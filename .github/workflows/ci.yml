@@ -1,0 +1,26 @@
+# Test + vet on every push and PR. The release workflow re-runs tests before it
+# builds, so a green CI here is the gate for tagging a release.
+name: ci
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go vet ./...
+      - run: go test ./...
+      - name: Verify it builds static for both target arches
+        run: |
+          set -euo pipefail
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="${arch}" go build -o /dev/null .
+          done

@@ -1,0 +1,10 @@
+# Build output
+/bin/
+/dist/
+
+# Go test/coverage artifacts
+*.out
+coverage.txt
+
+# Editor/OS
+.DS_Store

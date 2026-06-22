@@ -1,0 +1,69 @@
+# Build and publish the agent binaries on a version tag.
+#
+# The control plane (IdraDev/deplo) installs the agent by downloading these
+# release assets and verifying their sha256 against checksums.txt — so the asset
+# NAMES and the checksums format are a contract:
+#
+#   deplo-agent-linux-amd64
+#   deplo-agent-linux-arm64
+#   checksums.txt          (sha256sum format: "<hex>  <filename>" per line)
+#
+# lib/agent/release.ts (control plane) greps checksums.txt by these basenames and
+# install-agent.sh picks one by `uname -m`. Do not rename the assets without
+# updating both sides.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # create the release + upload assets
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Build static binaries (amd64, arm64)
+        run: |
+          set -euo pipefail
+          # Strip a leading v from the tag for the stamped version (matches the
+          # control plane, which normalizes tags the same way).
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "Building deplo-agent ${VERSION} for linux/amd64 and linux/arm64"
+          LDFLAGS="-s -w -X github.com/PixelFederico/deplo-agent/internal/server.AgentVersion=${VERSION}"
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="${arch}" \
+              go build -trimpath -ldflags "${LDFLAGS}" \
+              -o "dist/deplo-agent-linux-${arch}" .
+          done
+
+      - name: Generate checksums.txt
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          # sha256sum's native format is exactly what the consumers parse.
+          sha256sum deplo-agent-linux-amd64 deplo-agent-linux-arm64 > checksums.txt
+          echo "--- checksums.txt ---"
+          cat checksums.txt
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/deplo-agent-linux-amd64
+            dist/deplo-agent-linux-arm64
+            dist/checksums.txt
+          generate_release_notes: true
