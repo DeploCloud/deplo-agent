@@ -96,6 +96,23 @@ service Agent {
   // Container introspection (status/running) for the live-status subscriptions.
   rpc Inspect(InspectRequest) returns (InspectResponse);
 
+  // Update the agent BINARY in place to a newer release, WITHOUT re-bootstrapping
+  // — the agent's mTLS materials (agent.crt/agent.key/ca.crt under --agent-dir)
+  // are NEVER touched, so the server keeps its identity and pinned fingerprint
+  // across the upgrade and stays "online". This is the in-place sibling of
+  // re-running install-agent.sh (which mints a fresh token and re-bootstraps,
+  // resetting trust). The control plane resolves the latest release (the SAME
+  // GitHub release the install path uses) and sends the per-arch download URL +
+  // its sha256 here; the agent downloads, VERIFIES the checksum (refusing a
+  // mismatch, exactly like the installer's P2 guard), atomically swaps its own
+  // on-disk binary, replies, then restarts so systemd re-execs the new binary
+  // (which finds the existing materials and serves straight away — no call-home).
+  // INVARIANT: trust material is out of scope here; a SelfUpdate can change the
+  // code but never the identity. Returns FAILED_PRECONDITION when the agent can't
+  // locate/replace its own binary (e.g. a read-only install dir), so the control
+  // plane can tell the operator to fall back to re-running the installer.
+  rpc SelfUpdate(SelfUpdateRequest) returns (SelfUpdateResponse);
+
   // ---- PART C: console observability (replaces lib/logs + lib/attach +
   // the direct-Docker half of lib/data/console.ts for remote projects) ----
 
@@ -552,6 +569,49 @@ message InspectResponse {
   bool running = 2;
   // Raw docker state string (running, exited, ...).
   string state = 3;
+}
+
+// In-place agent binary update (SelfUpdate). The control plane resolves the
+// latest release and sends EVERY published per-arch asset (its download URL + the
+// sha256 from the release's checksums.txt — the same integrity source install-
+// agent.sh pins). The AGENT selects the asset matching its OWN architecture
+// (runtime.GOARCH), exactly as install-agent.sh selects by `uname -m`: the agent
+// is the authority on its own host's arch, and the control plane never has to
+// learn or store it. The agent stays otherwise dumb — it does not talk to the
+// GitHub API or know the release repo, it just fetches the chosen URL, checks the
+// digest, and swaps itself. Trust material is NOT in this message and is never
+// touched by the update.
+message SelfUpdateRequest {
+  // The target version, normalized without a leading v (e.g. "1.2.0"). Used only
+  // for logging + the response echo; the agent does not gate on it (the control
+  // plane already decided this is the version to install).
+  string version = 1;
+  // The published binaries, keyed by Go arch ("amd64" | "arm64"). The agent picks
+  // the entry for its own runtime.GOARCH; if its arch is absent (the release
+  // didn't publish it), the update fails with FAILED_PRECONDITION and the running
+  // binary is untouched. At least one entry is always present.
+  map<string, ArchBinary> binaries = 2;
+}
+
+// One published binary asset for a single architecture.
+message ArchBinary {
+  // The asset download URL. The agent treats the bytes as opaque until the
+  // checksum passes.
+  string url = 1;
+  // Lowercase hex sha256 the downloaded bytes MUST match. A mismatch aborts the
+  // update with FAILED_PRECONDITION and the running binary is left untouched —
+  // the agent never execs an unverified binary (install-agent.sh P2 parity).
+  string sha256 = 2;
+}
+
+message SelfUpdateResponse {
+  // The version now staged on disk (echoes the request's version on success).
+  string version = 1;
+  // True once the new binary is in place and the agent is about to restart to
+  // exec it. The control plane uses this as the "update applied" signal; the
+  // agent then exits so its supervisor (systemd Restart=on-failure) re-execs the
+  // freshly-swapped binary, which reuses the existing mTLS materials.
+  bool restarting = 2;
 }
 
 // ---------------------------------------------------------------------------
