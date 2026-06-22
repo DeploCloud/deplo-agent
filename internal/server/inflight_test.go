@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	pb "github.com/PixelFederico/deplo-agent/gen"
+	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
 func logEvent(text string) *pb.DeployEvent {

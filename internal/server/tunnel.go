@@ -8,8 +8,8 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	pb "github.com/PixelFederico/deplo-agent/gen"
-	"github.com/PixelFederico/deplo-agent/internal/dockercli"
+	pb "github.com/DeploCloud/deplo-agent/gen"
+	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
 // tunnel.go ports the VS Code Remote Tunnel half of lib/deploy/dev.ts to the

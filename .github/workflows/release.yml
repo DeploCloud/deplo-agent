@@ -42,7 +42,7 @@ jobs:
           # control plane, which normalizes tags the same way).
           VERSION="${GITHUB_REF_NAME#v}"
           echo "Building deplo-agent ${VERSION} for linux/amd64 and linux/arm64"
-          LDFLAGS="-s -w -X github.com/PixelFederico/deplo-agent/internal/server.AgentVersion=${VERSION}"
+          LDFLAGS="-s -w -X github.com/DeploCloud/deplo-agent/internal/server.AgentVersion=${VERSION}"
           mkdir -p dist
           for arch in amd64 arm64; do
             CGO_ENABLED=0 GOOS=linux GOARCH="${arch}" \

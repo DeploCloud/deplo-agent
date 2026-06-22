@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	pb "github.com/PixelFederico/deplo-agent/gen"
+	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
 // collectEmitter captures the events the deploy steps emit, so a test can assert

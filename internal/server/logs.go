@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"sync"
 
-	pb "github.com/PixelFederico/deplo-agent/gen"
+	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
 // logs.go ports lib/infra/docker.ts followLogs to the agent: stream a container's

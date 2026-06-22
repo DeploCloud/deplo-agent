@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	pb "github.com/PixelFederico/deplo-agent/gen"
-	"github.com/PixelFederico/deplo-agent/internal/dockercli"
-	"github.com/PixelFederico/deplo-agent/internal/safepath"
+	pb "github.com/DeploCloud/deplo-agent/gen"
+	"github.com/DeploCloud/deplo-agent/internal/dockercli"
+	"github.com/DeploCloud/deplo-agent/internal/safepath"
 )
 
 // emitter funnels DeployEvents back over the gRPC stream. A small indirection so

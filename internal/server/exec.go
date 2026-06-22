@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	pb "github.com/PixelFederico/deplo-agent/gen"
-	"github.com/PixelFederico/deplo-agent/internal/dockercli"
+	pb "github.com/DeploCloud/deplo-agent/gen"
+	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
 // exec.go ports the container-exec half of lib/infra/docker.ts to the agent:

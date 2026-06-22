@@ -1,4 +1,4 @@
-module github.com/PixelFederico/deplo-agent
+module github.com/DeploCloud/deplo-agent
 
 go 1.23.4
 

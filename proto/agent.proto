@@ -35,7 +35,7 @@ syntax = "proto3";
 // bootstrap endpoint; see lib/agent/bootstrap.ts and app/api/agent/bootstrap.
 package deplo.agent.v1;
 
-option go_package = "github.com/PixelFederico/deplo-agent/gen;agentpb";
+option go_package = "github.com/DeploCloud/deplo-agent/gen;agentpb";
 
 // CONTRACT VERSION. Bumped when the wire contract changes incompatibly. The
 // control plane sends its version in HelloRequest and the agent echoes its own

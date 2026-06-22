@@ -15,7 +15,7 @@
 # GitHub releases). The release workflow stamps from the tag directly, not this.
 # Override with `make build VERSION=x`.
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//' || echo dev)
-LDFLAGS := -X github.com/PixelFederico/deplo-agent/internal/server.AgentVersion=$(VERSION)
+LDFLAGS := -X github.com/DeploCloud/deplo-agent/internal/server.AgentVersion=$(VERSION)
 
 .PHONY: build test vet proto clean
 

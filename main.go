@@ -28,9 +28,9 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
-	pb "github.com/PixelFederico/deplo-agent/gen"
-	"github.com/PixelFederico/deplo-agent/internal/bootstrap"
-	"github.com/PixelFederico/deplo-agent/internal/server"
+	pb "github.com/DeploCloud/deplo-agent/gen"
+	"github.com/DeploCloud/deplo-agent/internal/bootstrap"
+	"github.com/DeploCloud/deplo-agent/internal/server"
 )
 
 func main() {

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	pb "github.com/PixelFederico/deplo-agent/gen"
+	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
 func TestWriteGatewayFilesSubstitutesSentinelAndModes(t *testing.T) {

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	pb "github.com/PixelFederico/deplo-agent/gen"
+	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
 // newFilesService builds a Service whose stackDir is a temp dir, with the files

@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	pb "github.com/PixelFederico/deplo-agent/gen"
-	"github.com/PixelFederico/deplo-agent/internal/safepath"
+	pb "github.com/DeploCloud/deplo-agent/gen"
+	"github.com/DeploCloud/deplo-agent/internal/safepath"
 )
 
 // materializeGit clones a git source (PLAN Part B, D3): the agent clones the
