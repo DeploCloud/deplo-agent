@@ -63,6 +63,7 @@ const (
 	Agent_Reroute_FullMethodName            = "/deplo.agent.v1.Agent/Reroute"
 	Agent_ReadStack_FullMethodName          = "/deplo.agent.v1.Agent/ReadStack"
 	Agent_Inspect_FullMethodName            = "/deplo.agent.v1.Agent/Inspect"
+	Agent_SelfUpdate_FullMethodName         = "/deplo.agent.v1.Agent/SelfUpdate"
 	Agent_FollowLogs_FullMethodName         = "/deplo.agent.v1.Agent/FollowLogs"
 	Agent_Attach_FullMethodName             = "/deplo.agent.v1.Agent/Attach"
 	Agent_ListInstances_FullMethodName      = "/deplo.agent.v1.Agent/ListInstances"
@@ -134,6 +135,22 @@ type AgentClient interface {
 	ReadStack(ctx context.Context, in *StackRef, opts ...grpc.CallOption) (*ReadStackResponse, error)
 	// Container introspection (status/running) for the live-status subscriptions.
 	Inspect(ctx context.Context, in *InspectRequest, opts ...grpc.CallOption) (*InspectResponse, error)
+	// Update the agent BINARY in place to a newer release, WITHOUT re-bootstrapping
+	// — the agent's mTLS materials (agent.crt/agent.key/ca.crt under --agent-dir)
+	// are NEVER touched, so the server keeps its identity and pinned fingerprint
+	// across the upgrade and stays "online". This is the in-place sibling of
+	// re-running install-agent.sh (which mints a fresh token and re-bootstraps,
+	// resetting trust). The control plane resolves the latest release (the SAME
+	// GitHub release the install path uses) and sends the per-arch download URL +
+	// its sha256 here; the agent downloads, VERIFIES the checksum (refusing a
+	// mismatch, exactly like the installer's P2 guard), atomically swaps its own
+	// on-disk binary, replies, then restarts so systemd re-execs the new binary
+	// (which finds the existing materials and serves straight away — no call-home).
+	// INVARIANT: trust material is out of scope here; a SelfUpdate can change the
+	// code but never the identity. Returns FAILED_PRECONDITION when the agent can't
+	// locate/replace its own binary (e.g. a read-only install dir), so the control
+	// plane can tell the operator to fall back to re-running the installer.
+	SelfUpdate(ctx context.Context, in *SelfUpdateRequest, opts ...grpc.CallOption) (*SelfUpdateResponse, error)
 	// Stream a container's live runtime logs (`docker logs -f --tail N`) as raw
 	// byte chunks. Output-only — there is no stdin. The control plane proxies these
 	// chunks straight into the unchanged SSE log route. Closing the stream (browser
@@ -330,6 +347,16 @@ func (c *agentClient) Inspect(ctx context.Context, in *InspectRequest, opts ...g
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(InspectResponse)
 	err := c.cc.Invoke(ctx, Agent_Inspect_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) SelfUpdate(ctx context.Context, in *SelfUpdateRequest, opts ...grpc.CallOption) (*SelfUpdateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SelfUpdateResponse)
+	err := c.cc.Invoke(ctx, Agent_SelfUpdate_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -642,6 +669,22 @@ type AgentServer interface {
 	ReadStack(context.Context, *StackRef) (*ReadStackResponse, error)
 	// Container introspection (status/running) for the live-status subscriptions.
 	Inspect(context.Context, *InspectRequest) (*InspectResponse, error)
+	// Update the agent BINARY in place to a newer release, WITHOUT re-bootstrapping
+	// — the agent's mTLS materials (agent.crt/agent.key/ca.crt under --agent-dir)
+	// are NEVER touched, so the server keeps its identity and pinned fingerprint
+	// across the upgrade and stays "online". This is the in-place sibling of
+	// re-running install-agent.sh (which mints a fresh token and re-bootstraps,
+	// resetting trust). The control plane resolves the latest release (the SAME
+	// GitHub release the install path uses) and sends the per-arch download URL +
+	// its sha256 here; the agent downloads, VERIFIES the checksum (refusing a
+	// mismatch, exactly like the installer's P2 guard), atomically swaps its own
+	// on-disk binary, replies, then restarts so systemd re-execs the new binary
+	// (which finds the existing materials and serves straight away — no call-home).
+	// INVARIANT: trust material is out of scope here; a SelfUpdate can change the
+	// code but never the identity. Returns FAILED_PRECONDITION when the agent can't
+	// locate/replace its own binary (e.g. a read-only install dir), so the control
+	// plane can tell the operator to fall back to re-running the installer.
+	SelfUpdate(context.Context, *SelfUpdateRequest) (*SelfUpdateResponse, error)
 	// Stream a container's live runtime logs (`docker logs -f --tail N`) as raw
 	// byte chunks. Output-only — there is no stdin. The control plane proxies these
 	// chunks straight into the unchanged SSE log route. Closing the stream (browser
@@ -755,6 +798,9 @@ func (UnimplementedAgentServer) ReadStack(context.Context, *StackRef) (*ReadStac
 }
 func (UnimplementedAgentServer) Inspect(context.Context, *InspectRequest) (*InspectResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Inspect not implemented")
+}
+func (UnimplementedAgentServer) SelfUpdate(context.Context, *SelfUpdateRequest) (*SelfUpdateResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SelfUpdate not implemented")
 }
 func (UnimplementedAgentServer) FollowLogs(*FollowLogsRequest, grpc.ServerStreamingServer[LogChunk]) error {
 	return status.Errorf(codes.Unimplemented, "method FollowLogs not implemented")
@@ -1008,6 +1054,24 @@ func _Agent_Inspect_Handler(srv interface{}, ctx context.Context, dec func(inter
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(AgentServer).Inspect(ctx, req.(*InspectRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_SelfUpdate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SelfUpdateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).SelfUpdate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_SelfUpdate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).SelfUpdate(ctx, req.(*SelfUpdateRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1432,6 +1496,10 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Inspect",
 			Handler:    _Agent_Inspect_Handler,
+		},
+		{
+			MethodName: "SelfUpdate",
+			Handler:    _Agent_SelfUpdate_Handler,
 		},
 		{
 			MethodName: "ListInstances",
