@@ -60,6 +60,8 @@ const (
 	Agent_StopStack_FullMethodName          = "/deplo.agent.v1.Agent/StopStack"
 	Agent_StartStack_FullMethodName         = "/deplo.agent.v1.Agent/StartStack"
 	Agent_DestroyStack_FullMethodName       = "/deplo.agent.v1.Agent/DestroyStack"
+	Agent_Reroute_FullMethodName            = "/deplo.agent.v1.Agent/Reroute"
+	Agent_ReadStack_FullMethodName          = "/deplo.agent.v1.Agent/ReadStack"
 	Agent_Inspect_FullMethodName            = "/deplo.agent.v1.Agent/Inspect"
 	Agent_FollowLogs_FullMethodName         = "/deplo.agent.v1.Agent/FollowLogs"
 	Agent_Attach_FullMethodName             = "/deplo.agent.v1.Agent/Attach"
@@ -116,6 +118,20 @@ type AgentClient interface {
 	StopStack(ctx context.Context, in *StackRef, opts ...grpc.CallOption) (*StackResult, error)
 	StartStack(ctx context.Context, in *StackRef, opts ...grpc.CallOption) (*StackResult, error)
 	DestroyStack(ctx context.Context, in *StackRef, opts ...grpc.CallOption) (*StackResult, error)
+	// Re-apply routing to a running stack WITHOUT a rebuild. The control plane
+	// re-renders the stack YAML with the new domain set (renderCompose /
+	// buildComposeStack stay the single TS source of truth) and sends it; the agent
+	// overwrites <stack_dir>/<slug>.yml (+ the env-file and any compose mount files)
+	// and `docker compose up -d --remove-orphans`, which recreates only the routed
+	// service in place so Traefik picks up the new labels. Replaces the in-process
+	// reroute that read/wrote the stack file on the control plane's own disk.
+	Reroute(ctx context.Context, in *RerouteRequest, opts ...grpc.CallOption) (*StackResult, error)
+	// Read back the rendered stack YAML the agent has on disk (<stack_dir>/<slug>.yml)
+	// for the "View full compose" preview. The single-image/built stack's image ref
+	// + env live only in this file (not on the project), so the preview must read it
+	// from the owning host. Returns exists=false (empty yaml) when no stack file is
+	// present yet (never deployed).
+	ReadStack(ctx context.Context, in *StackRef, opts ...grpc.CallOption) (*ReadStackResponse, error)
 	// Container introspection (status/running) for the live-status subscriptions.
 	Inspect(ctx context.Context, in *InspectRequest, opts ...grpc.CallOption) (*InspectResponse, error)
 	// Stream a container's live runtime logs (`docker logs -f --tail N`) as raw
@@ -284,6 +300,26 @@ func (c *agentClient) DestroyStack(ctx context.Context, in *StackRef, opts ...gr
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(StackResult)
 	err := c.cc.Invoke(ctx, Agent_DestroyStack_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) Reroute(ctx context.Context, in *RerouteRequest, opts ...grpc.CallOption) (*StackResult, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StackResult)
+	err := c.cc.Invoke(ctx, Agent_Reroute_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) ReadStack(ctx context.Context, in *StackRef, opts ...grpc.CallOption) (*ReadStackResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReadStackResponse)
+	err := c.cc.Invoke(ctx, Agent_ReadStack_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -590,6 +626,20 @@ type AgentServer interface {
 	StopStack(context.Context, *StackRef) (*StackResult, error)
 	StartStack(context.Context, *StackRef) (*StackResult, error)
 	DestroyStack(context.Context, *StackRef) (*StackResult, error)
+	// Re-apply routing to a running stack WITHOUT a rebuild. The control plane
+	// re-renders the stack YAML with the new domain set (renderCompose /
+	// buildComposeStack stay the single TS source of truth) and sends it; the agent
+	// overwrites <stack_dir>/<slug>.yml (+ the env-file and any compose mount files)
+	// and `docker compose up -d --remove-orphans`, which recreates only the routed
+	// service in place so Traefik picks up the new labels. Replaces the in-process
+	// reroute that read/wrote the stack file on the control plane's own disk.
+	Reroute(context.Context, *RerouteRequest) (*StackResult, error)
+	// Read back the rendered stack YAML the agent has on disk (<stack_dir>/<slug>.yml)
+	// for the "View full compose" preview. The single-image/built stack's image ref
+	// + env live only in this file (not on the project), so the preview must read it
+	// from the owning host. Returns exists=false (empty yaml) when no stack file is
+	// present yet (never deployed).
+	ReadStack(context.Context, *StackRef) (*ReadStackResponse, error)
 	// Container introspection (status/running) for the live-status subscriptions.
 	Inspect(context.Context, *InspectRequest) (*InspectResponse, error)
 	// Stream a container's live runtime logs (`docker logs -f --tail N`) as raw
@@ -696,6 +746,12 @@ func (UnimplementedAgentServer) StartStack(context.Context, *StackRef) (*StackRe
 }
 func (UnimplementedAgentServer) DestroyStack(context.Context, *StackRef) (*StackResult, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method DestroyStack not implemented")
+}
+func (UnimplementedAgentServer) Reroute(context.Context, *RerouteRequest) (*StackResult, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Reroute not implemented")
+}
+func (UnimplementedAgentServer) ReadStack(context.Context, *StackRef) (*ReadStackResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ReadStack not implemented")
 }
 func (UnimplementedAgentServer) Inspect(context.Context, *InspectRequest) (*InspectResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Inspect not implemented")
@@ -898,6 +954,42 @@ func _Agent_DestroyStack_Handler(srv interface{}, ctx context.Context, dec func(
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(AgentServer).DestroyStack(ctx, req.(*StackRef))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_Reroute_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RerouteRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).Reroute(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_Reroute_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).Reroute(ctx, req.(*RerouteRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_ReadStack_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StackRef)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).ReadStack(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_ReadStack_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).ReadStack(ctx, req.(*StackRef))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1328,6 +1420,14 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "DestroyStack",
 			Handler:    _Agent_DestroyStack_Handler,
+		},
+		{
+			MethodName: "Reroute",
+			Handler:    _Agent_Reroute_Handler,
+		},
+		{
+			MethodName: "ReadStack",
+			Handler:    _Agent_ReadStack_Handler,
 		},
 		{
 			MethodName: "Inspect",
