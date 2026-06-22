@@ -30,6 +30,14 @@ var Capabilities = []string{
 	"deploy.image",          // runs a prebuilt image as-is
 	"deploy.compose.single", // single-image compose-up
 	"deploy.compose.multi",  // multi-service compose stack (env-file + label-wait)
+	// The heavy builders, ported from builders.ts (build_methods.go). The control
+	// plane routes a project's build method to the agent only when the matching
+	// capability is present; an older agent without it gets an "update the agent"
+	// error rather than a request it can't handle.
+	"deploy.static",     // nginx static site
+	"deploy.nixpacks",   // nixpacks (binary lazily installed on first use)
+	"deploy.buildpacks", // Cloud Native Buildpacks (heroku + paketo) via pack
+	"deploy.railpack",   // railpack via buildkitd/buildctl
 	"metrics",
 	"dev",         // dev container lifecycle (StartDev/StopDev/Reset/Teardown) — Part D
 	"ssh-gateway", // the per-host SSH gateway singleton (Ensure/Provision/Deprovision)

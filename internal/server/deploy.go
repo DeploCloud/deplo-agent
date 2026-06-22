@@ -284,21 +284,35 @@ func shortSha(sha string) string {
 	return sha
 }
 
-// buildImage builds req.image_ref from a Dockerfile in buildDir. Returns false
-// (after emitting a failure result) on any error. Mirrors builders.ts'
-// buildFromDockerfile / buildGenerated for the Dockerfile family — the most
-// common path. Other build methods stay on the control plane in Part A.
+// buildImage builds req.image_ref from buildDir using the request's BuildKind.
+// Returns false (after emitting a failure result) on any error. The Dockerfile
+// family lives here; the heavy builders (static/nixpacks/buildpacks/railpack) are
+// ported from builders.ts in build_methods.go and dispatched below — each emits
+// the BUILDING phase + its own failure result, so this stays a thin router.
 func (s *Service) buildImage(ctx context.Context, req *pb.DeployRequest, buildDir string, e *emitter) bool {
-	if req.GetBuildKind() != pb.BuildKind_BUILD_KIND_DOCKERFILE {
-		e.result(false, "this agent only builds the Dockerfile method in Part A", "")
+	switch req.GetBuildKind() {
+	case pb.BuildKind_BUILD_KIND_DOCKERFILE:
+		return s.buildDockerfile(ctx, req, buildDir, e)
+	case pb.BuildKind_BUILD_KIND_STATIC:
+		return s.buildStatic(ctx, req, buildDir, e)
+	case pb.BuildKind_BUILD_KIND_NIXPACKS:
+		return s.buildNixpacks(ctx, req, buildDir, e)
+	case pb.BuildKind_BUILD_KIND_BUILDPACKS:
+		return s.buildBuildpacks(ctx, req, buildDir, e)
+	case pb.BuildKind_BUILD_KIND_RAILPACK:
+		return s.buildRailpack(ctx, req, buildDir, e)
+	default:
+		e.result(false, "unsupported build kind", "")
 		return false
 	}
+}
+
+// buildDockerfile builds req.image_ref from a Dockerfile in buildDir. Mirrors
+// builders.ts' buildFromDockerfile / buildGenerated for the Dockerfile family —
+// the most common path.
+func (s *Service) buildDockerfile(ctx context.Context, req *pb.DeployRequest, buildDir string, e *emitter) bool {
 	df := req.GetDockerfile()
-	labels := []string{
-		"--label", "deplo.managed=true",
-		"--label", "deplo.project=" + req.GetProjectId(),
-		"--label", "deplo.slug=" + req.GetSlug(),
-	}
+	labels := labelArgs(req)
 
 	e.phase(pb.DeployPhase_DEPLOY_PHASE_BUILDING)
 

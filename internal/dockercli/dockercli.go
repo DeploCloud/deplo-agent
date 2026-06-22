@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -60,8 +61,35 @@ func Run(ctx context.Context, timeout time.Duration, args ...string) (Result, er
 func Stream(ctx context.Context, timeout time.Duration, onLine LineFn, input string, args ...string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(cctx, "docker", args...)
+	return streamCmd(cctx, timeout, onLine, input, exec.CommandContext(cctx, "docker", args...))
+}
 
+// StreamEnv is Stream with extra "KEY=VALUE" environment entries layered on top
+// of the agent's own env (e.g. DOCKER_BUILDKIT=1 for the nixpacks generated
+// Dockerfile, which uses BuildKit syntax). Mirrors spawnStream's `env` option.
+func StreamEnv(ctx context.Context, timeout time.Duration, onLine LineFn, extraEnv []string, args ...string) (int, error) {
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	cmd := exec.CommandContext(cctx, "docker", args...)
+	cmd.Env = append(os.Environ(), extraEnv...)
+	return streamCmd(cctx, timeout, onLine, "", cmd)
+}
+
+// Spawn runs an ARBITRARY host binary (not docker) and streams its merged output,
+// for build tools that run on the host rather than via the daemon — the nixpacks
+// binary (lazily installed), and `sh -c` for railpack's buildctl redirection.
+// Same streaming/timeout discipline as Stream.
+func Spawn(ctx context.Context, timeout time.Duration, onLine LineFn, input, name string, args ...string) (int, error) {
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	return streamCmd(cctx, timeout, onLine, input, exec.CommandContext(cctx, name, args...))
+}
+
+// streamCmd is the shared core of Stream/StreamEnv/Spawn: start an already-built
+// command, fan its stdout+stderr into onLine line-by-line, and map the exit /
+// timeout / cancellation outcome the same way for every caller.
+func streamCmd(cctx context.Context, timeout time.Duration, onLine LineFn, input string, cmd *exec.Cmd) (int, error) {
+	label := strings.Join(cmd.Args, " ")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return -1, err
@@ -82,7 +110,7 @@ func Stream(ctx context.Context, timeout time.Duration, onLine LineFn, input str
 	}
 
 	if err := cmd.Start(); err != nil {
-		return -1, fmt.Errorf("docker %s: %w", strings.Join(args, " "), err)
+		return -1, fmt.Errorf("%s: %w", label, err)
 	}
 
 	// Merge both streams line-by-line. A small fan-in over two scanners keeps
@@ -109,10 +137,10 @@ func Stream(ctx context.Context, timeout time.Duration, onLine LineFn, input str
 		// before this would misreport a real timeout as a generic "exit -1"
 		// failure and leave this clear message unreachable.
 		if cctx.Err() == context.DeadlineExceeded {
-			return -1, fmt.Errorf("docker %s timed out after %s", strings.Join(args, " "), timeout)
+			return -1, fmt.Errorf("%s timed out after %s", label, timeout)
 		}
 		if cctx.Err() == context.Canceled {
-			return -1, fmt.Errorf("docker %s canceled", strings.Join(args, " "))
+			return -1, fmt.Errorf("%s canceled", label)
 		}
 		// A genuine non-zero exit: the process ran and failed (ExitCode>=0).
 		if ee, ok := err.(*exec.ExitError); ok && ee.ProcessState.Exited() {

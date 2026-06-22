@@ -329,15 +329,71 @@ enum SourceKind {
   SOURCE_KIND_DEV_WORKSPACE = 5;
 }
 
-// How the agent turns the build context into an image. Part A implements the
-// DOCKERFILE family (an explicit or generated Dockerfile, the most common path);
-// the heavier builders (Nixpacks/Buildpacks/Railpack/static) stay on the control
-// plane's local path in Part A and migrate agent-side later. NONE means "no
-// build, run the IMAGE source directly".
+// How the agent turns the build context into an image. The DOCKERFILE family (an
+// explicit or generated Dockerfile, the most common path) was Part A; the heavier
+// builders (Nixpacks/Buildpacks/Railpack/static) — ported from the control plane's
+// old in-process builders (lib/deploy/builders.ts) — now ALSO run agent-side, each
+// keyed by a BuildKind below and parameterised by DeployRequest.build_spec. NONE
+// means "no build, run the IMAGE source directly". A heavy kind is only sent to an
+// agent whose Hello advertised the matching capability (deploy.nixpacks / .static /
+// .buildpacks / .railpack); an older agent surfaces a clear "update the agent"
+// error rather than silently mishandling the request — forward-compatible (D6).
 enum BuildKind {
   BUILD_KIND_UNSPECIFIED = 0;
   BUILD_KIND_NONE = 1;        // SOURCE_KIND_IMAGE: run as-is, no build
   BUILD_KIND_DOCKERFILE = 2;  // build from a Dockerfile in the context
+  // The heavy builders. Each reads DeployRequest.build_spec for its method
+  // settings (port, commands, runtime version, per-method knobs). The agent ports
+  // builders.ts byte-for-byte so an image built here matches the old local path.
+  BUILD_KIND_STATIC = 3;      // nginx serves a build output (buildStatic)
+  BUILD_KIND_NIXPACKS = 4;    // nixpacks generates a Dockerfile, then docker build
+  BUILD_KIND_BUILDPACKS = 5;  // Cloud Native Buildpacks via `pack` (heroku|paketo)
+  BUILD_KIND_RAILPACK = 6;    // railpack plan + buildkitd/buildctl
+}
+
+// The build method's settings for a heavy BuildKind (STATIC/NIXPACKS/BUILDPACKS/
+// RAILPACK). Mirrors the fields lib/deploy/builders.ts reads off BuildConfig +
+// methodSettings, flattened onto the wire. The control plane is the single source
+// of truth: it resolves the framework's runtime language (runtimeFor().language)
+// so the agent stays dumb about Deplo's framework registry. Only the fields the
+// chosen method uses are read; the rest are ignored. Present iff build_kind is one
+// of the heavy kinds (DeployRequest.build_spec).
+message BuildSpec {
+  // The build method name, for logs + the buildpacks flavor select
+  // ("nixpacks"|"heroku"|"paketo"|"railpack"|"static"). The agent dispatches on
+  // build_kind, not this string; it is the human label + the heroku/paketo split.
+  string method = 1;
+  // The container port the app listens on (drives PORT/--build-arg PORT and the
+  // nginx `listen`). 0 => the method's default (nginx 80).
+  int32 port = 2;
+  // Build commands (empty => the method's own default / detection). Mirror
+  // BuildConfig.installCommand / buildCommand / startCommand.
+  string install_command = 3;
+  string build_command = 4;
+  string start_command = 5;
+  // The static method's output dir to serve (BuildConfig.outputDirectory). Empty
+  // => ".".
+  string output_directory = 6;
+  // The runtime version the user pinned (BuildConfig.runtimeVersion), e.g. "20".
+  // Empty => the method's default.
+  string runtime_version = 7;
+  // The framework's runtime language, resolved control-plane-side via
+  // runtimeFor(framework).language ("node"|"python"|…|"none"). Used to pin the
+  // nixpacks per-language version var (NIXPACKS_<LANG>_VERSION) and to gate the
+  // static builder's Node builder stage. Empty/"none" => no language pin.
+  string runtime_language = 8;
+  // nixpacks: the dir the build publishes/serves; non-empty switches nixpacks to
+  // the nginx-wrap static path (methodSettings.nixpacksPublishDirectory).
+  string nixpacks_publish_directory = 9;
+  // heroku: builder image version ("22"|"24"|"26"); maps to heroku/builder:<v>.
+  // Empty => "24". Ignored for paketo (methodSettings.herokuVersion).
+  string heroku_version = 10;
+  // railpack: CLI/frontend version pin ("latest" or "0.27.2"); empty => latest
+  // (methodSettings.railpackVersion).
+  string railpack_version = 11;
+  // static / nixpacks-static: serve as an SPA (history-API fallback to
+  // index.html) (methodSettings.staticSinglePageApp).
+  bool static_single_page_app = 12;
 }
 
 // A git source the agent clones itself (SOURCE_KIND_GIT, D3). The control plane
@@ -462,6 +518,12 @@ message DeployRequest {
   // (anti-escape, like the GIT subdir). Mirrors how the git arm passes
   // project.build.rootDirectory as GitSource.subdir.
   string dev_workspace_subdir = 15;
+
+  // The heavy build method's settings — present iff build_kind is STATIC /
+  // NIXPACKS / BUILDPACKS / RAILPACK. The agent reads the fields its method uses
+  // and ignores the rest. Absent for BUILD_KIND_DOCKERFILE (which uses
+  // `dockerfile` above) and BUILD_KIND_NONE.
+  BuildSpec build_spec = 16;
 }
 
 // One event in the deploy stream. Exactly one of the oneof arms is set.
