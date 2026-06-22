@@ -7,7 +7,7 @@ checklist. Delete it once the cutover is done.
 
 ## 1. Publish this repo
 
-This tree is ready: module path `github.com/PixelFederico/deplo-agent`, tests
+This tree is ready: module path `github.com/DeploCloud/deplo-agent`, tests
 green, release + CI workflows in `.github/workflows/`.
 
 ```bash
@@ -15,7 +15,7 @@ cd deplo-agent
 git init -b main
 git add -A
 git commit -m "Import agent + proto from IdraDev/deplo; release as GitHub assets"
-git remote add origin https://github.com/PixelFederico/deplo-agent.git
+git remote add origin https://github.com/DeploCloud/deplo-agent.git
 git push -u origin main
 ```
 

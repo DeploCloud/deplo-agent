@@ -35,7 +35,7 @@ syntax = "proto3";
 // bootstrap endpoint; see lib/agent/bootstrap.ts and app/api/agent/bootstrap.
 package deplo.agent.v1;
 
-option go_package = "github.com/PixelFederico/deplo-agent/gen;agentpb";
+option go_package = "github.com/DeploCloud/deplo-agent/gen;agentpb";
 
 // CONTRACT VERSION. Bumped when the wire contract changes incompatibly. The
 // control plane sends its version in HelloRequest and the agent echoes its own
@@ -76,6 +76,22 @@ service Agent {
   rpc StopStack(StackRef) returns (StackResult);
   rpc StartStack(StackRef) returns (StackResult);
   rpc DestroyStack(StackRef) returns (StackResult);
+
+  // Re-apply routing to a running stack WITHOUT a rebuild. The control plane
+  // re-renders the stack YAML with the new domain set (renderCompose /
+  // buildComposeStack stay the single TS source of truth) and sends it; the agent
+  // overwrites <stack_dir>/<slug>.yml (+ the env-file and any compose mount files)
+  // and `docker compose up -d --remove-orphans`, which recreates only the routed
+  // service in place so Traefik picks up the new labels. Replaces the in-process
+  // reroute that read/wrote the stack file on the control plane's own disk.
+  rpc Reroute(RerouteRequest) returns (StackResult);
+
+  // Read back the rendered stack YAML the agent has on disk (<stack_dir>/<slug>.yml)
+  // for the "View full compose" preview. The single-image/built stack's image ref
+  // + env live only in this file (not on the project), so the preview must read it
+  // from the owning host. Returns exists=false (empty yaml) when no stack file is
+  // present yet (never deployed).
+  rpc ReadStack(StackRef) returns (ReadStackResponse);
 
   // Container introspection (status/running) for the live-status subscriptions.
   rpc Inspect(InspectRequest) returns (InspectResponse);
@@ -500,6 +516,30 @@ message StackRef {
 message StackResult {
   bool ok = 1;
   string error = 2;
+}
+
+// A label-only reroute of an already-deployed stack (no build, no env change
+// beyond what the control plane re-sends). Mirrors the compose-write half of a
+// Deploy: the control plane renders everything, the agent just writes + brings up.
+message RerouteRequest {
+  // Stack identity — keys the stack file, compose project and container name.
+  string slug = 1;
+  // The fully re-rendered stack YAML with the new domain/label set. Opaque to the
+  // agent (same contract as DeployRequest.compose_yaml).
+  string compose_yaml = 2;
+  // Decrypted env for ${VAR} interpolation; written to <stack_dir>/<slug>.env
+  // (0600) and passed as --env-file. Empty => no env-file.
+  map<string, string> env = 3;
+  // Compose mount files to (re)materialise under <stack_dir>/files/<slug>/ before
+  // bringing the stack up. Empty for single-image projects.
+  repeated MountFile mounts = 4;
+}
+
+message ReadStackResponse {
+  // Whether a stack file exists on disk for this slug.
+  bool exists = 1;
+  // The rendered stack YAML (empty when exists=false).
+  string yaml = 2;
 }
 
 message InspectRequest {

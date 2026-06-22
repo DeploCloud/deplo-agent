@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	pb "github.com/PixelFederico/deplo-agent/gen"
-	"github.com/PixelFederico/deplo-agent/internal/dockercli"
+	pb "github.com/DeploCloud/deplo-agent/gen"
+	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
 // DestroyStack's `rm -f` fallback must report Ok based on the docker EXIT CODE,

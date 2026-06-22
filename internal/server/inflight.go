@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	pb "github.com/PixelFederico/deplo-agent/gen"
+	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
 // inflight tracks one deploy the agent is running (or recently finished), keyed

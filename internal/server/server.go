@@ -9,6 +9,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -16,9 +17,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	pb "github.com/PixelFederico/deplo-agent/gen"
-	"github.com/PixelFederico/deplo-agent/internal/dockercli"
-	"github.com/PixelFederico/deplo-agent/internal/hostmetrics"
+	pb "github.com/DeploCloud/deplo-agent/gen"
+	"github.com/DeploCloud/deplo-agent/internal/dockercli"
+	"github.com/DeploCloud/deplo-agent/internal/hostmetrics"
 )
 
 // Capabilities this agent advertises in Hello. The control plane routes only
@@ -251,6 +252,72 @@ func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.Stack
 		return &pb.StackResult{Ok: false, Error: err.Error()}, nil
 	}
 	return &pb.StackResult{Ok: r2.Code == 0, Error: r2.Stderr}, nil
+}
+
+// Reroute re-renders a running stack in place: the control plane changed the
+// stack's domain/label set (or rotated env) and ships the freshly rendered
+// compose, env and mount files so the agent rewrites them and runs `up -d` to
+// pick up the new config WITHOUT a rebuild. Unlike Deploy there is no event
+// stream — this is a synchronous lifecycle verb like StopStack/StartStack — so
+// writeMountFiles' warn logs go to a discarding emitter.
+func (s *Service) Reroute(ctx context.Context, req *pb.RerouteRequest) (*pb.StackResult, error) {
+	slug := req.GetSlug()
+	name := "deplo-" + slug
+
+	if req.GetComposeYaml() == "" {
+		return &pb.StackResult{Ok: false, Error: "reroute request missing rendered compose"}, nil
+	}
+
+	if err := os.MkdirAll(s.stackDir, 0o755); err != nil {
+		return &pb.StackResult{Ok: false, Error: "create stack dir: " + err.Error()}, nil
+	}
+
+	stackFile := s.stackPath(slug)
+	if err := os.WriteFile(stackFile, []byte(req.GetComposeYaml()), 0o644); err != nil {
+		return &pb.StackResult{Ok: false, Error: "write stack file: " + err.Error()}, nil
+	}
+
+	// (Re)materialise the compose mount files. There is no deploy stream here, so
+	// any unsafe-path warnings are discarded (the control plane already validated
+	// the rendered set; the in-agent guard stays as defence in depth).
+	if len(req.GetMounts()) > 0 {
+		discard := &emitter{send: func(*pb.DeployEvent) error { return nil }}
+		if err := s.writeMountFiles(slug, req.GetMounts(), discard); err != nil {
+			return &pb.StackResult{Ok: false, Error: "write mount files: " + err.Error()}, nil
+		}
+	}
+
+	// Single-image stacks bake env into the YAML and send empty env+mounts;
+	// compose stacks need a 0600 env-file for ${VAR} interpolation. Mirror Deploy:
+	// write+pass the env-file only when there is env to interpolate.
+	composeArgs := []string{"compose", "-p", name, "-f", stackFile}
+	if len(req.GetEnv()) > 0 {
+		envFile := fmt.Sprintf("%s/%s.env", s.stackDir, slug)
+		if err := os.WriteFile(envFile, []byte(renderEnvFile(req.GetEnv())), 0o600); err != nil {
+			return &pb.StackResult{Ok: false, Error: "write env file: " + err.Error()}, nil
+		}
+		composeArgs = append(composeArgs, "--env-file", envFile)
+	}
+	composeArgs = append(composeArgs, "up", "-d", "--remove-orphans")
+
+	res, err := dockercli.Run(ctx, 120*time.Second, composeArgs...)
+	if err != nil {
+		return &pb.StackResult{Ok: false, Error: err.Error()}, nil
+	}
+	return &pb.StackResult{Ok: res.Code == 0, Error: res.Stderr}, nil
+}
+
+// ReadStack returns the rendered stack YAML on disk for a slug so the control
+// plane can preview/diff it before a reroute. A missing file is not an error —
+// it just means "nothing deployed yet" (Exists:false). Any OTHER read failure is
+// also reported as Exists:false (rather than an RPC error) so the preview shows
+// "nothing yet" instead of surfacing a transient FS error to the operator.
+func (s *Service) ReadStack(ctx context.Context, ref *pb.StackRef) (*pb.ReadStackResponse, error) {
+	contents, err := os.ReadFile(s.stackPath(ref.GetSlug()))
+	if err != nil {
+		return &pb.ReadStackResponse{Exists: false, Yaml: ""}, nil
+	}
+	return &pb.ReadStackResponse{Exists: true, Yaml: string(contents)}, nil
 }
 
 // Inspect reports a container's existence + running state for live status.

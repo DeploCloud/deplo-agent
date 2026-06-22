@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	pb "github.com/PixelFederico/deplo-agent/gen"
+	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
 // nopEmitter discards every event — the tests assert on filesystem effects, not

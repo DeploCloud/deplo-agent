@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	pb "github.com/PixelFederico/deplo-agent/gen"
+	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
 // The generated-Dockerfile path (legacy/auto: no Dockerfile in the repo). The
