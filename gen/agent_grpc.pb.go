@@ -64,6 +64,10 @@ const (
 	Agent_ReadStack_FullMethodName          = "/deplo.agent.v1.Agent/ReadStack"
 	Agent_Inspect_FullMethodName            = "/deplo.agent.v1.Agent/Inspect"
 	Agent_SelfUpdate_FullMethodName         = "/deplo.agent.v1.Agent/SelfUpdate"
+	Agent_Backup_FullMethodName             = "/deplo.agent.v1.Agent/Backup"
+	Agent_Restore_FullMethodName            = "/deplo.agent.v1.Agent/Restore"
+	Agent_S3Check_FullMethodName            = "/deplo.agent.v1.Agent/S3Check"
+	Agent_S3Delete_FullMethodName           = "/deplo.agent.v1.Agent/S3Delete"
 	Agent_FollowLogs_FullMethodName         = "/deplo.agent.v1.Agent/FollowLogs"
 	Agent_Attach_FullMethodName             = "/deplo.agent.v1.Agent/Attach"
 	Agent_ListInstances_FullMethodName      = "/deplo.agent.v1.Agent/ListInstances"
@@ -151,6 +155,39 @@ type AgentClient interface {
 	// locate/replace its own binary (e.g. a read-only install dir), so the control
 	// plane can tell the operator to fall back to re-running the installer.
 	SelfUpdate(ctx context.Context, in *SelfUpdateRequest, opts ...grpc.CallOption) (*SelfUpdateResponse, error)
+	// Back up a database or a project to S3, streaming progress. DATABASE → the
+	// agent `docker exec`s the engine's dump tool (per the format table in
+	// docs/research/dbs-backups/PLAN.md), gzip-compresses the stream, and uploads
+	// it to S3 via a multipart PUT (minio-go), so no temp file and no
+	// control-plane round-trip. PROJECT → the agent tars the project's named +
+	// compose-stack volumes (via a throwaway helper container that mounts them),
+	// the project files dir, and the rendered compose/env snapshot, gzip-compresses,
+	// and uploads. Host bind mounts are EXCLUDED (shared cross-tenant paths,
+	// outside Deplo). The terminal BackupResult carries the final object key +
+	// byte size the control plane records on the BackupRun.
+	Backup(ctx context.Context, in *BackupRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[BackupEvent], error)
+	// Restore a database or project from a previously-uploaded S3 object, IN
+	// PLACE, streaming progress. DATABASE → download the object, decompress, and
+	// restore per the format table — drop-and-recreate, guaranteed by the dump
+	// format (pg `--clean --if-exists`, mysql `--add-drop-table`, mongo `--drop`)
+	// so a restore overwrites rather than appends. PROJECT → stop the stack, wipe
+	// + untar the volumes + files, re-`Reroute` the snapshot compose/env (which
+	// restarts the stack) = full data + config in place. A restart failure (e.g.
+	// a snapshot image that no longer exists) is reported clearly on the stream
+	// rather than silently leaving the stack down.
+	Restore(ctx context.Context, in *RestoreRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RestoreEvent], error)
+	// Verify S3 connectivity + the destination bucket for the "Test connection"
+	// button (makes lib/data/s3.ts testS3 real). The agent HEADs/stats the bucket
+	// with the supplied creds and reports reachable + writable, with a human
+	// message on failure. Any agent advertising "backup" can serve it — it needs
+	// no Docker, only the S3 client — so the control plane can run it on any
+	// reachable backup-capable server.
+	S3Check(ctx context.Context, in *S3CheckRequest, opts ...grpc.CallOption) (*S3CheckResponse, error)
+	// Delete S3 objects by exact key or by prefix. Backs retention pruning (the
+	// control plane deletes objects older than retentionDays for a backup) and
+	// the "delete artifacts too" branch of target deletion. Idempotent: a missing
+	// object is not an error. Returns how many objects were removed.
+	S3Delete(ctx context.Context, in *S3DeleteRequest, opts ...grpc.CallOption) (*S3DeleteResponse, error)
 	// Stream a container's live runtime logs (`docker logs -f --tail N`) as raw
 	// byte chunks. Output-only — there is no stdin. The control plane proxies these
 	// chunks straight into the unchanged SSE log route. Closing the stream (browser
@@ -363,9 +400,67 @@ func (c *agentClient) SelfUpdate(ctx context.Context, in *SelfUpdateRequest, opt
 	return out, nil
 }
 
+func (c *agentClient) Backup(ctx context.Context, in *BackupRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[BackupEvent], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[2], Agent_Backup_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[BackupRequest, BackupEvent]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Agent_BackupClient = grpc.ServerStreamingClient[BackupEvent]
+
+func (c *agentClient) Restore(ctx context.Context, in *RestoreRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RestoreEvent], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[3], Agent_Restore_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[RestoreRequest, RestoreEvent]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Agent_RestoreClient = grpc.ServerStreamingClient[RestoreEvent]
+
+func (c *agentClient) S3Check(ctx context.Context, in *S3CheckRequest, opts ...grpc.CallOption) (*S3CheckResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(S3CheckResponse)
+	err := c.cc.Invoke(ctx, Agent_S3Check_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) S3Delete(ctx context.Context, in *S3DeleteRequest, opts ...grpc.CallOption) (*S3DeleteResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(S3DeleteResponse)
+	err := c.cc.Invoke(ctx, Agent_S3Delete_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *agentClient) FollowLogs(ctx context.Context, in *FollowLogsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LogChunk], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[2], Agent_FollowLogs_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[4], Agent_FollowLogs_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -384,7 +479,7 @@ type Agent_FollowLogsClient = grpc.ServerStreamingClient[LogChunk]
 
 func (c *agentClient) Attach(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AttachInput, AttachOutput], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[3], Agent_Attach_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[5], Agent_Attach_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -507,7 +602,7 @@ func (c *agentClient) FilesExist(ctx context.Context, in *FilesExistRequest, opt
 
 func (c *agentClient) StartDev(ctx context.Context, in *StartDevRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[DeployEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[4], Agent_StartDev_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[6], Agent_StartDev_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -536,7 +631,7 @@ func (c *agentClient) StopDev(ctx context.Context, in *StopDevRequest, opts ...g
 
 func (c *agentClient) ResetDevWorkspace(ctx context.Context, in *StartDevRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[DeployEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[5], Agent_ResetDevWorkspace_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[7], Agent_ResetDevWorkspace_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -685,6 +780,39 @@ type AgentServer interface {
 	// locate/replace its own binary (e.g. a read-only install dir), so the control
 	// plane can tell the operator to fall back to re-running the installer.
 	SelfUpdate(context.Context, *SelfUpdateRequest) (*SelfUpdateResponse, error)
+	// Back up a database or a project to S3, streaming progress. DATABASE → the
+	// agent `docker exec`s the engine's dump tool (per the format table in
+	// docs/research/dbs-backups/PLAN.md), gzip-compresses the stream, and uploads
+	// it to S3 via a multipart PUT (minio-go), so no temp file and no
+	// control-plane round-trip. PROJECT → the agent tars the project's named +
+	// compose-stack volumes (via a throwaway helper container that mounts them),
+	// the project files dir, and the rendered compose/env snapshot, gzip-compresses,
+	// and uploads. Host bind mounts are EXCLUDED (shared cross-tenant paths,
+	// outside Deplo). The terminal BackupResult carries the final object key +
+	// byte size the control plane records on the BackupRun.
+	Backup(*BackupRequest, grpc.ServerStreamingServer[BackupEvent]) error
+	// Restore a database or project from a previously-uploaded S3 object, IN
+	// PLACE, streaming progress. DATABASE → download the object, decompress, and
+	// restore per the format table — drop-and-recreate, guaranteed by the dump
+	// format (pg `--clean --if-exists`, mysql `--add-drop-table`, mongo `--drop`)
+	// so a restore overwrites rather than appends. PROJECT → stop the stack, wipe
+	// + untar the volumes + files, re-`Reroute` the snapshot compose/env (which
+	// restarts the stack) = full data + config in place. A restart failure (e.g.
+	// a snapshot image that no longer exists) is reported clearly on the stream
+	// rather than silently leaving the stack down.
+	Restore(*RestoreRequest, grpc.ServerStreamingServer[RestoreEvent]) error
+	// Verify S3 connectivity + the destination bucket for the "Test connection"
+	// button (makes lib/data/s3.ts testS3 real). The agent HEADs/stats the bucket
+	// with the supplied creds and reports reachable + writable, with a human
+	// message on failure. Any agent advertising "backup" can serve it — it needs
+	// no Docker, only the S3 client — so the control plane can run it on any
+	// reachable backup-capable server.
+	S3Check(context.Context, *S3CheckRequest) (*S3CheckResponse, error)
+	// Delete S3 objects by exact key or by prefix. Backs retention pruning (the
+	// control plane deletes objects older than retentionDays for a backup) and
+	// the "delete artifacts too" branch of target deletion. Idempotent: a missing
+	// object is not an error. Returns how many objects were removed.
+	S3Delete(context.Context, *S3DeleteRequest) (*S3DeleteResponse, error)
 	// Stream a container's live runtime logs (`docker logs -f --tail N`) as raw
 	// byte chunks. Output-only — there is no stdin. The control plane proxies these
 	// chunks straight into the unchanged SSE log route. Closing the stream (browser
@@ -801,6 +929,18 @@ func (UnimplementedAgentServer) Inspect(context.Context, *InspectRequest) (*Insp
 }
 func (UnimplementedAgentServer) SelfUpdate(context.Context, *SelfUpdateRequest) (*SelfUpdateResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SelfUpdate not implemented")
+}
+func (UnimplementedAgentServer) Backup(*BackupRequest, grpc.ServerStreamingServer[BackupEvent]) error {
+	return status.Errorf(codes.Unimplemented, "method Backup not implemented")
+}
+func (UnimplementedAgentServer) Restore(*RestoreRequest, grpc.ServerStreamingServer[RestoreEvent]) error {
+	return status.Errorf(codes.Unimplemented, "method Restore not implemented")
+}
+func (UnimplementedAgentServer) S3Check(context.Context, *S3CheckRequest) (*S3CheckResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method S3Check not implemented")
+}
+func (UnimplementedAgentServer) S3Delete(context.Context, *S3DeleteRequest) (*S3DeleteResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method S3Delete not implemented")
 }
 func (UnimplementedAgentServer) FollowLogs(*FollowLogsRequest, grpc.ServerStreamingServer[LogChunk]) error {
 	return status.Errorf(codes.Unimplemented, "method FollowLogs not implemented")
@@ -1072,6 +1212,64 @@ func _Agent_SelfUpdate_Handler(srv interface{}, ctx context.Context, dec func(in
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(AgentServer).SelfUpdate(ctx, req.(*SelfUpdateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_Backup_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(BackupRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(AgentServer).Backup(m, &grpc.GenericServerStream[BackupRequest, BackupEvent]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Agent_BackupServer = grpc.ServerStreamingServer[BackupEvent]
+
+func _Agent_Restore_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(RestoreRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(AgentServer).Restore(m, &grpc.GenericServerStream[RestoreRequest, RestoreEvent]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Agent_RestoreServer = grpc.ServerStreamingServer[RestoreEvent]
+
+func _Agent_S3Check_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(S3CheckRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).S3Check(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_S3Check_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).S3Check(ctx, req.(*S3CheckRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_S3Delete_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(S3DeleteRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).S3Delete(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_S3Delete_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).S3Delete(ctx, req.(*S3DeleteRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1502,6 +1700,14 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Agent_SelfUpdate_Handler,
 		},
 		{
+			MethodName: "S3Check",
+			Handler:    _Agent_S3Check_Handler,
+		},
+		{
+			MethodName: "S3Delete",
+			Handler:    _Agent_S3Delete_Handler,
+		},
+		{
 			MethodName: "ListInstances",
 			Handler:    _Agent_ListInstances_Handler,
 		},
@@ -1587,6 +1793,16 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "ReattachDeploy",
 			Handler:       _Agent_ReattachDeploy_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "Backup",
+			Handler:       _Agent_Backup_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "Restore",
+			Handler:       _Agent_Restore_Handler,
 			ServerStreams: true,
 		},
 		{

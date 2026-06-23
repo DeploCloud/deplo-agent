@@ -54,6 +54,32 @@ func Run(ctx context.Context, timeout time.Duration, args ...string) (Result, er
 	return res, nil
 }
 
+// RunEnv is Run with extra "KEY=VALUE" host-process env layered on (e.g. so a
+// `docker exec -e REDISCLI_AUTH <c> redis-cli …` can forward the password from
+// the docker client's env into the container without the value touching argv).
+// Same exit-code/error discipline as Run; the argv is redacted in the error.
+func RunEnv(ctx context.Context, timeout time.Duration, extraEnv []string, args ...string) (Result, error) {
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	cmd := exec.CommandContext(cctx, "docker", args...)
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
+	var out, errb strings.Builder
+	cmd.Stdout = &out
+	cmd.Stderr = &errb
+	err := cmd.Run()
+	res := Result{Stdout: out.String(), Stderr: errb.String()}
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			res.Code = ee.ExitCode()
+			return res, nil
+		}
+		return res, fmt.Errorf("docker %s failed: %w (%s)", redactArgs(args), err, errb.String())
+	}
+	return res, nil
+}
+
 // Stream runs `docker <args>` and forwards each line of merged stdout+stderr to
 // onLine as it is produced (the live build/clone log), returning the exit code.
 // Mirrors lib/infra/exec.ts spawnStream. `input`, when non-empty, is written to
@@ -149,6 +175,105 @@ func streamCmd(cctx context.Context, timeout time.Duration, onLine LineFn, input
 		return -1, err
 	}
 	return 0, nil
+}
+
+// PipeOut runs `docker <args>` and copies the child's RAW stdout into `dst`
+// (bytes, not lines) while collecting stderr for diagnostics — for piping a
+// dump tool's output (`docker exec <c> pg_dump …`) straight into the gzip→S3
+// pipeline with no temp file. Returns the exit code; an error only when docker
+// never produced an exit status (spawn/timeout). A non-zero exit returns the
+// collected stderr in the error so the caller can surface why the dump failed.
+//
+// extraEnv layers "KEY=VALUE" entries on top of the agent's env (e.g. so a
+// password can ride in the docker-exec invocation's env rather than argv).
+func PipeOut(ctx context.Context, timeout time.Duration, dst io.Writer, extraEnv []string, args ...string) (int, error) {
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	cmd := exec.CommandContext(cctx, "docker", args...)
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
+	var errb strings.Builder
+	cmd.Stdout = dst
+	cmd.Stderr = &errb
+	err := cmd.Run()
+	if err != nil {
+		label := redactArgs(args)
+		if cctx.Err() == context.DeadlineExceeded {
+			return -1, fmt.Errorf("docker %s timed out after %s", label, timeout)
+		}
+		if ee, ok := err.(*exec.ExitError); ok && ee.ProcessState.Exited() {
+			return ee.ExitCode(), fmt.Errorf("docker %s exited %d: %s", label, ee.ExitCode(), strings.TrimSpace(errb.String()))
+		}
+		return -1, fmt.Errorf("docker %s failed: %w (%s)", label, err, strings.TrimSpace(errb.String()))
+	}
+	return 0, nil
+}
+
+// PipeIn runs `docker <args>` feeding `src` to the child's stdin (the restore
+// direction: a decompressed dump streamed into `docker exec -i <c> psql …`),
+// collecting stderr. Same exit-code/error discipline as PipeOut.
+func PipeIn(ctx context.Context, timeout time.Duration, src io.Reader, extraEnv []string, args ...string) (int, error) {
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	cmd := exec.CommandContext(cctx, "docker", args...)
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
+	var errb strings.Builder
+	cmd.Stdin = src
+	cmd.Stderr = &errb
+	err := cmd.Run()
+	if err != nil {
+		label := redactArgs(args)
+		if cctx.Err() == context.DeadlineExceeded {
+			return -1, fmt.Errorf("docker %s timed out after %s", label, timeout)
+		}
+		if ee, ok := err.(*exec.ExitError); ok && ee.ProcessState.Exited() {
+			return ee.ExitCode(), fmt.Errorf("docker %s exited %d: %s", label, ee.ExitCode(), strings.TrimSpace(errb.String()))
+		}
+		return -1, fmt.Errorf("docker %s failed: %w (%s)", label, err, strings.TrimSpace(errb.String()))
+	}
+	return 0, nil
+}
+
+// redactArgs renders an argv for an error message with any secret-bearing token
+// masked, so a failed dump/restore (e.g. on bad credentials) never echoes a
+// cleartext password into an error string that the control plane logs. Two
+// shapes are masked: an inline `KEY=VALUE` env assignment (the value is hidden,
+// the KEY kept) and the VALUE following a known secret flag (`-a`, `-p`,
+// `--password`). Defence in depth: the backup paths also keep secrets OFF argv
+// entirely, but a stray future caller shouldn't be able to leak one through here.
+func redactArgs(args []string) string {
+	out := make([]string, len(args))
+	maskNext := false
+	for i, a := range args {
+		if maskNext {
+			out[i] = "***"
+			maskNext = false
+			continue
+		}
+		if k, _, ok := strings.Cut(a, "="); ok && a != k+"=" && looksSecretKey(k) {
+			out[i] = k + "=***"
+			continue
+		}
+		switch a {
+		case "-a", "-p", "--password":
+			out[i] = a
+			maskNext = true
+		default:
+			out[i] = a
+		}
+	}
+	return strings.Join(out, " ")
+}
+
+func looksSecretKey(k string) bool {
+	k = strings.ToUpper(k)
+	// Trailing component for an `-e KEY=` is the env name; match the well-known
+	// DB-credential vars the backup paths use plus a generic PASSWORD substring.
+	return k == "PGPASSWORD" || k == "MYSQL_PWD" || k == "REDISCLI_AUTH" ||
+		k == "MONGODB_PASSWORD" || strings.Contains(k, "PASSWORD") || strings.Contains(k, "SECRET")
 }
 
 // Available reports whether the Docker daemon is reachable. Never errors.

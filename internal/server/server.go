@@ -43,6 +43,7 @@ var Capabilities = []string{
 	"ssh-gateway", // the per-host SSH gateway singleton (Ensure/Provision/Deprovision)
 	"tunnel",      // the VS Code remote tunnel (Start/Get/Stop)
 	"self-update", // in-place agent binary update over mTLS (SelfUpdate), certs kept
+	"backup",      // dump/restore a DB or project to/from S3 (Backup/Restore/S3Check/S3Delete)
 }
 
 // AgentVersion is the version this agent reports over Hello. It is stamped at

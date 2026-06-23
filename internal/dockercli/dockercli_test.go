@@ -75,3 +75,28 @@ func TestTraefikRunning(t *testing.T) {
 		t.Skip("another traefik is running on this host; can't assert the false case")
 	}
 }
+
+// redactArgs must mask any secret-bearing token so a failed dump/restore never
+// echoes a cleartext password into an error string the control plane logs.
+func TestRedactArgs(t *testing.T) {
+	cases := []struct {
+		in   []string
+		want string
+	}{
+		// Inline KEY=VALUE secret env: value hidden, key kept.
+		{[]string{"exec", "-e", "PGPASSWORD=hunter2", "c", "pg_dump"}, "exec -e PGPASSWORD=*** c pg_dump"},
+		{[]string{"exec", "-e", "MYSQL_PWD=s3cret", "c"}, "exec -e MYSQL_PWD=*** c"},
+		// Bare -e NAME (no value) is NOT a secret value — left intact.
+		{[]string{"exec", "-e", "PGPASSWORD", "c", "pg_dump"}, "exec -e PGPASSWORD c pg_dump"},
+		// Value after a secret flag is masked.
+		{[]string{"exec", "c", "redis-cli", "-a", "topsecret", "PING"}, "exec c redis-cli -a *** PING"},
+		{[]string{"exec", "c", "mongodump", "-p", "pw", "--archive"}, "exec c mongodump -p *** --archive"},
+		// A non-secret env (no PASSWORD/SECRET) is untouched.
+		{[]string{"exec", "-e", "PGHOST=db", "c"}, "exec -e PGHOST=db c"},
+	}
+	for _, tc := range cases {
+		if got := redactArgs(tc.in); got != tc.want {
+			t.Errorf("redactArgs(%v)\n  got  %q\n  want %q", tc.in, got, tc.want)
+		}
+	}
+}

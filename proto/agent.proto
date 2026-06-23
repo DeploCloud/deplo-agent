@@ -113,6 +113,54 @@ service Agent {
   // plane can tell the operator to fall back to re-running the installer.
   rpc SelfUpdate(SelfUpdateRequest) returns (SelfUpdateResponse);
 
+  // ---- BACKUPS: dump/restore a database or project to/from S3, and the S3
+  // affordances the control plane needs (connectivity check + object delete).
+  // Routes ALL backup work through the OWNING server's agent (ADR-0007): the
+  // agent has the Docker socket + host fs the dump needs, and an S3 client
+  // (minio-go) so the bytes never round-trip through the control plane. The
+  // control plane stays the source of truth — it decrypts the S3 creds and
+  // builds the object key, then sends them here over mTLS; the agent streams
+  // the dump straight to (or from) the bucket. Gated behind the "backup"
+  // Hello capability so an older agent surfaces a clear "update the agent"
+  // error rather than a fake success (forward-compatible, D6). ----
+
+  // Back up a database or a project to S3, streaming progress. DATABASE → the
+  // agent `docker exec`s the engine's dump tool (per the format table in
+  // docs/research/dbs-backups/PLAN.md), gzip-compresses the stream, and uploads
+  // it to S3 via a multipart PUT (minio-go), so no temp file and no
+  // control-plane round-trip. PROJECT → the agent tars the project's named +
+  // compose-stack volumes (via a throwaway helper container that mounts them),
+  // the project files dir, and the rendered compose/env snapshot, gzip-compresses,
+  // and uploads. Host bind mounts are EXCLUDED (shared cross-tenant paths,
+  // outside Deplo). The terminal BackupResult carries the final object key +
+  // byte size the control plane records on the BackupRun.
+  rpc Backup(BackupRequest) returns (stream BackupEvent);
+
+  // Restore a database or project from a previously-uploaded S3 object, IN
+  // PLACE, streaming progress. DATABASE → download the object, decompress, and
+  // restore per the format table — drop-and-recreate, guaranteed by the dump
+  // format (pg `--clean --if-exists`, mysql `--add-drop-table`, mongo `--drop`)
+  // so a restore overwrites rather than appends. PROJECT → stop the stack, wipe
+  // + untar the volumes + files, re-`Reroute` the snapshot compose/env (which
+  // restarts the stack) = full data + config in place. A restart failure (e.g.
+  // a snapshot image that no longer exists) is reported clearly on the stream
+  // rather than silently leaving the stack down.
+  rpc Restore(RestoreRequest) returns (stream RestoreEvent);
+
+  // Verify S3 connectivity + the destination bucket for the "Test connection"
+  // button (makes lib/data/s3.ts testS3 real). The agent HEADs/stats the bucket
+  // with the supplied creds and reports reachable + writable, with a human
+  // message on failure. Any agent advertising "backup" can serve it — it needs
+  // no Docker, only the S3 client — so the control plane can run it on any
+  // reachable backup-capable server.
+  rpc S3Check(S3CheckRequest) returns (S3CheckResponse);
+
+  // Delete S3 objects by exact key or by prefix. Backs retention pruning (the
+  // control plane deletes objects older than retentionDays for a backup) and
+  // the "delete artifacts too" branch of target deletion. Idempotent: a missing
+  // object is not an error. Returns how many objects were removed.
+  rpc S3Delete(S3DeleteRequest) returns (S3DeleteResponse);
+
   // ---- PART C: console observability (replaces lib/logs + lib/attach +
   // the direct-Docker half of lib/data/console.ts for remote projects) ----
 
@@ -249,6 +297,9 @@ message HelloResponse {
   // supports (Part A: a localhost agent that handles the Dockerfile build +
   // single-image compose-up path). Absent capability => control plane keeps the
   // local fallback path. Forward-compatible: new capabilities are new entries.
+  // The "backup" capability gates the Backup/Restore/S3Check/S3Delete RPCs: the
+  // control plane preflights it (AgentBackupUnsupportedError when absent) so an
+  // older agent gives a clear "update the agent" message, never a fake success.
   repeated string capabilities = 5;
   // Whether a Traefik reverse proxy is running on this host (a container on the
   // shared `deplo` network that reads the deploy labels and routes traffic).
@@ -681,6 +732,171 @@ message SelfUpdateResponse {
   // agent then exits so its supervisor (systemd Restart=on-failure) re-execs the
   // freshly-swapped binary, which reuses the existing mTLS materials.
   bool restarting = 2;
+}
+
+// ---------------------------------------------------------------------------
+// BACKUPS — dump/restore to S3 (Backup / Restore / S3Check / S3Delete)
+// ---------------------------------------------------------------------------
+
+// What a backup/restore targets. A DATABASE is dumped via the engine's tool
+// (`docker exec`); a PROJECT is the tar of its volumes + files + the compose/
+// env snapshot. New kinds are new enum cases, never a redesign (D6).
+enum BackupKind {
+  BACKUP_KIND_UNSPECIFIED = 0;
+  BACKUP_KIND_DATABASE = 1;
+  BACKUP_KIND_PROJECT = 2;
+}
+
+// The S3 destination the agent reads/writes with — the DECRYPTED creds (the
+// control plane decrypts via decryptSecret and sends plaintext over mTLS; the
+// agent never holds the encryption key, mirroring Deploy's env handling) plus
+// the bucket coordinates and the exact object key. `object_key` is built by the
+// control plane (deplo/<teamId>/<kind>/<targetId>/<ISO-timestamp>.<ext>) and is
+// opaque to the agent. For S3Check it may be empty (a bucket-level probe); for
+// S3Delete `object_key` is the key/prefix to remove.
+message S3Target {
+  string endpoint = 1;     // e.g. s3.amazonaws.com or a MinIO host:port
+  string region = 2;       // e.g. us-east-1 ("" => the SDK default)
+  string bucket = 3;
+  string access_key = 4;   // decrypted; never logged
+  string secret_key = 5;   // decrypted; never logged
+  string object_key = 6;   // the exact object key (PUT/GET target)
+  // Whether to address the bucket path-style (bucket in the URL path, not the
+  // host). MinIO / many S3-compatibles need this; AWS uses virtual-host style.
+  // The control plane decides from the destination's provider.
+  bool path_style = 7;
+}
+
+// The database descriptor for a DATABASE backup/restore. The control plane
+// resolves the container name + engine details from its store; the agent stays
+// dumb about Deplo's DB model and just runs the right tool inside the container.
+message DatabaseDescriptor {
+  // The DB container to `docker exec` into (the agent re-derives nothing — it
+  // execs exactly this name). For a Deplo DB this is the compose container of
+  // the db-<name> stack.
+  string container = 1;
+  // The engine, lower-case: "postgres" | "mysql" | "mariadb" | "mongodb" |
+  // "redis" | "clickhouse". Selects the dump/restore tool + flags.
+  string db_type = 2;
+  // The logical database name to dump/restore (the default DB for the engine).
+  string db_name = 3;
+  // The superuser the dump tool authenticates as inside the container.
+  string user = 4;
+  // The engine password, decrypted by the control plane. The agent keeps it OFF
+  // the host docker-client's argv (which is world-readable via ps/proc) wherever
+  // the engine's tool can read it from an env var instead: postgres PGPASSWORD,
+  // mysql/mariadb MYSQL_PWD, redis REDISCLI_AUTH — forwarded into the container
+  // via a valueless `docker exec -e NAME`, so the value rides only in the host
+  // process's env. mongodump/mongorestore have no password env var, so for mongo
+  // the password is still passed as `-p <pw>` on argv (a bounded, host-local
+  // residual; the agent masks it out of any error string it logs). Empty when the
+  // container trusts local socket auth.
+  string password = 5;
+}
+
+// The project descriptor for a PROJECT backup/restore. The control plane resolves
+// the persistent state's three shapes into a flat name list (host bind mounts
+// excluded) so the agent stays dumb about Deplo's volume-naming scheme.
+message ProjectDescriptor {
+  // The project slug — keys the files dir (<stack-dir>/files/<slug>) and the
+  // stack the restore re-Reroutes.
+  string slug = 1;
+  // The host volume names to tar: the named-volume shape (hostVolumeName =
+  // deplo-<slug>-<name>) AND the compose-stack volumes the control plane parsed
+  // out of the rendered YAML. Host bind mounts are NOT here (excluded). A helper
+  // container mounts each read-only to tar it.
+  repeated string volume_names = 2;
+  // Whether to include the project files dir (<stack-dir>/files/<slug>) in the
+  // archive. False when the project has no files dir.
+  bool include_files = 3;
+  // The rendered compose YAML snapshot, captured into the archive so a restore
+  // can re-Reroute the EXACT config that was backed up (full data + config
+  // restore). Opaque to the agent.
+  string compose_yaml = 4;
+  // The decrypted env snapshot for the re-Reroute on restore. Stored in the
+  // archive; the env secrets are written 0600 like every other env-file. Empty
+  // for single-image projects that bake env into the compose.
+  map<string, string> env_snapshot = 5;
+  // Compose mount files (template config) to re-materialise on restore, mirroring
+  // RerouteRequest.mounts. Empty for single-image projects.
+  repeated MountFile mounts = 6;
+}
+
+message BackupRequest {
+  BackupKind kind = 1;
+  S3Target s3 = 2;
+  // Exactly one of these is set, per `kind`.
+  DatabaseDescriptor database = 3;
+  ProjectDescriptor project = 4;
+}
+
+// One event in the backup stream. Exactly one arm is set; the terminal arm is
+// always `result`. Mirrors the Deploy stream's log/result shape so the control
+// plane reuses the same SSE plumbing.
+message BackupEvent {
+  oneof event {
+    LogLine log = 1;
+    BackupResult result = 2;
+  }
+}
+
+message BackupResult {
+  // True => the dump+upload completed and the object is in the bucket.
+  bool ok = 1;
+  // A human-readable reason on failure (empty on success).
+  string error = 2;
+  // The object key written (echoes S3Target.object_key on success) and its size
+  // in bytes — recorded on the control plane's BackupRun.
+  string object_key = 3;
+  int64 size_bytes = 4;
+}
+
+message RestoreRequest {
+  BackupKind kind = 1;
+  S3Target s3 = 2; // object_key points at the artifact to restore FROM
+  DatabaseDescriptor database = 3;
+  ProjectDescriptor project = 4;
+}
+
+message RestoreEvent {
+  oneof event {
+    LogLine log = 1;
+    RestoreResult result = 2;
+  }
+}
+
+message RestoreResult {
+  bool ok = 1;
+  string error = 2;
+}
+
+message S3CheckRequest {
+  // Bucket coordinates + creds; object_key is ignored (this is a bucket probe).
+  S3Target s3 = 1;
+}
+
+message S3CheckResponse {
+  // True when the bucket is reachable AND writable with these creds.
+  bool ok = 1;
+  // "" on success; a human-readable reason otherwise (bad creds, no bucket,
+  // network) — surfaced as the destination's status detail.
+  string error = 2;
+}
+
+message S3DeleteRequest {
+  // s3.object_key is the key (or, with `prefix`, the prefix) to remove.
+  S3Target s3 = 1;
+  // When true, delete EVERY object under s3.object_key as a prefix (retention /
+  // delete-with-artifacts of a whole target's folder). When false, delete the
+  // single exact key. Defaults to a single-key delete.
+  bool prefix = 2;
+}
+
+message S3DeleteResponse {
+  bool ok = 1;
+  string error = 2;
+  // How many objects were deleted (0 when already absent — still ok, idempotent).
+  int64 deleted = 3;
 }
 
 // ---------------------------------------------------------------------------
