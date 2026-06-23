@@ -245,10 +245,30 @@ func (s *Service) StartStack(ctx context.Context, ref *pb.StackRef) (*pb.StackRe
 }
 
 // DestroyStack stops and removes a stack (compose down, falling back to rm -f).
+//
+// When ref.RemoveVolumes is set the `down` also drops the stack's named volumes
+// (`-v`) and, on a clean teardown, the on-disk compose + env files are removed.
+// Database deletion sets it so a DB's data volume is reclaimed rather than
+// orphaned; app teardown leaves it false (volumes survive, file stays). An older
+// control plane that never sends the field leaves it false too, so the default is
+// the original volume-preserving behaviour.
+//
+// The volume sweep only happens on a successful `down -v` (the rm -f fallback can
+// only remove a container, never a named volume). So a removeVolumes destroy that
+// fails the compose-down and falls through to rm -f reports Ok:false and keeps the
+// stack file — the volume was NOT reclaimed and the control plane must not believe
+// otherwise.
 func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.StackResult, error) {
 	slug := ref.GetSlug()
-	res, err := dockercli.Run(ctx, 90*time.Second, "compose", "-p", "deplo-"+slug, "-f", s.stackPath(slug), "down", "--remove-orphans")
+	downArgs := []string{"compose", "-p", "deplo-" + slug, "-f", s.stackPath(slug), "down", "--remove-orphans"}
+	if ref.GetRemoveVolumes() {
+		downArgs = append(downArgs, "-v")
+	}
+	res, err := dockercli.Run(ctx, 90*time.Second, downArgs...)
 	if err == nil && res.Code == 0 {
+		if ref.GetRemoveVolumes() {
+			s.removeStackFiles(slug)
+		}
 		return &pb.StackResult{Ok: true}, nil
 	}
 	// `rm -f` is idempotent for a missing container (exit 0), so the common
@@ -260,7 +280,29 @@ func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.Stack
 	if err != nil {
 		return &pb.StackResult{Ok: false, Error: err.Error()}, nil
 	}
+	// A removeVolumes destroy that fell through to `rm -f` did NOT run a successful
+	// `down -v`, and `rm -f` only removes a container — it can never reclaim a named
+	// volume. So the data volume survives here. Do NOT sweep the stack file (it is
+	// the only on-disk record of the volume's compose name a retry needs) and do NOT
+	// report a clean destroy: surface Ok:false so the control plane can warn / retry
+	// rather than believe the volume was reclaimed when it wasn't.
+	if ref.GetRemoveVolumes() {
+		msg := r2.Stderr
+		if msg == "" {
+			msg = "down -v failed; container force-removed but the named volume was not reclaimed (stack file kept for retry)"
+		}
+		return &pb.StackResult{Ok: false, Error: msg}, nil
+	}
 	return &pb.StackResult{Ok: r2.Code == 0, Error: r2.Stderr}, nil
+}
+
+// removeStackFiles deletes the on-disk compose file and its env sidecar for a
+// destroyed stack. Best-effort: a missing file is fine (already gone), and a
+// remove failure must not flip an otherwise-successful destroy to failed — the
+// container/volumes are already down, a stray file is cosmetic.
+func (s *Service) removeStackFiles(slug string) {
+	_ = os.Remove(s.stackPath(slug))
+	_ = os.Remove(fmt.Sprintf("%s/%s.env", s.stackDir, slug))
 }
 
 // Reroute re-renders a running stack in place: the control plane changed the
