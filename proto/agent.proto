@@ -96,6 +96,19 @@ service Agent {
   // Container introspection (status/running) for the live-status subscriptions.
   rpc Inspect(InspectRequest) returns (InspectResponse);
 
+  // Whether a HOST TCP port is free to publish. The control plane calls this
+  // BEFORE provisioning a database with "Expose publicly" (a published `ports:`
+  // mapping) so a port already taken — by another Deplo stack OR by any non-Deplo
+  // host process (a system Postgres on 5432, the control plane's own DB, …) —
+  // fails the creation up front with a clear message rather than leaving a
+  // half-provisioned container whose `compose up` lost the port bind. The agent
+  // answers by attempting to BIND the port on the host (0.0.0.0 + ::, then
+  // immediately closing): a bind is the only check that sees BOTH Docker-published
+  // ports and raw host listeners, with no output parsing. Gated behind the
+  // "checkport" Hello capability so an older agent surfaces "update the agent"
+  // rather than a fake "available".
+  rpc CheckPort(CheckPortRequest) returns (CheckPortResponse);
+
   // Update the agent BINARY in place to a newer release, WITHOUT re-bootstrapping
   // — the agent's mTLS materials (agent.crt/agent.key/ca.crt under --agent-dir)
   // are NEVER touched, so the server keeps its identity and pinned fingerprint
@@ -689,6 +702,21 @@ message InspectResponse {
   bool running = 2;
   // Raw docker state string (running, exited, ...).
   string state = 3;
+}
+
+// Ask whether a host TCP port can be published (see the CheckPort RPC comment).
+message CheckPortRequest {
+  // The host port to test (1-65535). Out-of-range => the agent reports it as not
+  // available with a reason, never a bind attempt.
+  int32 port = 1;
+}
+
+message CheckPortResponse {
+  // True when the agent could bind (and immediately released) the port on the
+  // host — i.e. nothing else holds it right now.
+  bool available = 1;
+  // "" when available; otherwise a human-readable reason (in use / out of range).
+  string reason = 2;
 }
 
 // In-place agent binary update (SelfUpdate). The control plane resolves the

@@ -63,6 +63,7 @@ const (
 	Agent_Reroute_FullMethodName            = "/deplo.agent.v1.Agent/Reroute"
 	Agent_ReadStack_FullMethodName          = "/deplo.agent.v1.Agent/ReadStack"
 	Agent_Inspect_FullMethodName            = "/deplo.agent.v1.Agent/Inspect"
+	Agent_CheckPort_FullMethodName          = "/deplo.agent.v1.Agent/CheckPort"
 	Agent_SelfUpdate_FullMethodName         = "/deplo.agent.v1.Agent/SelfUpdate"
 	Agent_Backup_FullMethodName             = "/deplo.agent.v1.Agent/Backup"
 	Agent_Restore_FullMethodName            = "/deplo.agent.v1.Agent/Restore"
@@ -139,6 +140,18 @@ type AgentClient interface {
 	ReadStack(ctx context.Context, in *StackRef, opts ...grpc.CallOption) (*ReadStackResponse, error)
 	// Container introspection (status/running) for the live-status subscriptions.
 	Inspect(ctx context.Context, in *InspectRequest, opts ...grpc.CallOption) (*InspectResponse, error)
+	// Whether a HOST TCP port is free to publish. The control plane calls this
+	// BEFORE provisioning a database with "Expose publicly" (a published `ports:`
+	// mapping) so a port already taken — by another Deplo stack OR by any non-Deplo
+	// host process (a system Postgres on 5432, the control plane's own DB, …) —
+	// fails the creation up front with a clear message rather than leaving a
+	// half-provisioned container whose `compose up` lost the port bind. The agent
+	// answers by attempting to BIND the port on the host (0.0.0.0 + ::, then
+	// immediately closing): a bind is the only check that sees BOTH Docker-published
+	// ports and raw host listeners, with no output parsing. Gated behind the
+	// "checkport" Hello capability so an older agent surfaces "update the agent"
+	// rather than a fake "available".
+	CheckPort(ctx context.Context, in *CheckPortRequest, opts ...grpc.CallOption) (*CheckPortResponse, error)
 	// Update the agent BINARY in place to a newer release, WITHOUT re-bootstrapping
 	// — the agent's mTLS materials (agent.crt/agent.key/ca.crt under --agent-dir)
 	// are NEVER touched, so the server keeps its identity and pinned fingerprint
@@ -384,6 +397,16 @@ func (c *agentClient) Inspect(ctx context.Context, in *InspectRequest, opts ...g
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(InspectResponse)
 	err := c.cc.Invoke(ctx, Agent_Inspect_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) CheckPort(ctx context.Context, in *CheckPortRequest, opts ...grpc.CallOption) (*CheckPortResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CheckPortResponse)
+	err := c.cc.Invoke(ctx, Agent_CheckPort_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -764,6 +787,18 @@ type AgentServer interface {
 	ReadStack(context.Context, *StackRef) (*ReadStackResponse, error)
 	// Container introspection (status/running) for the live-status subscriptions.
 	Inspect(context.Context, *InspectRequest) (*InspectResponse, error)
+	// Whether a HOST TCP port is free to publish. The control plane calls this
+	// BEFORE provisioning a database with "Expose publicly" (a published `ports:`
+	// mapping) so a port already taken — by another Deplo stack OR by any non-Deplo
+	// host process (a system Postgres on 5432, the control plane's own DB, …) —
+	// fails the creation up front with a clear message rather than leaving a
+	// half-provisioned container whose `compose up` lost the port bind. The agent
+	// answers by attempting to BIND the port on the host (0.0.0.0 + ::, then
+	// immediately closing): a bind is the only check that sees BOTH Docker-published
+	// ports and raw host listeners, with no output parsing. Gated behind the
+	// "checkport" Hello capability so an older agent surfaces "update the agent"
+	// rather than a fake "available".
+	CheckPort(context.Context, *CheckPortRequest) (*CheckPortResponse, error)
 	// Update the agent BINARY in place to a newer release, WITHOUT re-bootstrapping
 	// — the agent's mTLS materials (agent.crt/agent.key/ca.crt under --agent-dir)
 	// are NEVER touched, so the server keeps its identity and pinned fingerprint
@@ -926,6 +961,9 @@ func (UnimplementedAgentServer) ReadStack(context.Context, *StackRef) (*ReadStac
 }
 func (UnimplementedAgentServer) Inspect(context.Context, *InspectRequest) (*InspectResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Inspect not implemented")
+}
+func (UnimplementedAgentServer) CheckPort(context.Context, *CheckPortRequest) (*CheckPortResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CheckPort not implemented")
 }
 func (UnimplementedAgentServer) SelfUpdate(context.Context, *SelfUpdateRequest) (*SelfUpdateResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SelfUpdate not implemented")
@@ -1194,6 +1232,24 @@ func _Agent_Inspect_Handler(srv interface{}, ctx context.Context, dec func(inter
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(AgentServer).Inspect(ctx, req.(*InspectRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_CheckPort_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CheckPortRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).CheckPort(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_CheckPort_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).CheckPort(ctx, req.(*CheckPortRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1694,6 +1750,10 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Inspect",
 			Handler:    _Agent_Inspect_Handler,
+		},
+		{
+			MethodName: "CheckPort",
+			Handler:    _Agent_CheckPort_Handler,
 		},
 		{
 			MethodName: "SelfUpdate",

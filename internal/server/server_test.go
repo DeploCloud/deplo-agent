@@ -104,3 +104,53 @@ func TestDeploy_missingSlugFailsCleanly(t *testing.T) {
 		t.Error("expected a terminal DeployResult event")
 	}
 }
+
+func TestCheckPort_reportsAvailability(t *testing.T) {
+	client, done := dialLocal(t)
+	defer done()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// A port we hold open must read as NOT available: bind an ephemeral port
+	// ourselves, learn its number, keep it held, and ask CheckPort about it.
+	held, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	busyPort := held.Addr().(*net.TCPAddr).Port
+
+	resp, err := client.CheckPort(ctx, &pb.CheckPortRequest{Port: int32(busyPort)})
+	if err != nil {
+		t.Fatalf("CheckPort(busy): %v", err)
+	}
+	if resp.GetAvailable() {
+		t.Errorf("port %d is held open but CheckPort said available", busyPort)
+	}
+	if resp.GetReason() == "" {
+		t.Error("expected a reason when a port is unavailable")
+	}
+
+	// Release it, then the same port must read as available again (the probe binds
+	// and immediately releases, so it must not leave the port stuck).
+	held.Close()
+	resp, err = client.CheckPort(ctx, &pb.CheckPortRequest{Port: int32(busyPort)})
+	if err != nil {
+		t.Fatalf("CheckPort(freed): %v", err)
+	}
+	if !resp.GetAvailable() {
+		t.Errorf("port %d was freed but CheckPort said unavailable: %s", busyPort, resp.GetReason())
+	}
+
+	// Out-of-range ports are reported unavailable with a reason, never attempted.
+	for _, p := range []int32{0, -1, 70000} {
+		r, err := client.CheckPort(ctx, &pb.CheckPortRequest{Port: p})
+		if err != nil {
+			t.Fatalf("CheckPort(%d): %v", p, err)
+		}
+		if r.GetAvailable() || r.GetReason() == "" {
+			t.Errorf("port %d should be unavailable with a reason, got available=%v reason=%q",
+				p, r.GetAvailable(), r.GetReason())
+		}
+	}
+}

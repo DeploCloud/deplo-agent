@@ -9,8 +9,10 @@ package server
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -44,6 +46,7 @@ var Capabilities = []string{
 	"tunnel",      // the VS Code remote tunnel (Start/Get/Stop)
 	"self-update", // in-place agent binary update over mTLS (SelfUpdate), certs kept
 	"backup",      // dump/restore a DB or project to/from S3 (Backup/Restore/S3Check/S3Delete)
+	"checkport",   // host TCP port availability probe (CheckPort) — gates DB "expose publicly"
 }
 
 // AgentVersion is the version this agent reports over Hello. It is stamped at
@@ -381,6 +384,39 @@ func (s *Service) Inspect(ctx context.Context, req *pb.InspectRequest) (*pb.Insp
 		Running: state == "running",
 		State:   state,
 	}, nil
+}
+
+// CheckPort reports whether a host TCP port is free to publish. The definitive
+// test is to BIND it: a successful bind (immediately released) proves nothing
+// else holds it, and — unlike parsing `docker ps` or `ss` output — it sees BOTH
+// Docker-published ports and raw host listeners (a system Postgres on 5432, the
+// control plane's own DB, an unrelated daemon). We bind the IPv4 wildcard, which
+// is what a Docker `ports: "<p>:<p>"` publish contends for on this host; a bind
+// failure (EADDRINUSE) => not available. An out-of-range port is reported
+// unavailable with a reason rather than attempted.
+func (s *Service) CheckPort(ctx context.Context, req *pb.CheckPortRequest) (*pb.CheckPortResponse, error) {
+	port := req.GetPort()
+	if port < 1 || port > 65535 {
+		return &pb.CheckPortResponse{
+			Available: false,
+			Reason:    fmt.Sprintf("port %d is out of range (1-65535)", port),
+		}, nil
+	}
+	addr := net.JoinHostPort("0.0.0.0", strconv.Itoa(int(port)))
+	// SO_REUSEADDR is NOT set (Go's default), so this bind contends for the port
+	// exactly as a fresh docker-proxy publish would — a TIME_WAIT or an active
+	// listener both make it fail, which is the answer we want.
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return &pb.CheckPortResponse{
+			Available: false,
+			Reason:    fmt.Sprintf("port %d is already in use on the host", port),
+		}, nil
+	}
+	// Release immediately — this was only a probe. Close errors are irrelevant
+	// (the OS reclaims the socket regardless); the port is confirmed bindable.
+	_ = ln.Close()
+	return &pb.CheckPortResponse{Available: true}, nil
 }
 
 func (s *Service) stackPath(slug string) string {
