@@ -86,6 +86,35 @@ service Agent {
   // reroute that read/wrote the stack file on the control plane's own disk.
   rpc Reroute(RerouteRequest) returns (StackResult);
 
+  // Copy a single Docker named volume across HOSTS, for a server MOVE (a
+  // database/project relocating to another server). Docker named volumes are
+  // host-local and the agent trust model is strictly star (an agent can neither
+  // dial nor trust a peer agent), so a volume cannot be copied host-to-host
+  // directly — instead the control plane RELAYS the bytes: it calls ExportVolume
+  // on the SOURCE agent (streaming the volume's gzipped tar out), and feeds those
+  // chunks into ImportVolume on the DESTINATION agent (which untars them into the
+  // target volume). No S3 hop and no agent↔agent connection.
+  //
+  // ExportVolume tars the named volume from inside a read-only helper container
+  // (the same busybox `tar -C /v -cf -` used by Backup's archiveVolume), gzips it,
+  // and streams it as raw byte chunks. The caller is expected to have QUIESCED the
+  // source (stopped the stack) first so the on-disk files can't change mid-read —
+  // the agent does not stop anything here (it only reads), keeping this a pure,
+  // reusable primitive. Any agent advertising the "volume-copy" capability serves
+  // it; an older agent returns UNIMPLEMENTED, which the control plane maps to an
+  // "update the agent" error.
+  rpc ExportVolume(ExportVolumeRequest) returns (stream VolumeChunk);
+
+  // The destination half of a cross-host volume copy (see ExportVolume). The FIRST
+  // client message MUST be a VolumeChunk carrying `header` (the target volume name +
+  // whether to wipe it first); every subsequent message carries `data` (a raw slice
+  // of the gzipped tar produced by ExportVolume). The agent wipes the target volume
+  // (unless told not to), then untars the reassembled stream into it via a helper
+  // container (the same `tar -C /v -xf -` used by Restore). The caller MUST have
+  // stopped the destination stack first so nothing writes the volume under the
+  // untar. Terminal StackResult reports success/failure of the whole import.
+  rpc ImportVolume(stream VolumeChunk) returns (StackResult);
+
   // Read back the rendered stack YAML the agent has on disk (<stack_dir>/<slug>.yml)
   // for the "View full compose" preview. The single-image/built stack's image ref
   // + env live only in this file (not on the project), so the preview must read it
@@ -666,6 +695,41 @@ message StackRef {
 message StackResult {
   bool ok = 1;
   string error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Cross-host volume copy (server move) — see ExportVolume / ImportVolume
+// ---------------------------------------------------------------------------
+
+message ExportVolumeRequest {
+  // The FULL Docker named volume to tar out (e.g. `deplo-db-mydb_db-mydb-data`).
+  // Re-validated agent-side against the docker-volume-name pattern before it is
+  // interpolated into `-v <name>:/v` — a value like "/" or "/etc" that would
+  // bind-mount a host path is rejected (defence in depth behind the control
+  // plane's own naming). The volume must already exist on this host.
+  string volume_name = 1;
+}
+
+// A framed chunk of a cross-host volume transfer. ExportVolume emits a sequence of
+// `data` chunks (no header). ImportVolume expects the FIRST message to be a
+// `header` and all following messages to be `data`.
+message VolumeChunk {
+  message Header {
+    // The FULL Docker named volume on the DESTINATION host to untar into. Created
+    // on demand by the untar helper container if absent; re-validated like
+    // ExportVolumeRequest.volume_name.
+    string volume_name = 1;
+    // Empty the target volume before untarring (default true for a move, so the
+    // import overwrites rather than merges into whatever the freshly-provisioned
+    // stack initialised). A false value appends onto existing contents.
+    bool wipe_first = 2;
+  }
+  oneof frame {
+    Header header = 1;
+    // A raw slice of the gzipped tar stream. Chunked well under the gRPC max
+    // message size; reassembled in order on the destination.
+    bytes data = 2;
+  }
 }
 
 // A label-only reroute of an already-deployed stack (no build, no env change

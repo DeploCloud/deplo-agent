@@ -47,6 +47,7 @@ var Capabilities = []string{
 	"self-update", // in-place agent binary update over mTLS (SelfUpdate), certs kept
 	"backup",      // dump/restore a DB or project to/from S3 (Backup/Restore/S3Check/S3Delete)
 	"checkport",   // host TCP port availability probe (CheckPort) — gates DB "expose publicly"
+	"volume-copy", // cross-host named-volume copy for a server move (ExportVolume/ImportVolume)
 }
 
 // AgentVersion is the version this agent reports over Hello. It is stamped at
