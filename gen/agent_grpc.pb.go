@@ -63,6 +63,8 @@ const (
 	Agent_Reroute_FullMethodName            = "/deplo.agent.v1.Agent/Reroute"
 	Agent_ExportVolume_FullMethodName       = "/deplo.agent.v1.Agent/ExportVolume"
 	Agent_ImportVolume_FullMethodName       = "/deplo.agent.v1.Agent/ImportVolume"
+	Agent_ExportFiles_FullMethodName        = "/deplo.agent.v1.Agent/ExportFiles"
+	Agent_ImportFiles_FullMethodName        = "/deplo.agent.v1.Agent/ImportFiles"
 	Agent_ReadStack_FullMethodName          = "/deplo.agent.v1.Agent/ReadStack"
 	Agent_Inspect_FullMethodName            = "/deplo.agent.v1.Agent/Inspect"
 	Agent_CheckPort_FullMethodName          = "/deplo.agent.v1.Agent/CheckPort"
@@ -161,6 +163,24 @@ type AgentClient interface {
 	// stopped the destination stack first so nothing writes the volume under the
 	// untar. Terminal StackResult reports success/failure of the whole import.
 	ImportVolume(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[VolumeChunk, StackResult], error)
+	// Copy a service's host-side FILES DIR (<stack_dir>/files/<slug>) across hosts,
+	// for a server move — the sibling of ExportVolume/ImportVolume for the one piece
+	// of a service's state that is NOT a Docker volume. The files dir holds a
+	// compose-stack's `./` bind-mount files, template config-file mounts, and
+	// `type: "service"` volume mounts; most of it is re-materialised from the control
+	// plane on a deploy, but any RUNTIME data written under it would otherwise be lost
+	// on a move. ExportFiles tars the dir out (gzipped) and streams it; a missing dir
+	// streams an empty archive (not an error). Same relay + capability model as the
+	// volume RPCs.
+	ExportFiles(ctx context.Context, in *ExportFilesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[FilesChunk], error)
+	// The destination half of a files-dir copy (see ExportFiles). The FIRST client
+	// message MUST be a FilesChunk carrying `header` (the target slug + wipe flag);
+	// every subsequent message carries `data` (a slice of the gzipped tar). The agent
+	// wipes the target files dir (unless told not to), then untars the stream into it
+	// (anti-traversal enforced, symlinks skipped — same guard as Restore's files/
+	// arm). The caller must have stopped the destination stack first. Terminal
+	// StackResult reports success/failure.
+	ImportFiles(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[FilesChunk, StackResult], error)
 	// Read back the rendered stack YAML the agent has on disk (<stack_dir>/<slug>.yml)
 	// for the "View full compose" preview. The single-image/built stack's image ref
 	// + env live only in this file (not on the project), so the preview must read it
@@ -444,6 +464,38 @@ func (c *agentClient) ImportVolume(ctx context.Context, opts ...grpc.CallOption)
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Agent_ImportVolumeClient = grpc.ClientStreamingClient[VolumeChunk, StackResult]
 
+func (c *agentClient) ExportFiles(ctx context.Context, in *ExportFilesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[FilesChunk], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[4], Agent_ExportFiles_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[ExportFilesRequest, FilesChunk]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Agent_ExportFilesClient = grpc.ServerStreamingClient[FilesChunk]
+
+func (c *agentClient) ImportFiles(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[FilesChunk, StackResult], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[5], Agent_ImportFiles_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[FilesChunk, StackResult]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Agent_ImportFilesClient = grpc.ClientStreamingClient[FilesChunk, StackResult]
+
 func (c *agentClient) ReadStack(ctx context.Context, in *StackRef, opts ...grpc.CallOption) (*ReadStackResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ReadStackResponse)
@@ -486,7 +538,7 @@ func (c *agentClient) SelfUpdate(ctx context.Context, in *SelfUpdateRequest, opt
 
 func (c *agentClient) Backup(ctx context.Context, in *BackupRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[BackupEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[4], Agent_Backup_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[6], Agent_Backup_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -505,7 +557,7 @@ type Agent_BackupClient = grpc.ServerStreamingClient[BackupEvent]
 
 func (c *agentClient) Restore(ctx context.Context, in *RestoreRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RestoreEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[5], Agent_Restore_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[7], Agent_Restore_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -544,7 +596,7 @@ func (c *agentClient) S3Delete(ctx context.Context, in *S3DeleteRequest, opts ..
 
 func (c *agentClient) FollowLogs(ctx context.Context, in *FollowLogsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LogChunk], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[6], Agent_FollowLogs_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[8], Agent_FollowLogs_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -563,7 +615,7 @@ type Agent_FollowLogsClient = grpc.ServerStreamingClient[LogChunk]
 
 func (c *agentClient) Attach(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AttachInput, AttachOutput], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[7], Agent_Attach_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[9], Agent_Attach_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -686,7 +738,7 @@ func (c *agentClient) FilesExist(ctx context.Context, in *FilesExistRequest, opt
 
 func (c *agentClient) StartDev(ctx context.Context, in *StartDevRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[DeployEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[8], Agent_StartDev_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[10], Agent_StartDev_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -715,7 +767,7 @@ func (c *agentClient) StopDev(ctx context.Context, in *StopDevRequest, opts ...g
 
 func (c *agentClient) ResetDevWorkspace(ctx context.Context, in *StartDevRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[DeployEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[9], Agent_ResetDevWorkspace_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[11], Agent_ResetDevWorkspace_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -867,6 +919,24 @@ type AgentServer interface {
 	// stopped the destination stack first so nothing writes the volume under the
 	// untar. Terminal StackResult reports success/failure of the whole import.
 	ImportVolume(grpc.ClientStreamingServer[VolumeChunk, StackResult]) error
+	// Copy a service's host-side FILES DIR (<stack_dir>/files/<slug>) across hosts,
+	// for a server move — the sibling of ExportVolume/ImportVolume for the one piece
+	// of a service's state that is NOT a Docker volume. The files dir holds a
+	// compose-stack's `./` bind-mount files, template config-file mounts, and
+	// `type: "service"` volume mounts; most of it is re-materialised from the control
+	// plane on a deploy, but any RUNTIME data written under it would otherwise be lost
+	// on a move. ExportFiles tars the dir out (gzipped) and streams it; a missing dir
+	// streams an empty archive (not an error). Same relay + capability model as the
+	// volume RPCs.
+	ExportFiles(*ExportFilesRequest, grpc.ServerStreamingServer[FilesChunk]) error
+	// The destination half of a files-dir copy (see ExportFiles). The FIRST client
+	// message MUST be a FilesChunk carrying `header` (the target slug + wipe flag);
+	// every subsequent message carries `data` (a slice of the gzipped tar). The agent
+	// wipes the target files dir (unless told not to), then untars the stream into it
+	// (anti-traversal enforced, symlinks skipped — same guard as Restore's files/
+	// arm). The caller must have stopped the destination stack first. Terminal
+	// StackResult reports success/failure.
+	ImportFiles(grpc.ClientStreamingServer[FilesChunk, StackResult]) error
 	// Read back the rendered stack YAML the agent has on disk (<stack_dir>/<slug>.yml)
 	// for the "View full compose" preview. The single-image/built stack's image ref
 	// + env live only in this file (not on the project), so the preview must read it
@@ -1049,6 +1119,12 @@ func (UnimplementedAgentServer) ExportVolume(*ExportVolumeRequest, grpc.ServerSt
 }
 func (UnimplementedAgentServer) ImportVolume(grpc.ClientStreamingServer[VolumeChunk, StackResult]) error {
 	return status.Errorf(codes.Unimplemented, "method ImportVolume not implemented")
+}
+func (UnimplementedAgentServer) ExportFiles(*ExportFilesRequest, grpc.ServerStreamingServer[FilesChunk]) error {
+	return status.Errorf(codes.Unimplemented, "method ExportFiles not implemented")
+}
+func (UnimplementedAgentServer) ImportFiles(grpc.ClientStreamingServer[FilesChunk, StackResult]) error {
+	return status.Errorf(codes.Unimplemented, "method ImportFiles not implemented")
 }
 func (UnimplementedAgentServer) ReadStack(context.Context, *StackRef) (*ReadStackResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ReadStack not implemented")
@@ -1311,6 +1387,24 @@ func _Agent_ImportVolume_Handler(srv interface{}, stream grpc.ServerStream) erro
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Agent_ImportVolumeServer = grpc.ClientStreamingServer[VolumeChunk, StackResult]
+
+func _Agent_ExportFiles_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(ExportFilesRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(AgentServer).ExportFiles(m, &grpc.GenericServerStream[ExportFilesRequest, FilesChunk]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Agent_ExportFilesServer = grpc.ServerStreamingServer[FilesChunk]
+
+func _Agent_ImportFiles_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(AgentServer).ImportFiles(&grpc.GenericServerStream[FilesChunk, StackResult]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Agent_ImportFilesServer = grpc.ClientStreamingServer[FilesChunk, StackResult]
 
 func _Agent_ReadStack_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(StackRef)
@@ -1975,6 +2069,16 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "ImportVolume",
 			Handler:       _Agent_ImportVolume_Handler,
+			ClientStreams: true,
+		},
+		{
+			StreamName:    "ExportFiles",
+			Handler:       _Agent_ExportFiles_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "ImportFiles",
+			Handler:       _Agent_ImportFiles_Handler,
 			ClientStreams: true,
 		},
 		{

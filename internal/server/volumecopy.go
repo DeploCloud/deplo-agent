@@ -52,7 +52,9 @@ func (s *Service) ExportVolume(req *pb.ExportVolumeRequest, stream pb.Agent_Expo
 
 	// gzip the tar as it is produced, writing compressed bytes straight into the
 	// stream via chunkWriter — no temp file, no full-archive buffering.
-	cw := &chunkWriter{stream: stream}
+	cw := &chunkWriter{send: func(b []byte) error {
+		return stream.Send(&pb.VolumeChunk{Frame: &pb.VolumeChunk_Data{Data: b}})
+	}}
 	gz := gzip.NewWriter(cw)
 
 	// Producer: the helper container tars the volume's contents to stdout; PipeOut
@@ -83,12 +85,13 @@ func (s *Service) ExportVolume(req *pb.ExportVolumeRequest, stream pb.Agent_Expo
 	return nil
 }
 
-// chunkWriter is an io.Writer that frames whatever is written to it into
-// VolumeChunk{data} messages on the export stream. gzip writes here; each Write
-// becomes one or more ~1 MiB chunks.
+// chunkWriter is an io.Writer that frames whatever is written to it into ~1 MiB
+// `data` messages on an export stream via `send`. gzip writes here; the concrete
+// stream (VolumeChunk vs FilesChunk) is captured by the send closure, so this is
+// shared by ExportVolume and ExportFiles.
 type chunkWriter struct {
-	stream pb.Agent_ExportVolumeServer
-	err    error
+	send func([]byte) error
+	err  error
 }
 
 func (w *chunkWriter) Write(p []byte) (int, error) {
@@ -105,7 +108,7 @@ func (w *chunkWriter) Write(p []byte) (int, error) {
 		// its buffer across Writes.
 		buf := make([]byte, n)
 		copy(buf, p[:n])
-		if err := w.stream.Send(&pb.VolumeChunk{Frame: &pb.VolumeChunk_Data{Data: buf}}); err != nil {
+		if err := w.send(buf); err != nil {
 			w.err = err
 			return total, err
 		}

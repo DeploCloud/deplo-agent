@@ -115,6 +115,26 @@ service Agent {
   // untar. Terminal StackResult reports success/failure of the whole import.
   rpc ImportVolume(stream VolumeChunk) returns (StackResult);
 
+  // Copy a service's host-side FILES DIR (<stack_dir>/files/<slug>) across hosts,
+  // for a server move — the sibling of ExportVolume/ImportVolume for the one piece
+  // of a service's state that is NOT a Docker volume. The files dir holds a
+  // compose-stack's `./` bind-mount files, template config-file mounts, and
+  // `type: "service"` volume mounts; most of it is re-materialised from the control
+  // plane on a deploy, but any RUNTIME data written under it would otherwise be lost
+  // on a move. ExportFiles tars the dir out (gzipped) and streams it; a missing dir
+  // streams an empty archive (not an error). Same relay + capability model as the
+  // volume RPCs.
+  rpc ExportFiles(ExportFilesRequest) returns (stream FilesChunk);
+
+  // The destination half of a files-dir copy (see ExportFiles). The FIRST client
+  // message MUST be a FilesChunk carrying `header` (the target slug + wipe flag);
+  // every subsequent message carries `data` (a slice of the gzipped tar). The agent
+  // wipes the target files dir (unless told not to), then untars the stream into it
+  // (anti-traversal enforced, symlinks skipped — same guard as Restore's files/
+  // arm). The caller must have stopped the destination stack first. Terminal
+  // StackResult reports success/failure.
+  rpc ImportFiles(stream FilesChunk) returns (StackResult);
+
   // Read back the rendered stack YAML the agent has on disk (<stack_dir>/<slug>.yml)
   // for the "View full compose" preview. The single-image/built stack's image ref
   // + env live only in this file (not on the project), so the preview must read it
@@ -728,6 +748,29 @@ message VolumeChunk {
     Header header = 1;
     // A raw slice of the gzipped tar stream. Chunked well under the gRPC max
     // message size; reassembled in order on the destination.
+    bytes data = 2;
+  }
+}
+
+message ExportFilesRequest {
+  // The service slug whose files dir (<stack_dir>/files/<slug>) to tar out.
+  // Re-validated agent-side (validateSlug) before it is joined into a path. A
+  // missing dir yields an empty archive, not an error.
+  string slug = 1;
+}
+
+// A framed chunk of a cross-host FILES-DIR transfer, mirroring VolumeChunk.
+// ExportFiles emits `data` chunks (no header); ImportFiles expects a `header` first
+// then `data` frames.
+message FilesChunk {
+  message Header {
+    // The service slug whose files dir to untar into on the DESTINATION host.
+    string slug = 1;
+    // Empty the target files dir before untarring (default true for a move).
+    bool wipe_first = 2;
+  }
+  oneof frame {
+    Header header = 1;
     bytes data = 2;
   }
 }
