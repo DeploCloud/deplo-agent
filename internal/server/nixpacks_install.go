@@ -17,7 +17,11 @@ import (
 // nixpacksVersion is the nixpacks release the agent installs on first use. Pinned
 // (not "latest") so a build is reproducible and a surprise upstream release can't
 // change build output under a running agent. Bump deliberately.
-const nixpacksVersion = "1.21.0"
+//
+// Held at >=1.41.0: nixpacks 1.21.0 silently ignored EVERY Node-version signal
+// (NIXPACKS_NODE_VERSION, .nvmrc, package.json engines) and always built on
+// nodejs_18 — so pinning a Node version did nothing. 1.41.0 honours all three.
+const nixpacksVersion = "1.41.0"
 
 // ensureNixpacks returns the path to a usable nixpacks binary, installing it
 // lazily on first use (the "lazy: fetch on first use" tooling policy). Resolution
@@ -33,9 +37,13 @@ func (s *Service) ensureNixpacks(ctx context.Context, e *emitter) (string, error
 	}
 
 	toolsDir := filepath.Join(s.dataBase, "tools")
-	dest := filepath.Join(toolsDir, "nixpacks")
+	// Version-scope the cached binary so bumping nixpacksVersion re-downloads the
+	// new release instead of silently reusing a stale cached copy (an unversioned
+	// path would pin every server to whatever it first downloaded — the exact trap
+	// that kept broken 1.21.0 around after a bump).
+	dest := filepath.Join(toolsDir, "nixpacks-"+nixpacksVersion)
 
-	// 2. A previously-installed copy under <dataBase>/tools.
+	// 2. A previously-installed copy of THIS version under <dataBase>/tools.
 	if fi, err := os.Stat(dest); err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0 {
 		return dest, nil
 	}

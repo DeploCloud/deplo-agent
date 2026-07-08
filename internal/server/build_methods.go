@@ -212,9 +212,18 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 		prepArgs = append(prepArgs, "-s", c)
 	}
 	// Pin the runtime via nixpacks' per-language env var when the user set one.
-	lang := spec.GetRuntimeLanguage()
-	version := strings.TrimSpace(spec.GetRuntimeVersion())
-	if version != "" && lang != "" && lang != "none" {
+	// Node is the runtime Deplo lets you pin, so an empty/none language defaults to
+	// node (a control plane that dropped framework detection may send it blank).
+	// nixpacks' `--env NIXPACKS_NODE_VERSION` is the highest-precedence node signal
+	// (it beats a repo's engines.node / .nvmrc); node wants a bare major ("22").
+	if version := strings.TrimSpace(spec.GetRuntimeVersion()); version != "" {
+		lang := strings.ToLower(strings.TrimSpace(spec.GetRuntimeLanguage()))
+		if lang == "" || lang == "none" {
+			lang = "node"
+		}
+		if lang == "node" {
+			version = majorVersion(version, version)
+		}
 		prepArgs = append(prepArgs, "--env",
 			fmt.Sprintf("NIXPACKS_%s_VERSION=%s", strings.ToUpper(lang), version))
 	}
@@ -393,8 +402,25 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 	if pinned != "" {
 		planArgs = append(planArgs, "-e", "RAILPACK_VERSION="+pinned)
 	}
+	// Node version + build/start overrides ride into the plan through the container
+	// ENVIRONMENT (docker `-e KEY=VALUE`, an argv — so a user-supplied command can
+	// never break out of the `bash -lc` string), then railpack reads each with a
+	// BARE `--env KEY` (it does os.LookupEnv on bare keys). Bare refs for an unset
+	// key are harmless no-ops, so they stay constant in the prepare command.
+	// RAILPACK_NODE_VERSION is railpack's highest-precedence node signal; node wants
+	// a bare major. RAILPACK_BUILD_CMD / RAILPACK_START_CMD override the detected
+	// build + start commands.
+	if v := majorVersion(strings.TrimSpace(spec.GetRuntimeVersion()), ""); v != "" {
+		planArgs = append(planArgs, "-e", "RAILPACK_NODE_VERSION="+v)
+	}
+	if c := strings.TrimSpace(spec.GetBuildCommand()); c != "" {
+		planArgs = append(planArgs, "-e", "RAILPACK_BUILD_CMD="+c)
+	}
+	if c := strings.TrimSpace(spec.GetStartCommand()); c != "" {
+		planArgs = append(planArgs, "-e", "RAILPACK_START_CMD="+c)
+	}
 	planArgs = append(planArgs, "debian:bookworm-slim", "bash", "-lc",
-		"apt-get update -qq && apt-get install -y -qq curl ca-certificates tar && curl -sSL https://railpack.com/install.sh | bash && railpack prepare /app --plan-out /out/railpack-plan.json --info-out /out/railpack-info.json")
+		"apt-get update -qq && apt-get install -y -qq curl ca-certificates tar && curl -sSL https://railpack.com/install.sh | bash && railpack prepare /app --env RAILPACK_NODE_VERSION --env RAILPACK_BUILD_CMD --env RAILPACK_START_CMD --plan-out /out/railpack-plan.json --info-out /out/railpack-info.json")
 	e.log("command", "docker run (railpack prepare)")
 	code, err := dockercli.Stream(ctx, 10*time.Minute, func(l string) { e.log("info", l) }, "", planArgs...)
 	if err != nil {
