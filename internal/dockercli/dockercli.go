@@ -102,13 +102,60 @@ func StreamEnv(ctx context.Context, timeout time.Duration, onLine LineFn, extraE
 }
 
 // Spawn runs an ARBITRARY host binary (not docker) and streams its merged output,
-// for build tools that run on the host rather than via the daemon — the nixpacks
-// binary (lazily installed), and `sh -c` for railpack's buildctl redirection.
-// Same streaming/timeout discipline as Stream.
+// for build tools that run on the host rather than via the daemon — e.g. the
+// nixpacks binary (lazily installed). Same streaming/timeout discipline as Stream.
 func Spawn(ctx context.Context, timeout time.Duration, onLine LineFn, input, name string, args ...string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	return streamCmd(cctx, timeout, onLine, input, exec.CommandContext(cctx, name, args...))
+}
+
+// StreamOut runs `docker <args>` (no shell — argv is injection-safe) with extra
+// "KEY=VALUE" env layered on, streaming the child's RAW stdout into dst (e.g. a
+// build image tar written straight to disk) while forwarding each stderr line to
+// onLine (the live progress log). It exists for railpack's buildctl, which writes
+// a docker-format tar to stdout and reports BuildKit progress on stderr — so a
+// shell `>` redirect is unneeded, and unwanted, since the secret ids on the
+// command line come from an untrusted repo's railpack plan. Same exit/timeout
+// discipline as streamCmd; extraEnv rides in via the docker client's env (bare
+// `docker exec -e NAME`) so a secret VALUE never touches argv.
+func StreamOut(ctx context.Context, timeout time.Duration, dst io.Writer, onLine LineFn, extraEnv []string, args ...string) (int, error) {
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	cmd := exec.CommandContext(cctx, "docker", args...)
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
+	label := redactArgs(args)
+	cmd.Stdout = dst
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return -1, err
+	}
+	if err := cmd.Start(); err != nil {
+		return -1, fmt.Errorf("docker %s: %w", label, err)
+	}
+	sc := bufio.NewScanner(stderr)
+	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	for sc.Scan() {
+		onLine(strings.TrimRight(sc.Text(), "\r"))
+	}
+	err = cmd.Wait()
+	if err != nil {
+		// Context first: a timeout/cancel kill surfaces as an ExitError with a
+		// negative code, which the ExitError branch would otherwise misreport.
+		if cctx.Err() == context.DeadlineExceeded {
+			return -1, fmt.Errorf("docker %s timed out after %s", label, timeout)
+		}
+		if cctx.Err() == context.Canceled {
+			return -1, fmt.Errorf("docker %s canceled", label)
+		}
+		if ee, ok := err.(*exec.ExitError); ok && ee.ProcessState.Exited() {
+			return ee.ExitCode(), nil
+		}
+		return -1, err
+	}
+	return 0, nil
 }
 
 // streamCmd is the shared core of Stream/StreamEnv/Spawn: start an already-built

@@ -2,9 +2,11 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -410,14 +412,20 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 	// RAILPACK_NODE_VERSION is railpack's highest-precedence node signal; node wants
 	// a bare major. RAILPACK_BUILD_CMD / RAILPACK_START_CMD override the detected
 	// build + start commands.
-	if v := majorVersion(strings.TrimSpace(spec.GetRuntimeVersion()), ""); v != "" {
-		planArgs = append(planArgs, "-e", "RAILPACK_NODE_VERSION="+v)
+	// The RAILPACK_* overrides, lifted to function scope: prepare bakes them into
+	// the plan (as secrets — see Phase B) and Phase B must hand the same values back
+	// to buildctl to satisfy those secret mounts.
+	nodeVer := majorVersion(strings.TrimSpace(spec.GetRuntimeVersion()), "")
+	buildCmd := strings.TrimSpace(spec.GetBuildCommand())
+	startCmd := strings.TrimSpace(spec.GetStartCommand())
+	if nodeVer != "" {
+		planArgs = append(planArgs, "-e", "RAILPACK_NODE_VERSION="+nodeVer)
 	}
-	if c := strings.TrimSpace(spec.GetBuildCommand()); c != "" {
-		planArgs = append(planArgs, "-e", "RAILPACK_BUILD_CMD="+c)
+	if buildCmd != "" {
+		planArgs = append(planArgs, "-e", "RAILPACK_BUILD_CMD="+buildCmd)
 	}
-	if c := strings.TrimSpace(spec.GetStartCommand()); c != "" {
-		planArgs = append(planArgs, "-e", "RAILPACK_START_CMD="+c)
+	if startCmd != "" {
+		planArgs = append(planArgs, "-e", "RAILPACK_START_CMD="+startCmd)
 	}
 	planArgs = append(planArgs, "debian:bookworm-slim", "bash", "-lc",
 		"apt-get update -qq && apt-get install -y -qq curl ca-certificates tar && curl -sSL https://railpack.com/install.sh | bash && railpack prepare /app --env RAILPACK_NODE_VERSION --env RAILPACK_BUILD_CMD --env RAILPACK_START_CMD --plan-out /out/railpack-plan.json --info-out /out/railpack-info.json")
@@ -443,13 +451,53 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 		return false
 	}
 
-	// buildctl runs inside the buildkitd container; capture its docker-format output
-	// tar to tarPath, then `docker load` it. The `>` redirection needs a shell.
+	// railpack declared each RAILPACK_* override we passed to `prepare` as a BuildKit
+	// SECRET in the plan, and its frontend mounts every plan secret as a REQUIRED env
+	// secret on EVERY build step. Raw `buildctl build` must therefore hand each one
+	// back or it fails "secret <name>: not found". We forward the VALUES as process
+	// env (never on a command line) and reference them by bare `docker exec -e NAME`
+	// (docker copies NAME from the caller's env) plus `buildctl --secret
+	// id=NAME,env=NAME` (buildctl reads NAME from its own env). The secret NAMES come
+	// from the plan, which is generated from the UNTRUSTED user repo (a railpack
+	// config may declare arbitrary `secrets:`), so everything is passed as argv
+	// tokens via StreamOut — never a shell string — leaving a crafted name like
+	// `x; rm -rf /` an inert argument rather than a command on the root-privileged
+	// host agent.
+	known := map[string]string{
+		"RAILPACK_NODE_VERSION": nodeVer,
+		"RAILPACK_BUILD_CMD":    buildCmd,
+		"RAILPACK_START_CMD":    startCmd,
+	}
+	secretNames, ok := readPlanSecrets(filepath.Join(planDir, "railpack-plan.json"))
+	if !ok {
+		// Plan unreadable: fall back to every override name `prepare` references, so
+		// a still-required secret is never left unprovided (empty value is fine — a
+		// provided-but-empty secret resolves, an absent one is "not found").
+		secretNames = []string{"RAILPACK_NODE_VERSION", "RAILPACK_BUILD_CMD", "RAILPACK_START_CMD"}
+	}
+	// Defence in depth: the plan is untrusted, so drop any name that isn't a plain
+	// env identifier before it reaches the buildctl `--secret id=…,env=…` CSV (a
+	// comma/space in a name could otherwise smuggle extra CSV attributes). A real
+	// railpack secret is always an identifier; a dropped hostile name simply fails
+	// its own build with "secret not found".
+	secretNames = sanitizeSecretNames(secretNames)
+	secretEnv := make([]string, 0, len(secretNames)) // the ONLY place secret VALUES live
+	for _, name := range secretNames {
+		secretEnv = append(secretEnv, name+"="+known[name]) // unknown ⇒ "" (provided ⇒ never "not found")
+	}
+	execArgs := railpackBuildctlArgs(buildkitd, frontend, req.GetImageRef(), secretNames)
+
+	// buildctl (inside buildkitd) writes the docker-format image tar to STDOUT and
+	// BuildKit progress to stderr. Stream stdout straight into tarPath — no shell
+	// redirect — then `docker load` it.
+	tarFile, err := os.Create(tarPath)
+	if err != nil {
+		e.result(false, "create railpack tar: "+err.Error(), "")
+		return false
+	}
 	e.log("command", "buildctl build (railpack frontend "+frontendTag+")")
-	buildctl := fmt.Sprintf(
-		"docker exec %s buildctl build --frontend=gateway.v0 --opt source=%s --local context=/context --local dockerfile=/plan --opt filename=railpack-plan.json --output type=docker,name=%s > %s",
-		buildkitd, frontend, req.GetImageRef(), tarPath)
-	code, err = dockercli.Spawn(ctx, 20*time.Minute, func(l string) { e.log("info", l) }, "", "sh", "-c", buildctl)
+	code, err = dockercli.StreamOut(ctx, 20*time.Minute, tarFile, func(l string) { e.log("info", l) }, secretEnv, execArgs...)
+	_ = tarFile.Close()
 	if err != nil {
 		e.result(false, "railpack buildctl: "+err.Error(), "")
 		return false
@@ -505,6 +553,66 @@ func imageTag(ref string) string {
 		return ref[i+1:]
 	}
 	return ref
+}
+
+// validRailpackSecret matches an environment-variable-style identifier — the only
+// shape a legitimate railpack secret name takes.
+var validRailpackSecret = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
+// sanitizeSecretNames keeps only identifier-shaped secret names (the plan is
+// generated from an untrusted repo). Order is preserved; the result is a fresh
+// slice so the caller's fallback literal is never mutated.
+func sanitizeSecretNames(names []string) []string {
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if validRailpackSecret.MatchString(n) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// railpackBuildctlArgs assembles the injection-safe argv for railpack's Phase-B
+// build: `docker exec [-e NAME ...] <buildkitd> buildctl build ... [--secret
+// id=NAME,env=NAME ...] --output type=docker,name=<ref>`. The `-e NAME` flags
+// forward each secret's value from the docker client's env into buildctl (whose
+// `--secret env=NAME` reads it); the VALUES never appear here. secretNames come
+// from an untrusted repo's railpack plan, so they are emitted as discrete argv
+// tokens (no shell) — a hostile name stays one inert argument.
+func railpackBuildctlArgs(buildkitd, frontend, imageRef string, secretNames []string) []string {
+	args := []string{"exec"}
+	for _, name := range secretNames {
+		args = append(args, "-e", name)
+	}
+	args = append(args, buildkitd, "buildctl", "build",
+		"--frontend=gateway.v0",
+		"--opt", "source="+frontend,
+		"--local", "context=/context",
+		"--local", "dockerfile=/plan",
+		"--opt", "filename=railpack-plan.json")
+	for _, name := range secretNames {
+		args = append(args, "--secret", "id="+name+",env="+name)
+	}
+	return append(args, "--output", "type=docker,name="+imageRef)
+}
+
+// readPlanSecrets returns the `secrets` a railpack plan declares — the RAILPACK_*
+// overrides we passed to `prepare`, which railpack mounts as REQUIRED BuildKit env
+// secrets on every build step. The bool is false only when the plan can't be read
+// or parsed (so the caller falls back); a valid plan that declares no secrets
+// returns (nil, true) and the caller correctly passes none.
+func readPlanSecrets(planPath string) ([]string, bool) {
+	b, err := os.ReadFile(planPath)
+	if err != nil {
+		return nil, false
+	}
+	var plan struct {
+		Secrets []string `json:"secrets"`
+	}
+	if err := json.Unmarshal(b, &plan); err != nil {
+		return nil, false
+	}
+	return plan.Secrets, true
 }
 
 // errOrCode formats either a spawn error or a non-zero exit with its stderr.
