@@ -1119,6 +1119,23 @@ message ConsoleInstance {
   string workdir = 7;
   bool open_stdin = 8;
   bool tty = 9;
+
+  // Fields 10-12 are ADDITIVE (contract stays V1): an older agent simply omits
+  // them and the control plane falls back to `running`. They exist because
+  // `running` alone cannot tell a container docker is CRASH-LOOPING from one
+  // that is cleanly stopped — both are "not running" — which is how an app in a
+  // restart loop was reported as Online.
+
+  // Raw docker state: "running" | "restarting" | "exited" | "created" |
+  // "paused" | "dead" | "removing". Empty from an agent too old to send it.
+  string state = 10;
+  // Healthcheck verdict when the image defines one: "healthy" | "unhealthy" |
+  // "starting". Empty when the container has no healthcheck (the common case) —
+  // NOT a synonym for healthy.
+  string health = 11;
+  // How many times docker has restarted this container. The number that turns
+  // "it is starting" into "it has been dying for an hour".
+  int32 restart_count = 12;
 }
 
 message ListInstancesResponse {

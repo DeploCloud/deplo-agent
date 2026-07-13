@@ -19,6 +19,12 @@ import (
 // lists every attachable container in a project's stack with the runtime/stdio
 // metadata the console needs, ordered exposed -> running -> service.
 //
+// It also reports each container's RAW docker state (running / restarting /
+// exited / …), its healthcheck verdict and its restart count. The bool `running`
+// alone cannot distinguish a container docker is crash-looping from one that is
+// cleanly stopped — both are simply "not running" — which is how the control
+// plane came to show an app in a restart loop as "Online".
+//
 // DELIBERATELY no synthetic fallback entry: when a project has no containers the
 // response is empty. The TS listInstances returns ONE fabricated entry so the
 // console still renders a name — that is a control-plane UI affordance and stays
@@ -40,24 +46,39 @@ func (s *Service) ListInstances(ctx context.Context, req *pb.ListInstancesReques
 	if err != nil {
 		return nil, err
 	}
+
+	names := make([]string, 0, len(cs))
+	for _, c := range cs {
+		names = append(names, c.Name)
+	}
+	// ONE `docker inspect` for the whole stack, keyed by container name — not two
+	// per container. A container that vanished between the `ps` and the inspect
+	// is simply absent from the map (never silently mistaken for another one).
+	details := inspectContainers(ctx, names)
+
 	out := make([]*pb.ConsoleInstance, 0, len(cs))
 	for _, c := range cs {
-		user, workdir := inspectRuntime(ctx, c.Name)
-		openStdin, tty := inspectStdio(ctx, c.Name)
-		exposed := false
-		if req.GetExposeService() != "" {
-			exposed = strings.Contains(c.Name, "-"+req.GetExposeService()+"-")
+		d := details[c.Name]
+		// `docker ps` already told us the state; the inspect confirms it. Prefer
+		// the inspect (same daemon, richer read), fall back to ps.
+		state := d.State
+		if state == "" {
+			state = c.State
 		}
+		service := serviceOf(req.GetSlug(), c.Name)
 		out = append(out, &pb.ConsoleInstance{
-			Name:      c.Name,
-			Service:   serviceOf(req.GetSlug(), c.Name),
-			Image:     c.Image,
-			Running:   c.State == "running",
-			Exposed:   exposed,
-			User:      user,
-			Workdir:   workdir,
-			OpenStdin: openStdin,
-			Tty:       tty,
+			Name:    c.Name,
+			Service: service,
+			Image:   c.Image,
+			Running: state == "running",
+			Exposed:      isExposed(service, req.GetExposeService()),
+			User:         d.User,
+			Workdir:      d.Workdir,
+			OpenStdin:    d.OpenStdin,
+			Tty:          d.Tty,
+			State:        state,
+			Health:       d.Health,
+			RestartCount: d.RestartCount,
 		})
 	}
 	// Exposed app first, then running, then alphabetical by service — the same
@@ -73,6 +94,17 @@ func (s *Service) ListInstances(ctx context.Context, req *pb.ListInstancesReques
 		return a.Service < b.Service
 	})
 	return &pb.ListInstancesResponse{Instances: out}, nil
+}
+
+// isExposed reports whether a container's service is the Traefik-exposed one.
+//
+// It compares the SERVICE, not the container name. The old test asked whether the
+// name contained "-<exposeService>-", which is true of every container in the
+// stack: a compose project is named deplo-<slug>, so "deplo-activepieces-postgres-1"
+// contains "-activepieces-" exactly as the app's own container does — and the
+// whole stack came back flagged as exposed, taking the instance ordering with it.
+func isExposed(service, exposeService string) bool {
+	return exposeService != "" && service == exposeService
 }
 
 type containerRow struct {
@@ -111,6 +143,84 @@ func listProjectContainers(ctx context.Context, projectID string) ([]containerRo
 	return rows, nil
 }
 
+// containerDetail is everything one `docker inspect` pass yields per container.
+type containerDetail struct {
+	Name         string `json:"name"`
+	User         string `json:"user"`
+	Workdir      string `json:"workdir"`
+	OpenStdin    bool   `json:"openStdin"`
+	Tty          bool   `json:"tty"`
+	State        string `json:"state"`
+	Health       string `json:"health"`
+	RestartCount int32  `json:"restartCount"`
+}
+
+// The inspect template emits one JSON object per container. It carries the name
+// so the answers can be matched back even when a container disappears mid-call,
+// and guards .State.Health, which is nil for an image with no healthcheck (a bare
+// {{json .State.Health.Status}} would fail the whole template).
+const inspectTemplate = `{"name":{{json .Name}},` +
+	`"user":{{json .Config.User}},` +
+	`"workdir":{{json .Config.WorkingDir}},` +
+	`"openStdin":{{json .Config.OpenStdin}},` +
+	`"tty":{{json .Config.Tty}},` +
+	`"state":{{json .State.Status}},` +
+	`"restartCount":{{json .RestartCount}},` +
+	`"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}""{{end}}}`
+
+// inspectContainers inspects every named container in ONE call, keyed by name.
+// Best-effort: a container that cannot be inspected is simply missing from the
+// map, and the caller falls back to the `docker ps` row. Replaces the old pair of
+// per-container calls (inspectRuntime + inspectStdio), whose tab-separated format
+// dropped a field whenever Config.User was empty: TrimSpace ate the LEADING tab,
+// so the split shifted and the WORKDIR was returned as the user — the console
+// then exec'd as `-u /app`.
+func inspectContainers(ctx context.Context, names []string) map[string]containerDetail {
+	out := map[string]containerDetail{}
+	if len(names) == 0 {
+		return out
+	}
+	args := append([]string{"inspect", "-f", inspectTemplate}, names...)
+	res, err := dockercli.Run(ctx, 20*time.Second, args...)
+	if err != nil {
+		return out
+	}
+	// A non-zero code means at least one name was not found; the lines for the
+	// ones that WERE found are still on stdout, so parse whatever came back.
+	return parseInspectLines(res.Stdout)
+}
+
+// parseInspectLines turns the inspect template's output into details by name.
+func parseInspectLines(stdout string) map[string]containerDetail {
+	out := map[string]containerDetail{}
+	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var d containerDetail
+		if err := json.Unmarshal([]byte(line), &d); err != nil {
+			continue
+		}
+		// docker reports the name as "/deplo-foo".
+		d.Name = strings.TrimPrefix(d.Name, "/")
+		if d.Name == "" {
+			continue
+		}
+		// An image that declares no USER runs as root, and no WORKDIR means "/".
+		// Defaulted HERE, on the parsed field — never by string-splitting, which
+		// is what shifted workdir into user when Config.User was empty.
+		if d.User == "" {
+			d.User = "root"
+		}
+		if d.Workdir == "" {
+			d.Workdir = "/"
+		}
+		out[d.Name] = d
+	}
+	return out
+}
+
 // serviceOf extracts the compose service name from a container name
 // (deplo-<slug>-<service>-N), falling back to the slug for single-image deploys.
 // Mirrors lib/data/console.ts serviceOf.
@@ -135,48 +245,4 @@ func trimTrailingReplicaIndex(s string) string {
 		}
 	}
 	return s[:i]
-}
-
-// inspectRuntime mirrors lib/infra/docker.ts inspectRuntime: effective user +
-// working dir from container metadata; defaults root/"/" on any failure.
-func inspectRuntime(ctx context.Context, name string) (user, workdir string) {
-	res, err := dockercli.Run(ctx, 10*time.Second,
-		"inspect", "-f", "{{.Config.User}}\t{{.Config.WorkingDir}}", name)
-	if err != nil || res.Code != 0 {
-		return "root", "/"
-	}
-	parts := strings.SplitN(strings.TrimSpace(res.Stdout), "\t", 2)
-	u := ""
-	w := ""
-	if len(parts) > 0 {
-		u = strings.TrimSpace(parts[0])
-	}
-	if len(parts) > 1 {
-		w = strings.TrimSpace(parts[1])
-	}
-	if u == "" {
-		u = "root"
-	}
-	if w == "" {
-		w = "/"
-	}
-	return u, w
-}
-
-// inspectStdio mirrors lib/infra/docker.ts inspectStdio: whether the container
-// was started with stdin open / a TTY allocated; both false on any failure.
-func inspectStdio(ctx context.Context, name string) (openStdin, tty bool) {
-	res, err := dockercli.Run(ctx, 10*time.Second,
-		"inspect", "-f", "{{.Config.OpenStdin}}\t{{.Config.Tty}}", name)
-	if err != nil || res.Code != 0 {
-		return false, false
-	}
-	parts := strings.SplitN(strings.TrimSpace(res.Stdout), "\t", 2)
-	if len(parts) > 0 && strings.TrimSpace(parts[0]) == "true" {
-		openStdin = true
-	}
-	if len(parts) > 1 && strings.TrimSpace(parts[1]) == "true" {
-		tty = true
-	}
-	return openStdin, tty
 }
