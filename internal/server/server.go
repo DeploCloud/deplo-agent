@@ -49,6 +49,9 @@ var Capabilities = []string{
 	"checkport",   // host TCP port availability probe (CheckPort) — gates DB "expose publicly"
 	"volume-copy", // cross-host named-volume copy for a server move (ExportVolume/ImportVolume)
 	"files-copy",  // cross-host files-dir copy for a service move (ExportFiles/ImportFiles)
+	// Allow-listed Docker disk reclaim (DockerCleanup): build cache, dangling
+	// images, orphaned buildkit volumes, unused app images. NEVER a bare prune.
+	"docker-cleanup",
 }
 
 // AgentVersion is the version this agent reports over Hello. It is stamped at

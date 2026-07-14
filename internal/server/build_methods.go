@@ -391,7 +391,14 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 		return false
 	}
 	defer func() {
-		_, _ = dockercli.Run(ctx, 30*time.Second, "rm", "-f", buildkitd)
+		// `-v` is load-bearing: moby/buildkit declares VOLUME /var/lib/buildkit, so
+		// every buildkitd we start gets an ANONYMOUS volume holding its cache. We
+		// mount no named volume over it, so that cache is discarded the moment this
+		// container goes — but without -v the volume itself survives as a dangling
+		// ~2 GB orphan, one per railpack build. Removing the container's anonymous
+		// volumes with it is the fix at the source; DockerCleanup's
+		// ORPHAN_BUILDKIT_CACHE scope mops up the ones already leaked.
+		_, _ = dockercli.Run(ctx, 30*time.Second, "rm", "-f", "-v", buildkitd)
 		_ = os.Remove(tarPath)
 		_ = os.RemoveAll(planDir)
 	}()
@@ -441,7 +448,9 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 	}
 
 	// Phase B: a privileged buildkitd with context+plan mounted, build via buildctl.
-	_, _ = dockercli.Run(ctx, 15*time.Second, "rm", "-f", buildkitd)
+	// `-v` again (see the defer above): a leftover buildkitd from a killed build must
+	// take its anonymous cache volume with it, or the orphan outlives the container.
+	_, _ = dockercli.Run(ctx, 15*time.Second, "rm", "-f", "-v", buildkitd)
 	runArgs := []string{"run", "-d", "--name", buildkitd, "--privileged",
 		"-v", buildDir + ":/context:ro",
 		"-v", planDir + ":/plan:ro",

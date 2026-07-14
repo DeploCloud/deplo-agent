@@ -158,6 +158,27 @@ service Agent {
   // rather than a fake "available".
   rpc CheckPort(CheckPortRequest) returns (CheckPortResponse);
 
+  // Reclaim Docker disk on the host. STRICTLY AN ALLOW-LIST: the agent removes
+  // only what it can PROVE is unreferenced, and the proof is always a
+  // container-reference REVERSE INDEX over `docker ps -aq` (running AND exited) or
+  // an on-disk sentinel — never a label, because a genuine app container may carry
+  // no `deplo.*` label at all (`deplo-myapp-web-1` does not). It therefore never
+  // runs `docker system prune`, `container prune`, `volume prune` or `network
+  // prune`: on a Deplo host a STOPPED app is a LIVE app (StopStack is `compose
+  // stop`, StartStack is `compose start` — the container, its volumes and its
+  // networks must all survive a stop), and a dangling volume may hold a database's
+  // data files. Those verbs are absent from CleanupScope and must never be added.
+  //
+  // With dry_run the agent enumerates candidates and reclaims NOTHING, filling in
+  // every result field as if it had — this is what the UI calls first, to render
+  // the confirm dialog. A scope that fails, or that the agent declines because it
+  // could not build the reverse index and refuses to guess, is reported per-scope
+  // and the sweep carries on; ok=false is reserved for a sweep that could not start
+  // at all (UNAVAILABLE when Docker is unreachable). Gated behind the
+  // "docker-cleanup" Hello capability so an older agent surfaces "update the agent"
+  // rather than a fake success.
+  rpc DockerCleanup(DockerCleanupRequest) returns (DockerCleanupResponse);
+
   // Update the agent BINARY in place to a newer release, WITHOUT re-bootstrapping
   // — the agent's mTLS materials (agent.crt/agent.key/ca.crt under --agent-dir)
   // are NEVER touched, so the server keeps its identity and pinned fingerprint
@@ -1390,4 +1411,84 @@ message TunnelRequest {
 message TunnelStatus {
   bool running = 1;
   string log = 2;
+}
+
+// ---- Docker cleanup ----
+
+// Which classes of object a cleanup may reclaim. Every scope is an ALLOW-LIST —
+// see the DockerCleanup RPC contract. Scopes not listed here DO NOT EXIST:
+// container prune, volume prune, network prune and `system prune` are
+// deliberately absent and must never be added, because a stopped Deplo app is a
+// live app (its container, volumes and networks must survive a `compose stop`)
+// and a dangling volume may hold a database's data files. Adding one would turn
+// a disk-reclaim button into a data-loss button.
+enum CleanupScope {
+  CLEANUP_SCOPE_UNSPECIFIED = 0;
+  // `docker builder prune` — the daemon's own BuildKit cache. Touches no Deplo
+  // object at all.
+  CLEANUP_SCOPE_BUILD_CACHE = 1;
+  // `docker image prune` — untagged layers only, NEVER `-a`. A stopped container
+  // still pins its image, so this cannot strand an app.
+  CLEANUP_SCOPE_DANGLING_IMAGES = 2;
+  // Dangling anonymous volumes that are PROVABLY buildkitd stores: the railpack
+  // builder runs `moby/buildkit`, which declares VOLUME /var/lib/buildkit, and an
+  // orphaned one is identified by the `buildkitd.lock` sentinel file at its
+  // mountpoint — never by name, never by label. Removed one `docker volume rm` at
+  // a time.
+  CLEANUP_SCOPE_ORPHAN_BUILDKIT_CACHE = 3;
+  // Old `deplo/<slug>:<deployment>` images labelled deplo.managed=true that NO
+  // container (running or exited) references, older than min_age_hours, minus the
+  // newest keep_images_per_app per deplo.slug. Removed BY ID with an explicit
+  // `docker rmi` each — never `image prune -a`, which would decide for us. There
+  // is no registry push anywhere in Deplo, so a removed image is recoverable only
+  // by a rebuild: this scope is opt-in and off by default.
+  CLEANUP_SCOPE_UNUSED_APP_IMAGES = 4;
+}
+
+message DockerCleanupRequest {
+  // The scopes to reclaim. Empty => nothing is done (ok, zero results): the
+  // control plane, not the agent, owns the default set.
+  repeated CleanupScope scopes = 1;
+  // When true the agent ENUMERATES candidates and removes NOTHING; every
+  // CleanupScopeResult is populated as if the removal had happened. This is what
+  // the UI calls to render its confirm dialog.
+  bool dry_run = 2;
+  // Only reclaim objects older than this. 0 => no age filter. Maps to docker's
+  // `--filter until=<n>h` on the prune scopes, and to a created-at comparison on
+  // the enumerated ones. An object whose age the agent cannot determine is never
+  // a candidate while an age filter is set (fail closed).
+  int32 min_age_hours = 3;
+  // UNUSED_APP_IMAGES only: how many of the newest images to keep per deplo.slug.
+  // 0 => 1 — the current tag is always kept, even when no container references it
+  // (a stopped app must stay redeployable without a rebuild).
+  int32 keep_images_per_app = 4;
+}
+
+message CleanupScopeResult {
+  CleanupScope scope = 1;
+  // Bytes reclaimed by this scope. Where docker reports its own total after a
+  // prune that total is authoritative; otherwise it is the summed size of the
+  // objects actually removed (which is also what a dry_run reports, since nothing
+  // has been removed yet to measure). Never an invented number.
+  int64 reclaimed_bytes = 2;
+  int32 items_removed = 3;
+  // The image ids / volume names / cache-record ids removed — or, under dry_run,
+  // that WOULD be removed. Bounded to 200 entries; items_removed is authoritative.
+  repeated string items = 4;
+  // True when the agent DECLINED the scope: it could not build the
+  // container-reference reverse index the scope's safety rests on, so it refused
+  // to guess. A skipped scope is not a failure — the sweep continues.
+  bool skipped = 5;
+  // Per-scope failure. Non-fatal: the other scopes still run and the response is
+  // still ok.
+  string error = 6;
+}
+
+message DockerCleanupResponse {
+  // False only when the whole sweep could not start.
+  bool ok = 1;
+  string error = 2;
+  // The sum of the per-scope reclaimed_bytes.
+  int64 reclaimed_bytes = 3;
+  repeated CleanupScopeResult results = 4;
 }

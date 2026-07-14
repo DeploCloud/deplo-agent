@@ -68,6 +68,7 @@ const (
 	Agent_ReadStack_FullMethodName          = "/deplo.agent.v1.Agent/ReadStack"
 	Agent_Inspect_FullMethodName            = "/deplo.agent.v1.Agent/Inspect"
 	Agent_CheckPort_FullMethodName          = "/deplo.agent.v1.Agent/CheckPort"
+	Agent_DockerCleanup_FullMethodName      = "/deplo.agent.v1.Agent/DockerCleanup"
 	Agent_SelfUpdate_FullMethodName         = "/deplo.agent.v1.Agent/SelfUpdate"
 	Agent_Backup_FullMethodName             = "/deplo.agent.v1.Agent/Backup"
 	Agent_Restore_FullMethodName            = "/deplo.agent.v1.Agent/Restore"
@@ -201,6 +202,26 @@ type AgentClient interface {
 	// "checkport" Hello capability so an older agent surfaces "update the agent"
 	// rather than a fake "available".
 	CheckPort(ctx context.Context, in *CheckPortRequest, opts ...grpc.CallOption) (*CheckPortResponse, error)
+	// Reclaim Docker disk on the host. STRICTLY AN ALLOW-LIST: the agent removes
+	// only what it can PROVE is unreferenced, and the proof is always a
+	// container-reference REVERSE INDEX over `docker ps -aq` (running AND exited) or
+	// an on-disk sentinel — never a label, because a genuine app container may carry
+	// no `deplo.*` label at all (`deplo-myapp-web-1` does not). It therefore never
+	// runs `docker system prune`, `container prune`, `volume prune` or `network
+	// prune`: on a Deplo host a STOPPED app is a LIVE app (StopStack is `compose
+	// stop`, StartStack is `compose start` — the container, its volumes and its
+	// networks must all survive a stop), and a dangling volume may hold a database's
+	// data files. Those verbs are absent from CleanupScope and must never be added.
+	//
+	// With dry_run the agent enumerates candidates and reclaims NOTHING, filling in
+	// every result field as if it had — this is what the UI calls first, to render
+	// the confirm dialog. A scope that fails, or that the agent declines because it
+	// could not build the reverse index and refuses to guess, is reported per-scope
+	// and the sweep carries on; ok=false is reserved for a sweep that could not start
+	// at all (UNAVAILABLE when Docker is unreachable). Gated behind the
+	// "docker-cleanup" Hello capability so an older agent surfaces "update the agent"
+	// rather than a fake success.
+	DockerCleanup(ctx context.Context, in *DockerCleanupRequest, opts ...grpc.CallOption) (*DockerCleanupResponse, error)
 	// Update the agent BINARY in place to a newer release, WITHOUT re-bootstrapping
 	// — the agent's mTLS materials (agent.crt/agent.key/ca.crt under --agent-dir)
 	// are NEVER touched, so the server keeps its identity and pinned fingerprint
@@ -520,6 +541,16 @@ func (c *agentClient) CheckPort(ctx context.Context, in *CheckPortRequest, opts 
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CheckPortResponse)
 	err := c.cc.Invoke(ctx, Agent_CheckPort_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) DockerCleanup(ctx context.Context, in *DockerCleanupRequest, opts ...grpc.CallOption) (*DockerCleanupResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DockerCleanupResponse)
+	err := c.cc.Invoke(ctx, Agent_DockerCleanup_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -957,6 +988,26 @@ type AgentServer interface {
 	// "checkport" Hello capability so an older agent surfaces "update the agent"
 	// rather than a fake "available".
 	CheckPort(context.Context, *CheckPortRequest) (*CheckPortResponse, error)
+	// Reclaim Docker disk on the host. STRICTLY AN ALLOW-LIST: the agent removes
+	// only what it can PROVE is unreferenced, and the proof is always a
+	// container-reference REVERSE INDEX over `docker ps -aq` (running AND exited) or
+	// an on-disk sentinel — never a label, because a genuine app container may carry
+	// no `deplo.*` label at all (`deplo-myapp-web-1` does not). It therefore never
+	// runs `docker system prune`, `container prune`, `volume prune` or `network
+	// prune`: on a Deplo host a STOPPED app is a LIVE app (StopStack is `compose
+	// stop`, StartStack is `compose start` — the container, its volumes and its
+	// networks must all survive a stop), and a dangling volume may hold a database's
+	// data files. Those verbs are absent from CleanupScope and must never be added.
+	//
+	// With dry_run the agent enumerates candidates and reclaims NOTHING, filling in
+	// every result field as if it had — this is what the UI calls first, to render
+	// the confirm dialog. A scope that fails, or that the agent declines because it
+	// could not build the reverse index and refuses to guess, is reported per-scope
+	// and the sweep carries on; ok=false is reserved for a sweep that could not start
+	// at all (UNAVAILABLE when Docker is unreachable). Gated behind the
+	// "docker-cleanup" Hello capability so an older agent surfaces "update the agent"
+	// rather than a fake success.
+	DockerCleanup(context.Context, *DockerCleanupRequest) (*DockerCleanupResponse, error)
 	// Update the agent BINARY in place to a newer release, WITHOUT re-bootstrapping
 	// — the agent's mTLS materials (agent.crt/agent.key/ca.crt under --agent-dir)
 	// are NEVER touched, so the server keeps its identity and pinned fingerprint
@@ -1134,6 +1185,9 @@ func (UnimplementedAgentServer) Inspect(context.Context, *InspectRequest) (*Insp
 }
 func (UnimplementedAgentServer) CheckPort(context.Context, *CheckPortRequest) (*CheckPortResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method CheckPort not implemented")
+}
+func (UnimplementedAgentServer) DockerCleanup(context.Context, *DockerCleanupRequest) (*DockerCleanupResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DockerCleanup not implemented")
 }
 func (UnimplementedAgentServer) SelfUpdate(context.Context, *SelfUpdateRequest) (*SelfUpdateResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method SelfUpdate not implemented")
@@ -1456,6 +1510,24 @@ func _Agent_CheckPort_Handler(srv interface{}, ctx context.Context, dec func(int
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(AgentServer).CheckPort(ctx, req.(*CheckPortRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_DockerCleanup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DockerCleanupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).DockerCleanup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_DockerCleanup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).DockerCleanup(ctx, req.(*DockerCleanupRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1960,6 +2032,10 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CheckPort",
 			Handler:    _Agent_CheckPort_Handler,
+		},
+		{
+			MethodName: "DockerCleanup",
+			Handler:    _Agent_DockerCleanup_Handler,
 		},
 		{
 			MethodName: "SelfUpdate",

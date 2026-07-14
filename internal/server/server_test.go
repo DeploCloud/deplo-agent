@@ -50,6 +50,12 @@ func TestHello_reportsContractAndCapabilities(t *testing.T) {
 	if len(resp.GetCapabilities()) == 0 {
 		t.Error("expected capabilities to be advertised")
 	}
+	// The control plane gates DockerCleanup on this string: without it advertised,
+	// an operator on an old agent gets "update the agent on this server" instead of
+	// a fake success (the SELF_UPDATE_CAPABILITY / BACKUP_CAPABILITY discipline).
+	if !containsString(resp.GetCapabilities(), "docker-cleanup") {
+		t.Errorf("capabilities %v do not advertise docker-cleanup", resp.GetCapabilities())
+	}
 	// docker_available may be true or false depending on the test host; the
 	// point is Hello answers without error (the deploy pre-flight, PLAN P5).
 }
