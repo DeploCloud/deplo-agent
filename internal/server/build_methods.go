@@ -385,7 +385,11 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 	tag := imageTag(req.GetImageRef())
 	planDir := filepath.Join(s.buildTmpDir, fmt.Sprintf("deplo-railpack-%s-%s-plan", slug, tag))
 	tarPath := filepath.Join(s.buildTmpDir, fmt.Sprintf("deplo-railpack-%s-%s.tar", slug, tag))
-	buildkitd := "deplo-buildkitd-" + slug
+	// Keyed by slug AND the per-build image tag (like planDir/tarPath above), so two
+	// concurrent builds of the SAME app get distinct daemons — otherwise one build's
+	// pre-start/defer `rm -f` would kill the other's live buildkitd mid-build, which
+	// surfaces as the very "buildkitd.sock: no such file" error waitBuildkitReady guards.
+	buildkitd := "deplo-buildkitd-" + slug + "-" + tag
 	if err := os.MkdirAll(planDir, 0o755); err != nil {
 		e.result(false, "create railpack plan dir: "+err.Error(), "")
 		return false
@@ -460,6 +464,15 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 		return false
 	}
 
+	// `docker run -d` returns once the CONTAINER is up, but buildkitd needs a further
+	// beat to open its gRPC socket at /run/buildkit/buildkitd.sock. buildctl fired into
+	// that gap dies hard with "dial unix …/buildkitd.sock: connect: no such file or
+	// directory" — the daemon isn't listening yet. Gate on it actually answering first.
+	if !waitBuildkitReady(ctx, buildkitd, e) {
+		e.result(false, "buildkitd did not become ready in time", "")
+		return false
+	}
+
 	// railpack declared each RAILPACK_* override we passed to `prepare` as a BuildKit
 	// SECRET in the plan, and its frontend mounts every plan secret as a REQUIRED env
 	// secret on EVERY build step. Raw `buildctl build` must therefore hand each one
@@ -521,6 +534,47 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 	}
 	// railpack frontend output carries no labels — re-stamp ours.
 	return s.relabel(ctx, req, e)
+}
+
+// buildkitReadyTimeout bounds the wait for a freshly-started buildkitd to open its
+// gRPC socket. The daemon is normally serving within a second or two; 30s is ample
+// slack for a loaded host. A daemon that never starts is caught sooner by the
+// container-exited check below, so this cap only governs the slow-start case.
+const buildkitReadyTimeout = 30 * time.Second
+
+// waitBuildkitReady blocks until buildctl can reach the buildkitd daemon inside the
+// named container, or the container dies / the timeout / ctx deadline elapses. It
+// closes a race: `docker run -d moby/buildkit` returns when the CONTAINER starts, not
+// when buildkitd has created /run/buildkit/buildkitd.sock, so the real `buildctl
+// build` fired straight after fails "dial unix …/buildkitd.sock: connect: no such
+// file or directory". Polling `buildctl debug workers` (the same list-workers
+// round-trip the build does first) gates on the daemon actually serving, not merely
+// on the container existing. Returns false if the daemon never answered in time.
+func waitBuildkitReady(ctx context.Context, buildkitd string, e *emitter) bool {
+	deadline := time.Now().Add(buildkitReadyTimeout)
+	announced := false
+	for {
+		res, err := dockercli.Run(ctx, 10*time.Second, "exec", buildkitd, "buildctl", "debug", "workers")
+		if err == nil && res.Code == 0 {
+			return true
+		}
+		// A buildkitd that crashed on startup (e.g. a host that can't run it
+		// privileged) will never answer — fail fast with its real state instead of
+		// burning the whole budget polling a dead container.
+		if exists, status := dockercli.State(ctx, buildkitd); !exists || status != "running" {
+			e.log("info", "buildkitd container is not running (status: "+status+"): "+strings.TrimSpace(res.Stderr))
+			return false
+		}
+		if ctx.Err() != nil || time.Now().After(deadline) {
+			e.log("info", "buildkitd not ready within "+buildkitReadyTimeout.String()+": "+strings.TrimSpace(res.Stderr))
+			return false
+		}
+		if !announced {
+			e.log("info", "Waiting for BuildKit to become ready…")
+			announced = true
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 // runBuildKit streams a `docker build` with BuildKit forced on (DOCKER_BUILDKIT=1),
