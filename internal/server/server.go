@@ -40,6 +40,7 @@ var Capabilities = []string{
 	"deploy.nixpacks",   // nixpacks (binary lazily installed on first use)
 	"deploy.buildpacks", // Cloud Native Buildpacks (heroku + paketo) via pack
 	"deploy.railpack",   // railpack via buildkitd/buildctl
+	"deploy.buildenv",   // req.env reaches BUILDS too (build args / plan secrets), not just the runtime stack
 	"metrics",
 	"dev",         // dev container lifecycle (StartDev/StopDev/Reset/Teardown) — Part D
 	"ssh-gateway", // the per-host SSH gateway singleton (Ensure/Provision/Deprovision)

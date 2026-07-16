@@ -327,9 +327,15 @@ func (s *Service) buildDockerfile(ctx context.Context, req *pb.DeployRequest, bu
 			}
 			e.log("info", "No Dockerfile found — using one generated from build settings")
 		}
-		args := append([]string{"build", "-t", req.GetImageRef()}, labels...)
+		// Build-time env (build_env.go): forward every env var the Dockerfile
+		// declares as an ARG. Scan the file ON DISK (a repo's own Dockerfile may
+		// have won over the generated body above). Bare `--build-arg KEY` keeps
+		// values off argv; they ride the docker client's process env instead.
+		envKeys := dockerfileBuildEnv(dfPath, req)
+		args := appendBuildArgKeys([]string{"build", "-t", req.GetImageRef()}, envKeys)
+		args = append(args, labels...)
 		args = append(args, buildDir)
-		return s.runBuild(ctx, args, e)
+		return s.runBuild(ctx, args, envKV(req.GetEnv(), envKeys), e)
 	}
 
 	// Explicit Dockerfile path + context, each re-validated to stay inside the
@@ -357,15 +363,32 @@ func (s *Service) buildDockerfile(ctx context.Context, req *pb.DeployRequest, bu
 	if stage := strings.TrimSpace(df.GetTargetStage()); stage != "" {
 		args = append(args, "--target", stage)
 	}
+	// Build-time env: an explicit Dockerfile opts into a variable by declaring
+	// `ARG NAME` — only declared names are forwarded, so builds stay warning-free.
+	envKeys := dockerfileBuildEnv(dockerfilePath, req)
+	args = appendBuildArgKeys(args, envKeys)
 	args = append(args, "-t", req.GetImageRef())
 	args = append(args, labels...)
 	args = append(args, contextDir)
-	return s.runBuild(ctx, args, e)
+	return s.runBuild(ctx, args, envKV(req.GetEnv(), envKeys), e)
 }
 
-func (s *Service) runBuild(ctx context.Context, args []string, e *emitter) bool {
+// dockerfileBuildEnv reads the Dockerfile about to build and returns the env
+// keys it declares as ARGs (build_env.go). Unreadable file ⇒ no keys — the
+// build itself will surface the real error.
+func dockerfileBuildEnv(dockerfilePath string, req *pb.DeployRequest) []string {
+	body, err := os.ReadFile(dockerfilePath)
+	if err != nil {
+		return nil
+	}
+	return dockerfileEnvKeys(string(body), req.GetEnv())
+}
+
+// runBuild streams a `docker build`; extraEnv carries build-env VALUES (bare
+// `--build-arg KEY` flags in args resolve from it) and may be nil.
+func (s *Service) runBuild(ctx context.Context, args []string, extraEnv []string, e *emitter) bool {
 	e.log("command", "docker "+strings.Join(args, " "))
-	code, err := dockercli.Stream(ctx, 15*time.Minute, func(l string) { e.log("info", l) }, "", args...)
+	code, err := dockercli.StreamEnv(ctx, 15*time.Minute, func(l string) { e.log("info", l) }, extraEnv, args...)
 	if err != nil {
 		e.result(false, "docker build: "+err.Error(), "")
 		return false

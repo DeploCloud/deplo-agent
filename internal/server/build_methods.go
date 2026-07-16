@@ -119,6 +119,11 @@ func (s *Service) buildStatic(ctx context.Context, req *pb.DeployRequest, buildD
 	}
 
 	buildCmd := strings.TrimSpace(spec.GetBuildCommand())
+	// Build-time env (build_env.go): the builder stage declares every resolved
+	// var as ARG+ENV so the install/build commands see them (a static site's env
+	// is build-time by definition — there is no runtime to inject into). Values
+	// arrive via bare `--build-arg KEY` + the docker client's process env.
+	envKeys := buildEnvKeys(req.GetEnv())
 	var dockerfile string
 	if buildCmd != "" {
 		// Two-stage: install + build with Node, then serve the output with nginx.
@@ -133,7 +138,7 @@ func (s *Service) buildStatic(ctx context.Context, req *pb.DeployRequest, buildD
 		}
 		dockerfile = fmt.Sprintf(`FROM node:%s-alpine AS builder
 WORKDIR /app
-COPY . .
+%sCOPY . .
 RUN %s
 RUN %s
 FROM nginx:alpine
@@ -142,8 +147,10 @@ COPY deplo-nginx.conf /etc/nginx/conf.d/deplo.conf
 COPY --from=builder /app/%s/ /usr/share/nginx/html/
 EXPOSE %d
 CMD ["nginx", "-g", "daemon off;"]
-`, node, install, buildCmd, outputDir, port)
+`, node, argEnvLines(envKeys), install, buildCmd, outputDir, port)
 	} else {
+		// No build command runs, so no build env is consumed — pass none.
+		envKeys = nil
 		// Already-static: copy the output dir straight into nginx.
 		dockerfile = fmt.Sprintf(`FROM nginx:alpine
 RUN rm -f /etc/nginx/conf.d/default.conf
@@ -159,9 +166,20 @@ CMD ["nginx", "-g", "daemon off;"]
 		return false
 	}
 
-	args := append([]string{"build", "-t", req.GetImageRef()}, labelArgs(req)...)
+	args := appendBuildArgKeys([]string{"build", "-t", req.GetImageRef()}, envKeys)
+	args = append(args, labelArgs(req)...)
 	args = append(args, buildDir)
-	return s.runBuild(ctx, args, e)
+	return s.runBuild(ctx, args, envKV(req.GetEnv(), envKeys), e)
+}
+
+// argEnvLines renders one `ARG KEY` + `ENV KEY=$KEY` pair per line for a
+// generated builder stage — single-name forms for classic-builder compatibility.
+func argEnvLines(keys []string) string {
+	var b strings.Builder
+	for _, k := range keys {
+		b.WriteString("ARG " + k + "\nENV " + k + "=$" + k + "\n")
+	}
+	return b.String()
 }
 
 // majorVersion extracts the leading major version digits from a version string
@@ -201,6 +219,12 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 	}
 
 	port := buildPort(spec)
+	// Build-time env (build_env.go). PORT and NIXPACKS_* stay excluded: the prep
+	// pins those itself below (spec-derived), and a user var must not silently
+	// fight the explicit build settings.
+	envKeys := filterKeys(buildEnvKeys(req.GetEnv()), func(k string) bool {
+		return k != "PORT" && !strings.HasPrefix(k, "NIXPACKS_")
+	})
 	// Phase 1: generate .nixpacks/Dockerfile WITHOUT the daemon (host binary).
 	prepArgs := []string{"build", buildDir, "--out", buildDir, "--no-error-without-start",
 		"--env", fmt.Sprintf("PORT=%d", port)}
@@ -229,9 +253,17 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 		prepArgs = append(prepArgs, "--env",
 			fmt.Sprintf("NIXPACKS_%s_VERSION=%s", strings.ToUpper(lang), version))
 	}
+	// Each user var as a BARE `--env KEY` (nixpacks os.LookupEnvs bare names from
+	// its process env — SpawnEnv below): the generated Dockerfile then declares
+	// `ARG KEY` + `ENV KEY=$KEY`, so the value is consumed at docker-build time
+	// (Phase 2's --build-arg), never baked into the Dockerfile text or the log.
+	for _, k := range envKeys {
+		prepArgs = append(prepArgs, "--env", k)
+	}
 
 	e.log("command", "nixpacks "+strings.Join(prepArgs, " "))
-	code, err := dockercli.Spawn(ctx, 5*time.Minute, func(l string) { e.log("info", l) }, "", nixpacks, prepArgs...)
+	code, err := dockercli.SpawnEnv(ctx, 5*time.Minute, func(l string) { e.log("info", l) },
+		envKV(req.GetEnv(), envKeys), nixpacks, prepArgs...)
 	if err != nil {
 		e.result(false, "nixpacks: "+err.Error(), "")
 		return false
@@ -244,20 +276,27 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 	generated := filepath.Join(buildDir, ".nixpacks", "Dockerfile")
 	publishDir := strings.TrimSpace(spec.GetNixpacksPublishDirectory())
 
+	// Phase 2 feeds each declared ARG a value: bare `--build-arg KEY` flags with
+	// the values riding the docker client's process env (never argv/logs).
+	buildEnv := envKV(req.GetEnv(), envKeys)
+
 	if publishDir == "" {
 		// App with a start command: build the generated Dockerfile directly.
 		args := []string{"build", "-f", generated, "-t", req.GetImageRef(),
 			"--build-arg", fmt.Sprintf("PORT=%d", port)}
+		args = appendBuildArgKeys(args, envKeys)
 		args = append(args, labelArgs(req)...)
 		args = append(args, buildDir)
-		return s.runBuildKit(ctx, args, e)
+		return s.runBuildKit(ctx, args, buildEnv, e)
 	}
 
 	// Static publish dir: build a staging image, then nginx-wrap its output.
 	staging := "deplo-nixpacks-staging:" + imageTag(req.GetImageRef())
 	stageArgs := []string{"build", "-f", generated, "-t", staging,
-		"--build-arg", fmt.Sprintf("PORT=%d", port), buildDir}
-	if !s.runBuildKit(ctx, stageArgs, e) {
+		"--build-arg", fmt.Sprintf("PORT=%d", port)}
+	stageArgs = appendBuildArgKeys(stageArgs, envKeys)
+	stageArgs = append(stageArgs, buildDir)
+	if !s.runBuildKit(ctx, stageArgs, buildEnv, e) {
 		return false
 	}
 	defer func() { _, _ = dockercli.Run(ctx, 30*time.Second, "rmi", staging) }()
@@ -292,7 +331,8 @@ CMD ["nginx", "-g", "daemon off;"]
 	args := []string{"build", "-f", wrapperPath, "-t", req.GetImageRef()}
 	args = append(args, labelArgs(req)...)
 	args = append(args, buildDir)
-	return s.runBuild(ctx, args, e)
+	// The wrapper only copies files out of the built image — no build env needed.
+	return s.runBuild(ctx, args, nil, e)
 }
 
 // ---------------------------------------------------------------------------
@@ -330,19 +370,33 @@ func (s *Service) buildBuildpacks(ctx context.Context, req *pb.DeployRequest, bu
 	e.log("info", "Building with "+label)
 	e.phase(pb.DeployPhase_DEPLOY_PHASE_BUILDING)
 
+	// Build-time env: pack resolves a bare `--env KEY` from ITS process env — the
+	// pack container's — so each key rides in twice: `-e KEY` on the docker run
+	// (docker copies the value from the client's process env, via StreamEnv) and
+	// `--env KEY` on pack. Values never touch argv (this command line is logged).
+	envKeys := filterKeys(buildEnvKeys(req.GetEnv()), func(k string) bool { return k != "PORT" })
 	args := []string{
 		"run", "--rm",
 		"-v", "/var/run/docker.sock:/var/run/docker.sock",
 		"-v", buildDir + ":/workspace",
+	}
+	for _, k := range envKeys {
+		args = append(args, "-e", k)
+	}
+	args = append(args,
 		"buildpacksio/pack", "build", req.GetImageRef(),
 		"--builder", builder,
 		"--path", "/workspace",
 		"--docker-host", "inherit",
 		"--pull-policy", "if-not-present",
 		"--env", fmt.Sprintf("PORT=%d", buildPort(spec)),
+	)
+	for _, k := range envKeys {
+		args = append(args, "--env", k)
 	}
 	e.log("command", "docker "+strings.Join(args, " "))
-	code, err := dockercli.Stream(ctx, 20*time.Minute, func(l string) { e.log("info", l) }, "", args...)
+	code, err := dockercli.StreamEnv(ctx, 20*time.Minute, func(l string) { e.log("info", l) },
+		envKV(req.GetEnv(), envKeys), args...)
 	if err != nil {
 		e.result(false, "pack build: "+err.Error(), "")
 		return false
@@ -438,10 +492,29 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 	if startCmd != "" {
 		planArgs = append(planArgs, "-e", "RAILPACK_START_CMD="+startCmd)
 	}
-	planArgs = append(planArgs, "debian:bookworm-slim", "bash", "-lc",
-		"apt-get update -qq && apt-get install -y -qq curl ca-certificates tar && curl -sSL https://railpack.com/install.sh | bash && railpack prepare /app --env RAILPACK_NODE_VERSION --env RAILPACK_BUILD_CMD --env RAILPACK_START_CMD --plan-out /out/railpack-plan.json --info-out /out/railpack-info.json")
+	// Build-time env (build_env.go): each user var reaches `railpack prepare` the
+	// same way the overrides above do — a bare `-e KEY` on the docker run (the
+	// value rides the docker client's process env via StreamEnv, never argv) plus
+	// a bare `--env KEY` on the prepare command. railpack declares each one a
+	// plan SECRET, which its frontend mounts as env on every build step — so the
+	// var is present while `npm run build` inlines it, without being baked into
+	// the image. RAILPACK_* names stay excluded: those are spec-derived above and
+	// a user var must not silently fight the explicit build settings. Keys are
+	// identifier-shaped by construction (buildEnvKeys), so embedding them in the
+	// `bash -lc` string below cannot break out of it.
+	envKeys := filterKeys(buildEnvKeys(req.GetEnv()), func(k string) bool {
+		return !strings.HasPrefix(k, "RAILPACK_")
+	})
+	prepareCmd := "apt-get update -qq && apt-get install -y -qq curl ca-certificates tar && curl -sSL https://railpack.com/install.sh | bash && railpack prepare /app --env RAILPACK_NODE_VERSION --env RAILPACK_BUILD_CMD --env RAILPACK_START_CMD"
+	for _, k := range envKeys {
+		planArgs = append(planArgs, "-e", k)
+		prepareCmd += " --env " + k
+	}
+	prepareCmd += " --plan-out /out/railpack-plan.json --info-out /out/railpack-info.json"
+	planArgs = append(planArgs, "debian:bookworm-slim", "bash", "-lc", prepareCmd)
 	e.log("command", "docker run (railpack prepare)")
-	code, err := dockercli.Stream(ctx, 10*time.Minute, func(l string) { e.log("info", l) }, "", planArgs...)
+	code, err := dockercli.StreamEnv(ctx, 10*time.Minute, func(l string) { e.log("info", l) },
+		envKV(req.GetEnv(), envKeys), planArgs...)
 	if err != nil {
 		e.result(false, "railpack prepare: "+err.Error(), "")
 		return false
@@ -485,17 +558,22 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 	// tokens via StreamOut — never a shell string — leaving a crafted name like
 	// `x; rm -rf /` an inert argument rather than a command on the root-privileged
 	// host agent.
-	known := map[string]string{
-		"RAILPACK_NODE_VERSION": nodeVer,
-		"RAILPACK_BUILD_CMD":    buildCmd,
-		"RAILPACK_START_CMD":    startCmd,
+	// User build env first, the spec-derived overrides second (overrides win a
+	// collision — same authority order as `prepare` above).
+	known := map[string]string{}
+	for _, k := range envKeys {
+		known[k] = req.GetEnv()[k]
 	}
+	known["RAILPACK_NODE_VERSION"] = nodeVer
+	known["RAILPACK_BUILD_CMD"] = buildCmd
+	known["RAILPACK_START_CMD"] = startCmd
 	secretNames, ok := readPlanSecrets(filepath.Join(planDir, "railpack-plan.json"))
 	if !ok {
-		// Plan unreadable: fall back to every override name `prepare` references, so
-		// a still-required secret is never left unprovided (empty value is fine — a
-		// provided-but-empty secret resolves, an absent one is "not found").
-		secretNames = []string{"RAILPACK_NODE_VERSION", "RAILPACK_BUILD_CMD", "RAILPACK_START_CMD"}
+		// Plan unreadable: fall back to every name `prepare` referenced — the three
+		// overrides plus each user env key — so a still-required secret is never
+		// left unprovided (empty value is fine — a provided-but-empty secret
+		// resolves, an absent one is "not found").
+		secretNames = append([]string{"RAILPACK_NODE_VERSION", "RAILPACK_BUILD_CMD", "RAILPACK_START_CMD"}, envKeys...)
 	}
 	// Defence in depth: the plan is untrusted, so drop any name that isn't a plain
 	// env identifier before it reaches the buildctl `--secret id=…,env=…` CSV (a
@@ -579,10 +657,11 @@ func waitBuildkitReady(ctx context.Context, buildkitd string, e *emitter) bool {
 
 // runBuildKit streams a `docker build` with BuildKit forced on (DOCKER_BUILDKIT=1),
 // needed by the nixpacks generated Dockerfile (which uses BuildKit syntax).
-func (s *Service) runBuildKit(ctx context.Context, args []string, e *emitter) bool {
+// extraEnv carries build-env VALUES for bare `--build-arg KEY` flags (may be nil).
+func (s *Service) runBuildKit(ctx context.Context, args []string, extraEnv []string, e *emitter) bool {
 	e.log("command", "docker "+strings.Join(args, " "))
 	code, err := dockercli.StreamEnv(ctx, 15*time.Minute, func(l string) { e.log("info", l) },
-		[]string{"DOCKER_BUILDKIT=1"}, args...)
+		append([]string{"DOCKER_BUILDKIT=1"}, extraEnv...), args...)
 	if err != nil {
 		e.result(false, "docker build: "+err.Error(), "")
 		return false

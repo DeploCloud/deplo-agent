@@ -110,6 +110,20 @@ func Spawn(ctx context.Context, timeout time.Duration, onLine LineFn, input, nam
 	return streamCmd(cctx, timeout, onLine, input, exec.CommandContext(cctx, name, args...))
 }
 
+// SpawnEnv is Spawn with extra "KEY=VALUE" env entries layered on top of the
+// agent's own env — e.g. the nixpacks binary resolving bare `--env KEY` refs
+// from its process env, so a build-env VALUE never rides argv (which the
+// deploy log echoes).
+func SpawnEnv(ctx context.Context, timeout time.Duration, onLine LineFn, extraEnv []string, name string, args ...string) (int, error) {
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	cmd := exec.CommandContext(cctx, name, args...)
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
+	return streamCmd(cctx, timeout, onLine, "", cmd)
+}
+
 // StreamOut runs `docker <args>` (no shell — argv is injection-safe) with extra
 // "KEY=VALUE" env layered on, streaming the child's RAW stdout into dst (e.g. a
 // build image tar written straight to disk) while forwarding each stderr line to
