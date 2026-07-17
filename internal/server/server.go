@@ -42,6 +42,7 @@ var Capabilities = []string{
 	"deploy.railpack",   // railpack via buildkitd/buildctl
 	"deploy.buildenv",   // req.env reaches BUILDS too (build args / plan secrets), not just the runtime stack
 	"metrics",
+	"container-stats", // per-container `docker stats` snapshot (ContainerStats) — the per-app/per-database Monitoring tab
 	"dev",         // dev container lifecycle (StartDev/StopDev/Reset/Teardown) — Part D
 	"ssh-gateway", // the per-host SSH gateway singleton (Ensure/Provision/Deprovision)
 	"tunnel",      // the VS Code remote tunnel (Start/Get/Stop)

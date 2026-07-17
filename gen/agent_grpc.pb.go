@@ -55,6 +55,7 @@ const _ = grpc.SupportPackageIsVersion9
 const (
 	Agent_Hello_FullMethodName              = "/deplo.agent.v1.Agent/Hello"
 	Agent_Metrics_FullMethodName            = "/deplo.agent.v1.Agent/Metrics"
+	Agent_ContainerStats_FullMethodName     = "/deplo.agent.v1.Agent/ContainerStats"
 	Agent_Deploy_FullMethodName             = "/deplo.agent.v1.Agent/Deploy"
 	Agent_ReattachDeploy_FullMethodName     = "/deplo.agent.v1.Agent/ReattachDeploy"
 	Agent_StopStack_FullMethodName          = "/deplo.agent.v1.Agent/StopStack"
@@ -110,6 +111,13 @@ type AgentClient interface {
 	// Host CPU/mem/disk/net snapshot. Replaces lib/infra/host.ts per server.
 	// (Wired into getServerMetrics in Part C; defined now so the contract is whole.)
 	Metrics(ctx context.Context, in *MetricsRequest, opts ...grpc.CallOption) (*HostMetrics, error)
+	// Per-CONTAINER live resource snapshot (`docker stats --no-stream`) for the
+	// named containers of ONE project — the data source for the per-app /
+	// per-database Monitoring tab, next to the host-level Metrics above. Scoped to
+	// a project by label (deplo.project=<project_id>) exactly like the Part C
+	// container RPCs, so a container name off the wire can never stat a sibling
+	// project's container. ADDITIVE: gated by the "container-stats" capability.
+	ContainerStats(ctx context.Context, in *ContainerStatsRequest, opts ...grpc.CallOption) (*ContainerStatsResponse, error)
 	// Deploy lifecycle. Server-streaming so build/run logs flow live, in one
 	// connection, into the control plane's existing per-deployment log + status
 	// writes (which republish over the GraphQL SSE subscriptions unchanged).
@@ -369,6 +377,16 @@ func (c *agentClient) Metrics(ctx context.Context, in *MetricsRequest, opts ...g
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(HostMetrics)
 	err := c.cc.Invoke(ctx, Agent_Metrics_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) ContainerStats(ctx context.Context, in *ContainerStatsRequest, opts ...grpc.CallOption) (*ContainerStatsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ContainerStatsResponse)
+	err := c.cc.Invoke(ctx, Agent_ContainerStats_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -896,6 +914,13 @@ type AgentServer interface {
 	// Host CPU/mem/disk/net snapshot. Replaces lib/infra/host.ts per server.
 	// (Wired into getServerMetrics in Part C; defined now so the contract is whole.)
 	Metrics(context.Context, *MetricsRequest) (*HostMetrics, error)
+	// Per-CONTAINER live resource snapshot (`docker stats --no-stream`) for the
+	// named containers of ONE project — the data source for the per-app /
+	// per-database Monitoring tab, next to the host-level Metrics above. Scoped to
+	// a project by label (deplo.project=<project_id>) exactly like the Part C
+	// container RPCs, so a container name off the wire can never stat a sibling
+	// project's container. ADDITIVE: gated by the "container-stats" capability.
+	ContainerStats(context.Context, *ContainerStatsRequest) (*ContainerStatsResponse, error)
 	// Deploy lifecycle. Server-streaming so build/run logs flow live, in one
 	// connection, into the control plane's existing per-deployment log + status
 	// writes (which republish over the GraphQL SSE subscriptions unchanged).
@@ -1147,6 +1172,9 @@ func (UnimplementedAgentServer) Hello(context.Context, *HelloRequest) (*HelloRes
 func (UnimplementedAgentServer) Metrics(context.Context, *MetricsRequest) (*HostMetrics, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Metrics not implemented")
 }
+func (UnimplementedAgentServer) ContainerStats(context.Context, *ContainerStatsRequest) (*ContainerStatsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ContainerStats not implemented")
+}
 func (UnimplementedAgentServer) Deploy(*DeployRequest, grpc.ServerStreamingServer[DeployEvent]) error {
 	return status.Errorf(codes.Unimplemented, "method Deploy not implemented")
 }
@@ -1326,6 +1354,24 @@ func _Agent_Metrics_Handler(srv interface{}, ctx context.Context, dec func(inter
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(AgentServer).Metrics(ctx, req.(*MetricsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_ContainerStats_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ContainerStatsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).ContainerStats(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_ContainerStats_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).ContainerStats(ctx, req.(*ContainerStatsRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -2004,6 +2050,10 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Metrics",
 			Handler:    _Agent_Metrics_Handler,
+		},
+		{
+			MethodName: "ContainerStats",
+			Handler:    _Agent_ContainerStats_Handler,
 		},
 		{
 			MethodName: "StopStack",

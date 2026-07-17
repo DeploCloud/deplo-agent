@@ -55,6 +55,14 @@ service Agent {
   // (Wired into getServerMetrics in Part C; defined now so the contract is whole.)
   rpc Metrics(MetricsRequest) returns (HostMetrics);
 
+  // Per-CONTAINER live resource snapshot (`docker stats --no-stream`) for the
+  // named containers of ONE project — the data source for the per-app /
+  // per-database Monitoring tab, next to the host-level Metrics above. Scoped to
+  // a project by label (deplo.project=<project_id>) exactly like the Part C
+  // container RPCs, so a container name off the wire can never stat a sibling
+  // project's container. ADDITIVE: gated by the "container-stats" capability.
+  rpc ContainerStats(ContainerStatsRequest) returns (ContainerStatsResponse);
+
   // Deploy lifecycle. Server-streaming so build/run logs flow live, in one
   // connection, into the control plane's existing per-deployment log + status
   // writes (which republish over the GraphQL SSE subscriptions unchanged).
@@ -1491,4 +1499,50 @@ message DockerCleanupResponse {
   // The sum of the per-scope reclaimed_bytes.
   int64 reclaimed_bytes = 3;
   repeated CleanupScopeResult results = 4;
+}
+
+// ---------------------------------------------------------------------------
+// ContainerStats — per-container `docker stats` for the Monitoring tab
+// ---------------------------------------------------------------------------
+//
+// Messages for the ContainerStats RPC (declared up in the service block next to
+// Metrics). Kept at the END of the file so appending them doesn't renumber the
+// generated message indices of everything below their logical home — the wire
+// is identical either way, but the committed *.pb.go / agent.ts diff stays a
+// clean, purely-additive one.
+
+message ContainerStatsRequest {
+  // The project the containers must belong to (agent re-validates the label
+  // deplo.project=<project_id>). Empty is REJECTED — a blank filter would stat
+  // every container on the host (cross-tenant), exactly like ListInstances.
+  string project_id = 1;
+  // The container names to stat (resolved control-plane-side from the project's
+  // instances). Any name that does not carry project_id's label is dropped.
+  // Empty => stat all of the project's containers.
+  repeated string containers = 2;
+}
+
+// One container's live resource usage, parsed from `docker stats --no-stream`.
+// net_* / block_* are CUMULATIVE totals since container start (that is what
+// `docker stats` reports), NOT rates — the control plane derives bytes/sec from
+// the delta between consecutive samples, which also survives a counter reset on
+// restart. cpu_pct and mem_* are already instantaneous.
+message ContainerStat {
+  string name = 1;
+  double cpu_pct = 2;      // 0-100 (across all cores, like `docker stats`)
+  int64 mem_used = 3;      // bytes
+  int64 mem_limit = 4;     // bytes
+  double mem_pct = 5;
+  int64 net_rx = 6;        // cumulative bytes received
+  int64 net_tx = 7;        // cumulative bytes transmitted
+  int64 block_read = 8;    // cumulative bytes read from block devices
+  int64 block_write = 9;   // cumulative bytes written
+  int32 pids = 10;
+  // False for a container that exists in the project but is not running (stats
+  // are zeroed) — so the tab can distinguish "stopped" from "no such container".
+  bool running = 11;
+}
+
+message ContainerStatsResponse {
+  repeated ContainerStat stats = 1;
 }
