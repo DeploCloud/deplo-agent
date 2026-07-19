@@ -33,7 +33,7 @@ type hostFixture struct {
 	buildCacheJSON  string            // `docker system df -v --format {{json .BuildCache}}`
 	danglingImages  []string          // `docker image ls --filter dangling=true -q` (short ids)
 	managedImages   []string          // `docker image ls --filter label=deplo.managed=true -q`
-	imageRows       map[string]string // short id -> "<fullID>|<slug>|<created>|<sizeBytes>"
+	imageRows       map[string]string // short id -> "<fullID>|<slug>|<service>|<created>|<sizeBytes>"
 	danglingVolumes []string          // `docker volume ls --filter dangling=true -q`
 	volumeMounts    map[string]string // volume name -> mountpoint on disk
 	volumeCreated   string            // every volume's CreatedAt (RFC3339)
@@ -41,6 +41,9 @@ type hostFixture struct {
 	// psFails forces `docker ps -aq` to fail, so the container-reference index
 	// cannot be built.
 	psFails bool
+	// dfFails forces `docker system df -v` to fail — the loaded-host case where the
+	// build-cache enumeration times out while the prune itself would still work.
+	dfFails bool
 
 	mu       sync.Mutex
 	removals [][]string
@@ -59,6 +62,9 @@ func (h *hostFixture) query(args []string) (dockercli.Result, error) {
 	case args[0] == "inspect":
 		return okResult(strings.Join(h.inspectRows, "\n")), nil
 	case args[0] == "system" && args[1] == "df":
+		if h.dfFails {
+			return dockercli.Result{Code: -1, Stderr: "signal: killed"}, nil
+		}
 		return okResult(h.buildCacheJSON), nil
 	case strings.HasPrefix(key, "image ls --filter dangling=true"):
 		return okResult(strings.Join(h.danglingImages, "\n")), nil
@@ -161,10 +167,10 @@ func newFixture(t *testing.T) *hostFixture {
 		danglingImages: []string{"ddd1111"},
 		managedImages:  []string{"aaa1111", "ccc1111", "eee1111"},
 		imageRows: map[string]string{
-			"ddd1111": "sha256:ddd|<no value>|" + oldRFC + "|500000000",
-			"aaa1111": "sha256:aaa|web|" + now.Format(time.RFC3339Nano) + "|1000000000", // newest, IN USE
-			"ccc1111": "sha256:ccc|web|" + oldRFC + "|900000000",                        // idle, older
-			"eee1111": "sha256:eee|web|" + olderRFC + "|800000000",                      // idle, oldest
+			"ddd1111": "sha256:ddd|<no value>|<no value>|" + oldRFC + "|500000000",
+			"aaa1111": "sha256:aaa|web|<no value>|" + now.Format(time.RFC3339Nano) + "|1000000000", // newest, IN USE
+			"ccc1111": "sha256:ccc|web|<no value>|" + oldRFC + "|900000000",                        // idle, older
+			"eee1111": "sha256:eee|web|<no value>|" + olderRFC + "|800000000",                      // idle, oldest
 		},
 		danglingVolumes: []string{"orphan-buildkit", "mongo-data"},
 		volumeMounts: map[string]string{
@@ -398,6 +404,156 @@ func TestDockerCleanup_unusedAppImages_skipsUnslugged(t *testing.T) {
 	}
 	if got := h.argv(); len(got) != 0 {
 		t.Fatalf("argv = %q, want none — an image with no deplo.slug is not a candidate", got)
+	}
+}
+
+// THE REGRESSION that saturated real hosts: an app redeployed many times a day
+// piles up superseded-but-tagged images, all younger than min_age_hours — and the
+// old age gate meant none was EVER a candidate, so every sweep "succeeded" with 0
+// bytes while the disk filled. App images are count-based now: min_age must not
+// shield them, and only the fixed one-hour deploy grace does.
+func TestDockerCleanup_unusedAppImages_minAgeDoesNotShield(t *testing.T) {
+	h := newFixture(t)
+	now := time.Now()
+	// Today's churn: the running image, a 30-minute-old build (inside the deploy
+	// grace) and a five-hour-old superseded one — nothing near 168h old.
+	h.imageRows["aaa1111"] = "sha256:aaa|web|<no value>|" + now.Format(time.RFC3339Nano) + "|1000000000"
+	h.imageRows["eee1111"] = "sha256:eee|web|<no value>|" + now.Add(-30*time.Minute).Format(time.RFC3339Nano) + "|800000000"
+	h.imageRows["ccc1111"] = "sha256:ccc|web|<no value>|" + now.Add(-5*time.Hour).Format(time.RFC3339Nano) + "|900000000"
+	h.install(t)
+
+	if _, err := newService(t).DockerCleanup(context.Background(), &pb.DockerCleanupRequest{
+		Scopes:           []pb.CleanupScope{pb.CleanupScope_CLEANUP_SCOPE_UNUSED_APP_IMAGES},
+		KeepImagesPerApp: 1,
+		MinAgeHours:      168, // must be irrelevant to this scope
+	}); err != nil {
+		t.Fatalf("DockerCleanup: %v", err)
+	}
+	// Rank: aaa (newest, kept + in use), eee (30min — beyond keep but inside the
+	// grace, kept), ccc (5h — beyond keep, unreferenced, past the grace: removed).
+	if got := h.argv(); len(got) != 1 || got[0] != "rmi sha256:ccc" {
+		t.Fatalf("argv = %q, want [rmi sha256:ccc] — min_age shielded a superseded image (or the grace didn't)", got)
+	}
+}
+
+// Compose stacks build one image per service under the SAME deplo.slug; the
+// deplo.service image label splits them so "keep the newest N" holds per service.
+// Ranked together, keep=1 would keep one service's image and eat the others'.
+func TestDockerCleanup_unusedAppImages_composeServicesRankApart(t *testing.T) {
+	h := newFixture(t)
+	now := time.Now()
+	newer := now.Add(-2 * time.Hour).Format(time.RFC3339Nano)
+	older := now.Add(-8 * time.Hour).Format(time.RFC3339Nano)
+	h.managedImages = []string{"web1111", "web2222", "api1111", "api2222"}
+	h.imageRows = map[string]string{
+		"web1111": "sha256:web1|shop|web|" + newer + "|100000000",
+		"web2222": "sha256:web2|shop|web|" + older + "|100000000",
+		"api1111": "sha256:api1|shop|api|" + newer + "|100000000",
+		"api2222": "sha256:api2|shop|api|" + older + "|100000000",
+	}
+	h.install(t)
+
+	if _, err := newService(t).DockerCleanup(context.Background(), &pb.DockerCleanupRequest{
+		Scopes:           []pb.CleanupScope{pb.CleanupScope_CLEANUP_SCOPE_UNUSED_APP_IMAGES},
+		KeepImagesPerApp: 1,
+	}); err != nil {
+		t.Fatalf("DockerCleanup: %v", err)
+	}
+	got := h.argv()
+	want := []string{"rmi sha256:web2", "rmi sha256:api2"}
+	if len(got) != len(want) {
+		t.Fatalf("argv = %q, want %q — services of one slug must rank separately", got, want)
+	}
+	for _, w := range want {
+		if !containsString(got, w) {
+			t.Fatalf("argv = %q, missing %q", got, w)
+		}
+	}
+}
+
+// The prune scopes must PRUNE even when their own enumeration finds no candidate:
+// the enumeration is the preview, docker's own `until=` filter is the decision.
+// Gating on the pre-count is how a host kept 20GB docker itself called reclaimable
+// while every sweep reported success — our parse and docker's filter disagree, and
+// the short-circuit let ours win.
+func TestDockerCleanup_pruneScopes_runEvenWithZeroCandidates(t *testing.T) {
+	h := newFixture(t)
+	h.buildCacheJSON = `[]` // nothing our enumeration would pick
+	h.danglingImages = nil  // ditto
+	h.install(t)
+
+	resp, err := newService(t).DockerCleanup(context.Background(), &pb.DockerCleanupRequest{
+		Scopes: []pb.CleanupScope{
+			pb.CleanupScope_CLEANUP_SCOPE_BUILD_CACHE,
+			pb.CleanupScope_CLEANUP_SCOPE_DANGLING_IMAGES,
+		},
+		MinAgeHours: 24,
+	})
+	if err != nil {
+		t.Fatalf("DockerCleanup: %v", err)
+	}
+	got := h.argv()
+	want := []string{"builder prune --force --filter until=24h", "image prune --force --filter until=24h"}
+	if len(got) != len(want) {
+		t.Fatalf("argv = %q, want %q — zero own-candidates must not skip the prune", got, want)
+	}
+	for _, w := range want {
+		if !containsString(got, w) {
+			t.Fatalf("argv = %q, missing %q", got, w)
+		}
+	}
+	// Docker's own printed total (the fixture's "1.5GB") is the reported number —
+	// never our zero estimate.
+	for _, r := range resp.GetResults() {
+		if r.GetReclaimedBytes() != 1500000000 {
+			t.Errorf("scope %s reclaimed_bytes = %d, want docker's own total (1500000000)",
+				r.GetScope(), r.GetReclaimedBytes())
+		}
+	}
+}
+
+// A failed enumeration on a loaded host (`docker system df -v` signal-killed at
+// its timeout) must not abort the wet sweep — the prune is still safe and still
+// owed. The dry run, whose whole answer IS the enumeration, keeps failing loudly.
+func TestDockerCleanup_buildCache_enumerationFailureStillPrunes(t *testing.T) {
+	h := newFixture(t)
+	h.dfFails = true
+	h.install(t)
+
+	resp, err := newService(t).DockerCleanup(context.Background(), &pb.DockerCleanupRequest{
+		Scopes:      []pb.CleanupScope{pb.CleanupScope_CLEANUP_SCOPE_BUILD_CACHE},
+		MinAgeHours: 168,
+	})
+	if err != nil {
+		t.Fatalf("DockerCleanup: %v", err)
+	}
+	if got := h.argv(); len(got) != 1 || got[0] != "builder prune --force --filter until=168h" {
+		t.Fatalf("argv = %q, want the prune despite the failed enumeration", got)
+	}
+	r := resultFor(t, resp, pb.CleanupScope_CLEANUP_SCOPE_BUILD_CACHE)
+	if r.GetError() != "" {
+		t.Errorf("error = %q; a pruned scope with a failed preview is a success", r.GetError())
+	}
+	if r.GetReclaimedBytes() != 1500000000 {
+		t.Errorf("reclaimed_bytes = %d, want docker's own total", r.GetReclaimedBytes())
+	}
+
+	// Dry run: no enumeration, no answer — and never a prune.
+	h2 := newFixture(t)
+	h2.dfFails = true
+	h2.install(t)
+	resp2, err := newService(t).DockerCleanup(context.Background(), &pb.DockerCleanupRequest{
+		Scopes: []pb.CleanupScope{pb.CleanupScope_CLEANUP_SCOPE_BUILD_CACHE},
+		DryRun: true,
+	})
+	if err != nil {
+		t.Fatalf("DockerCleanup (dry): %v", err)
+	}
+	if got := h2.argv(); len(got) != 0 {
+		t.Fatalf("dry run touched the host: %q", got)
+	}
+	if r2 := resultFor(t, resp2, pb.CleanupScope_CLEANUP_SCOPE_BUILD_CACHE); r2.GetError() == "" {
+		t.Error("a dry run that could not enumerate must say so")
 	}
 }
 
@@ -641,6 +797,32 @@ func TestParseHumanSize(t *testing.T) {
 		if got := parseHumanSize(tc.in); got != tc.want {
 			t.Errorf("parseHumanSize(%q) = %d, want %d", tc.in, got, tc.want)
 		}
+	}
+}
+
+// Docker's own printed total is authoritative INCLUDING ZERO: "Total reclaimed
+// space: 0B" means the prune freed nothing, and falling back to the pre-flight
+// estimate there is how the history once recorded a gigabyte that was never freed.
+// The estimate is only for output shapes with no recognisable total at all.
+func TestPickReclaimed_zeroTotalIsAuthoritative(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		out      string
+		estimate int64
+		want     int64
+	}{
+		{"image prune says 0B", "Deleted Images:\nuntagged: x\nTotal reclaimed space: 0B\n", 999, 0},
+		{"buildx says 0B", "Total:\t0B\n", 999, 0},
+		{"real total wins over estimate", "Total reclaimed space: 449.4MB\n", 1, 449400000},
+		{"no total line -> estimate", "nothing to see here\n", 777, 777},
+		{"unreadable total -> estimate", "Total: garbage\n", 555, 555},
+		{"empty output -> estimate", "", 42, 42},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := pickReclaimed(tc.out, tc.estimate); got != tc.want {
+				t.Errorf("pickReclaimed(%q, %d) = %d, want %d", tc.out, tc.estimate, got, tc.want)
+			}
+		})
 	}
 }
 

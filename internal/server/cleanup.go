@@ -72,6 +72,16 @@ const (
 	// not, say, a database's data volume — which is exactly what several dangling
 	// volumes on a real host turn out to be.
 	buildkitSentinel = "buildkitd.lock"
+
+	// How fresh an app image must be to be untouchable by UNUSED_APP_IMAGES,
+	// REGARDLESS of the policy's min_age_hours. App-image retention is count-based
+	// (keep_images_per_app), NOT age-based: gating it on min_age let a host that
+	// redeploys many times a day fill its disk with superseded-but-tagged images
+	// none of which ever aged into eligibility (min_age defaults to a day and can be
+	// set to a year). The grace window only shields a build racing its own deploy —
+	// an image whose container has not started yet — and one hour is far beyond any
+	// build→run gap while being far below any real redeploy cadence worth keeping.
+	appImageDeployGrace = time.Hour
 )
 
 // removeObject is the ONE host-mutating docker call in this file: every prune and
@@ -103,8 +113,12 @@ type cleanupParams struct {
 	dryRun           bool
 	minAgeHours      int
 	keepImagesPerApp int
-	// cutoff is the newest an object may be to qualify. ZERO means "no age filter".
+	// cutoff is the newest a CACHE-type object (build cache, dangling image, orphan
+	// buildkit volume) may be to qualify. ZERO means "no age filter".
 	cutoff time.Time
+	// appImageCutoff is the newest an APP image may be to qualify — always
+	// appImageDeployGrace ago, never the policy cutoff. See the constant's comment.
+	appImageCutoff time.Time
 }
 
 // DockerCleanup reclaims Docker disk on this host within the allow-listed scopes
@@ -141,6 +155,7 @@ func (s *Service) DockerCleanup(ctx context.Context, req *pb.DockerCleanupReques
 	if params.minAgeHours > 0 {
 		params.cutoff = time.Now().Add(-time.Duration(params.minAgeHours) * time.Hour)
 	}
+	params.appImageCutoff = time.Now().Add(-appImageDeployGrace)
 
 	// The reverse index costs one inspect over every container on the host, and two
 	// scopes need it — so build it at most once, and only if a scope actually asks.
@@ -297,50 +312,62 @@ type buildCacheRecord struct {
 // that touches no Deplo object whatsoever — a cache record is pure derived data,
 // and the worst a wrong answer here can do is make the next build slower.
 //
-// It still enumerates first, because dry_run has to report what a prune WOULD take
-// and docker offers no --dry-run of its own.
+// It enumerates first because dry_run has to report what a prune WOULD take and
+// docker offers no --dry-run of its own — but on a REAL run the enumeration is
+// only the preview, never the gate: the prune always runs and docker's own
+// `until=` filter decides. Gating the prune on our own candidate count is exactly
+// what let a loaded host keep its cache forever (its `system df -v` timed out, or
+// our timestamp parse disagreed with docker's), reported as a clean success.
 func cleanBuildCache(ctx context.Context, p cleanupParams) *pb.CleanupScopeResult {
 	r := &pb.CleanupScopeResult{Scope: pb.CleanupScope_CLEANUP_SCOPE_BUILD_CACHE}
 
-	res, err := dockerQuery(ctx, cleanupQueryTimeout, "system", "df", "-v", "--format", "{{json .BuildCache}}")
-	if err != nil {
-		r.Error = err.Error()
-		return r
-	}
-	if res.Code != 0 {
-		r.Error = dockerErr("system df -v", res)
-		return r
-	}
-	var records []buildCacheRecord
-	if out := strings.TrimSpace(res.Stdout); out != "" && out != "null" {
-		if err := json.Unmarshal([]byte(out), &records); err != nil {
-			r.Error = "read the build cache: " + err.Error()
-			return r
-		}
-	}
-
 	var estimate int64
-	for _, rec := range records {
-		if rec.InUse == "true" {
-			continue // a build is holding it right now
+	enumFailure := func() string {
+		res, err := dockerQuery(ctx, cleanupQueryTimeout, "system", "df", "-v", "--format", "{{json .BuildCache}}")
+		if err != nil {
+			return err.Error()
 		}
-		// Age off last use where docker knows it, creation otherwise — the same
-		// choice `--filter until=` makes.
-		at := rec.LastUsedAt
-		if at == "" {
-			at = rec.CreatedAt
+		if res.Code != 0 {
+			return dockerErr("system df -v", res)
 		}
-		if !olderThan(at, p.cutoff) {
-			continue
+		var records []buildCacheRecord
+		if out := strings.TrimSpace(res.Stdout); out != "" && out != "null" {
+			if err := json.Unmarshal([]byte(out), &records); err != nil {
+				return "read the build cache: " + err.Error()
+			}
 		}
-		estimate += parseHumanSize(rec.Size)
-		addItem(r, rec.ID)
-		r.ItemsRemoved++
-	}
+		for _, rec := range records {
+			if rec.InUse == "true" {
+				continue // a build is holding it right now
+			}
+			// Age off last use where docker knows it, creation otherwise — the same
+			// choice `--filter until=` makes.
+			at := rec.LastUsedAt
+			if at == "" {
+				at = rec.CreatedAt
+			}
+			if !olderThan(at, p.cutoff) {
+				continue
+			}
+			estimate += parseHumanSize(rec.Size)
+			addItem(r, rec.ID)
+			r.ItemsRemoved++
+		}
+		return ""
+	}()
 
-	if p.dryRun || r.ItemsRemoved == 0 {
+	if p.dryRun {
+		// A dry run IS the enumeration; without it there is nothing to answer with.
+		if enumFailure != "" {
+			r.Error = enumFailure
+		}
 		r.ReclaimedBytes = estimate
 		return r
+	}
+	if enumFailure != "" {
+		// The preview failed; the prune is still safe (docker's filter decides) and
+		// still owed. Items stay empty — docker's total below is the honest number.
+		log.Printf("deplo-agent: build-cache enumeration failed (%s); pruning anyway", enumFailure)
 	}
 
 	args := []string{"builder", "prune", "--force"}
@@ -382,37 +409,45 @@ func cleanBuildCache(ctx context.Context, p cleanupParams) *pb.CleanupScopeResul
 // Deplo pushes to a registry, so a wrongly-removed app image is recoverable only by
 // a full rebuild from source. Removing app images is a separate, opt-in, allow-listed
 // scope (UNUSED_APP_IMAGES) that decides image by image, never `-a`.
+//
+// Like the build-cache scope, the enumeration is the dry run's answer and the wet
+// run's preview — never the gate. The prune always runs; docker's filter decides.
 func cleanDanglingImages(ctx context.Context, p cleanupParams) *pb.CleanupScopeResult {
 	r := &pb.CleanupScopeResult{Scope: pb.CleanupScope_CLEANUP_SCOPE_DANGLING_IMAGES}
 
-	res, err := dockerQuery(ctx, cleanupQueryTimeout, "image", "ls", "--filter", "dangling=true", "--quiet")
-	if err != nil {
-		r.Error = err.Error()
-		return r
-	}
-	if res.Code != 0 {
-		r.Error = dockerErr("image ls", res)
-		return r
-	}
-	images, err := inspectImages(ctx, uniqueLines(res.Stdout))
-	if err != nil {
-		r.Error = err.Error()
-		return r
-	}
-
 	var estimate int64
-	for _, im := range images {
-		if !olderThan(im.created, p.cutoff) {
-			continue
+	enumFailure := func() string {
+		res, err := dockerQuery(ctx, cleanupQueryTimeout, "image", "ls", "--filter", "dangling=true", "--quiet")
+		if err != nil {
+			return err.Error()
 		}
-		estimate += im.size
-		addItem(r, im.id)
-		r.ItemsRemoved++
-	}
+		if res.Code != 0 {
+			return dockerErr("image ls", res)
+		}
+		images, err := inspectImages(ctx, uniqueLines(res.Stdout))
+		if err != nil {
+			return err.Error()
+		}
+		for _, im := range images {
+			if !olderThan(im.created, p.cutoff) {
+				continue
+			}
+			estimate += im.size
+			addItem(r, im.id)
+			r.ItemsRemoved++
+		}
+		return ""
+	}()
 
-	if p.dryRun || r.ItemsRemoved == 0 {
+	if p.dryRun {
+		if enumFailure != "" {
+			r.Error = enumFailure
+		}
 		r.ReclaimedBytes = estimate
 		return r
+	}
+	if enumFailure != "" {
+		log.Printf("deplo-agent: dangling-image enumeration failed (%s); pruning anyway", enumFailure)
 	}
 
 	args := []string{"image", "prune", "--force"}
@@ -517,13 +552,19 @@ func cleanOrphanBuildkitCache(ctx context.Context, p cleanupParams, idx *contain
 
 // cleanUnusedAppImages removes old `deplo/<slug>:<deployment>` images. This is the
 // only scope that can destroy something a rebuild is the sole recovery for (Deplo
-// pushes to no registry), so it is opt-in, off by default, and every image must
-// clear FOUR independent tests:
+// pushes to no registry), so every image must clear FOUR independent tests:
 //
 //	a. no container — running or EXITED — references it (the reverse index);
 //	b. it carries deplo.managed=true (the `--filter label=` below);
-//	c. it is older than min_age_hours;
-//	d. it is not among the newest keep_images_per_app images of its deplo.slug.
+//	c. it is older than the fixed appImageDeployGrace — NOT min_age_hours. App
+//	   retention is count-based; the policy age floor is a cache knob. Gating on
+//	   min_age let a host that redeploys many times a day pile up superseded
+//	   1-2GB images that never aged into eligibility and saturate its disk while
+//	   every sweep reported success/0.
+//	d. it is not among the newest keep_images_per_app images of its group — the
+//	   deplo.slug, subdivided by the deplo.service image label when present
+//	   (a compose stack builds one image per service under the same slug;
+//	   ranking them together would keep one service's image and eat the rest's).
 //
 // (b) is the one label test in this file, and it is not an ownership test: it only
 // NARROWS what we will even consider, so a mislabelled object is left alone rather
@@ -552,22 +593,25 @@ func cleanUnusedAppImages(ctx context.Context, p cleanupParams, idx *containerIn
 		return r
 	}
 
-	// Rank within the slug's WHOLE image set, in-use ones included: "keep the newest
+	// Rank within the group's WHOLE image set, in-use ones included: "keep the newest
 	// N of this app" has to mean the newest N that exist, or a redeploy that leaves
 	// the previous image running would let us delete every older generation at once.
-	bySlug := map[string][]imageInfo{}
+	// The group is the slug, split by the deplo.service image label when present —
+	// each built service of a compose stack keeps its own newest N.
+	byGroup := map[string][]imageInfo{}
 	for _, im := range images {
 		if im.slug == "" {
 			// No deplo.slug: we cannot say which app it belongs to, so we cannot apply
 			// keep-N to it. Leave it alone.
 			continue
 		}
-		bySlug[im.slug] = append(bySlug[im.slug], im)
+		key := im.slug + "\x00" + im.service
+		byGroup[key] = append(byGroup[key], im)
 	}
 
 	var failures scopeFailures
-	for _, slug := range sortedKeys(bySlug) {
-		group := bySlug[slug]
+	for _, key := range sortedKeys(byGroup) {
+		group := byGroup[key]
 		sort.SliceStable(group, func(i, j int) bool {
 			ti, oki := parseDockerTime(group[i].created)
 			tj, okj := parseDockerTime(group[j].created)
@@ -584,8 +628,8 @@ func cleanUnusedAppImages(ctx context.Context, p cleanupParams, idx *containerIn
 			if idx.images[im.id] {
 				continue // (a) a container — perhaps a stopped one — still needs it
 			}
-			if !olderThan(im.created, p.cutoff) {
-				continue // (c)
+			if !olderThan(im.created, p.appImageCutoff) {
+				continue // (c) inside the deploy grace — possibly racing its own start
 			}
 
 			if !p.dryRun {
@@ -618,15 +662,16 @@ func cleanUnusedAppImages(ctx context.Context, p cleanupParams, idx *containerIn
 // Helpers
 // ---------------------------------------------------------------------------
 
-// imageInfo is the four things the allow-list needs about an image.
+// imageInfo is the five things the allow-list needs about an image.
 type imageInfo struct {
 	id      string // FULL sha256 — the form the container index is keyed by
 	slug    string // deplo.slug label, "" when absent
+	service string // deplo.service label (compose-built images), "" when absent
 	created string
 	size    int64 // bytes
 }
 
-// inspectImages reads those four fields for a batch of ids in ONE docker call.
+// inspectImages reads those five fields for a batch of ids in ONE docker call.
 // `image ls` cannot give us any of them properly: it prints the SHORT id, no
 // labels, and a human-rounded size.
 //
@@ -639,30 +684,35 @@ func inspectImages(ctx context.Context, ids []string) ([]imageInfo, error) {
 		return nil, nil
 	}
 	args := append([]string{"image", "inspect", "--format",
-		`{{.Id}}|{{index .Config.Labels "deplo.slug"}}|{{.Created}}|{{.Size}}`}, ids...)
+		`{{.Id}}|{{index .Config.Labels "deplo.slug"}}|{{index .Config.Labels "deplo.service"}}|{{.Created}}|{{.Size}}`}, ids...)
 	res, err := dockerQuery(ctx, cleanupQueryTimeout, args...)
 	if err != nil {
 		return nil, err
 	}
 
+	// text/template prints `<no value>` for an absent label.
+	label := func(s string) string {
+		s = strings.TrimSpace(s)
+		if s == "<no value>" {
+			return ""
+		}
+		return s
+	}
 	var out []imageInfo
 	for _, line := range splitLines(res.Stdout) {
 		parts := strings.Split(line, "|")
-		if len(parts) != 4 {
+		if len(parts) != 5 {
 			continue
 		}
-		size, err := strconv.ParseInt(strings.TrimSpace(parts[3]), 10, 64)
+		size, err := strconv.ParseInt(strings.TrimSpace(parts[4]), 10, 64)
 		if err != nil {
 			continue
 		}
-		slug := strings.TrimSpace(parts[1])
-		if slug == "<no value>" { // what text/template prints for an absent label
-			slug = ""
-		}
 		out = append(out, imageInfo{
 			id:      strings.TrimSpace(parts[0]),
-			slug:    slug,
-			created: strings.TrimSpace(parts[2]),
+			slug:    label(parts[1]),
+			service: label(parts[2]),
+			created: strings.TrimSpace(parts[3]),
 			size:    size,
 		})
 	}
@@ -796,18 +846,24 @@ var sizeUnits = map[string]float64{
 // pickReclaimed prefers the total docker itself reports after a prune ("Total
 // reclaimed space: 449.4MB" from `image prune`, "Total:  449.4MB" from the buildx
 // `builder prune`) over our pre-flight estimate, and falls back to the estimate
-// when the output shape is one we do not recognise.
+// only when no total line is recognised.
+//
+// A parsed total of ZERO is AUTHORITATIVE, not a parse failure: docker printing
+// "Total reclaimed space: 0B" means the prune freed nothing, and reporting the
+// estimate instead is how a sweep that reclaimed nothing was once recorded as
+// having reclaimed a gigabyte (the history's phantom bytes). The digit check is
+// what separates "docker said 0" from "docker said something we cannot read".
 func pickReclaimed(out string, estimate int64) int64 {
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
-		if v, ok := strings.CutPrefix(line, "Total reclaimed space:"); ok {
-			if n := parseHumanSize(v); n > 0 {
-				return n
+		for _, prefix := range []string{"Total reclaimed space:", "Total:"} {
+			v, ok := strings.CutPrefix(line, prefix)
+			if !ok {
+				continue
 			}
-		}
-		if v, ok := strings.CutPrefix(line, "Total:"); ok {
-			if n := parseHumanSize(v); n > 0 {
-				return n
+			v = strings.TrimSpace(v)
+			if v != "" && v[0] >= '0' && v[0] <= '9' {
+				return parseHumanSize(v)
 			}
 		}
 	}
