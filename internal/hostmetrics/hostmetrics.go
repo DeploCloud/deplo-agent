@@ -79,10 +79,25 @@ func Collect(dataDir string) Metrics {
 
 type cpuTimes struct{ idle, total uint64 }
 
+// readCPUTimes keeps the lossy shape Collect was written against: a failed read
+// is reported as a zero cpuTimes. That is safe for Collect, which diffs two
+// reads taken within one call and whose cpuPercent returns 0 when total is 0 —
+// there is no baseline living across calls to corrupt. Anything that KEEPS a
+// baseline must use readCPUTimesOK instead.
 func readCPUTimes() cpuTimes {
+	c, _ := readCPUTimesOK()
+	return c
+}
+
+// readCPUTimesOK is readCPUTimes plus the one bit of information the lossy form
+// throws away: whether the numbers are real. Without it a caller cannot tell an
+// unreadable /proc/stat from an idle CPU, and a streaming sampler that adopted
+// the zero as its next baseline would diff the whole since-boot counter against
+// it on the following tick.
+func readCPUTimesOK() (cpuTimes, bool) {
 	f, err := os.Open("/proc/stat")
 	if err != nil {
-		return cpuTimes{}
+		return cpuTimes{}, false
 	}
 	defer f.Close()
 	sc := bufio.NewScanner(f)
@@ -100,9 +115,11 @@ func readCPUTimes() cpuTimes {
 				idle = v
 			}
 		}
-		return cpuTimes{idle: idle, total: total}
+		return cpuTimes{idle: idle, total: total}, true
 	}
-	return cpuTimes{}
+	// Opened but no aggregate "cpu " line, or the scan died part way: either way
+	// we have no usable reading, so say so rather than returning a plausible 0.
+	return cpuTimes{}, false
 }
 
 func cpuPercent(a, b cpuTimes) float64 {
@@ -159,10 +176,23 @@ func diskBytes(path string) (used, total int64) {
 	return used, total
 }
 
+// readNetCounters is the lossy form, kept for Collect — see readCPUTimes for
+// why a baseline-keeping caller must not use it.
 func readNetCounters() (rx, tx int64) {
+	r, t, _ := readNetCountersOK()
+	return r, t
+}
+
+// readNetCountersOK also reports whether the file was read to the end. A
+// half-read /proc/net/dev sums fewer interfaces than the previous read did, so
+// it looks exactly like a counter reset; clamping hides the dip, but adopting
+// the short total as the next baseline turns the following tick into a fake
+// multi-gigabyte spike. An empty-but-clean read (a netns with only lo) is a
+// genuine 0 and reports ok.
+func readNetCountersOK() (rx, tx int64, ok bool) {
 	f, err := os.Open("/proc/net/dev")
 	if err != nil {
-		return 0, 0
+		return 0, 0, false
 	}
 	defer f.Close()
 	sc := bufio.NewScanner(f)
@@ -185,7 +215,10 @@ func readNetCounters() (rx, tx int64) {
 		rx += r
 		tx += t
 	}
-	return rx, tx
+	if sc.Err() != nil {
+		return 0, 0, false
+	}
+	return rx, tx, true
 }
 
 func loadavg() (l1, l5, l15 float64) {

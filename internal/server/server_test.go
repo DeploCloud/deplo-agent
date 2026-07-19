@@ -56,6 +56,14 @@ func TestHello_reportsContractAndCapabilities(t *testing.T) {
 	if !containsString(resp.GetCapabilities(), "docker-cleanup") {
 		t.Errorf("capabilities %v do not advertise docker-cleanup", resp.GetCapabilities())
 	}
+	// Same discipline for the telemetry stream. The control plane decides per
+	// server whether to hold ONE long-lived StreamMetrics or to fall back to
+	// polling the unary Metrics/ContainerStats, and it decides it from THIS
+	// string at connect time. Drop it and every host silently degrades to the
+	// poll path — which still draws correct charts, so nothing would tell you.
+	if !containsString(resp.GetCapabilities(), "metrics-stream") {
+		t.Errorf("capabilities %v do not advertise metrics-stream", resp.GetCapabilities())
+	}
 	// docker_available may be true or false depending on the test host; the
 	// point is Hello answers without error (the deploy pre-flight, PLAN P5).
 }

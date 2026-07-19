@@ -63,6 +63,26 @@ service Agent {
   // project's container. ADDITIVE: gated by the "container-stats" capability.
   rpc ContainerStats(ContainerStatsRequest) returns (ContainerStatsResponse);
 
+  // ONE long-lived stream carrying this host's metrics AND every Deplo-managed
+  // container's stats, sampled on the AGENT's own ticker. Replaces the
+  // per-viewer, per-resource Metrics/ContainerStats poll: the control plane
+  // opens exactly one of these per server and demuxes frames into its RAM ring
+  // buffer, so telemetry cost is O(hosts) — independent of how many containers
+  // run there and how many people are looking.
+  //
+  // The agent is still a pure gRPC SERVER: the control plane dials and the agent
+  // streams, exactly like FollowLogs. There is no agent->control-plane channel.
+  //
+  // Container scoping is by the deplo.managed=true label, NEVER an empty filter
+  // (which would enumerate every container on the host, including ones Deplo
+  // does not own). Each stat carries its deplo.project label so the control
+  // plane demuxes to an App / Database without a second lookup.
+  //
+  // ADDITIVE: gated by the "metrics-stream" capability. An agent without it
+  // keeps serving the unary Metrics / ContainerStats poll unchanged, and the
+  // control plane falls back to polling that ONE server.
+  rpc StreamMetrics(MetricsStreamRequest) returns (stream MetricsSample);
+
   // Deploy lifecycle. Server-streaming so build/run logs flow live, in one
   // connection, into the control plane's existing per-deployment log + status
   // writes (which republish over the GraphQL SSE subscriptions unchanged).
@@ -196,8 +216,10 @@ service Agent {
   // GitHub release the install path uses) and sends the per-arch download URL +
   // its sha256 here; the agent downloads, VERIFIES the checksum (refusing a
   // mismatch, exactly like the installer's P2 guard), atomically swaps its own
-  // on-disk binary, replies, then restarts so systemd re-execs the new binary
-  // (which finds the existing materials and serves straight away — no call-home).
+  // on-disk binary, replies, then re-execs ITSELF (syscall.Exec — same PID, same
+  // argv, same env; no exit, so a supervisor's Restart policy is not involved).
+  // The re-execed binary finds the existing materials and serves straight away —
+  // no call-home.
   // INVARIANT: trust material is out of scope here; a SelfUpdate can change the
   // code but never the identity. Returns FAILED_PRECONDITION when the agent can't
   // locate/replace its own binary (e.g. a read-only install dir), so the control
@@ -892,9 +914,11 @@ message SelfUpdateResponse {
   // The version now staged on disk (echoes the request's version on success).
   string version = 1;
   // True once the new binary is in place and the agent is about to restart to
-  // exec it. The control plane uses this as the "update applied" signal; the
-  // agent then exits so its supervisor (systemd Restart=on-failure) re-execs the
-  // freshly-swapped binary, which reuses the existing mTLS materials.
+  // exec it. The control plane uses this as the "update applied" signal; shortly
+  // after replying the agent re-execs ITSELF via syscall.Exec — the process is
+  // REPLACED in place (same PID, same argv, same env), it does NOT exit, so no
+  // supervisor (systemd Restart=on-failure) is involved. The freshly-swapped
+  // binary reuses the existing mTLS materials.
   bool restarting = 2;
 }
 
@@ -1541,8 +1565,80 @@ message ContainerStat {
   // False for a container that exists in the project but is not running (stats
   // are zeroed) — so the tab can distinguish "stopped" from "no such container".
   bool running = 11;
+
+  // Fields 12-16 are ADDITIVE (contract stays V1). The per-project
+  // ContainerStats RPC leaves 12-13 empty because its caller already knows the
+  // project and asked by name; they exist for the HOST-WIDE StreamMetrics frame,
+  // which carries every project's containers at once and must be demuxable.
+
+  // The deplo.project label (an App id, prj_*, or a Database id) this container
+  // belongs to — the demux key for the host-wide stream. Identity comes from the
+  // LABEL, never from parsing the container name: name-mangling is how Dokploy
+  // collapses every sibling Compose container of an App into one series.
+  string project_id = 12;
+  // The full 64-hex Docker id. Stable for a container's lifetime and CHANGES on
+  // recreation, which is exactly what the rate calculator needs in order to drop
+  // a stale previous sample instead of emitting a bogus negative delta.
+  string container_id = 13;
+
+  // Fields 14-16 mirror ConsoleInstance's state/health/restart_count field-for-
+  // field so the control plane maps them with no translation. They ride the
+  // metrics frame because the sampler already visits every container each tick,
+  // which lets live status stop polling ListInstances per App. `running` alone
+  // cannot tell a container docker is CRASH-LOOPING from one cleanly stopped —
+  // both are "not running" — which is how an app in a restart loop got reported
+  // as Online.
+
+  // Raw docker state: "running" | "restarting" | "exited" | "created" |
+  // "paused" | "dead" | "removing". Empty from an agent too old to send it.
+  string state = 14;
+  // Healthcheck verdict when the image defines one: "healthy" | "unhealthy" |
+  // "starting". Empty when the container has no healthcheck (the common case) —
+  // NOT a synonym for healthy.
+  string health = 15;
+  // How many times docker has restarted this container. The number that turns
+  // "it is starting" into "it has been dying for an hour".
+  int32 restart_count = 16;
 }
 
 message ContainerStatsResponse {
   repeated ContainerStat stats = 1;
+}
+
+// ---------------------------------------------------------------------------
+// StreamMetrics — one long-lived telemetry stream per host
+// ---------------------------------------------------------------------------
+//
+// Appended at the END of the file for the same reason ContainerStats was: the
+// wire is identical wherever they sit, but keeping additions last leaves the
+// committed *.pb.go / agent.ts diff purely additive.
+
+message MetricsStreamRequest {
+  // The path whose filesystem to measure for disk usage (the agent's data dir).
+  // Empty => the agent's own --data-dir, exactly like MetricsRequest.
+  string data_dir = 1;
+  // Sampling cadence. 0 => the agent's default (5000). The agent CLAMPS this to
+  // [1000, 60000]: a cadence is a HINT, never a way for a caller to pin the host
+  // by asking for 10ms samples.
+  int32 interval_ms = 2;
+  // False => host metrics only. No container roster, no `docker ps`, no stats —
+  // for a caller that only wants the host gauge.
+  bool include_containers = 3;
+}
+
+// One tick. `host` is always present; `containers` is empty unless the request
+// asked for them (or nothing Deplo-managed is running on this host).
+message MetricsSample {
+  HostMetrics host = 1;
+  repeated ContainerStat containers = 2;
+  // The AGENT's clock at sample time. The control plane stamps its OWN receive
+  // time into the ring buffer — clock skew between hosts must never move a point
+  // on a chart — but this makes agent-side sampling gaps diagnosable after the
+  // fact, which a receive timestamp alone cannot do.
+  int64 sampled_at_unix_ms = 3;
+  // Which backend produced this frame: "cgroup2" | "docker-stats". Diagnostic
+  // only — the numbers mean the same thing either way. It lets the control plane
+  // surface "this host is on the slow path" (~18x the CPU cost) without a second
+  // RPC, and makes an automatic demotion visible instead of silent.
+  string source = 4;
 }

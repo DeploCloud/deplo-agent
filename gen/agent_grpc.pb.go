@@ -56,6 +56,7 @@ const (
 	Agent_Hello_FullMethodName              = "/deplo.agent.v1.Agent/Hello"
 	Agent_Metrics_FullMethodName            = "/deplo.agent.v1.Agent/Metrics"
 	Agent_ContainerStats_FullMethodName     = "/deplo.agent.v1.Agent/ContainerStats"
+	Agent_StreamMetrics_FullMethodName      = "/deplo.agent.v1.Agent/StreamMetrics"
 	Agent_Deploy_FullMethodName             = "/deplo.agent.v1.Agent/Deploy"
 	Agent_ReattachDeploy_FullMethodName     = "/deplo.agent.v1.Agent/ReattachDeploy"
 	Agent_StopStack_FullMethodName          = "/deplo.agent.v1.Agent/StopStack"
@@ -118,6 +119,25 @@ type AgentClient interface {
 	// container RPCs, so a container name off the wire can never stat a sibling
 	// project's container. ADDITIVE: gated by the "container-stats" capability.
 	ContainerStats(ctx context.Context, in *ContainerStatsRequest, opts ...grpc.CallOption) (*ContainerStatsResponse, error)
+	// ONE long-lived stream carrying this host's metrics AND every Deplo-managed
+	// container's stats, sampled on the AGENT's own ticker. Replaces the
+	// per-viewer, per-resource Metrics/ContainerStats poll: the control plane
+	// opens exactly one of these per server and demuxes frames into its RAM ring
+	// buffer, so telemetry cost is O(hosts) — independent of how many containers
+	// run there and how many people are looking.
+	//
+	// The agent is still a pure gRPC SERVER: the control plane dials and the agent
+	// streams, exactly like FollowLogs. There is no agent->control-plane channel.
+	//
+	// Container scoping is by the deplo.managed=true label, NEVER an empty filter
+	// (which would enumerate every container on the host, including ones Deplo
+	// does not own). Each stat carries its deplo.project label so the control
+	// plane demuxes to an App / Database without a second lookup.
+	//
+	// ADDITIVE: gated by the "metrics-stream" capability. An agent without it
+	// keeps serving the unary Metrics / ContainerStats poll unchanged, and the
+	// control plane falls back to polling that ONE server.
+	StreamMetrics(ctx context.Context, in *MetricsStreamRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[MetricsSample], error)
 	// Deploy lifecycle. Server-streaming so build/run logs flow live, in one
 	// connection, into the control plane's existing per-deployment log + status
 	// writes (which republish over the GraphQL SSE subscriptions unchanged).
@@ -393,9 +413,28 @@ func (c *agentClient) ContainerStats(ctx context.Context, in *ContainerStatsRequ
 	return out, nil
 }
 
+func (c *agentClient) StreamMetrics(ctx context.Context, in *MetricsStreamRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[MetricsSample], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[0], Agent_StreamMetrics_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[MetricsStreamRequest, MetricsSample]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Agent_StreamMetricsClient = grpc.ServerStreamingClient[MetricsSample]
+
 func (c *agentClient) Deploy(ctx context.Context, in *DeployRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[DeployEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[0], Agent_Deploy_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[1], Agent_Deploy_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -414,7 +453,7 @@ type Agent_DeployClient = grpc.ServerStreamingClient[DeployEvent]
 
 func (c *agentClient) ReattachDeploy(ctx context.Context, in *ReattachRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[DeployEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[1], Agent_ReattachDeploy_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[2], Agent_ReattachDeploy_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -473,7 +512,7 @@ func (c *agentClient) Reroute(ctx context.Context, in *RerouteRequest, opts ...g
 
 func (c *agentClient) ExportVolume(ctx context.Context, in *ExportVolumeRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[VolumeChunk], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[2], Agent_ExportVolume_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[3], Agent_ExportVolume_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -492,7 +531,7 @@ type Agent_ExportVolumeClient = grpc.ServerStreamingClient[VolumeChunk]
 
 func (c *agentClient) ImportVolume(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[VolumeChunk, StackResult], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[3], Agent_ImportVolume_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[4], Agent_ImportVolume_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -505,7 +544,7 @@ type Agent_ImportVolumeClient = grpc.ClientStreamingClient[VolumeChunk, StackRes
 
 func (c *agentClient) ExportFiles(ctx context.Context, in *ExportFilesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[FilesChunk], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[4], Agent_ExportFiles_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[5], Agent_ExportFiles_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -524,7 +563,7 @@ type Agent_ExportFilesClient = grpc.ServerStreamingClient[FilesChunk]
 
 func (c *agentClient) ImportFiles(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[FilesChunk, StackResult], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[5], Agent_ImportFiles_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[6], Agent_ImportFiles_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -587,7 +626,7 @@ func (c *agentClient) SelfUpdate(ctx context.Context, in *SelfUpdateRequest, opt
 
 func (c *agentClient) Backup(ctx context.Context, in *BackupRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[BackupEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[6], Agent_Backup_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[7], Agent_Backup_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -606,7 +645,7 @@ type Agent_BackupClient = grpc.ServerStreamingClient[BackupEvent]
 
 func (c *agentClient) Restore(ctx context.Context, in *RestoreRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RestoreEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[7], Agent_Restore_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[8], Agent_Restore_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -645,7 +684,7 @@ func (c *agentClient) S3Delete(ctx context.Context, in *S3DeleteRequest, opts ..
 
 func (c *agentClient) FollowLogs(ctx context.Context, in *FollowLogsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LogChunk], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[8], Agent_FollowLogs_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[9], Agent_FollowLogs_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -664,7 +703,7 @@ type Agent_FollowLogsClient = grpc.ServerStreamingClient[LogChunk]
 
 func (c *agentClient) Attach(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AttachInput, AttachOutput], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[9], Agent_Attach_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[10], Agent_Attach_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -787,7 +826,7 @@ func (c *agentClient) FilesExist(ctx context.Context, in *FilesExistRequest, opt
 
 func (c *agentClient) StartDev(ctx context.Context, in *StartDevRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[DeployEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[10], Agent_StartDev_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[11], Agent_StartDev_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -816,7 +855,7 @@ func (c *agentClient) StopDev(ctx context.Context, in *StopDevRequest, opts ...g
 
 func (c *agentClient) ResetDevWorkspace(ctx context.Context, in *StartDevRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[DeployEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[11], Agent_ResetDevWorkspace_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[12], Agent_ResetDevWorkspace_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -921,6 +960,25 @@ type AgentServer interface {
 	// container RPCs, so a container name off the wire can never stat a sibling
 	// project's container. ADDITIVE: gated by the "container-stats" capability.
 	ContainerStats(context.Context, *ContainerStatsRequest) (*ContainerStatsResponse, error)
+	// ONE long-lived stream carrying this host's metrics AND every Deplo-managed
+	// container's stats, sampled on the AGENT's own ticker. Replaces the
+	// per-viewer, per-resource Metrics/ContainerStats poll: the control plane
+	// opens exactly one of these per server and demuxes frames into its RAM ring
+	// buffer, so telemetry cost is O(hosts) — independent of how many containers
+	// run there and how many people are looking.
+	//
+	// The agent is still a pure gRPC SERVER: the control plane dials and the agent
+	// streams, exactly like FollowLogs. There is no agent->control-plane channel.
+	//
+	// Container scoping is by the deplo.managed=true label, NEVER an empty filter
+	// (which would enumerate every container on the host, including ones Deplo
+	// does not own). Each stat carries its deplo.project label so the control
+	// plane demuxes to an App / Database without a second lookup.
+	//
+	// ADDITIVE: gated by the "metrics-stream" capability. An agent without it
+	// keeps serving the unary Metrics / ContainerStats poll unchanged, and the
+	// control plane falls back to polling that ONE server.
+	StreamMetrics(*MetricsStreamRequest, grpc.ServerStreamingServer[MetricsSample]) error
 	// Deploy lifecycle. Server-streaming so build/run logs flow live, in one
 	// connection, into the control plane's existing per-deployment log + status
 	// writes (which republish over the GraphQL SSE subscriptions unchanged).
@@ -1175,6 +1233,9 @@ func (UnimplementedAgentServer) Metrics(context.Context, *MetricsRequest) (*Host
 func (UnimplementedAgentServer) ContainerStats(context.Context, *ContainerStatsRequest) (*ContainerStatsResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ContainerStats not implemented")
 }
+func (UnimplementedAgentServer) StreamMetrics(*MetricsStreamRequest, grpc.ServerStreamingServer[MetricsSample]) error {
+	return status.Errorf(codes.Unimplemented, "method StreamMetrics not implemented")
+}
 func (UnimplementedAgentServer) Deploy(*DeployRequest, grpc.ServerStreamingServer[DeployEvent]) error {
 	return status.Errorf(codes.Unimplemented, "method Deploy not implemented")
 }
@@ -1375,6 +1436,17 @@ func _Agent_ContainerStats_Handler(srv interface{}, ctx context.Context, dec fun
 	}
 	return interceptor(ctx, in, info, handler)
 }
+
+func _Agent_StreamMetrics_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(MetricsStreamRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(AgentServer).StreamMetrics(m, &grpc.GenericServerStream[MetricsStreamRequest, MetricsSample]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Agent_StreamMetricsServer = grpc.ServerStreamingServer[MetricsSample]
 
 func _Agent_Deploy_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(DeployRequest)
@@ -2177,6 +2249,11 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "StreamMetrics",
+			Handler:       _Agent_StreamMetrics_Handler,
+			ServerStreams: true,
+		},
 		{
 			StreamName:    "Deploy",
 			Handler:       _Agent_Deploy_Handler,

@@ -24,9 +24,11 @@ import (
 	"net"
 	"os"
 	"strings"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/keepalive"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/bootstrap"
@@ -100,6 +102,34 @@ func main() {
 	// Build contexts and rendered compose can be large; lift the default 4MiB
 	// receive cap so an uploaded archive rides inside the Deploy request.
 	opts = append(opts, grpc.MaxRecvMsgSize(256*1024*1024))
+
+	// Keepalive, sized for the LONG-LIVED streams (StreamMetrics runs for the
+	// whole life of a control-plane process; FollowLogs and Attach for hours).
+	//
+	// EnforcementPolicy is the one that bites if you omit it: grpc-go's server
+	// default MinTime is FIVE MINUTES, and it answers anything more frequent with
+	// GOAWAY/ENHANCE_YOUR_CALM. The control plane pings every 30s, so without this
+	// the metrics stream would be torn down by our own server and present as
+	// mysterious network flakiness. 15s leaves headroom under that 30s.
+	//
+	// ServerParameters make the agent detect a control plane that died without
+	// closing (a hard kill, a severed NAT mapping). Without them a half-open
+	// connection would hold its stream — and the `docker events` child that
+	// StreamMetrics spawns — open until the OS eventually noticed, leaking a
+	// process per dead peer.
+	opts = append(opts,
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime: 15 * time.Second,
+			// The control plane only pings while a stream is open, and so should
+			// anyone else; a ping on a wholly idle connection is not something we
+			// need to permit.
+			PermitWithoutStream: false,
+		}),
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			Time:    30 * time.Second,
+			Timeout: 10 * time.Second,
+		}),
+	)
 
 	srv := grpc.NewServer(opts...)
 	pb.RegisterAgentServer(srv, server.New(*stackDir, *buildTmpDir, *dataDir, *dataBase))
