@@ -123,10 +123,12 @@ func buildSample(
 		sample.Source = source
 		running = containers.RunningCount()
 	}
-	// The running-container count comes from the roster, NOT from a fresh
-	// `docker ps -q` like the unary Metrics RPC does: that call costs ~190ms of
-	// dockerd CPU, which on a 5s ticker would cost more than every metric in this
-	// frame combined.
+	// The running-container count is the roster's CACHED host-wide figure, not a
+	// fresh `docker ps -q` like the unary Metrics RPC does: that call costs
+	// ~190ms of dockerd CPU, which on a 5s ticker would cost more than every
+	// metric in this frame combined. It is the UNFILTERED count on purpose —
+	// reporting only deplo.managed containers here would quietly change what this
+	// field means the moment a host's agent was updated.
 	sample.Host = hostMetricsPB(host.Sample(), running)
 	return sample
 }
@@ -251,6 +253,9 @@ func (cs *containerSampler) sourceName() string {
 	return sourceDockerStats
 }
 
-func (cs *containerSampler) RunningCount() int { return cs.ros.RunningCount() }
+// RunningCount is the HOST-WIDE running-container count for the frame's host
+// gauge — deliberately not the roster's label-scoped RunningCount(). See the
+// roster's hostRunning field.
+func (cs *containerSampler) RunningCount() int { return cs.ros.HostRunningCount() }
 
 func (cs *containerSampler) Close() { cs.ros.Close() }

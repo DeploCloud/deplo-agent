@@ -517,6 +517,16 @@ type fakeDocker struct {
 	inspErr  error
 	listHits int
 	inspHits int
+	// hostRunning is what an unfiltered `docker ps -q` would report — every
+	// container on the host, Deplo-managed or not. Defaults to 0 so a test that
+	// does not care about the host gauge is unaffected.
+	hostRunning int
+}
+
+func (f *fakeDocker) hostCount(context.Context) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.hostRunning
 }
 
 func (f *fakeDocker) list(context.Context) ([]rosterPsRow, error) {
@@ -559,6 +569,10 @@ func newFakeRoster(t *testing.T) (*roster, *fakeDocker) {
 	r.backstop = time.Hour // off unless a test opts in
 	r.listFn = f.list
 	r.inspectFn = f.inspect
+	// Stubbed so a rebuild never shells out to a real `docker ps -q`. Left
+	// unstubbed these tests would silently depend on a live daemon AND report
+	// whatever that machine happened to be running.
+	r.hostCountFn = f.hostCount
 	r.watchFn = func(ctx context.Context) { <-ctx.Done() } // no `docker events` child
 	return r, f
 }
@@ -928,5 +942,60 @@ func TestMarkDirtyCoalescesWithoutBlocking(t *testing.T) {
 	}
 	if got := len(r.dirty); got != 1 {
 		t.Fatalf("1000 events left %d tokens, want exactly 1", got)
+	}
+}
+
+// The host gauge must count EVERY running container on the host, while the
+// roster's own RunningCount stays scoped to deplo.managed ones. They are
+// different numbers on any host running Traefik or anything the platform did not
+// create, and HostMetrics.running_containers is the unfiltered one — the unary
+// Metrics RPC has always reported it that way.
+//
+// This was found by running the stream against a live host: the unary RPC said 3
+// and the stream said 2, so updating an agent would have made the dashboard's
+// container count drop with no explanation an operator could act on.
+func TestRosterHostCountIsUnfilteredWhileRunningCountIsScoped(t *testing.T) {
+	r, f := newFakeRoster(t)
+	seedOneApp(f)
+	f.set(func(f *fakeDocker) { f.hostRunning = 7 }) // 1 managed + Traefik + 5 others
+
+	r.start(context.Background())
+	defer r.Close()
+
+	if got := r.RunningCount(); got != 1 {
+		t.Errorf("RunningCount() = %d, want 1 (deplo.managed only)", got)
+	}
+	if got := r.HostRunningCount(); got != 7 {
+		t.Errorf("HostRunningCount() = %d, want 7 (every container on the host)", got)
+	}
+}
+
+// A failed `docker ps -q` reports 0, which is indistinguishable from a genuinely
+// empty host. Publishing that zero would show "0 containers" on a machine plainly
+// running some, so the last known figure is kept instead — the same discipline
+// the rest of the rebuild applies to a failed listing.
+func TestRosterHostCountKeepsLastKnownOnFailure(t *testing.T) {
+	r, f := newFakeRoster(t)
+	seedOneApp(f)
+	f.set(func(f *fakeDocker) { f.hostRunning = 4 })
+
+	r.start(context.Background())
+	defer r.Close()
+
+	if got := r.HostRunningCount(); got != 4 {
+		t.Fatalf("precondition: HostRunningCount() = %d, want 4", got)
+	}
+
+	// The count read now fails (RunningContainers swallows the error and yields 0).
+	f.set(func(f *fakeDocker) { f.hostRunning = 0 })
+	r.markDirty()
+	waitFor(t, "a rebuild after the failing count", func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.listHits >= 2
+	})
+
+	if got := r.HostRunningCount(); got != 4 {
+		t.Errorf("HostRunningCount() = %d after a failed count, want the last known 4", got)
 	}
 }

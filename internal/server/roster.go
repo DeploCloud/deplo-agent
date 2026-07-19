@@ -139,10 +139,27 @@ type roster struct {
 	// without a docker daemon. That half is where the failure modes are (a lost
 	// dirty token, a leaked child, a rebuild storm), and a test that needs a live
 	// dockerd to exercise it would never run on the machine where it broke.
-	listFn    func(context.Context) ([]rosterPsRow, error)
-	inspectFn func(context.Context, []string) (map[string]rosterDetail, error)
-	rebuildFn func(context.Context)
-	watchFn   func(context.Context)
+	listFn      func(context.Context) ([]rosterPsRow, error)
+	inspectFn   func(context.Context, []string) (map[string]rosterDetail, error)
+	hostCountFn func(context.Context) int
+	rebuildFn   func(context.Context)
+	watchFn     func(context.Context)
+
+	// hostRunning is EVERY running container on the host, not just the
+	// deplo.managed ones in `entries`.
+	//
+	// It exists because HostMetrics.running_containers must not change meaning
+	// depending on which RPC served it. The unary Metrics RPC reports an
+	// unfiltered `docker ps -q`; if the stream reported the label-scoped count
+	// instead, updating an agent would silently drop Traefik and every
+	// unmanaged container out of the host gauge — a number falling on the
+	// dashboard for no reason the operator could see. Caught by running the
+	// stream against a real host: unary said 3, the stream said 2.
+	//
+	// Refreshed on the same churn-driven rebuild as everything else, so it costs
+	// one extra `docker ps` per container event rather than one per tick — and
+	// container start/stop IS a rebuild trigger, so it cannot go stale.
+	hostRunning int
 
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
@@ -176,6 +193,7 @@ func newRosterDefaults() *roster {
 	}
 	r.listFn = listManagedContainers
 	r.inspectFn = inspectRosterContainers
+	r.hostCountFn = dockercli.RunningContainers
 	r.rebuildFn = r.rebuild
 	r.watchFn = r.watchEvents
 	return r
@@ -242,6 +260,16 @@ func (r *roster) RunningCount() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return countRunning(r.entries)
+}
+
+// HostRunningCount reports EVERY running container on the host, matching what
+// the unary Metrics RPC puts in the same field. Use this — not RunningCount —
+// for HostMetrics.running_containers; see the hostRunning field for why the two
+// must not be confused.
+func (r *roster) HostRunningCount() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.hostRunning
 }
 
 // cachedCgroup exposes the cgroup cache under the lock. Only tests read it, and
@@ -520,11 +548,19 @@ func (r *roster) rebuild(ctx context.Context) {
 	for _, e := range entries {
 		ids2[e.ID] = struct{}{}
 	}
+	// Unfiltered host count, taken outside the lock like everything else here.
+	hostRunning := r.hostCountFn(ctx)
 
 	r.mu.Lock()
 	r.entries = entries
 	r.ids = ids2
 	r.cgroups = cgroups // rebuilt from the live set, so destroyed ids drop out
+	// A zero here means the `docker ps` failed (RunningContainers swallows the
+	// error), and reporting 0 running containers on a host that plainly has some
+	// is worse than reporting the last known figure — keep the previous value.
+	if hostRunning > 0 {
+		r.hostRunning = hostRunning
+	}
 	r.mu.Unlock()
 }
 
