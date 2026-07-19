@@ -43,6 +43,12 @@ var Capabilities = []string{
 	"deploy.buildenv",   // req.env reaches BUILDS too (build args / plan secrets), not just the runtime stack
 	"metrics",
 	"container-stats", // per-container `docker stats` snapshot (ContainerStats) — the per-app/per-database Monitoring tab
+	// ONE long-lived host+container telemetry stream (StreamMetrics), sampled on
+	// the agent's own ticker. Supersedes polling `metrics` + `container-stats`
+	// per viewer per resource: with it the control plane holds a single stream
+	// per host, so telemetry cost stops scaling with container and viewer count.
+	// Both unary RPCs stay for agents (and control planes) without it.
+	"metrics-stream",
 	"dev",         // dev container lifecycle (StartDev/StopDev/Reset/Teardown) — Part D
 	"ssh-gateway", // the per-host SSH gateway singleton (Ensure/Provision/Deprovision)
 	"tunnel",      // the VS Code remote tunnel (Start/Get/Stop)
@@ -57,11 +63,13 @@ var Capabilities = []string{
 }
 
 // AgentVersion is the version this agent reports over Hello. It is stamped at
-// build time via -ldflags from agent/version.json — the SINGLE SOURCE the control
-// plane also reads (lib/version.ts EXPECTED_AGENT_VERSION), so the binary's version
-// and the control plane's notion of "latest" can't drift. "dev" for a build that
-// skipped the stamp (e.g. a bare `go build`), which the control plane treats as
-// "can't compare", never "outdated".
+// build time via -ldflags from the GIT TAG — see the Makefile's `git describe`
+// (and release.yml, which stamps from the pushed tag directly). That tag is also
+// what the control plane resolves as "latest" from this repo's GitHub releases
+// (lib/agent/release.ts in IdraDev/deplo), so the binary's version and the
+// control plane's notion of latest cannot drift. "dev" for a build that skipped
+// the stamp (e.g. a bare `go build`), which the control plane treats as "can't
+// compare", never "outdated".
 var AgentVersion = "dev"
 
 // retainFinished is how long a finished deploy's event buffer is kept so a
@@ -135,6 +143,17 @@ func (s *Service) Metrics(ctx context.Context, req *pb.MetricsRequest) (*pb.Host
 		dataDir = s.dataDir
 	}
 	m := hostmetrics.Collect(dataDir)
+	// `docker ps -q` per call is affordable here (one unary RPC, on demand) but
+	// NOT on the stream's ticker — StreamMetrics takes the count from its roster,
+	// which is rebuilt on container churn rather than every 5s. See roster.go.
+	return hostMetricsPB(m, dockercli.RunningContainers(ctx)), nil
+}
+
+// hostMetricsPB maps a hostmetrics.Metrics onto the wire type. Extracted so the
+// unary Metrics RPC and the StreamMetrics ticker cannot drift into reporting the
+// same host two different ways — the two paths differ ONLY in how they obtain the
+// running-container count and whether the sample slept for its window.
+func hostMetricsPB(m hostmetrics.Metrics, runningContainers int) *pb.HostMetrics {
 	return &pb.HostMetrics{
 		Cpu:               m.CPU,
 		CpuCores:          int32(m.CPUCores),
@@ -150,8 +169,8 @@ func (s *Service) Metrics(ctx context.Context, req *pb.MetricsRequest) (*pb.Host
 		Load5:             m.Load5,
 		Load15:            m.Load15,
 		UptimeSec:         m.UptimeSec,
-		RunningContainers: int32(dockercli.RunningContainers(ctx)),
-	}, nil
+		RunningContainers: int32(runningContainers),
+	}
 }
 
 // Deploy runs a deployment and streams its events. The stream is the live build
