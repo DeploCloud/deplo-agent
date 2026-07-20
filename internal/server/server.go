@@ -8,6 +8,7 @@ package server
 
 import (
 	"context"
+	"crypto/ed25519"
 	"fmt"
 	"net"
 	"os"
@@ -60,6 +61,11 @@ var Capabilities = []string{
 	// Allow-listed Docker disk reclaim (DockerCleanup): build cache, dangling
 	// images, orphaned buildkit volumes, unused app images. NEVER a bare prune.
 	"docker-cleanup",
+	// mTLS leaf renewal over the existing pinned channel (RenewalCSR +
+	// InstallRenewedCert): the control plane re-signs a fresh CSR before the
+	// ~365d cert expires and the agent hot-reloads it WITHOUT a restart. An agent
+	// without this capability keeps its old behavior (the operator re-bootstraps).
+	"cert-renewal",
 }
 
 // AgentVersion is the version this agent reports over Hello. It is stamped at
@@ -96,6 +102,13 @@ type Service struct {
 
 	mu      sync.Mutex
 	deploys map[string]*inflight
+
+	// mTLS leaf renewal (nil for --insecure / tests). certMgr hot-swaps the live
+	// server cert; pendingKey is the freshly-generated key from a RenewalCSR,
+	// held until the matching signed cert arrives via InstallRenewedCert.
+	certMgr    *CertManager
+	pendingMu  sync.Mutex
+	pendingKey ed25519.PrivateKey
 }
 
 // New builds the service. stackDir/buildTmpDir are created lazily by the deploy

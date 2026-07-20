@@ -17,10 +17,7 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"flag"
-	"fmt"
 	"log"
 	"net"
 	"os"
@@ -93,12 +90,16 @@ func main() {
 	}
 
 	var opts []grpc.ServerOption
+	var certMgr *server.CertManager
 	if !*insecure {
-		creds, err := loadMTLS(cert, key, ca)
+		cm, err := server.NewCertManager(cert, key, ca)
 		if err != nil {
 			log.Fatalf("deplo-agent: mTLS setup: %v", err)
 		}
-		opts = append(opts, grpc.Creds(creds))
+		certMgr = cm
+		// The TLS config reads the CURRENT materials per handshake, so an
+		// InstallRenewedCert hot-swaps the leaf without restarting the listener.
+		opts = append(opts, grpc.Creds(credentials.NewTLS(cm.ServerTLSConfig())))
 	} else {
 		log.Printf("deplo-agent: WARNING serving WITHOUT mTLS (--insecure)")
 	}
@@ -135,7 +136,11 @@ func main() {
 	)
 
 	srv := grpc.NewServer(opts...)
-	pb.RegisterAgentServer(srv, server.New(*stackDir, *buildTmpDir, *dataDir, *dataBase))
+	svc := server.New(*stackDir, *buildTmpDir, *dataDir, *dataBase)
+	if certMgr != nil {
+		svc.EnableCertRenewal(certMgr) // makes RenewalCSR / InstallRenewedCert live
+	}
+	pb.RegisterAgentServer(srv, svc)
 
 	lis, err := net.Listen("tcp", *addr)
 	if err != nil {
@@ -170,32 +175,11 @@ func main() {
 	}
 }
 
-// loadMTLS builds server transport credentials that present the agent's cert
-// and REQUIRE a CA-signed client cert (the control plane). A peer that cannot
-// present such a cert never completes the handshake.
-func loadMTLS(certFile, keyFile, caFile string) (credentials.TransportCredentials, error) {
-	if certFile == "" || keyFile == "" || caFile == "" {
-		return nil, fmt.Errorf("cert, key and ca are all required for mTLS (or pass --insecure for local tests)")
-	}
-	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-	if err != nil {
-		return nil, fmt.Errorf("load keypair: %w", err)
-	}
-	caPem, err := os.ReadFile(caFile)
-	if err != nil {
-		return nil, fmt.Errorf("read ca: %w", err)
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(caPem) {
-		return nil, fmt.Errorf("ca file %q contained no certificates", caFile)
-	}
-	return credentials.NewTLS(&tls.Config{
-		Certificates: []tls.Certificate{cert},
-		ClientAuth:   tls.RequireAndVerifyClientCert,
-		ClientCAs:    pool,
-		MinVersion:   tls.VersionTLS12,
-	}), nil
-}
+// mTLS transport credentials are built from a server.CertManager (see the
+// serve block above), which reads the CURRENT materials on every handshake so a
+// renewed leaf hot-swaps without a restart. It still REQUIRES a CA-signed client
+// cert (the control plane); a peer that cannot present one never completes the
+// handshake.
 
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {

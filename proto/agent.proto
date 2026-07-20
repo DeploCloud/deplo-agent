@@ -383,6 +383,43 @@ service Agent {
   rpc GetTunnel(TunnelRequest) returns (TunnelStatus);
   // Stop the tunnel process (the CLI download + auth token are kept).
   rpc StopTunnel(TunnelRequest) returns (StackResult);
+
+  // ---- CERT RENEWAL: the agent's mTLS leaf is minted once at bootstrap (~365d).
+  // Before it expires the control plane — still authenticated by the CURRENT
+  // valid cert over this same mTLS channel — drives a renewal: it asks the agent
+  // for a fresh CSR (a NEW keypair whose private key never leaves the host), signs
+  // it with the CA, and hands back the new leaf, which the agent installs and
+  // hot-reloads WITHOUT a restart. A failed renewal is a no-op — the current cert
+  // stays valid until expiry — so a renewal bug can never black out the fleet.
+  // Gated behind the "cert-renewal" Hello capability. ----
+
+  // Generate a fresh keypair + CSR for renewal; the new private key is held
+  // PENDING on the host (never sent) until InstallRenewedCert confirms the match.
+  rpc RenewalCSR(RenewalCSRRequest) returns (RenewalCSRResponse);
+  // Install the CA-signed leaf produced from the last RenewalCSR: the agent
+  // verifies the cert matches the pending key, atomically swaps cert+key on disk,
+  // and hot-reloads its TLS config so new handshakes present the fresh cert.
+  rpc InstallRenewedCert(InstallRenewedCertRequest) returns (StackResult);
+}
+
+// ---------------------------------------------------------------------------
+// Cert renewal
+// ---------------------------------------------------------------------------
+
+message RenewalCSRRequest {}
+
+message RenewalCSRResponse {
+  // PEM-encoded PKCS#10 CSR for a freshly generated keypair. The matching private
+  // key is held PENDING on the agent and never leaves the host.
+  string csr_pem = 1;
+}
+
+message InstallRenewedCertRequest {
+  // The CA-signed leaf certificate (PEM) produced from the last RenewalCSR's CSR.
+  string cert_pem = 1;
+  // The CA certificate (PEM); the agent refreshes its trust pool too if non-empty.
+  // Empty ⇒ keep the existing CA (the common case — only the leaf rotates).
+  string ca_pem = 2;
 }
 
 // ---------------------------------------------------------------------------
