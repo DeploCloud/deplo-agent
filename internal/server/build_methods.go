@@ -92,6 +92,37 @@ func (s *Service) relabel(ctx context.Context, req *pb.DeployRequest, e *emitter
 	return true
 }
 
+// reservedBuildEnvKeys names a user build-arg must NEVER supply: each one, once
+// present in the build process's environment, redirects or hijacks the ROOT-
+// PRIVILEGED build tooling instead of configuring the app being built. DOCKER_HOST
+// / BUILDKIT_HOST point docker / buildkit at an attacker's daemon;
+// DOCKER_CONFIG / DOCKER_CONTEXT / DOCKER_CERT_PATH / DOCKER_TLS_VERIFY swap its
+// endpoint or credentials; PATH / LD_PRELOAD / LD_LIBRARY_PATH hijack the dynamic
+// linker to run attacker code inside the agent's build. Build-env VALUES ride the
+// spawned client's process env (envKV → StreamEnv / SpawnEnv / StreamOut), so a
+// user var named like one of these would otherwise land there verbatim. Matched
+// case-sensitively — these tools read the exact uppercase names, so an ordinary
+// lowercase app var is unaffected.
+var reservedBuildEnvKeys = map[string]bool{
+	"DOCKER_HOST":       true,
+	"DOCKER_CONFIG":     true,
+	"DOCKER_CONTEXT":    true,
+	"DOCKER_CERT_PATH":  true,
+	"DOCKER_TLS_VERIFY": true,
+	"BUILDKIT_HOST":     true,
+	"LD_PRELOAD":        true,
+	"LD_LIBRARY_PATH":   true,
+	"PATH":              true,
+}
+
+// dropReservedBuildEnv removes reservedBuildEnvKeys from a build-env key list so a
+// user-supplied var can never reach the privileged build process's environment
+// (envKV → cmd.Env) and hijack the build. Ordinary app build-args are untouched;
+// order is preserved. Every heavy builder funnels buildEnvKeys through this.
+func dropReservedBuildEnv(keys []string) []string {
+	return filterKeys(keys, func(k string) bool { return !reservedBuildEnvKeys[k] })
+}
+
 // ---------------------------------------------------------------------------
 // static (nginx) — ports builders.ts buildStatic
 // ---------------------------------------------------------------------------
@@ -123,7 +154,7 @@ func (s *Service) buildStatic(ctx context.Context, req *pb.DeployRequest, buildD
 	// var as ARG+ENV so the install/build commands see them (a static site's env
 	// is build-time by definition — there is no runtime to inject into). Values
 	// arrive via bare `--build-arg KEY` + the docker client's process env.
-	envKeys := buildEnvKeys(req.GetEnv())
+	envKeys := dropReservedBuildEnv(buildEnvKeys(req.GetEnv()))
 	var dockerfile string
 	if buildCmd != "" {
 		// Two-stage: install + build with Node, then serve the output with nginx.
@@ -222,7 +253,7 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 	// Build-time env (build_env.go). PORT and NIXPACKS_* stay excluded: the prep
 	// pins those itself below (spec-derived), and a user var must not silently
 	// fight the explicit build settings.
-	envKeys := filterKeys(buildEnvKeys(req.GetEnv()), func(k string) bool {
+	envKeys := filterKeys(dropReservedBuildEnv(buildEnvKeys(req.GetEnv())), func(k string) bool {
 		return k != "PORT" && !strings.HasPrefix(k, "NIXPACKS_")
 	})
 	// Phase 1: generate .nixpacks/Dockerfile WITHOUT the daemon (host binary).
@@ -374,7 +405,7 @@ func (s *Service) buildBuildpacks(ctx context.Context, req *pb.DeployRequest, bu
 	// pack container's — so each key rides in twice: `-e KEY` on the docker run
 	// (docker copies the value from the client's process env, via StreamEnv) and
 	// `--env KEY` on pack. Values never touch argv (this command line is logged).
-	envKeys := filterKeys(buildEnvKeys(req.GetEnv()), func(k string) bool { return k != "PORT" })
+	envKeys := filterKeys(dropReservedBuildEnv(buildEnvKeys(req.GetEnv())), func(k string) bool { return k != "PORT" })
 	args := []string{
 		"run", "--rm",
 		"-v", "/var/run/docker.sock:/var/run/docker.sock",
@@ -502,7 +533,7 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 	// a user var must not silently fight the explicit build settings. Keys are
 	// identifier-shaped by construction (buildEnvKeys), so embedding them in the
 	// `bash -lc` string below cannot break out of it.
-	envKeys := filterKeys(buildEnvKeys(req.GetEnv()), func(k string) bool {
+	envKeys := filterKeys(dropReservedBuildEnv(buildEnvKeys(req.GetEnv())), func(k string) bool {
 		return !strings.HasPrefix(k, "RAILPACK_")
 	})
 	prepareCmd := "apt-get update -qq && apt-get install -y -qq curl ca-certificates tar && curl -sSL https://railpack.com/install.sh | bash && railpack prepare /app --env RAILPACK_NODE_VERSION --env RAILPACK_BUILD_CMD --env RAILPACK_START_CMD"

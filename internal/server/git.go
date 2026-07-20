@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net/url"
 	"os"
@@ -18,9 +19,9 @@ import (
 // repo ITSELF with a short-lived token the control plane minted, so a remote
 // build never ships the whole repo over the wire. It returns the build dir
 // (the clone root, or a sub-directory of it), the resolved commit sha, and a
-// cleanup func. The token is injected into the URL only if the URL does not
-// already carry one (a GitHub App URL arrives pre-authenticated), and is NEVER
-// logged — the emitted command line is sanitised.
+// cleanup func. The token NEVER rides the clone URL on argv (that would land in
+// the world-readable /proc/<pid>/cmdline); it is carried as an out-of-band
+// http.extraHeader, and is NEVER logged — the emitted command line is sanitised.
 func (s *Service) materializeGit(
 	ctx context.Context,
 	g *pb.GitSource,
@@ -36,7 +37,7 @@ func (s *Service) materializeGit(
 	}
 	cleanup = func() { _ = os.RemoveAll(dir) }
 
-	cloneURL, display := authenticatedURL(g.GetUrl(), g.GetToken())
+	cloneURL, display, authHeader := authenticatedURL(g.GetUrl(), g.GetToken())
 
 	// Clone shallowly at the requested branch. A shallow single-branch clone is
 	// the smallest fetch that still yields a working tree + the tip commit sha.
@@ -53,7 +54,7 @@ func (s *Service) materializeGit(
 	}
 	e.log("command", "git clone "+display+branchNote)
 
-	if err := runGit(ctx, e, "", args...); err != nil {
+	if err := runGit(ctx, e, "", authHeader, args...); err != nil {
 		cleanup()
 		return "", "", func() {}, err
 	}
@@ -85,39 +86,51 @@ func (s *Service) materializeGit(
 	return buildDir, commitSha, cleanup, nil
 }
 
-// authenticatedURL returns (cloneURL, displayURL). If the URL already carries
-// credentials (a GitHub App x-access-token URL from the control plane), it is
-// used as-is. Otherwise, when a token is supplied, it is injected as the
-// x-access-token userinfo. The display URL always has credentials stripped so a
-// token never reaches a log line.
-func authenticatedURL(raw, token string) (cloneURL, display string) {
+// authenticatedURL returns (cloneURL, display, authHeader). Credentials are
+// NEVER placed on the clone URL — a URL on argv lands in /proc/<pid>/cmdline,
+// which is world-readable, so the token would leak. Instead, when the URL
+// carries userinfo (a GitHub-App x-access-token URL from the control plane) or a
+// bare token is supplied, the credential is returned as an
+// "Authorization: Basic <b64>" header value the caller injects out-of-band (git
+// http.extraHeader via env), and the clone URL is stripped of any userinfo. The
+// display URL likewise never carries credentials.
+func authenticatedURL(raw, token string) (cloneURL, display, authHeader string) {
 	u, err := url.Parse(raw)
 	if err != nil {
-		// Not a parseable URL (e.g. scp-like git@host:repo) — pass through, and
-		// display as-is (no userinfo to leak in that form).
-		return raw, raw
+		// Not a parseable URL (e.g. scp-like git@host:repo) — pass through. Such
+		// forms carry no HTTP userinfo and authenticate over ssh, so no secret
+		// reaches argv.
+		return raw, raw, ""
 	}
-	// Strip any credentials for display.
-	disp := *u
-	disp.User = nil
-	display = disp.String()
+	// Strip any credentials from both the clone URL and the display URL.
+	user := u.User
+	u.User = nil
+	cloneURL = u.String()
+	display = cloneURL
 
-	if u.User != nil && u.User.Username() != "" {
-		// Already authenticated — keep it.
-		return raw, display
+	if user != nil && user.Username() != "" {
+		// Pre-authenticated URL: lift the existing creds off the URL into a header.
+		pass, _ := user.Password()
+		return cloneURL, display, basicAuthHeader(user.Username(), pass)
 	}
 	if strings.TrimSpace(token) != "" {
-		u.User = url.UserPassword("x-access-token", token)
-		return u.String(), display
+		return cloneURL, display, basicAuthHeader("x-access-token", token)
 	}
-	return raw, display
+	return cloneURL, display, ""
+}
+
+// basicAuthHeader builds the "Authorization: Basic <b64>" header line for git's
+// http.extraHeader, matching git's own userinfo scheme (base64 of "user:pass").
+func basicAuthHeader(user, pass string) string {
+	return "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass))
 }
 
 // runGit runs a git command, streaming combined output line-by-line as info
-// logs (so the operator sees clone progress). Token-bearing URLs are passed only
-// in argv, never echoed (the caller logs a sanitised line). dir="" runs in the
-// process cwd (used for the clone itself, whose target is an arg).
-func runGit(ctx context.Context, e *emitter, dir string, args ...string) error {
+// logs (so the operator sees clone progress). Any credential is supplied via
+// authHeader (an http.extraHeader line) through git's env-based config, so it
+// never appears on argv. dir="" runs in the process cwd (used for the clone
+// itself, whose target is an arg).
+func runGit(ctx context.Context, e *emitter, dir, authHeader string, args ...string) error {
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, "git", args...)
@@ -127,6 +140,16 @@ func runGit(ctx context.Context, e *emitter, dir string, args ...string) error {
 	// GIT_TERMINAL_PROMPT=0: never block on an interactive credential prompt (a
 	// bad/expired token must fail fast, not hang the deploy).
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if strings.TrimSpace(authHeader) != "" {
+		// Inject the credential as an http.extraHeader through git's env-based
+		// config (GIT_CONFIG_COUNT/KEY/VALUE) so it authenticates the request
+		// WITHOUT ever appearing on argv / in the world-readable /proc/<pid>/cmdline.
+		cmd.Env = append(cmd.Env,
+			"GIT_CONFIG_COUNT=1",
+			"GIT_CONFIG_KEY_0=http.extraHeader",
+			"GIT_CONFIG_VALUE_0="+authHeader,
+		)
+	}
 	stdout, _ := cmd.StdoutPipe()
 	cmd.Stderr = cmd.Stdout // fold stderr into the same stream for ordered logs
 	if err := cmd.Start(); err != nil {

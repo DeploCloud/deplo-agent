@@ -14,6 +14,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"strings"
 
 	"github.com/minio/minio-go/v7"
@@ -30,6 +31,12 @@ type Config struct {
 	// PathStyle forces bucket-in-path addressing (MinIO + many S3-compatibles).
 	// AWS uses virtual-host style (PathStyle=false).
 	PathStyle bool
+	// AllowPrivateEndpoint opts OUT of the SSRF guard that rejects an endpoint
+	// resolving to a loopback / link-local / private (RFC1918 / ULA) address.
+	// Defaults to false (reject): the endpoint arrives off the wire and the agent
+	// dials it as root, so a value like 169.254.169.254 (cloud metadata) or
+	// 127.0.0.1 must not be reachable unless the destination explicitly opted in.
+	AllowPrivateEndpoint bool
 }
 
 // New builds a minio client for a destination. The endpoint may arrive with a
@@ -47,6 +54,9 @@ func New(cfg Config) (*minio.Client, error) {
 	if endpoint == "" {
 		return nil, fmt.Errorf("s3: empty endpoint")
 	}
+	if err := validateEndpointHost(endpoint, cfg.AllowPrivateEndpoint); err != nil {
+		return nil, err
+	}
 	return minio.New(endpoint, &minio.Options{
 		Creds:        credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
 		Secure:       secure,
@@ -60,6 +70,66 @@ func bucketLookup(pathStyle bool) minio.BucketLookupType {
 		return minio.BucketLookupPath
 	}
 	return minio.BucketLookupDNS
+}
+
+// validateEndpointHost is the SSRF guard for the S3 endpoint, which arrives off
+// the wire (user-controlled) and is dialed by the root agent. It resolves the
+// endpoint host and rejects any address in a loopback, unspecified, link-local
+// (incl. the cloud metadata address 169.254.169.254), or private (RFC1918 / ULA)
+// range — unless the destination explicitly opted in. A public IP, or a hostname
+// that resolves only to public addresses, passes (legitimate AWS S3 / R2 / public
+// MinIO endpoints keep working). `endpoint` is scheme-stripped host[:port].
+func validateEndpointHost(endpoint string, allowPrivate bool) error {
+	if allowPrivate {
+		return nil
+	}
+	// Isolate host[:port] from any stray path, then drop the port.
+	host := endpoint
+	if i := strings.IndexByte(host, '/'); i >= 0 {
+		host = host[:i]
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return fmt.Errorf("s3: empty endpoint host")
+	}
+
+	var ips []net.IP
+	if ip := net.ParseIP(host); ip != nil {
+		ips = []net.IP{ip}
+	} else {
+		resolved, err := net.LookupIP(host)
+		if err != nil {
+			return fmt.Errorf("s3: cannot resolve endpoint host %q: %w", host, err)
+		}
+		ips = resolved
+	}
+	// Reject if ANY resolved address is disallowed (conservative — thwarts a
+	// hostname that mixes a public A record with an internal one).
+	for _, ip := range ips {
+		if reason := blockedIPReason(ip); reason != "" {
+			return fmt.Errorf("s3: endpoint host %q resolves to a disallowed %s address %s; refusing to connect (SSRF guard)", host, reason, ip)
+		}
+	}
+	return nil
+}
+
+// blockedIPReason names the SSRF category an IP falls into, or "" if it is a
+// routable public address that is safe to dial.
+func blockedIPReason(ip net.IP) string {
+	switch {
+	case ip.IsLoopback():
+		return "loopback"
+	case ip.IsUnspecified():
+		return "unspecified"
+	case ip.IsLinkLocalUnicast(), ip.IsLinkLocalMulticast():
+		return "link-local"
+	case ip.IsPrivate():
+		return "private"
+	}
+	return ""
 }
 
 // Upload streams `r` to bucket/key via a multipart PUT, no temp file. Size may

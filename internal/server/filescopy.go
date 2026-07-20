@@ -38,15 +38,28 @@ func (s *Service) ExportFiles(req *pb.ExportFilesRequest, stream pb.Agent_Export
 	gz := gzip.NewWriter(cw)
 	tw := tar.NewWriter(gz)
 
-	// A missing/empty dir yields an empty (header-only) tar — valid, and the
-	// destination handles it as "nothing to restore". Only a real dir is walked.
-	if st, err := os.Stat(root); err == nil && st.IsDir() {
+	// A missing dir (or a non-directory at that path) yields an empty
+	// (header-only) tar — valid, and the destination handles it as "nothing to
+	// restore". But ANY OTHER stat error (a transient I/O error, a permission
+	// fault) must NOT be silently downgraded to an empty archive: a wipe-first
+	// ImportFiles on the destination would then discard the real files dir on the
+	// far host (data loss on a server move). So abort on such errors and let the
+	// control plane keep the source in place rather than relay an empty archive.
+	st, statErr := os.Stat(root)
+	switch {
+	case statErr == nil && st.IsDir():
 		if err := addDirToTar(tw, root, "files"); err != nil {
 			// Best-effort close the writers before returning the walk error.
 			_ = tw.Close()
 			_ = gz.Close()
 			return fmt.Errorf("export files %q: %w", slug, err)
 		}
+	case statErr == nil || os.IsNotExist(statErr):
+		// Benign empty case: no dir, or a non-directory at that path. Nothing to walk.
+	default:
+		_ = tw.Close()
+		_ = gz.Close()
+		return fmt.Errorf("export files %q: stat: %w", slug, statErr)
 	}
 
 	// Finish the tar + gzip trailers BEFORE reporting, so the destination sees a

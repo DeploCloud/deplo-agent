@@ -141,20 +141,49 @@ func Run(cfg Config) (Materials, error) {
 		}
 	}
 
-	// 4. Persist the materials.
+	// 4. Persist the materials ATOMICALLY. The single-use token is already spent
+	// by now, so a partial write here would wedge the agent: a restart re-runs
+	// bootstrap (materials incomplete → Provisioned=false) with a token the
+	// control plane will reject. Stage all three to sibling temp files first and
+	// os.Rename each into place only after ALL are written, so a mid-write
+	// failure (e.g. disk full) never leaves a half-provisioned dir.
 	keyDER, err := x509.MarshalPKCS8PrivateKey(priv)
 	if err != nil {
 		return mats, fmt.Errorf("marshal key: %w", err)
 	}
 	keyPem := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
-	if err := os.WriteFile(mats.KeyPath, keyPem, 0o600); err != nil {
-		return mats, fmt.Errorf("write key: %w", err)
+
+	type material struct {
+		tmp, final string
+		data       []byte
+		perm       os.FileMode
 	}
-	if err := os.WriteFile(mats.CertPath, []byte(resp.CertPem), 0o600); err != nil {
-		return mats, fmt.Errorf("write cert: %w", err)
+	// Order: key first (0600 preserved), then cert, then CA.
+	staged := []material{
+		{tmp: mats.KeyPath + ".tmp", final: mats.KeyPath, data: keyPem, perm: 0o600},
+		{tmp: mats.CertPath + ".tmp", final: mats.CertPath, data: []byte(resp.CertPem), perm: 0o600},
+		{tmp: mats.CAPath + ".tmp", final: mats.CAPath, data: []byte(resp.CAPem), perm: 0o644},
 	}
-	if err := os.WriteFile(mats.CAPath, []byte(resp.CAPem), 0o644); err != nil {
-		return mats, fmt.Errorf("write ca: %w", err)
+	cleanupTmps := func() {
+		for _, m := range staged {
+			_ = os.Remove(m.tmp)
+		}
+	}
+	// Stage: write each material to its temp file (same dir → rename is atomic).
+	for _, m := range staged {
+		// Clear any leftover temp so the requested perm applies on a fresh create.
+		_ = os.Remove(m.tmp)
+		if err := os.WriteFile(m.tmp, m.data, m.perm); err != nil {
+			cleanupTmps()
+			return mats, fmt.Errorf("stage %s: %w", filepath.Base(m.final), err)
+		}
+	}
+	// Commit: flip every staged temp into place only now that all are on disk.
+	for _, m := range staged {
+		if err := os.Rename(m.tmp, m.final); err != nil {
+			cleanupTmps()
+			return mats, fmt.Errorf("commit %s: %w", filepath.Base(m.final), err)
+		}
 	}
 	return mats, nil
 }
