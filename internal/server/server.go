@@ -235,7 +235,19 @@ func (s *Service) driveDeploy(ctx context.Context, id string, req *pb.DeployRequ
 		f.append(ev)
 		return nil
 	}}
-	s.runDeploy(ctx, req, e)
+	// A panic inside a builder (a nil-deref on a partial proto, an index error on
+	// malformed build input) must degrade to ONE failed deploy — not crash the
+	// whole agent, which would take down every tenant's streams/metrics/management
+	// on this shared host. Recover here and emit a failure result; the eviction
+	// below still runs.
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				e.result(false, fmt.Sprintf("deploy panicked: %v", r), "")
+			}
+		}()
+		s.runDeploy(ctx, req, e)
+	}()
 	// Retain briefly for reconnection, then evict.
 	time.AfterFunc(retainFinished, func() {
 		s.mu.Lock()
@@ -249,6 +261,9 @@ func (s *Service) driveDeploy(ctx context.Context, id string, req *pb.DeployRequ
 // StopStack stops a compose-managed stack (falls back to the bare container).
 func (s *Service) StopStack(ctx context.Context, ref *pb.StackRef) (*pb.StackResult, error) {
 	slug := ref.GetSlug()
+	if err := validateSlug(slug); err != nil {
+		return nil, err
+	}
 	res, err := dockercli.Run(ctx, time.Minute, "compose", "-p", "deplo-"+slug, "-f", s.stackPath(slug), "stop")
 	if err == nil && res.Code == 0 {
 		return &pb.StackResult{Ok: true}, nil
@@ -263,6 +278,9 @@ func (s *Service) StopStack(ctx context.Context, ref *pb.StackRef) (*pb.StackRes
 // StartStack starts a previously stopped stack.
 func (s *Service) StartStack(ctx context.Context, ref *pb.StackRef) (*pb.StackResult, error) {
 	slug := ref.GetSlug()
+	if err := validateSlug(slug); err != nil {
+		return nil, err
+	}
 	res, err := dockercli.Run(ctx, time.Minute, "compose", "-p", "deplo-"+slug, "-f", s.stackPath(slug), "start")
 	if err == nil && res.Code == 0 {
 		return &pb.StackResult{Ok: true}, nil
@@ -290,6 +308,9 @@ func (s *Service) StartStack(ctx context.Context, ref *pb.StackRef) (*pb.StackRe
 // otherwise.
 func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.StackResult, error) {
 	slug := ref.GetSlug()
+	if err := validateSlug(slug); err != nil {
+		return nil, err
+	}
 	downArgs := []string{"compose", "-p", "deplo-" + slug, "-f", s.stackPath(slug), "down", "--remove-orphans"}
 	if ref.GetRemoveVolumes() {
 		downArgs = append(downArgs, "-v")
@@ -343,6 +364,9 @@ func (s *Service) removeStackFiles(slug string) {
 // writeMountFiles' warn logs go to a discarding emitter.
 func (s *Service) Reroute(ctx context.Context, req *pb.RerouteRequest) (*pb.StackResult, error) {
 	slug := req.GetSlug()
+	if err := validateSlug(slug); err != nil {
+		return nil, err
+	}
 	name := "deplo-" + slug
 
 	if req.GetComposeYaml() == "" {
@@ -394,6 +418,9 @@ func (s *Service) Reroute(ctx context.Context, req *pb.RerouteRequest) (*pb.Stac
 // also reported as Exists:false (rather than an RPC error) so the preview shows
 // "nothing yet" instead of surfacing a transient FS error to the operator.
 func (s *Service) ReadStack(ctx context.Context, ref *pb.StackRef) (*pb.ReadStackResponse, error) {
+	if err := validateSlug(ref.GetSlug()); err != nil {
+		return &pb.ReadStackResponse{Exists: false, Yaml: ""}, nil
+	}
 	contents, err := os.ReadFile(s.stackPath(ref.GetSlug()))
 	if err != nil {
 		return &pb.ReadStackResponse{Exists: false, Yaml: ""}, nil
@@ -403,6 +430,9 @@ func (s *Service) ReadStack(ctx context.Context, ref *pb.StackRef) (*pb.ReadStac
 
 // Inspect reports a container's existence + running state for live status.
 func (s *Service) Inspect(ctx context.Context, req *pb.InspectRequest) (*pb.InspectResponse, error) {
+	if err := validateSlug(req.GetSlug()); err != nil {
+		return nil, err
+	}
 	name := "deplo-" + req.GetSlug()
 	exists, state := dockercli.State(ctx, name)
 	return &pb.InspectResponse{

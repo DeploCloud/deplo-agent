@@ -3,12 +3,15 @@ package server
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -232,7 +235,12 @@ func (s *Service) ReadFile(ctx context.Context, req *pb.ReadFileRequest) (*pb.Re
 		return nil, err
 	}
 	rel, _ := normalizeRel(req.GetPath())
-	st, err := os.Stat(abs)
+	f, err := os.Open(abs)
+	if err != nil {
+		return nil, status.Errorf(codes.NotFound, "read %s: %v", rel, err)
+	}
+	defer f.Close()
+	st, err := f.Stat()
 	if err != nil {
 		return nil, status.Errorf(codes.NotFound, "read %s: %v", rel, err)
 	}
@@ -242,9 +250,16 @@ func (s *Service) ReadFile(ctx context.Context, req *pb.ReadFileRequest) (*pb.Re
 	if st.Size() > maxViewBytes {
 		return &pb.ReadFileResponse{Path: rel, Size: st.Size(), Reason: "too-large"}, nil
 	}
-	buf, err := os.ReadFile(abs)
+	// Read through a LimitReader (cap+1): the files dir is bind-mounted rw into the
+	// container, so a file just under the cap at Stat time can be grown before/
+	// during the read — os.ReadFile would then pull the whole (now-huge) file into
+	// the agent heap. The fstat'd fd + bounded read close that TOCTOU.
+	buf, err := io.ReadAll(io.LimitReader(f, maxViewBytes+1))
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "read %s: %v", rel, err)
+	}
+	if int64(len(buf)) > maxViewBytes {
+		return &pb.ReadFileResponse{Path: rel, Size: int64(len(buf)), Reason: "too-large"}, nil
 	}
 	// A NUL byte in the first chunk is a reliable binary tell for config trees.
 	probe := buf
@@ -282,14 +297,37 @@ func (s *Service) writeBytes(slug, p string, data []byte) (*pb.FileEntryResult, 
 	if err != nil {
 		return nil, err
 	}
-	if st, e := os.Stat(abs); e == nil && st.IsDir() {
-		return nil, status.Error(codes.InvalidArgument, "a folder already exists there")
+	// resolveParentInside canonicalises only the PARENT; the leaf is appended
+	// lexically. Since the files dir is bind-mounted read-write into the app
+	// container (user code), a leaf could be a symlink the user planted pointing
+	// OUTSIDE the sandbox — os.WriteFile would follow it and write anywhere on the
+	// shared host as root. Lstat (no-follow) gives a clear error for a symlink or
+	// an existing dir; O_NOFOLLOW on the open is the race-free enforcement (rejects
+	// a symlink swapped in after the Lstat).
+	if li, e := os.Lstat(abs); e == nil {
+		if li.Mode()&os.ModeSymlink != 0 {
+			return nil, status.Error(codes.InvalidArgument, "refusing to write through a symlink")
+		}
+		if li.IsDir() {
+			return nil, status.Error(codes.InvalidArgument, "a folder already exists there")
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return nil, status.Errorf(codes.Internal, "mkdir: %v", err)
 	}
 	// 0644 — bind-mounted into the app container, which may run as non-root.
-	if err := os.WriteFile(abs, data, 0o644); err != nil {
+	f, err := os.OpenFile(abs, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0o644)
+	if err != nil {
+		if errors.Is(err, syscall.ELOOP) {
+			return nil, status.Error(codes.InvalidArgument, "refusing to write through a symlink")
+		}
+		return nil, status.Errorf(codes.Internal, "write %s: %v", rel, err)
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return nil, status.Errorf(codes.Internal, "write %s: %v", rel, err)
+	}
+	if err := f.Close(); err != nil {
 		return nil, status.Errorf(codes.Internal, "write %s: %v", rel, err)
 	}
 	return s.entryResult(abs, rel)

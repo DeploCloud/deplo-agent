@@ -50,8 +50,11 @@ func (e *emitter) result(ready bool, errMsg, commitSha string) {
 // (D2) and decrypted the env (D4); the agent never re-implements that logic.
 func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitter) {
 	slug := req.GetSlug()
-	if slug == "" {
-		e.result(false, "deploy request missing slug", "")
+	// The slug is written into host paths (stack file, env file, files dir) and
+	// docker project names, so it must be a safe token before ANY of that — a
+	// `../…` slug is otherwise an arbitrary root-owned write on the shared host.
+	if err := validateSlug(slug); err != nil {
+		e.result(false, err.Error(), "")
 		return
 	}
 	name := "deplo-" + slug
@@ -177,7 +180,12 @@ func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitt
 	}
 	composeArgs = append(composeArgs, "up", "-d", "--remove-orphans")
 	e.log("command", "docker compose up -d")
-	code, err := dockercli.Stream(ctx, 5*time.Minute, func(l string) { e.log("info", l) }, "", composeArgs...)
+	// A multi-service compose stack pulls SEVERAL images here (and an IMAGE deploy
+	// with pullImage=false pulls at up time too). The old 5-minute cap SIGKILLed
+	// `compose up` mid-pull on a modest network and falsely reported the deploy
+	// failed while the stack was left half-up. Give it a budget generous enough for
+	// several large image pulls (the single-image pre-pull already gets 10m).
+	code, err := dockercli.Stream(ctx, 15*time.Minute, func(l string) { e.log("info", l) }, "", composeArgs...)
 	if err != nil {
 		e.result(false, "compose up: "+err.Error(), "")
 		return
@@ -353,6 +361,18 @@ func (s *Service) buildDockerfile(ctx context.Context, req *pb.DeployRequest, bu
 	// realpath guard now that the parent exists.
 	if cd, err := safepath.Inside(buildDir, contextDir); err == nil {
 		contextDir = cd
+	}
+	// safepath.Join is lexical only; the Dockerfile lives in a user-controlled git
+	// repo, so its path could be a SYMLINK pointing at any host file, making
+	// `docker build -f` read (and bake into an image the user pulls) e.g.
+	// /root/.ssh/id_rsa. Reject a symlink at the -f target outright, then realpath-
+	// guard it inside the context like contextDir above.
+	if li, lerr := os.Lstat(dockerfilePath); lerr == nil && li.Mode()&os.ModeSymlink != 0 {
+		e.result(false, "the Dockerfile path must not be a symlink", "")
+		return false
+	}
+	if dp, ierr := safepath.Inside(buildDir, dockerfilePath); ierr == nil {
+		dockerfilePath = dp
 	}
 	if _, err := os.Stat(dockerfilePath); err != nil {
 		e.result(false, fmt.Sprintf("No Dockerfile at %q in the build context", df.GetDockerfilePath()), "")
