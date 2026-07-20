@@ -493,19 +493,34 @@ func TestCgroupSampler_DegradesPerMetricNotPerSample(t *testing.T) {
 	}
 }
 
+// A RUNNING container the backend cannot read is ABSENT, never a zeroed row: a
+// flat line at zero reads as "idle" instead of the "unknown" that actually
+// happened. A NON-RUNNING container is the other case — it is emitted with
+// identity, its real state and zeroed usage, exactly as the docker-stats backend
+// does, so a stopped container never vanishes from the stream depending on which
+// backend this host uses.
 func TestCgroupSampler_UnreadableEntriesAreAbsentNotZeroed(t *testing.T) {
 	tmp := t.TempDir()
 	c := newTestSampler(t, filepath.Join(tmp, "proc"))
 
 	entries := []rosterEntry{
-		// Exited: its cgroup is gone. A zeroed row here would draw a flat line
-		// that reads as "idle" rather than "not running".
+		// Exited: its cgroup is gone, but it must still be reported — with its real
+		// state and zeroed usage — so the control plane can show it as stopped.
 		{ID: "gone", Name: "old", ProjectID: "prj_1", State: "exited", CgroupPath: filepath.Join(tmp, "nope")},
-		// The roster could not resolve a path at all.
+		// A RUNNING container whose path the roster could not resolve: nothing to
+		// read, so it is dropped rather than zeroed.
 		{ID: "unresolved", Name: "mystery", ProjectID: "prj_1", State: "running", CgroupPath: ""},
 	}
-	if out := c.Sample(entries, time.Unix(6000, 0)); len(out) != 0 {
-		t.Errorf("got %d stats for unreadable entries, want 0", len(out))
+	out := c.Sample(entries, time.Unix(6000, 0))
+	if len(out) != 1 {
+		t.Fatalf("got %d stats, want 1 (the exited container zeroed; the running-unresolved one dropped)", len(out))
+	}
+	st := out[0]
+	if st.ContainerId != "gone" || st.State != "exited" || st.Running {
+		t.Errorf("emitted row = id %q/state %q/running %v, want gone/exited/false", st.ContainerId, st.State, st.Running)
+	}
+	if st.CpuPct != 0 || st.MemUsed != 0 {
+		t.Errorf("stopped container carried non-zero usage: cpu=%v mem=%d", st.CpuPct, st.MemUsed)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
+	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 	"github.com/DeploCloud/deplo-agent/internal/hostmetrics"
 )
 
@@ -121,14 +122,22 @@ func buildSample(
 		stats, source := containers.Sample(ctx)
 		sample.Containers = stats
 		sample.Source = source
+		// The running-container count is the roster's CACHED host-wide figure, not
+		// a fresh `docker ps -q` like the unary Metrics RPC does: that call costs
+		// ~190ms of dockerd CPU, which on a 5s ticker would cost more than every
+		// metric in this frame combined. It is the UNFILTERED count on purpose —
+		// reporting only deplo.managed containers here would quietly change what
+		// this field means the moment a host's agent was updated.
 		running = containers.RunningCount()
+	} else {
+		// include_containers=false skips per-container stats, but
+		// running_containers is a HOST gauge that must not change meaning with that
+		// flag — the unary Metrics RPC always reports it. With no roster to read a
+		// cached figure from, match that RPC exactly: one unfiltered `docker ps -q`,
+		// best-effort (0 on failure). The per-tick cost only applies to host-only
+		// streams, which already opted out of the expensive container sampling.
+		running = dockercli.RunningContainers(ctx)
 	}
-	// The running-container count is the roster's CACHED host-wide figure, not a
-	// fresh `docker ps -q` like the unary Metrics RPC does: that call costs
-	// ~190ms of dockerd CPU, which on a 5s ticker would cost more than every
-	// metric in this frame combined. It is the UNFILTERED count on purpose —
-	// reporting only deplo.managed containers here would quietly change what this
-	// field means the moment a host's agent was updated.
 	sample.Host = hostMetricsPB(host.Sample(), running)
 	return sample
 }

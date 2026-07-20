@@ -141,7 +141,7 @@ type roster struct {
 	// dockerd to exercise it would never run on the machine where it broke.
 	listFn      func(context.Context) ([]rosterPsRow, error)
 	inspectFn   func(context.Context, []string) (map[string]rosterDetail, error)
-	hostCountFn func(context.Context) int
+	hostCountFn func(context.Context) (int, bool)
 	rebuildFn   func(context.Context)
 	watchFn     func(context.Context)
 
@@ -193,7 +193,7 @@ func newRosterDefaults() *roster {
 	}
 	r.listFn = listManagedContainers
 	r.inspectFn = inspectRosterContainers
-	r.hostCountFn = dockercli.RunningContainers
+	r.hostCountFn = hostRunningCount
 	r.rebuildFn = r.rebuild
 	r.watchFn = r.watchEvents
 	return r
@@ -549,16 +549,19 @@ func (r *roster) rebuild(ctx context.Context) {
 		ids2[e.ID] = struct{}{}
 	}
 	// Unfiltered host count, taken outside the lock like everything else here.
-	hostRunning := r.hostCountFn(ctx)
+	// ok distinguishes a genuine 0 from a read that failed.
+	hostRunning, ok := r.hostCountFn(ctx)
 
 	r.mu.Lock()
 	r.entries = entries
 	r.ids = ids2
 	r.cgroups = cgroups // rebuilt from the live set, so destroyed ids drop out
-	// A zero here means the `docker ps` failed (RunningContainers swallows the
-	// error), and reporting 0 running containers on a host that plainly has some
-	// is worse than reporting the last known figure — keep the previous value.
-	if hostRunning > 0 {
+	// Only publish a figure we actually READ. A failed `docker ps -q` (ok=false)
+	// means the count is UNKNOWN, and fabricating a 0 on a host that plainly has
+	// containers is worse than reporting the last known figure — keep the previous
+	// value. A genuine 0 (ok=true) is real and MUST land, so a host that emptied
+	// out reports 0 instead of a stale count that never falls.
+	if ok {
 		r.hostRunning = hostRunning
 	}
 	r.mu.Unlock()
@@ -596,6 +599,29 @@ func listManagedContainers(ctx context.Context) ([]rosterPsRow, error) {
 		}
 	}
 	return rows, nil
+}
+
+// hostRunningCount counts EVERY running container on the host — the unfiltered
+// `docker ps -q` the host gauge is built from — returning ok=false when the read
+// itself failed.
+//
+// It exists instead of dockercli.RunningContainers because that helper collapses
+// a failure and a genuinely empty host to the same 0, and rebuild MUST tell them
+// apart: a real 0 has to update the gauge (a host that emptied out should report
+// 0, not a stale count that never falls), while a failed read has to keep the
+// last known value rather than fabricate a 0 on a host that plainly has some.
+func hostRunningCount(ctx context.Context) (int, bool) {
+	res, err := dockercli.Run(ctx, 10*time.Second, "ps", "-q")
+	if err != nil || res.Code != 0 {
+		return 0, false
+	}
+	n := 0
+	for _, l := range strings.Split(strings.TrimSpace(res.Stdout), "\n") {
+		if strings.TrimSpace(l) != "" {
+			n++
+		}
+	}
+	return n, true
 }
 
 type rosterCmdError struct {

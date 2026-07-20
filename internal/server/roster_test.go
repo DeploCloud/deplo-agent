@@ -521,12 +521,19 @@ type fakeDocker struct {
 	// container on the host, Deplo-managed or not. Defaults to 0 so a test that
 	// does not care about the host gauge is unaffected.
 	hostRunning int
+	// hostCountFail makes the host-count read report a FAILURE (ok=false) rather
+	// than a count, so a test can exercise the fail/zero distinction: a failed
+	// read keeps the last known gauge, whereas a genuine 0 must publish.
+	hostCountFail bool
 }
 
-func (f *fakeDocker) hostCount(context.Context) int {
+func (f *fakeDocker) hostCount(context.Context) (int, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.hostRunning
+	if f.hostCountFail {
+		return 0, false
+	}
+	return f.hostRunning, true
 }
 
 func (f *fakeDocker) list(context.Context) ([]rosterPsRow, error) {
@@ -970,10 +977,11 @@ func TestRosterHostCountIsUnfilteredWhileRunningCountIsScoped(t *testing.T) {
 	}
 }
 
-// A failed `docker ps -q` reports 0, which is indistinguishable from a genuinely
-// empty host. Publishing that zero would show "0 containers" on a machine plainly
-// running some, so the last known figure is kept instead — the same discipline
-// the rest of the rebuild applies to a failed listing.
+// A FAILED `docker ps -q` yields no count. Publishing a fabricated 0 would show
+// "0 containers" on a machine plainly running some, so the last known figure is
+// kept instead — the same discipline the rest of the rebuild applies to a failed
+// listing. The failure is signalled distinctly from a count of 0 (see
+// hostRunningCount's ok return), which is what the genuine-zero test relies on.
 func TestRosterHostCountKeepsLastKnownOnFailure(t *testing.T) {
 	r, f := newFakeRoster(t)
 	seedOneApp(f)
@@ -986,8 +994,8 @@ func TestRosterHostCountKeepsLastKnownOnFailure(t *testing.T) {
 		t.Fatalf("precondition: HostRunningCount() = %d, want 4", got)
 	}
 
-	// The count read now fails (RunningContainers swallows the error and yields 0).
-	f.set(func(f *fakeDocker) { f.hostRunning = 0 })
+	// The count read now FAILS (ok=false), as opposed to reporting a genuine 0.
+	f.set(func(f *fakeDocker) { f.hostCountFail = true })
 	r.markDirty()
 	waitFor(t, "a rebuild after the failing count", func() bool {
 		f.mu.Lock()
@@ -997,5 +1005,35 @@ func TestRosterHostCountKeepsLastKnownOnFailure(t *testing.T) {
 
 	if got := r.HostRunningCount(); got != 4 {
 		t.Errorf("HostRunningCount() = %d after a failed count, want the last known 4", got)
+	}
+}
+
+// The counterpart to the failure test: a host that legitimately has 0 running
+// containers must report 0, not a stale figure. A genuine 0 (ok=true) is a real
+// reading and has to land — the old code conflated it with a failed read and
+// pinned the gauge at its last non-zero value forever.
+func TestRosterHostCountPublishesGenuineZero(t *testing.T) {
+	r, f := newFakeRoster(t)
+	seedOneApp(f)
+	f.set(func(f *fakeDocker) { f.hostRunning = 4 })
+
+	r.start(context.Background())
+	defer r.Close()
+
+	if got := r.HostRunningCount(); got != 4 {
+		t.Fatalf("precondition: HostRunningCount() = %d, want 4", got)
+	}
+
+	// The host genuinely empties out: a real 0, not a failed read.
+	f.set(func(f *fakeDocker) { f.hostRunning = 0 })
+	r.markDirty()
+	waitFor(t, "a rebuild after the host emptied out", func() bool {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return f.listHits >= 2
+	})
+
+	if got := r.HostRunningCount(); got != 0 {
+		t.Errorf("HostRunningCount() = %d after a genuine empty read, want 0", got)
 	}
 }

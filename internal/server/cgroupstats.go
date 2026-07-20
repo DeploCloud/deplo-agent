@@ -124,8 +124,11 @@ func (c *cgroupSampler) Unhealthy() bool {
 	return c.unhealthy
 }
 
-// Sample returns one stat per entry that could be read. Entries whose files
-// cannot be read are omitted entirely.
+// Sample returns one stat per entry. A RUNNING container whose files cannot be
+// read is omitted entirely (a fabricated zero would read as idle). A NON-RUNNING
+// container is emitted with identity, its real state and zeroed usage — matching
+// the docker-stats backend, so a stopped container never vanishes from the stream
+// depending on which backend this host uses.
 func (c *cgroupSampler) Sample(entries []rosterEntry, now time.Time) []*pb.ContainerStat {
 	c.sampleMu.Lock()
 	defer c.sampleMu.Unlock()
@@ -149,29 +152,40 @@ func (c *cgroupSampler) Sample(entries []rosterEntry, now time.Time) []*pb.Conta
 	expected, failed := 0, 0
 
 	for _, e := range entries {
-		running := e.State == "running"
-		if running {
-			expected++
+		if e.State != "running" {
+			// A non-running container has no cgroup to read, but it must NOT vanish
+			// from the stream. The docker-stats backend reports stopped and crashed
+			// containers too — with identity, their real state and zeroed usage —
+			// and the two backends have to agree on MEMBERSHIP, or a container would
+			// disappear from the control plane's view depending only on which path
+			// this host happens to use. A zeroed row is honest here, unlike the
+			// false-idle a zeroed RUNNING row would draw: State carries the truth
+			// and a stopped container genuinely uses nothing. Deliberately NOT
+			// counted in the health accounting below — a missing cgroup is EXPECTED
+			// for a stopped container, never the structural breakage
+			// cgroupUnhealthyTicks exists to detect.
+			st := &pb.ContainerStat{}
+			applyIdentity(st, e, false)
+			out = append(out, st)
+			carryCPUBaseline(next, prev, e.ID)
+			continue
 		}
+		expected++
 		if e.CgroupPath == "" {
-			// The roster could not resolve a path; there is nothing to read and
-			// nothing to guess at. This still counts as EXPECTED-AND-FAILED for a
-			// running container: unresolvable paths are the exact structural
+			// The roster could not resolve a path for a RUNNING container; there is
+			// nothing to read and nothing to guess at. This counts as
+			// EXPECTED-AND-FAILED: unresolvable paths are the exact structural
 			// breakage cgroupUnhealthyTicks exists to detect, and skipping the
 			// accounting here would leave `expected` at 0 forever, so the demotion
 			// to `docker stats` could never fire on the one failure mode that most
 			// needs it — the operator would just get permanently empty charts.
-			if running {
-				failed++
-			}
+			failed++
 			carryCPUBaseline(next, prev, e.ID)
 			continue
 		}
 		r, ok := c.readOne(e, now, prev)
 		if !ok {
-			if running {
-				failed++
-			}
+			failed++
 			carryCPUBaseline(next, prev, e.ID)
 			continue
 		}
