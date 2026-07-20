@@ -42,6 +42,16 @@ const (
 	// The helper image used to tar a project's named volumes. A tiny, ubiquitous
 	// image already present on most hosts; pulled on first use otherwise.
 	volumeHelperImage = "busybox:1.36"
+	// maxSnapshotBytes caps a single snapshot/ entry (compose.yml, env, a mount
+	// file) read fully into memory during restore. Snapshots are small config, not
+	// bulk data, so a larger entry means a corrupt/hostile archive — reject it
+	// rather than let an unbounded io.ReadAll OOM the agent.
+	maxSnapshotBytes = 16 << 20 // 16 MiB
+	// maxProjectRestoreBytes caps the TOTAL decompressed bytes the agent will read
+	// out of a project archive during restore, so a small "zip-bomb"-style object
+	// can't fill the host disk. Generous for real projects (volumes + files); an
+	// archive that blows past it aborts the restore instead of writing on.
+	maxProjectRestoreBytes = 64 << 30 // 64 GiB
 )
 
 // bkEmitter funnels BackupEvents over the stream (mirrors deploy.go's emitter).
@@ -786,6 +796,39 @@ type projectSnapshot struct {
 	mounts  []*pb.MountFile
 }
 
+// readSnapshotEntry reads a snapshot/ tar entry fully into memory with a hard
+// cap, erroring if it exceeds maxSnapshotBytes rather than reading unboundedly
+// (an OOM guard: the entry name + size come from an untrusted S3 object).
+func readSnapshotEntry(tr io.Reader, name string) ([]byte, error) {
+	b, err := io.ReadAll(io.LimitReader(tr, maxSnapshotBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > maxSnapshotBytes {
+		return nil, fmt.Errorf("snapshot entry %q exceeds the %d-byte limit", name, int64(maxSnapshotBytes))
+	}
+	return b, nil
+}
+
+// budgetReader wraps a reader and fails once cumulative bytes read exceed a
+// budget, so an over-large (or maliciously inflating) archive aborts partway
+// instead of filling the host disk. The error surfaces through whatever is
+// reading (here, the restore's tar.Reader).
+type budgetReader struct {
+	r      io.Reader
+	n      int64
+	budget int64
+}
+
+func (b *budgetReader) Read(p []byte) (int, error) {
+	n, err := b.r.Read(p)
+	b.n += int64(n)
+	if b.n > b.budget {
+		return n, fmt.Errorf("project archive exceeds the %d-byte restore limit", b.budget)
+	}
+	return n, err
+}
+
 // unpackProjectArchive reads the gzipped tar, routing each entry: volumes/<vol>/*
 // back into a freshly-wiped volume (via a helper container), files/* into a
 // freshly-wiped files dir, and snapshot/* into the returned projectSnapshot. The
@@ -827,7 +870,9 @@ func (s *Service) unpackProjectArchive(ctx context.Context, slug string, volumeN
 	vstreams := newVolumeStreams(ctx, volumeNames)
 	defer vstreams.closeAll()
 
-	tr := tar.NewReader(r)
+	// Cap the total decompressed bytes read from the archive so a small object
+	// that inflates hugely can't fill the host disk (volumes + files write here).
+	tr := tar.NewReader(&budgetReader{r: r, budget: maxProjectRestoreBytes})
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
@@ -876,19 +921,19 @@ func (s *Service) unpackProjectArchive(ctx context.Context, slug string, volumeN
 				return snap, fmt.Errorf("extract files: %w", err)
 			}
 		case name == "snapshot/compose.yml":
-			b, err := io.ReadAll(tr)
+			b, err := readSnapshotEntry(tr, name)
 			if err != nil {
 				return snap, err
 			}
 			snap.compose = string(b)
 		case name == "snapshot/env":
-			b, err := io.ReadAll(tr)
+			b, err := readSnapshotEntry(tr, name)
 			if err != nil {
 				return snap, err
 			}
 			snap.env = parseEnvFile(string(b))
 		case strings.HasPrefix(name, "snapshot/mounts/"):
-			b, err := io.ReadAll(tr)
+			b, err := readSnapshotEntry(tr, name)
 			if err != nil {
 				return snap, err
 			}

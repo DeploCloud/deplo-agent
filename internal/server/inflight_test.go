@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -14,6 +16,9 @@ func logEvent(text string) *pb.DeployEvent {
 }
 func resultEvent(ready bool) *pb.DeployEvent {
 	return &pb.DeployEvent{Event: &pb.DeployEvent_Result{Result: &pb.DeployResult{Ready: ready}}}
+}
+func phaseEvent(p pb.DeployPhase) *pb.DeployEvent {
+	return &pb.DeployEvent{Event: &pb.DeployEvent_Phase{Phase: &pb.PhaseChange{Phase: p}}}
 }
 
 // A subscriber from seq 0 receives every event in order, including the terminal
@@ -118,6 +123,89 @@ func TestInflight_subscriberCancelDetaches(t *testing.T) {
 	go func() { f.append(resultEvent(true)) }()
 	if err := f.subscribe(context.Background(), 0, func(*pb.DeployEvent) error { return nil }); err != nil {
 		t.Fatalf("post-detach subscribe failed: %v", err)
+	}
+}
+
+// A verbose/malicious build cannot grow the retained buffer without bound: log
+// events are capped by count, the oldest are coalesced into a single note, yet
+// the phase and terminal result events are always retained and the newest log
+// line survives — so reattach still yields a truncated log + a note + the result.
+func TestInflight_logRetentionIsBounded(t *testing.T) {
+	f := newInflight(func() {})
+	f.append(phaseEvent(pb.DeployPhase_DEPLOY_PHASE_BUILDING)) // structural, must survive
+	total := maxRetainedLogEvents + 500
+	for i := 0; i < total; i++ {
+		f.append(logEvent(fmt.Sprintf("line %d", i)))
+	}
+	f.append(resultEvent(true))
+
+	f.mu.Lock()
+	events := append([]*pb.DeployEvent(nil), f.events...)
+	dropped := f.droppedLog
+	logCount := f.logCount
+	f.mu.Unlock()
+
+	if dropped == 0 {
+		t.Fatalf("expected some log events to be trimmed, dropped=0")
+	}
+	if logCount > maxRetainedLogEvents {
+		t.Fatalf("retained real logs %d exceed cap %d", logCount, maxRetainedLogEvents)
+	}
+	// Buffer bounded: real logs + note + phase + result, never the full flood.
+	if len(events) >= total {
+		t.Fatalf("buffer not bounded: retained %d of %d events", len(events), total)
+	}
+
+	var sawPhase, sawResult, sawNote, sawNewest bool
+	newest := fmt.Sprintf("line %d", total-1)
+	for _, ev := range events {
+		switch {
+		case ev.GetPhase() != nil:
+			sawPhase = true
+		case ev.GetResult() != nil:
+			sawResult = true
+		case ev.GetLog() != nil:
+			if ev.GetLog().GetLevel() == "warn" && strings.Contains(ev.GetLog().GetText(), "trimmed") {
+				sawNote = true
+			}
+			if ev.GetLog().GetText() == newest {
+				sawNewest = true
+			}
+		}
+	}
+	if !sawPhase {
+		t.Fatalf("phase event was evicted; structural events must be retained")
+	}
+	if !sawResult {
+		t.Fatalf("terminal result was evicted; it must always be retained")
+	}
+	if !sawNote {
+		t.Fatalf("no truncation note in the retained buffer")
+	}
+	if !sawNewest {
+		t.Fatalf("newest log line %q was evicted; the most recent line must survive", newest)
+	}
+
+	// Seqs remain strictly ascending across the (trimmed) buffer, so the replay
+	// cursor stays well-defined.
+	var prev uint64
+	for _, ev := range events {
+		if ev.GetSeq() <= prev {
+			t.Fatalf("seq not ascending: %d after %d", ev.GetSeq(), prev)
+		}
+		prev = ev.GetSeq()
+	}
+
+	// A fresh subscriber still terminates and ends on the terminal result.
+	var got []*pb.DeployEvent
+	if err := f.subscribe(context.Background(), 0, func(ev *pb.DeployEvent) error {
+		got = append(got, ev)
+		return nil
+	}); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	if len(got) == 0 || got[len(got)-1].GetResult() == nil {
+		t.Fatalf("subscriber did not end on the terminal result")
 	}
 }
 

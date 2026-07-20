@@ -96,7 +96,7 @@ func (s *Service) dumpClickhouse(ctx context.Context, d *pb.DatabaseDescriptor, 
 	fmt.Fprintf(bw, "-- Deplo clickhouse backup of database %q\n", db)
 	for _, tbl := range tables {
 		// DROP first so the restore overwrites rather than merges.
-		fmt.Fprintf(bw, "DROP TABLE IF EXISTS `%s`.`%s`;\n", db, tbl)
+		fmt.Fprintf(bw, "DROP TABLE IF EXISTS `%s`.`%s`;\n", chQuoteIdent(db), chQuoteIdent(tbl))
 
 		// Schema: the stored CREATE query, made idempotent. create_table_query is
 		// `CREATE TABLE <db>.<t> (...)`; rewrite the leading verb to IF NOT EXISTS.
@@ -116,10 +116,11 @@ func (s *Service) dumpClickhouse(ctx context.Context, d *pb.DatabaseDescriptor, 
 			return err
 		}
 		argv, env := chClientPrefix(d, false)
+		qdb, qtbl := chQuoteIdent(db), chQuoteIdent(tbl)
 		argv = append(argv, "--query", fmt.Sprintf(
 			"SELECT * FROM `%s`.`%s` SETTINGS output_format_sql_insert_table_name='`%s`.`%s`', "+
 				"output_format_sql_insert_include_column_names=1, output_format_sql_insert_max_batch_size=1000 FORMAT SQLInsert",
-			db, tbl, db, tbl))
+			qdb, qtbl, qdb, qtbl))
 		code, derr := dockercli.PipeOut(ctx, backupStepTimeout, w, env, argv...)
 		if derr != nil {
 			return fmt.Errorf("dump data for %q: %w", tbl, derr)
@@ -175,6 +176,16 @@ func (s *Service) restoreClickhouse(ctx context.Context, req *pb.RestoreRequest,
 // so escape defensively).
 func chEscape(s string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), `'`, `\'`)
+}
+
+// chQuoteIdent escapes a name for a backtick-quoted clickhouse identifier
+// (`name`), doubling any backtick it contains (clickhouse's escape for a literal
+// backtick inside a quoted identifier). The db/table names are control-plane-
+// derived, but they are interpolated into backtick-quoted positions in the DDL
+// and queries, so escape defensively — a name carrying a backtick must not be
+// able to break out of the identifier and inject SQL.
+func chQuoteIdent(s string) string {
+	return strings.ReplaceAll(s, "`", "``")
 }
 
 // nonEmptyLines splits stdout into trimmed, non-empty lines.

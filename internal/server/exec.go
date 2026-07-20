@@ -56,6 +56,11 @@ var shellCandidates = []shellCandidate{
 
 const shellTTL = 5 * time.Minute
 
+// shellCacheMax bounds the cache. Each redeploy mints a fresh container name, so
+// without a ceiling a long-lived agent accumulates one dead entry per deploy
+// forever. The cap + eviction on write keep it bounded regardless of churn.
+const shellCacheMax = 1024
+
 type shellCacheEntry struct {
 	plan  shellPlan
 	image string
@@ -70,6 +75,31 @@ var (
 	// key — no need to compound with the project.)
 	shellCache = map[string]shellCacheEntry{}
 )
+
+// evictShellCacheLocked frees room in shellCache. Caller must hold shellCacheMu.
+// It first drops every TTL-lapsed entry (they'd re-probe on next use anyway),
+// then, if still at capacity, drops the oldest entries until below the cap.
+func evictShellCacheLocked(now time.Time) {
+	for k, v := range shellCache {
+		if now.Sub(v.at) >= shellTTL {
+			delete(shellCache, k)
+		}
+	}
+	for len(shellCache) >= shellCacheMax {
+		var oldestKey string
+		var oldestAt time.Time
+		found := false
+		for k, v := range shellCache {
+			if !found || v.at.Before(oldestAt) {
+				oldestKey, oldestAt, found = k, v.at, true
+			}
+		}
+		if !found {
+			break
+		}
+		delete(shellCache, oldestKey)
+	}
+}
 
 // resolveShellPlan determines how to run commands in a container — via a detected
 // shell, or raw argv when none exists — probed once per container and cached
@@ -104,7 +134,11 @@ func resolveShellPlan(ctx context.Context, name, image string) shellPlan {
 		}
 	}
 	shellCacheMu.Lock()
-	shellCache[name] = shellCacheEntry{plan: plan, image: image, at: time.Now()}
+	now := time.Now()
+	if _, exists := shellCache[name]; !exists && len(shellCache) >= shellCacheMax {
+		evictShellCacheLocked(now)
+	}
+	shellCache[name] = shellCacheEntry{plan: plan, image: image, at: now}
 	shellCacheMu.Unlock()
 	return plan
 }

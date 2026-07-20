@@ -116,10 +116,21 @@ func (s *Service) Attach(stream pb.Agent_AttachServer) error {
 		err error
 	}
 	recvCh := make(chan frameOrErr, 1)
+	// recvDone lets the recv goroutine terminate even when the handler returns
+	// while a frame is parked on the buffered send below (buffer full, main loop
+	// gone via outDone/ctx.Done and no longer draining recvCh). Without it, that
+	// blocked `recvCh <- fe` would leak the goroutine — client.close() only
+	// unblocks a Recv(), not a channel send.
+	recvDone := make(chan struct{})
+	defer close(recvDone)
 	go func() {
 		for {
 			in, err := stream.Recv()
-			recvCh <- frameOrErr{in, err}
+			select {
+			case recvCh <- frameOrErr{in, err}:
+			case <-recvDone:
+				return
+			}
 			if err != nil {
 				return
 			}
@@ -279,9 +290,22 @@ func (a *attachPipes) close() {
 // ---- pty backing (tty:true): docker attach inside a pseudo-terminal -------
 
 type attachPTY struct {
-	cmd  *exec.Cmd
-	ptmx *os.File
-	code int
+	cmd      *exec.Cmd
+	ptmx     *os.File
+	code     int
+	waitOnce sync.Once
+}
+
+// reap Wait()s the docker attach child exactly once (guarded), capturing its
+// exit code. Both read() (natural EOF) and close() (killed on a failed Send /
+// client teardown) call it, so the child is always reaped — never left a zombie.
+func (a *attachPTY) reap() {
+	a.waitOnce.Do(func() {
+		werr := a.cmd.Wait()
+		if ee := (&exec.ExitError{}); errors.As(werr, &ee) {
+			a.code = ee.ExitCode()
+		}
+	})
 }
 
 func newAttachPTY(name string, cols, rows int) (*attachPTY, error) {
@@ -297,12 +321,7 @@ func (a *attachPTY) read(p []byte) (int, error) {
 	n, err := a.ptmx.Read(p)
 	if err != nil {
 		// The pty closes when the attach client exits; reap to capture the code.
-		if a.cmd.ProcessState == nil {
-			werr := a.cmd.Wait()
-			if ee := (&exec.ExitError{}); errors.As(werr, &ee) {
-				a.code = ee.ExitCode()
-			}
-		}
+		a.reap()
 		return n, io.EOF
 	}
 	return n, nil
@@ -324,4 +343,8 @@ func (a *attachPTY) close() {
 	if a.cmd.Process != nil {
 		_ = a.cmd.Process.Kill()
 	}
+	// Reap the killed child so it never lingers as a zombie when close() is the
+	// exit path (output pump gone, no further read() to Wait() it). Idempotent
+	// with read()'s reap via waitOnce; Kill() above ensures Wait() returns.
+	a.reap()
 }
