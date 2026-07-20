@@ -42,38 +42,26 @@ func (s *Service) gwDir() string { return filepath.Join(s.dataBase, "ssh-gateway
 
 func (s *Service) gwStackFile() string { return filepath.Join(s.gwDir(), "docker-compose.yml") }
 
-// EnsureGateway lazily brings the 2-service gateway stack up and reconciles every
-// supplied user into it (ADR-0002: the store leads; the control plane sends the
-// full provision plan so a fresh gateway rebuilds its whole projection). Idempotent.
+// EnsureGateway is DORMANT — dev mode (and its SSH gateway) was removed from the
+// control plane (#33/#34). Kept only to satisfy the generated Agent interface; it
+// refuses before touching Docker/ssh/fs. Never revive the body.
 func (s *Service) EnsureGateway(ctx context.Context, req *pb.EnsureGatewayRequest) (*pb.StackResult, error) {
-	if err := s.ensureGateway(ctx, req.GetConfig()); err != nil {
-		return &pb.StackResult{Ok: false, Error: err.Error()}, nil
-	}
-	s.reconcileUsers(ctx, req.GetUsers())
-	return &pb.StackResult{Ok: true}, nil
+	return nil, status.Error(codes.Unimplemented, "dev mode has been removed")
 }
 
-// ProvisionSshUser ensures the gateway exists, then reconciles the full user set
-// (so a just-created gateway is rebuilt from the store, exactly like
-// EnsureGateway — the request carries every stored user, not just the new one).
+// ProvisionSshUser is DORMANT — the SSH gateway was removed with dev mode
+// (#33/#34). Kept only to satisfy the generated Agent interface; refuses before
+// running any useradd/ssh/Docker work. Never revive the body.
 func (s *Service) ProvisionSshUser(ctx context.Context, req *pb.ProvisionSshUserRequest) (*pb.StackResult, error) {
-	if err := s.ensureGateway(ctx, req.GetConfig()); err != nil {
-		return &pb.StackResult{Ok: false, Error: err.Error()}, nil
-	}
-	s.reconcileUsers(ctx, req.GetUsers())
-	return &pb.StackResult{Ok: true}, nil
+	return nil, status.Error(codes.Unimplemented, "dev mode has been removed")
 }
 
-// DeprovisionSshUser removes one user (the control-plane-computed deprovision
-// steps: pkill / deluser / rm). No-op if the gateway isn't running.
+// DeprovisionSshUser is DORMANT — the SSH gateway was removed with dev mode
+// (#33/#34). Kept only to satisfy the generated Agent interface; refuses before
+// running any deluser/ssh/Docker work. (It previously failed OPEN, returning
+// Ok:true on failure — now it hard-refuses.) Never revive the body.
 func (s *Service) DeprovisionSshUser(ctx context.Context, req *pb.DeprovisionSshUserRequest) (*pb.StackResult, error) {
-	if !s.gatewayRunning(ctx) {
-		return &pb.StackResult{Ok: true}, nil
-	}
-	for _, step := range req.GetSteps() {
-		s.runGatewayStep(ctx, step)
-	}
-	return &pb.StackResult{Ok: true}, nil
+	return nil, status.Error(codes.Unimplemented, "dev mode has been removed")
 }
 
 // ensureGateway writes the rendered config files, brings the stack up, and waits

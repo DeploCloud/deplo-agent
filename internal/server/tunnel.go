@@ -52,41 +52,17 @@ func readTunnelStatus(ctx context.Context, slug string) *pb.TunnelStatus {
 // StartTunnel launches the tunnel (idempotent) using the control-plane-rendered
 // launch script, then returns the current status. Mirrors startVscodeTunnel's
 // launch step; the control plane does its own brief poll loop via GetTunnel.
+// Dev mode (VS Code tunnel) was removed from the control plane, so this handler
+// is dormant. Refuse instead of executing privileged `docker exec` as UID 1000 —
+// no live caller should reach it, and a refusal removes the dead attack surface.
 func (s *Service) StartTunnel(ctx context.Context, req *pb.TunnelRequest) (*pb.TunnelStatus, error) {
-	slug := req.GetSlug()
-	if slug == "" {
-		return nil, status.Error(codes.InvalidArgument, "slug is required")
-	}
-	if req.GetLaunchScript() == "" {
-		return nil, status.Error(codes.InvalidArgument, "launch script is required")
-	}
-	name := devProjectName(slug)
-	// Launch as the dev user (UID 1000) so the tunnel owns its files.
-	_, _ = dockercli.Run(ctx, 120*time.Second,
-		"exec", "-u", "1000", "-w", "/workspace", name, "/bin/sh", "-lc", req.GetLaunchScript())
-	return readTunnelStatus(ctx, slug), nil
+	return nil, status.Error(codes.Unimplemented, "dev mode has been removed")
 }
 
-// GetTunnel reads the current tunnel status (no side effects).
 func (s *Service) GetTunnel(ctx context.Context, req *pb.TunnelRequest) (*pb.TunnelStatus, error) {
-	if req.GetSlug() == "" {
-		return nil, status.Error(codes.InvalidArgument, "slug is required")
-	}
-	return readTunnelStatus(ctx, req.GetSlug()), nil
+	return nil, status.Error(codes.Unimplemented, "dev mode has been removed")
 }
 
-// StopTunnel stops the tunnel process (the CLI download + auth token are kept, so
-// a later Start re-uses the GitHub login). Mirrors stopVscodeTunnel — passes the
-// same --cli-data-dir so `tunnel kill` acts on the same CLI state.
 func (s *Service) StopTunnel(ctx context.Context, req *pb.TunnelRequest) (*pb.StackResult, error) {
-	slug := req.GetSlug()
-	if slug == "" {
-		return nil, status.Error(codes.InvalidArgument, "slug is required")
-	}
-	name := devProjectName(slug)
-	script := "[ -f " + tunnelPid + " ] && kill \"$(cat " + tunnelPid + ")\" 2>/dev/null; " +
-		"rm -f " + tunnelPid + "; " +
-		codeCLI + " tunnel --cli-data-dir " + cliData + " kill 2>/dev/null || true"
-	_, _ = dockercli.Run(ctx, 20*time.Second, "exec", name, "/bin/sh", "-c", script)
-	return &pb.StackResult{Ok: true}, nil
+	return nil, status.Error(codes.Unimplemented, "dev mode has been removed")
 }

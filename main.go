@@ -16,6 +16,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"flag"
@@ -23,7 +24,9 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"google.golang.org/grpc"
@@ -139,8 +142,31 @@ func main() {
 		log.Fatalf("deplo-agent: listen %s: %v", *addr, err)
 	}
 	log.Printf("deplo-agent %s listening on %s (mtls=%v)", server.AgentVersion, *addr, !*insecure)
-	if err := srv.Serve(lis); err != nil {
-		log.Fatalf("deplo-agent: serve: %v", err)
+
+	// Graceful shutdown: on SIGTERM/SIGINT (service restart, host reboot) let
+	// in-flight unary RPCs finish and open streams receive a clean GOAWAY instead
+	// of a hard process kill that could leave a stack half-deployed (image built,
+	// `compose up` not run). Fall back to a hard Stop if the drain overruns.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve(lis) }()
+	select {
+	case err := <-serveErr:
+		if err != nil {
+			log.Fatalf("deplo-agent: serve: %v", err)
+		}
+	case <-ctx.Done():
+		log.Printf("deplo-agent: signal received — draining in-flight RPCs…")
+		drained := make(chan struct{})
+		go func() { srv.GracefulStop(); close(drained) }()
+		select {
+		case <-drained:
+			log.Printf("deplo-agent: drained cleanly, exiting")
+		case <-time.After(25 * time.Second):
+			log.Printf("deplo-agent: drain timed out, forcing stop")
+			srv.Stop()
+		}
 	}
 }
 

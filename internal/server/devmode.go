@@ -69,45 +69,18 @@ func (s *Service) devStackFile(slug string) string {
 func devProjectName(slug string) string { return "deplo-dev-" + slug }
 func depsVolume(slug string) string     { return "deplo-dev-" + slug + "-deps" }
 
-// StartDev starts (or restarts) a project's dev container, streaming progress.
-// Mirrors lib/deploy/dev.ts startDev: ensure the entry script + workspace dir
-// (chowned 1000), stage the clone secret / seed an upload workspace, write the
-// rendered stack, `compose up -d`. Server-streaming (like Deploy) so the
-// materialise/up logs flow into the same SSE plumbing; emits a terminal result.
+// StartDev is DORMANT — dev mode was removed from the control plane (#33/#34).
+// The method is kept only so the generated Agent interface stays satisfied; it
+// refuses immediately, before any Docker/fs work. Never revive the body.
 func (s *Service) StartDev(req *pb.StartDevRequest, stream pb.Agent_StartDevServer) error {
-	e := &emitter{send: stream.Send}
-	s.startDevBody(stream.Context(), req, e)
-	return nil
+	return status.Error(codes.Unimplemented, "dev mode has been removed")
 }
 
-// ResetDevWorkspace is DESTRUCTIVE: stop the container, wipe the workspace + deps
-// volume, then reseed via the StartDev body (the same payload reseeds). Mirrors
-// lib/deploy/dev.ts resetDevWorkspace.
+// ResetDevWorkspace is DORMANT — dev mode was removed from the control plane
+// (#33/#34). Kept only to satisfy the generated Agent interface; refuses before
+// any destructive Docker/fs work. Never revive the body.
 func (s *Service) ResetDevWorkspace(req *pb.StartDevRequest, stream pb.Agent_ResetDevWorkspaceServer) error {
-	e := &emitter{send: stream.Send}
-	ctx := stream.Context()
-	slug := req.GetSlug()
-	if slug == "" {
-		e.result(false, "dev request missing slug", "")
-		return nil
-	}
-	e.phase(pb.DeployPhase_DEPLOY_PHASE_PREPARING)
-	e.log("info", "Resetting the dev workspace…")
-	// 1. Stop so nothing holds the bind mount during the wipe.
-	s.stopDevContainer(ctx, slug)
-	// 2. Wipe the workspace contents (keep the dir — it's the bind target).
-	ws := s.workspaceDir(slug)
-	_ = os.RemoveAll(ws)
-	if err := os.MkdirAll(ws, 0o755); err != nil {
-		e.result(false, "recreate workspace: "+err.Error(), "")
-		return nil
-	}
-	// 3. Drop the deps volume so dependencies reinstall for the new source.
-	_, _ = dockercli.Run(ctx, 30*time.Second, "volume", "rm", "-f", depsVolume(slug))
-	// 4. Reseed: the StartDev body re-stages a fresh clone token and the
-	//    entrypoint clones/extracts the current source into the empty workspace.
-	s.startDevBody(ctx, req, e)
-	return nil
+	return status.Error(codes.Unimplemented, "dev mode has been removed")
 }
 
 // startDevBody is the shared start/reseed body. It NEVER returns an error; it
@@ -201,19 +174,11 @@ func (s *Service) startDevBody(ctx context.Context, req *pb.StartDevRequest, e *
 	e.result(false, "Dev container did not reach a running state", "")
 }
 
-// StopDev stops a project's dev container (reversible — keeps the workspace +
-// deps volume). Drops the staged clone token (StartDev regenerates it). Mirrors
-// lib/deploy/dev.ts stopDev. The control plane stops the tunnel first (its own
-// RPC) since that needs the rendered cli-data-dir context.
+// StopDev is DORMANT — dev mode was removed from the control plane (#33/#34).
+// Kept only to satisfy the generated Agent interface; refuses before any
+// Docker/fs work. Never revive the body.
 func (s *Service) StopDev(ctx context.Context, req *pb.StopDevRequest) (*pb.StackResult, error) {
-	slug := req.GetSlug()
-	if slug == "" {
-		return nil, status.Error(codes.InvalidArgument, "slug is required")
-	}
-	s.stopDevContainer(ctx, slug)
-	// Drop the staged clone token — StartDev regenerates a fresh one on restart.
-	_ = os.Remove(s.cloneSecretPath(slug))
-	return &pb.StackResult{Ok: true}, nil
+	return nil, status.Error(codes.Unimplemented, "dev mode has been removed")
 }
 
 // stopDevContainer brings the dev stack down, falling back to a bare `rm -f`.
@@ -226,21 +191,11 @@ func (s *Service) stopDevContainer(ctx context.Context, slug string) {
 	}
 }
 
-// TeardownDev fully tears a project's dev container down on PROJECT DELETE: stop
-// the stack, remove the stack file + deps volume, WIPE the workspace dir. The
-// gateway singleton is NOT torn down here (its users go via DeprovisionSshUser).
-// Mirrors lib/deploy/dev.ts teardownDev.
+// TeardownDev is DORMANT — dev mode was removed from the control plane (#33/#34).
+// Kept only to satisfy the generated Agent interface; refuses before any
+// destructive Docker/fs work. Never revive the body.
 func (s *Service) TeardownDev(ctx context.Context, req *pb.TeardownDevRequest) (*pb.StackResult, error) {
-	slug := req.GetSlug()
-	if slug == "" {
-		return nil, status.Error(codes.InvalidArgument, "slug is required")
-	}
-	s.stopDevContainer(ctx, slug)
-	_, _ = dockercli.Run(ctx, 30*time.Second, "volume", "rm", "-f", depsVolume(slug))
-	_ = os.Remove(s.devStackFile(slug))
-	_ = os.Remove(s.cloneSecretPath(slug))
-	_ = os.RemoveAll(s.workspaceDir(slug))
-	return &pb.StackResult{Ok: true}, nil
+	return nil, status.Error(codes.Unimplemented, "dev mode has been removed")
 }
 
 // ensureDevEntry writes the bind-mounted dev entrypoint (0755), idempotently.
