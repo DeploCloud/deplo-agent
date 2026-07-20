@@ -10,6 +10,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -388,10 +389,34 @@ func cleanBuildCache(ctx context.Context, p cleanupParams) *pb.CleanupScopeResul
 	if pres.Code != 0 {
 		return failedScope(r, dockerErr("builder prune", pres))
 	}
+	total, totalKnown := parsePrunedTotal(pres.Stdout)
+	if totalKnown && total == 0 {
+		// Docker freed nothing, so our enumerated candidates were NOT removed (its
+		// filter disagreed, or another sweep beat us to them). Zero the whole line —
+		// count and list included — or the history reports removals that never were.
+		r.ReclaimedBytes = 0
+		r.ItemsRemoved = 0
+		r.Items = nil
+		return r
+	}
 	// Docker prints the total it actually freed; that beats our estimate. The
 	// estimate is the fallback for an output shape we cannot parse — never a made-up
 	// number, just the same sum the dry run reported.
-	r.ReclaimedBytes = pickReclaimed(pres.Stdout, estimate)
+	if totalKnown {
+		r.ReclaimedBytes = total
+	} else {
+		r.ReclaimedBytes = estimate
+	}
+	if r.ItemsRemoved == 0 {
+		// Bytes were freed but our enumeration saw no candidate (it failed, or its
+		// parse disagreed with docker's filter): recover the records from the prune's
+		// own output so the count and the bytes tell one story.
+		ids := prunedCacheRecordIDs(pres.Stdout)
+		for _, id := range ids {
+			addItem(r, id)
+		}
+		r.ItemsRemoved = int32(len(ids))
+	}
 	return r
 }
 
@@ -416,6 +441,10 @@ func cleanDanglingImages(ctx context.Context, p cleanupParams) *pb.CleanupScopeR
 	r := &pb.CleanupScopeResult{Scope: pb.CleanupScope_CLEANUP_SCOPE_DANGLING_IMAGES}
 
 	var estimate int64
+	// The RAW dangling count before the prune (unfiltered — not just our candidates):
+	// one half of the post-prune diff that makes items_removed an observation instead
+	// of a prediction. -1 = the pre-list failed, no diff possible.
+	rawBefore := -1
 	enumFailure := func() string {
 		res, err := dockerQuery(ctx, cleanupQueryTimeout, "image", "ls", "--filter", "dangling=true", "--quiet")
 		if err != nil {
@@ -424,7 +453,9 @@ func cleanDanglingImages(ctx context.Context, p cleanupParams) *pb.CleanupScopeR
 		if res.Code != 0 {
 			return dockerErr("image ls", res)
 		}
-		images, err := inspectImages(ctx, uniqueLines(res.Stdout))
+		before := uniqueLines(res.Stdout)
+		rawBefore = len(before)
+		images, err := inspectImages(ctx, before)
 		if err != nil {
 			return err.Error()
 		}
@@ -463,7 +494,37 @@ func cleanDanglingImages(ctx context.Context, p cleanupParams) *pb.CleanupScopeR
 	if pres.Code != 0 {
 		return failedScope(r, dockerErr("image prune", pres))
 	}
-	r.ReclaimedBytes = pickReclaimed(pres.Stdout, estimate)
+	total, totalKnown := parsePrunedTotal(pres.Stdout)
+	if totalKnown && total == 0 {
+		// Nothing was actually freed — see the build-cache scope for why the whole
+		// line zeroes rather than reporting the un-removed candidates.
+		r.ReclaimedBytes = 0
+		r.ItemsRemoved = 0
+		r.Items = nil
+		return r
+	}
+	if totalKnown {
+		r.ReclaimedBytes = total
+	} else {
+		r.ReclaimedBytes = estimate
+	}
+	// items_removed as an OBSERVATION: re-list the dangling set and count what
+	// disappeared. Docker's filter — not our timestamp parse — decided what went, so
+	// the diff is the honest count (an image whose age we couldn't read still gets
+	// counted once docker removes it). Best effort: if either list failed, the
+	// enumeration's candidate count stands.
+	if rawBefore >= 0 {
+		if res, err := dockerQuery(ctx, cleanupQueryTimeout, "image", "ls", "--filter", "dangling=true", "--quiet"); err == nil && res.Code == 0 {
+			removed := rawBefore - len(uniqueLines(res.Stdout))
+			if removed < 0 {
+				removed = 0 // a concurrent build minted new dangling layers mid-sweep
+			}
+			r.ItemsRemoved = int32(removed)
+			if removed == 0 {
+				r.Items = nil
+			}
+		}
+	}
 	return r
 }
 
@@ -843,17 +904,16 @@ var sizeUnits = map[string]float64{
 	"TiB": 1 << 40,
 }
 
-// pickReclaimed prefers the total docker itself reports after a prune ("Total
+// parsePrunedTotal reads the total docker itself reports after a prune ("Total
 // reclaimed space: 449.4MB" from `image prune`, "Total:  449.4MB" from the buildx
-// `builder prune`) over our pre-flight estimate, and falls back to the estimate
-// only when no total line is recognised.
+// `builder prune`). The second return is whether a total was recognised at all.
 //
 // A parsed total of ZERO is AUTHORITATIVE, not a parse failure: docker printing
-// "Total reclaimed space: 0B" means the prune freed nothing, and reporting the
+// "Total reclaimed space: 0B" means the prune freed nothing, and reporting an
 // estimate instead is how a sweep that reclaimed nothing was once recorded as
 // having reclaimed a gigabyte (the history's phantom bytes). The digit check is
 // what separates "docker said 0" from "docker said something we cannot read".
-func pickReclaimed(out string, estimate int64) int64 {
+func parsePrunedTotal(out string) (int64, bool) {
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
 		for _, prefix := range []string{"Total reclaimed space:", "Total:"} {
@@ -863,11 +923,44 @@ func pickReclaimed(out string, estimate int64) int64 {
 			}
 			v = strings.TrimSpace(v)
 			if v != "" && v[0] >= '0' && v[0] <= '9' {
-				return parseHumanSize(v)
+				return parseHumanSize(v), true
 			}
 		}
 	}
+	return 0, false
+}
+
+// pickReclaimed is parsePrunedTotal with the pre-flight estimate as the fallback
+// for output shapes with no recognisable total.
+func pickReclaimed(out string, estimate int64) int64 {
+	if n, ok := parsePrunedTotal(out); ok {
+		return n
+	}
 	return estimate
+}
+
+// cacheRecordID is what a BuildKit cache-record id (25-char base36) or a legacy
+// builder cache id (hex) looks like as the first token of a prune output line.
+// Headers ("ID  RECLAIMABLE …"), totals and warnings never match.
+var cacheRecordID = regexp.MustCompile(`^[a-z0-9]{12,}$`)
+
+// prunedCacheRecordIDs recovers the record ids a `builder prune` printed —
+// classic docker prints one bare id per line, buildx one table row per record —
+// so a sweep whose own enumeration failed (or found nothing) can still report
+// what was actually pruned. Best effort: unrecognisable output yields nothing;
+// this is a report, never a gate.
+func prunedCacheRecordIDs(out string) []string {
+	var ids []string
+	for _, line := range splitLines(out) {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		if cacheRecordID.MatchString(fields[0]) {
+			ids = append(ids, fields[0])
+		}
+	}
+	return ids
 }
 
 // dirSize sums the disk a directory tree actually occupies, the way `du` does —

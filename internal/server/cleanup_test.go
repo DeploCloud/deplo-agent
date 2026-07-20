@@ -103,6 +103,18 @@ func (h *hostFixture) install(t *testing.T) {
 		h.mu.Lock()
 		h.removals = append(h.removals, append([]string(nil), args...))
 		h.mu.Unlock()
+		switch {
+		case args[0] == "builder" && args[1] == "prune":
+			// Classic builder-prune shape: one bare record id per line, then the total.
+			return okResult("pu0aq3k0be2nxyf87qw0jbh08\nvhcz1lchp7f0nrnu29jj0oy1n\n\nTotal:\t1.5GB\n"), nil
+		case args[0] == "image" && args[1] == "prune":
+			// Like the real daemon: the dangling set is gone once the prune returns,
+			// so the handler's post-prune re-list must see it empty.
+			h.mu.Lock()
+			h.danglingImages = nil
+			h.mu.Unlock()
+			return okResult("Deleted Images:\ndeleted: sha256:ddd\ndeleted: sha256:ddd-layer\n\nTotal reclaimed space: 1.5GB\n"), nil
+		}
 		return okResult("Total reclaimed space: 1.5GB\n"), nil
 	}
 	dockerAvailable = func(context.Context) bool { return true }
@@ -509,6 +521,107 @@ func TestDockerCleanup_pruneScopes_runEvenWithZeroCandidates(t *testing.T) {
 			t.Errorf("scope %s reclaimed_bytes = %d, want docker's own total (1500000000)",
 				r.GetScope(), r.GetReclaimedBytes())
 		}
+	}
+	// And the counts tell the same story as the bytes: the cache records are
+	// recovered from the prune's own output; the dangling diff saw nothing vanish
+	// (there was nothing dangling), so its count stays an honest zero.
+	bc := resultFor(t, resp, pb.CleanupScope_CLEANUP_SCOPE_BUILD_CACHE)
+	if bc.GetItemsRemoved() != 2 || len(bc.GetItems()) != 2 {
+		t.Errorf("build cache items = %d (%v), want the 2 record ids from docker's output",
+			bc.GetItemsRemoved(), bc.GetItems())
+	}
+	di := resultFor(t, resp, pb.CleanupScope_CLEANUP_SCOPE_DANGLING_IMAGES)
+	if di.GetItemsRemoved() != 0 || len(di.GetItems()) != 0 {
+		t.Errorf("dangling items = %d (%v), want 0 — the post-prune diff saw nothing disappear",
+			di.GetItemsRemoved(), di.GetItems())
+	}
+}
+
+// When docker's printed total is 0B, NOTHING was freed — the enumerated candidates
+// were not removed, and reporting them (count, list, bytes) would be the phantom
+// the history used to carry. The whole line zeroes.
+func TestDockerCleanup_pruneScopes_zeroTotalZeroesTheLine(t *testing.T) {
+	h := newFixture(t)
+	h.install(t)
+	removeObject = func(_ context.Context, args ...string) (dockercli.Result, error) {
+		h.mu.Lock()
+		h.removals = append(h.removals, append([]string(nil), args...))
+		h.mu.Unlock()
+		// Docker ran, matched nothing, freed nothing — and says so.
+		return okResult("Total reclaimed space: 0B\n"), nil
+	}
+
+	resp, err := newService(t).DockerCleanup(context.Background(), &pb.DockerCleanupRequest{
+		Scopes: []pb.CleanupScope{
+			pb.CleanupScope_CLEANUP_SCOPE_BUILD_CACHE,
+			pb.CleanupScope_CLEANUP_SCOPE_DANGLING_IMAGES,
+		},
+		MinAgeHours: 168,
+	})
+	if err != nil {
+		t.Fatalf("DockerCleanup: %v", err)
+	}
+	if got := len(h.argv()); got != 2 {
+		t.Fatalf("argv count = %d, want both prunes attempted", got)
+	}
+	for _, r := range resp.GetResults() {
+		if r.GetReclaimedBytes() != 0 || r.GetItemsRemoved() != 0 || len(r.GetItems()) != 0 {
+			t.Errorf("scope %s = %d bytes / %d items %v, want an all-zero line — docker freed nothing",
+				r.GetScope(), r.GetReclaimedBytes(), r.GetItemsRemoved(), r.GetItems())
+		}
+	}
+}
+
+// items_removed for dangling images is a post-prune OBSERVATION, not our
+// pre-flight guess: an image whose timestamp we cannot parse is never a
+// CANDIDATE of ours (olderThan refuses it), but once docker's own filter removes
+// it the diff counts it anyway. The count follows what happened, not what we
+// predicted.
+func TestDockerCleanup_danglingCount_isPostPruneDiff(t *testing.T) {
+	h := newFixture(t)
+	h.danglingImages = []string{"ddd1111", "xxx2222"}
+	h.imageRows["xxx2222"] = "sha256:xxx|<no value>|<no value>|not-a-timestamp|700000000"
+	h.install(t)
+
+	resp, err := newService(t).DockerCleanup(context.Background(), &pb.DockerCleanupRequest{
+		Scopes:      []pb.CleanupScope{pb.CleanupScope_CLEANUP_SCOPE_DANGLING_IMAGES},
+		MinAgeHours: 168,
+	})
+	if err != nil {
+		t.Fatalf("DockerCleanup: %v", err)
+	}
+	r := resultFor(t, resp, pb.CleanupScope_CLEANUP_SCOPE_DANGLING_IMAGES)
+	// Enumeration approved only sha256:ddd (xxx's age is unreadable), but the
+	// fixture's prune removed both — the diff must say 2.
+	if r.GetItemsRemoved() != 2 {
+		t.Errorf("items_removed = %d, want 2 (the post-prune diff, not the 1-candidate guess)",
+			r.GetItemsRemoved())
+	}
+	if r.GetReclaimedBytes() != 1500000000 {
+		t.Errorf("reclaimed_bytes = %d, want docker's own total", r.GetReclaimedBytes())
+	}
+}
+
+// The cache-record recovery: classic docker prints bare ids, buildx prints a
+// table; headers, totals and warnings never look like ids.
+func TestPrunedCacheRecordIDs(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		out  string
+		want int
+	}{
+		{"classic bare ids", "pu0aq3k0be2nxyf87qw0jbh08\nvhcz1lchp7f0nrnu29jj0oy1n\n\nTotal:\t1.5GB\n", 2},
+		{"buildx table", "ID\t\tRECLAIMABLE\tSIZE\tLAST ACCESSED\nx1y2z3a4b5c6d7e8 \ttrue\t203.7MB\t2 hours ago\n\nTotal:\t203.7MB\n", 1},
+		{"legacy hex id", "0123456789ab\nTotal reclaimed space: 12MB\n", 1},
+		{"total only", "Total reclaimed space: 1.5GB\n", 0},
+		{"warnings and noise", "WARNING! This will remove all dangling build cache.\nDeleted build cache objects:\nTotal:\t0B\n", 0},
+		{"empty", "", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := len(prunedCacheRecordIDs(tc.out)); got != tc.want {
+				t.Errorf("prunedCacheRecordIDs(%q) counted %d, want %d", tc.out, got, tc.want)
+			}
+		})
 	}
 }
 
