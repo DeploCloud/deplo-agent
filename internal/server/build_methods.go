@@ -197,7 +197,8 @@ CMD ["nginx", "-g", "daemon off;"]
 		return false
 	}
 
-	args := appendBuildArgKeys([]string{"build", "-t", req.GetImageRef()}, envKeys)
+	args := appendBuildArgKeys([]string{"build"}, envKeys)
+	args = append(args, imageOutputArgs(ctx, req.GetImageRef())...)
 	args = append(args, labelArgs(req)...)
 	args = append(args, buildDir)
 	return s.runBuild(ctx, args, envKV(req.GetEnv(), envKeys), e)
@@ -313,21 +314,21 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 
 	if publishDir == "" {
 		// App with a start command: build the generated Dockerfile directly.
-		args := []string{"build", "-f", generated, "-t", req.GetImageRef(),
-			"--build-arg", fmt.Sprintf("PORT=%d", port)}
+		args := []string{"build", "-f", generated, "--build-arg", fmt.Sprintf("PORT=%d", port)}
 		args = appendBuildArgKeys(args, envKeys)
+		args = append(args, imageOutputArgs(ctx, req.GetImageRef())...)
 		args = append(args, labelArgs(req)...)
 		args = append(args, buildDir)
-		return s.runBuildKit(ctx, args, buildEnv, e)
+		return s.runBuildKit(ctx, 15*time.Minute, args, buildEnv, e)
 	}
 
 	// Static publish dir: build a staging image, then nginx-wrap its output.
 	staging := "deplo-nixpacks-staging:" + imageTag(req.GetImageRef())
-	stageArgs := []string{"build", "-f", generated, "-t", staging,
-		"--build-arg", fmt.Sprintf("PORT=%d", port)}
+	stageArgs := []string{"build", "-f", generated, "--build-arg", fmt.Sprintf("PORT=%d", port)}
 	stageArgs = appendBuildArgKeys(stageArgs, envKeys)
+	stageArgs = append(stageArgs, imageOutputArgs(ctx, staging)...)
 	stageArgs = append(stageArgs, buildDir)
-	if !s.runBuildKit(ctx, stageArgs, buildEnv, e) {
+	if !s.runBuildKit(ctx, 15*time.Minute, stageArgs, buildEnv, e) {
 		return false
 	}
 	defer func() { _, _ = dockercli.Run(ctx, 30*time.Second, "rmi", staging) }()
@@ -359,7 +360,8 @@ CMD ["nginx", "-g", "daemon off;"]
 		e.result(false, "write wrapper Dockerfile: "+err.Error(), "")
 		return false
 	}
-	args := []string{"build", "-f", wrapperPath, "-t", req.GetImageRef()}
+	args := []string{"build", "-f", wrapperPath}
+	args = append(args, imageOutputArgs(ctx, req.GetImageRef())...)
 	args = append(args, labelArgs(req)...)
 	args = append(args, buildDir)
 	// The wrapper only copies files out of the built image — no build env needed.
@@ -440,112 +442,111 @@ func (s *Service) buildBuildpacks(ctx context.Context, req *pb.DeployRequest, bu
 }
 
 // ---------------------------------------------------------------------------
-// railpack — privileged buildkitd container + buildctl + tar load + relabel
+// railpack — host binary generates a plan, then docker build via its frontend
 // ---------------------------------------------------------------------------
 
-// buildRailpack generates a railpack plan in a throwaway container, then builds it
-// with a privileged buildkitd + buildctl, loads the resulting tar, and relabels.
-// Mirrors builders.ts buildRailpack. The build dir is bind-mounted directly (agent
-// on host). The plan + tar live alongside the build dir under buildTmpDir.
+// buildRailpack generates a railpack plan with the host railpack binary, then
+// hands the plan to `docker build` as its Dockerfile with the railpack BuildKit
+// frontend selected by BUILDKIT_SYNTAX. That is railpack's own documented Docker
+// integration, and it replaces a pipeline that was costing more than the build:
+//
+//   - a debian:bookworm-slim container running `apt-get update && apt-get install
+//     curl ca-certificates tar` and re-downloading the railpack installer on EVERY
+//     build, purely to emit a JSON plan — 21.4 s measured, against 1.2 s for the
+//     cached host binary (see ensureRailpack);
+//   - a freshly started privileged `moby/buildkit` container per build (~6.6 s to
+//     boot and answer) whose cache lived in an ANONYMOUS volume that the build's
+//     own cleanup then deleted, so no railpack build ever reused a single layer
+//     from the one before it — a rebuild of an unchanged app cost the same as the
+//     first ever build;
+//   - the image serialised to a tar on disk, `docker load`ed back in, and then
+//     rebuilt once more to stamp the deplo labels the frontend does not apply.
+//
+// Going through the daemon's own BuildKit deletes the first two outright — the
+// layer cache is the shared, persistent one every other build method already
+// uses (a warm rebuild measured 2.7 s against 35.3 s) and the image is written
+// straight to the image store — and reduces the third to the relabel alone.
 func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buildDir string, e *emitter) bool {
 	spec := req.GetBuildSpec()
 	e.log("info", "Building with Railpack")
 	e.phase(pb.DeployPhase_DEPLOY_PHASE_BUILDING)
 
-	// Normalise the version to each consumer's grammar: the frontend image tag
-	// wants `latest` or `v0.27.2`; install.sh's RAILPACK_VERSION wants a bare
-	// `0.27.2` (no "latest" sentinel) — pass nothing to let it auto-resolve latest.
-	ver := strings.ToLower(strings.TrimSpace(spec.GetRailpackVersion()))
-	pinned := ""
-	if ver != "" && ver != "latest" {
-		pinned = strings.TrimPrefix(ver, "v")
+	// One version drives both halves: the CLI that writes the plan and the frontend
+	// image that executes it. "latest" (the UI default) resolves to the release this
+	// agent ships — see railpackVersion for why that beats resolving each half to
+	// upstream-latest independently.
+	version := railpackVersion
+	if v := strings.ToLower(strings.TrimSpace(spec.GetRailpackVersion())); v != "" && v != "latest" {
+		version = strings.TrimPrefix(v, "v")
 	}
-	frontendTag := "latest"
-	if pinned != "" {
-		frontendTag = "v" + pinned
-	}
-	frontend := "ghcr.io/railwayapp/railpack-frontend:" + frontendTag
+	frontend := "ghcr.io/railwayapp/railpack-frontend:v" + version
 
-	slug := req.GetSlug()
-	tag := imageTag(req.GetImageRef())
-	planDir := filepath.Join(s.buildTmpDir, fmt.Sprintf("deplo-railpack-%s-%s-plan", slug, tag))
-	tarPath := filepath.Join(s.buildTmpDir, fmt.Sprintf("deplo-railpack-%s-%s.tar", slug, tag))
-	// Keyed by slug AND the per-build image tag (like planDir/tarPath above), so two
-	// concurrent builds of the SAME app get distinct daemons — otherwise one build's
-	// pre-start/defer `rm -f` would kill the other's live buildkitd mid-build, which
-	// surfaces as the very "buildkitd.sock: no such file" error waitBuildkitReady guards.
-	buildkitd := "deplo-buildkitd-" + slug + "-" + tag
+	railpack, err := s.ensureRailpack(ctx, version, e)
+	if err != nil {
+		e.result(false, "railpack unavailable: "+err.Error(), "")
+		return false
+	}
+
+	planDir := filepath.Join(s.buildTmpDir,
+		fmt.Sprintf("deplo-railpack-%s-%s-plan", req.GetSlug(), imageTag(req.GetImageRef())))
 	if err := os.MkdirAll(planDir, 0o755); err != nil {
 		e.result(false, "create railpack plan dir: "+err.Error(), "")
 		return false
 	}
-	defer func() {
-		// `-v` is load-bearing: moby/buildkit declares VOLUME /var/lib/buildkit, so
-		// every buildkitd we start gets an ANONYMOUS volume holding its cache. We
-		// mount no named volume over it, so that cache is discarded the moment this
-		// container goes — but without -v the volume itself survives as a dangling
-		// ~2 GB orphan, one per railpack build. Removing the container's anonymous
-		// volumes with it is the fix at the source; DockerCleanup's
-		// ORPHAN_BUILDKIT_CACHE scope mops up the ones already leaked.
-		_, _ = dockercli.Run(ctx, 30*time.Second, "rm", "-f", "-v", buildkitd)
-		_ = os.Remove(tarPath)
-		_ = os.RemoveAll(planDir)
-	}()
+	defer func() { _ = os.RemoveAll(planDir) }()
+	planPath := filepath.Join(planDir, "railpack-plan.json")
 
-	// Phase A: generate the railpack plan (daemon-free, glibc base).
-	planArgs := []string{"run", "--rm",
-		"-v", buildDir + ":/app:ro",
-		"-v", planDir + ":/out",
-		"-w", "/app"}
-	if pinned != "" {
-		planArgs = append(planArgs, "-e", "RAILPACK_VERSION="+pinned)
-	}
-	// Node version + build/start overrides ride into the plan through the container
-	// ENVIRONMENT (docker `-e KEY=VALUE`, an argv — so a user-supplied command can
-	// never break out of the `bash -lc` string), then railpack reads each with a
-	// BARE `--env KEY` (it does os.LookupEnv on bare keys). Bare refs for an unset
-	// key are harmless no-ops, so they stay constant in the prepare command.
+	// Phase A: generate the plan. Node version + build/start overrides reach
+	// railpack through the process ENVIRONMENT (SpawnEnv), read back by a BARE
+	// `--env KEY` (railpack does os.LookupEnv on bare keys) — so a user-supplied
+	// command is never a token on a command line we log. Bare refs for an unset key
+	// are harmless no-ops, so they stay constant in the prepare argv.
 	// RAILPACK_NODE_VERSION is railpack's highest-precedence node signal; node wants
 	// a bare major. RAILPACK_BUILD_CMD / RAILPACK_START_CMD override the detected
-	// build + start commands.
-	// The RAILPACK_* overrides, lifted to function scope: prepare bakes them into
-	// the plan (as secrets — see Phase B) and Phase B must hand the same values back
-	// to buildctl to satisfy those secret mounts.
+	// build + start commands. They are lifted to function scope because prepare
+	// bakes them into the plan as secrets (see Phase B) and Phase B must hand the
+	// same values back to satisfy those secret mounts.
 	nodeVer := majorVersion(strings.TrimSpace(spec.GetRuntimeVersion()), "")
 	buildCmd := strings.TrimSpace(spec.GetBuildCommand())
 	startCmd := strings.TrimSpace(spec.GetStartCommand())
-	if nodeVer != "" {
-		planArgs = append(planArgs, "-e", "RAILPACK_NODE_VERSION="+nodeVer)
-	}
-	if buildCmd != "" {
-		planArgs = append(planArgs, "-e", "RAILPACK_BUILD_CMD="+buildCmd)
-	}
-	if startCmd != "" {
-		planArgs = append(planArgs, "-e", "RAILPACK_START_CMD="+startCmd)
-	}
 	// Build-time env (build_env.go): each user var reaches `railpack prepare` the
-	// same way the overrides above do — a bare `-e KEY` on the docker run (the
-	// value rides the docker client's process env via StreamEnv, never argv) plus
-	// a bare `--env KEY` on the prepare command. railpack declares each one a
-	// plan SECRET, which its frontend mounts as env on every build step — so the
-	// var is present while `npm run build` inlines it, without being baked into
-	// the image. RAILPACK_* names stay excluded: those are spec-derived above and
-	// a user var must not silently fight the explicit build settings. Keys are
-	// identifier-shaped by construction (buildEnvKeys), so embedding them in the
-	// `bash -lc` string below cannot break out of it.
+	// same way the overrides do — its VALUE in the process env, its NAME as a bare
+	// `--env KEY`. railpack declares each one a plan SECRET, which its frontend
+	// mounts as env on every build step, so the var is present while `npm run build`
+	// inlines it without being baked into the image. RAILPACK_* names stay excluded:
+	// those are spec-derived above and a user var must not silently fight the
+	// explicit build settings.
 	envKeys := filterKeys(dropReservedBuildEnv(buildEnvKeys(req.GetEnv())), func(k string) bool {
 		return !strings.HasPrefix(k, "RAILPACK_")
 	})
-	prepareCmd := "apt-get update -qq && apt-get install -y -qq curl ca-certificates tar && curl -sSL https://railpack.com/install.sh | bash && railpack prepare /app --env RAILPACK_NODE_VERSION --env RAILPACK_BUILD_CMD --env RAILPACK_START_CMD"
+	prepareArgs := []string{"prepare", buildDir,
+		"--env", "RAILPACK_NODE_VERSION", "--env", "RAILPACK_BUILD_CMD", "--env", "RAILPACK_START_CMD"}
 	for _, k := range envKeys {
-		planArgs = append(planArgs, "-e", k)
-		prepareCmd += " --env " + k
+		prepareArgs = append(prepareArgs, "--env", k)
 	}
-	prepareCmd += " --plan-out /out/railpack-plan.json --info-out /out/railpack-info.json"
-	planArgs = append(planArgs, "debian:bookworm-slim", "bash", "-lc", prepareCmd)
-	e.log("command", "docker run (railpack prepare)")
-	code, err := dockercli.StreamEnv(ctx, 10*time.Minute, func(l string) { e.log("info", l) },
-		envKV(req.GetEnv(), envKeys), planArgs...)
+	prepareArgs = append(prepareArgs,
+		"--plan-out", planPath,
+		"--info-out", filepath.Join(planDir, "railpack-info.json"))
+
+	// Only EXPORT an override that was actually set. railpack reads these with
+	// os.LookupEnv, so an empty-but-present var still counts as supplied: it
+	// declares the name a plan secret and mounts it on every build step for no
+	// reason. Verified by diffing two plans — set-to-empty and unset produce
+	// identical build steps, differing only by three pointless secrets.
+	prepareEnv := envKV(req.GetEnv(), envKeys)
+	for _, kv := range [][2]string{
+		{"RAILPACK_NODE_VERSION", nodeVer},
+		{"RAILPACK_BUILD_CMD", buildCmd},
+		{"RAILPACK_START_CMD", startCmd},
+	} {
+		if kv[1] != "" {
+			prepareEnv = append(prepareEnv, kv[0]+"="+kv[1])
+		}
+	}
+
+	e.log("command", "railpack "+strings.Join(prepareArgs, " "))
+	code, err := dockercli.SpawnEnv(ctx, 5*time.Minute, func(l string) { e.log("info", l) },
+		prepareEnv, railpack, prepareArgs...)
 	if err != nil {
 		e.result(false, "railpack prepare: "+err.Error(), "")
 		return false
@@ -555,40 +556,17 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 		return false
 	}
 
-	// Phase B: a privileged buildkitd with context+plan mounted, build via buildctl.
-	// `-v` again (see the defer above): a leftover buildkitd from a killed build must
-	// take its anonymous cache volume with it, or the orphan outlives the container.
-	_, _ = dockercli.Run(ctx, 15*time.Second, "rm", "-f", "-v", buildkitd)
-	runArgs := []string{"run", "-d", "--name", buildkitd, "--privileged",
-		"-v", buildDir + ":/context:ro",
-		"-v", planDir + ":/plan:ro",
-		"moby/buildkit:v0.16.0"}
-	if res, err := dockercli.Run(ctx, 60*time.Second, runArgs...); err != nil || res.Code != 0 {
-		e.result(false, "start buildkitd: "+errOrCode(err, res.Code, res.Stderr), "")
-		return false
-	}
-
-	// `docker run -d` returns once the CONTAINER is up, but buildkitd needs a further
-	// beat to open its gRPC socket at /run/buildkit/buildkitd.sock. buildctl fired into
-	// that gap dies hard with "dial unix …/buildkitd.sock: connect: no such file or
-	// directory" — the daemon isn't listening yet. Gate on it actually answering first.
-	if !waitBuildkitReady(ctx, buildkitd, e) {
-		e.result(false, "buildkitd did not become ready in time", "")
-		return false
-	}
-
-	// railpack declared each RAILPACK_* override we passed to `prepare` as a BuildKit
-	// SECRET in the plan, and its frontend mounts every plan secret as a REQUIRED env
-	// secret on EVERY build step. Raw `buildctl build` must therefore hand each one
-	// back or it fails "secret <name>: not found". We forward the VALUES as process
-	// env (never on a command line) and reference them by bare `docker exec -e NAME`
-	// (docker copies NAME from the caller's env) plus `buildctl --secret
-	// id=NAME,env=NAME` (buildctl reads NAME from its own env). The secret NAMES come
-	// from the plan, which is generated from the UNTRUSTED user repo (a railpack
-	// config may declare arbitrary `secrets:`), so everything is passed as argv
-	// tokens via StreamOut — never a shell string — leaving a crafted name like
-	// `x; rm -rf /` an inert argument rather than a command on the root-privileged
-	// host agent.
+	// Phase B: build the plan with the railpack frontend.
+	//
+	// railpack declared each name we passed to `prepare` as a BuildKit SECRET in the
+	// plan, and its frontend mounts every plan secret as a REQUIRED env secret on
+	// EVERY build step — so the build must hand each one back or it fails "secret
+	// <name>: not found". VALUES ride the docker client's process env and are
+	// referenced by name only (`--secret id=NAME,env=NAME`), so they never touch
+	// argv or the deploy log. The secret NAMES come from a plan generated out of an
+	// UNTRUSTED user repo (a railpack config may declare arbitrary `secrets:`), so
+	// they are emitted as discrete argv tokens through a shell-free exec: a crafted
+	// name like `x; rm -rf /` stays one inert argument on a root-privileged host.
 	// User build env first, the spec-derived overrides second (overrides win a
 	// collision — same authority order as `prepare` above).
 	known := map[string]string{}
@@ -598,7 +576,7 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 	known["RAILPACK_NODE_VERSION"] = nodeVer
 	known["RAILPACK_BUILD_CMD"] = buildCmd
 	known["RAILPACK_START_CMD"] = startCmd
-	secretNames, ok := readPlanSecrets(filepath.Join(planDir, "railpack-plan.json"))
+	secretNames, ok := readPlanSecrets(planPath)
 	if !ok {
 		// Plan unreadable: fall back to every name `prepare` referenced — the three
 		// overrides plus each user env key — so a still-required secret is never
@@ -607,91 +585,55 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 		secretNames = append([]string{"RAILPACK_NODE_VERSION", "RAILPACK_BUILD_CMD", "RAILPACK_START_CMD"}, envKeys...)
 	}
 	// Defence in depth: the plan is untrusted, so drop any name that isn't a plain
-	// env identifier before it reaches the buildctl `--secret id=…,env=…` CSV (a
-	// comma/space in a name could otherwise smuggle extra CSV attributes). A real
-	// railpack secret is always an identifier; a dropped hostile name simply fails
-	// its own build with "secret not found".
+	// env identifier before it reaches the `--secret id=…,env=…` CSV (a comma or
+	// space in a name could otherwise smuggle extra CSV attributes). A real railpack
+	// secret is always an identifier; a dropped hostile name simply fails its own
+	// build with "secret not found".
 	secretNames = sanitizeSecretNames(secretNames)
 	secretEnv := make([]string, 0, len(secretNames)) // the ONLY place secret VALUES live
 	for _, name := range secretNames {
 		secretEnv = append(secretEnv, name+"="+known[name]) // unknown ⇒ "" (provided ⇒ never "not found")
 	}
-	execArgs := railpackBuildctlArgs(buildkitd, frontend, req.GetImageRef(), secretNames)
 
-	// buildctl (inside buildkitd) writes the docker-format image tar to STDOUT and
-	// BuildKit progress to stderr. Stream stdout straight into tarPath — no shell
-	// redirect — then `docker load` it.
-	tarFile, err := os.Create(tarPath)
-	if err != nil {
-		e.result(false, "create railpack tar: "+err.Error(), "")
+	args := railpackBuildArgs(frontend, planPath, buildDir, secretNames,
+		imageOutputArgs(ctx, req.GetImageRef()))
+	if !s.runBuildKit(ctx, 20*time.Minute, args, secretEnv, e) {
 		return false
 	}
-	e.log("command", "buildctl build (railpack frontend "+frontendTag+")")
-	code, err = dockercli.StreamOut(ctx, 20*time.Minute, tarFile, func(l string) { e.log("info", l) }, secretEnv, execArgs...)
-	_ = tarFile.Close()
-	if err != nil {
-		e.result(false, "railpack buildctl: "+err.Error(), "")
-		return false
-	}
-	if code != 0 {
-		e.result(false, fmt.Sprintf("railpack buildctl failed (exit %d)", code), "")
-		return false
-	}
-
-	if !s.runLoad(ctx, tarPath, e) {
-		return false
-	}
-	// railpack frontend output carries no labels — re-stamp ours.
+	// The railpack frontend builds the image config itself and DROPS the
+	// `--label` flags buildx forwards — verified against a real build, where the
+	// Dockerfile frontend kept all three deplo labels and railpack's kept none.
+	// So the labels every Deplo image is identified by (cleanup, roster, image
+	// retention all filter on deplo.slug) still need their own metadata-only pass.
+	// It costs ~1 s: no layer is rebuilt, only a new config referencing blobs the
+	// build just wrote.
 	return s.relabel(ctx, req, e)
 }
 
-// buildkitReadyTimeout bounds the wait for a freshly-started buildkitd to open its
-// gRPC socket. The daemon is normally serving within a second or two; 30s is ample
-// slack for a loaded host. A daemon that never starts is caught sooner by the
-// container-exited check below, so this cap only governs the slow-start case.
-const buildkitReadyTimeout = 30 * time.Second
-
-// waitBuildkitReady blocks until buildctl can reach the buildkitd daemon inside the
-// named container, or the container dies / the timeout / ctx deadline elapses. It
-// closes a race: `docker run -d moby/buildkit` returns when the CONTAINER starts, not
-// when buildkitd has created /run/buildkit/buildkitd.sock, so the real `buildctl
-// build` fired straight after fails "dial unix …/buildkitd.sock: connect: no such
-// file or directory". Polling `buildctl debug workers` (the same list-workers
-// round-trip the build does first) gates on the daemon actually serving, not merely
-// on the container existing. Returns false if the daemon never answered in time.
-func waitBuildkitReady(ctx context.Context, buildkitd string, e *emitter) bool {
-	deadline := time.Now().Add(buildkitReadyTimeout)
-	announced := false
-	for {
-		res, err := dockercli.Run(ctx, 10*time.Second, "exec", buildkitd, "buildctl", "debug", "workers")
-		if err == nil && res.Code == 0 {
-			return true
-		}
-		// A buildkitd that crashed on startup (e.g. a host that can't run it
-		// privileged) will never answer — fail fast with its real state instead of
-		// burning the whole budget polling a dead container.
-		if exists, status := dockercli.State(ctx, buildkitd); !exists || status != "running" {
-			e.log("info", "buildkitd container is not running (status: "+status+"): "+strings.TrimSpace(res.Stderr))
-			return false
-		}
-		if ctx.Err() != nil || time.Now().After(deadline) {
-			e.log("info", "buildkitd not ready within "+buildkitReadyTimeout.String()+": "+strings.TrimSpace(res.Stderr))
-			return false
-		}
-		if !announced {
-			e.log("info", "Waiting for BuildKit to become ready…")
-			announced = true
-		}
-		time.Sleep(500 * time.Millisecond)
+// railpackBuildArgs assembles the `docker build` argv that runs a railpack plan:
+// the plan file stands in for the Dockerfile and BUILDKIT_SYNTAX selects the
+// railpack frontend to interpret it. Split out from buildRailpack so the argv —
+// in particular that every untrusted secret NAME stays a discrete token — is
+// testable without a daemon. Labels are deliberately absent: the frontend
+// ignores them (see the relabel pass in buildRailpack).
+func railpackBuildArgs(frontend, planPath, contextDir string, secretNames, output []string) []string {
+	args := []string{"build", "--build-arg", "BUILDKIT_SYNTAX=" + frontend, "-f", planPath}
+	for _, name := range secretNames {
+		args = append(args, "--secret", "id="+name+",env="+name)
 	}
+	args = append(args, output...)
+	return append(args, contextDir)
 }
 
 // runBuildKit streams a `docker build` with BuildKit forced on (DOCKER_BUILDKIT=1),
-// needed by the nixpacks generated Dockerfile (which uses BuildKit syntax).
-// extraEnv carries build-env VALUES for bare `--build-arg KEY` flags (may be nil).
-func (s *Service) runBuildKit(ctx context.Context, args []string, extraEnv []string, e *emitter) bool {
+// needed by the nixpacks generated Dockerfile and the railpack plan (both use
+// BuildKit-only syntax). extraEnv carries build-env VALUES for bare `--build-arg
+// KEY` flags, or a railpack plan's `--secret env=NAME` values (may be nil).
+// timeout is explicit because the methods deserve different budgets: railpack
+// kept the 20 minutes its old buildctl path had, nixpacks the 15 it always had.
+func (s *Service) runBuildKit(ctx context.Context, timeout time.Duration, args []string, extraEnv []string, e *emitter) bool {
 	e.log("command", "docker "+strings.Join(args, " "))
-	code, err := dockercli.StreamEnv(ctx, 15*time.Minute, func(l string) { e.log("info", l) },
+	code, err := dockercli.StreamEnv(ctx, timeout, func(l string) { e.log("info", l) },
 		append([]string{"DOCKER_BUILDKIT=1"}, extraEnv...), args...)
 	if err != nil {
 		e.result(false, "docker build: "+err.Error(), "")
@@ -699,21 +641,6 @@ func (s *Service) runBuildKit(ctx context.Context, args []string, extraEnv []str
 	}
 	if code != 0 {
 		e.result(false, fmt.Sprintf("docker build failed (exit %d)", code), "")
-		return false
-	}
-	return true
-}
-
-// runLoad streams `docker load -i <tar>` into the deploy log.
-func (s *Service) runLoad(ctx context.Context, tarPath string, e *emitter) bool {
-	e.log("command", "docker load -i "+tarPath)
-	code, err := dockercli.Stream(ctx, 5*time.Minute, func(l string) { e.log("info", l) }, "", "load", "-i", tarPath)
-	if err != nil {
-		e.result(false, "docker load: "+err.Error(), "")
-		return false
-	}
-	if code != 0 {
-		e.result(false, fmt.Sprintf("docker load failed (exit %d)", code), "")
 		return false
 	}
 	return true
@@ -745,30 +672,6 @@ func sanitizeSecretNames(names []string) []string {
 	return out
 }
 
-// railpackBuildctlArgs assembles the injection-safe argv for railpack's Phase-B
-// build: `docker exec [-e NAME ...] <buildkitd> buildctl build ... [--secret
-// id=NAME,env=NAME ...] --output type=docker,name=<ref>`. The `-e NAME` flags
-// forward each secret's value from the docker client's env into buildctl (whose
-// `--secret env=NAME` reads it); the VALUES never appear here. secretNames come
-// from an untrusted repo's railpack plan, so they are emitted as discrete argv
-// tokens (no shell) — a hostile name stays one inert argument.
-func railpackBuildctlArgs(buildkitd, frontend, imageRef string, secretNames []string) []string {
-	args := []string{"exec"}
-	for _, name := range secretNames {
-		args = append(args, "-e", name)
-	}
-	args = append(args, buildkitd, "buildctl", "build",
-		"--frontend=gateway.v0",
-		"--opt", "source="+frontend,
-		"--local", "context=/context",
-		"--local", "dockerfile=/plan",
-		"--opt", "filename=railpack-plan.json")
-	for _, name := range secretNames {
-		args = append(args, "--secret", "id="+name+",env="+name)
-	}
-	return append(args, "--output", "type=docker,name="+imageRef)
-}
-
 // readPlanSecrets returns the `secrets` a railpack plan declares — the RAILPACK_*
 // overrides we passed to `prepare`, which railpack mounts as REQUIRED BuildKit env
 // secrets on every build step. The bool is false only when the plan can't be read
@@ -786,12 +689,4 @@ func readPlanSecrets(planPath string) ([]string, bool) {
 		return nil, false
 	}
 	return plan.Secrets, true
-}
-
-// errOrCode formats either a spawn error or a non-zero exit with its stderr.
-func errOrCode(err error, code int, stderr string) string {
-	if err != nil {
-		return err.Error()
-	}
-	return fmt.Sprintf("exit %d: %s", code, strings.TrimSpace(stderr))
 }

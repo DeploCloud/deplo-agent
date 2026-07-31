@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -350,6 +351,70 @@ func ServerVersion(ctx context.Context) string {
 		return ""
 	}
 	return strings.TrimSpace(res.Stdout)
+}
+
+// --- build-export capability -----------------------------------------------
+
+// Daemons that keep their images in containerd pay a heavy, invisible tax on
+// every build: BuildKit's `image` exporter GZIPs each new layer into the content
+// store before unpacking it back into the snapshotter. On a ~900 MB
+// node_modules layer that measured 25 s of pure CPU — a third of a Nixpacks
+// deploy spent compressing an image that is only ever run on this host and is
+// never pushed anywhere. `--output type=image,…,compression=zstd` cuts the same
+// export to ~8 s at the same on-disk size, which is what ImageExportOptsSupported
+// gates.
+//
+// The classic (overlay2 / graphdriver) image store needs none of this: it uses
+// the `moby` exporter, which hands BuildKit's layers to the daemon UNCOMPRESSED,
+// and it rejects `--output type=image` outright. So the probe is also a
+// correctness gate, not only an optimisation one — get it wrong on a classic
+// daemon and every build fails.
+var (
+	imageExportMu    sync.Mutex
+	imageExportKnown bool
+	imageExportOK    bool
+)
+
+// ImageExportOptsSupported reports whether `docker build --output type=image,…`
+// is available on this host — i.e. the daemon keeps images in containerd AND the
+// CLI has the buildx plugin that accepts the flag. False for every other host,
+// where callers must fall back to plain `-t` (which is already the fast path
+// there).
+//
+// The answer is cached for the life of the agent: neither the daemon's image
+// store nor the CLI's plugin set changes under a running agent, and the probe
+// costs two docker round-trips. Only a CONCLUSIVE probe is cached — a daemon
+// that was momentarily unreachable is asked again next build rather than being
+// written off as slow forever.
+func ImageExportOptsSupported(ctx context.Context) bool {
+	imageExportMu.Lock()
+	defer imageExportMu.Unlock()
+	if imageExportKnown {
+		return imageExportOK
+	}
+	// `docker info` renders the storage driver's status as [[key value] …]; the
+	// containerd image store announces itself with this driver-type row.
+	res, err := Run(ctx, 15*time.Second, "info", "--format", "{{json .DriverStatus}}")
+	if err != nil || res.Code != 0 {
+		return false // inconclusive — do not cache
+	}
+	if !strings.Contains(res.Stdout, "io.containerd.snapshotter.v1") {
+		imageExportKnown, imageExportOK = true, false
+		return false
+	}
+	bx, err := Run(ctx, 15*time.Second, "buildx", "version")
+	if err != nil {
+		return false // inconclusive — do not cache
+	}
+	imageExportKnown, imageExportOK = true, bx.Code == 0
+	return imageExportOK
+}
+
+// resetImageExportProbe clears the cached probe. Tests only.
+func resetImageExportProbe() {
+	imageExportMu.Lock()
+	defer imageExportMu.Unlock()
+	imageExportKnown, imageExportOK = false, false
 }
 
 // EnsureNetwork creates the shared external `deplo` network if it is missing.

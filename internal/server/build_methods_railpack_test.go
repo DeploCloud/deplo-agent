@@ -64,42 +64,50 @@ func TestSanitizeSecretNames(t *testing.T) {
 	}
 }
 
-// railpackBuildctlArgs must forward every plan secret as a `docker exec -e NAME`
-// AND a `buildctl --secret id=NAME,env=NAME`, and — the security property — emit
-// each secret NAME as a single discrete argv token so a hostile name from an
-// untrusted plan can never be word-split or shell-interpreted.
-func TestRailpackBuildctlArgs(t *testing.T) {
+// railpackBuildArgs must select the railpack frontend via BUILDKIT_SYNTAX, feed
+// the plan as the Dockerfile, forward every plan secret as `--secret
+// id=NAME,env=NAME`, and carry the caller's image output — all as discrete argv
+// tokens, so a hostile name from an untrusted plan can never be word-split or
+// shell-interpreted.
+func TestRailpackBuildArgs(t *testing.T) {
 	names := []string{"RAILPACK_NODE_VERSION", "RAILPACK_BUILD_CMD"}
-	args := railpackBuildctlArgs("bk-cwars", "ghcr.io/railwayapp/railpack-frontend:latest", "deplo/cwars:dpl_abc", names)
+	args := railpackBuildArgs(
+		"ghcr.io/railwayapp/railpack-frontend:v0.35.0",
+		"/tmp/plan/railpack-plan.json", "/tmp/ctx", names,
+		[]string{"-t", "deplo/cwars:dpl_abc"},
+	)
 
 	// No shell is ever involved: there is no `sh`/`-c` token anywhere.
 	if slices.Contains(args, "sh") || slices.Contains(args, "-c") {
 		t.Fatalf("argv must not invoke a shell: %v", args)
 	}
-	// Core buildctl shape is present in order.
 	joined := strings.Join(args, " ")
 	for _, want := range []string{
-		"exec -e RAILPACK_NODE_VERSION -e RAILPACK_BUILD_CMD bk-cwars buildctl build",
-		"--opt filename=railpack-plan.json",
+		"build --build-arg BUILDKIT_SYNTAX=ghcr.io/railwayapp/railpack-frontend:v0.35.0",
+		"-f /tmp/plan/railpack-plan.json",
 		"--secret id=RAILPACK_NODE_VERSION,env=RAILPACK_NODE_VERSION",
 		"--secret id=RAILPACK_BUILD_CMD,env=RAILPACK_BUILD_CMD",
-		"--output type=docker,name=deplo/cwars:dpl_abc",
+		"-t deplo/cwars:dpl_abc",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("argv missing %q in: %s", want, joined)
 		}
 	}
-
-	// Injection safety: a crafted secret name lands as EXACTLY one argv token in the
-	// `-e` slot and one in the `--secret` slot — never split, never a command.
-	evil := "x; rm -rf / #"
-	adv := railpackBuildctlArgs("bk", "front", "img", []string{evil})
-	eIdx := slices.Index(adv, "-e")
-	if eIdx < 0 || adv[eIdx+1] != evil {
-		t.Fatalf("hostile name not a single -e token: %v", adv)
+	// Labels are the relabel pass's job — the frontend drops them, so emitting
+	// them here would be dead argv that reads as if it worked.
+	if slices.Contains(args, "--label") {
+		t.Fatalf("labels must not ride the railpack frontend build: %v", args)
 	}
-	if !slices.Contains(adv, "--secret") ||
-		!slices.Contains(adv, "id="+evil+",env="+evil) {
+	// The build context is the final positional argument — docker reads it there.
+	if args[len(args)-1] != "/tmp/ctx" {
+		t.Fatalf("context must be the last arg: %v", args)
+	}
+
+	// Injection safety: a crafted secret name lands as EXACTLY one argv token in
+	// the `--secret` slot — never split, never a command.
+	evil := "x; rm -rf / #"
+	adv := railpackBuildArgs("front", "plan.json", "ctx", []string{evil}, nil)
+	if !slices.Contains(adv, "--secret") || !slices.Contains(adv, "id="+evil+",env="+evil) {
 		t.Fatalf("hostile name not a single --secret token: %v", adv)
 	}
 }

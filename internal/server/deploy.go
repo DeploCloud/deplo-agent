@@ -340,7 +340,8 @@ func (s *Service) buildDockerfile(ctx context.Context, req *pb.DeployRequest, bu
 		// have won over the generated body above). Bare `--build-arg KEY` keeps
 		// values off argv; they ride the docker client's process env instead.
 		envKeys := dockerfileBuildEnv(dfPath, req)
-		args := appendBuildArgKeys([]string{"build", "-t", req.GetImageRef()}, envKeys)
+		args := appendBuildArgKeys([]string{"build"}, envKeys)
+		args = append(args, imageOutputArgs(ctx, req.GetImageRef())...)
 		args = append(args, labels...)
 		args = append(args, buildDir)
 		return s.runBuild(ctx, args, envKV(req.GetEnv(), envKeys), e)
@@ -387,7 +388,7 @@ func (s *Service) buildDockerfile(ctx context.Context, req *pb.DeployRequest, bu
 	// `ARG NAME` — only declared names are forwarded, so builds stay warning-free.
 	envKeys := dockerfileBuildEnv(dockerfilePath, req)
 	args = appendBuildArgKeys(args, envKeys)
-	args = append(args, "-t", req.GetImageRef())
+	args = append(args, imageOutputArgs(ctx, req.GetImageRef())...)
 	args = append(args, labels...)
 	args = append(args, contextDir)
 	return s.runBuild(ctx, args, envKV(req.GetEnv(), envKeys), e)
@@ -407,6 +408,14 @@ func dockerfileBuildEnv(dockerfilePath string, req *pb.DeployRequest) []string {
 // runBuild streams a `docker build`; extraEnv carries build-env VALUES (bare
 // `--build-arg KEY` flags in args resolve from it) and may be nil.
 func (s *Service) runBuild(ctx context.Context, args []string, extraEnv []string, e *emitter) bool {
+	// A containerd image store can only be built into by BuildKit, and the
+	// `--output type=image,…` flag imageOutputArgs adds on those hosts is a
+	// BuildKit-only flag — so force BuildKit on rather than trust whatever
+	// DOCKER_BUILDKIT the agent's unit happened to inherit. On every other host
+	// the daemon's own default decides, exactly as before.
+	if dockercli.ImageExportOptsSupported(ctx) {
+		extraEnv = append([]string{"DOCKER_BUILDKIT=1"}, extraEnv...)
+	}
 	e.log("command", "docker "+strings.Join(args, " "))
 	code, err := dockercli.StreamEnv(ctx, 15*time.Minute, func(l string) { e.log("info", l) }, extraEnv, args...)
 	if err != nil {

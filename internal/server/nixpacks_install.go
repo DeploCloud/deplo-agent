@@ -44,24 +44,28 @@ func (s *Service) ensureNixpacks(ctx context.Context, e *emitter) (string, error
 	dest := filepath.Join(toolsDir, "nixpacks-"+nixpacksVersion)
 
 	// 2. A previously-installed copy of THIS version under <dataBase>/tools.
-	if fi, err := os.Stat(dest); err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0 {
+	if usableBinary(dest) {
 		return dest, nil
 	}
 
 	// 3. Download the pinned release for this arch and cache it.
 	e.log("info", fmt.Sprintf("Installing nixpacks %s (first use)…", nixpacksVersion))
-	if err := os.MkdirAll(toolsDir, 0o755); err != nil {
-		return "", fmt.Errorf("create tools dir: %w", err)
-	}
 	url, err := nixpacksDownloadURL()
 	if err != nil {
 		return "", err
 	}
-	if err := downloadNixpacks(ctx, url, dest); err != nil {
+	if err := installTarBinary(ctx, url, "nixpacks", dest); err != nil {
 		return "", err
 	}
 	e.log("info", "nixpacks installed")
 	return dest, nil
+}
+
+// usableBinary reports whether path is an existing, executable regular file —
+// i.e. a cached tool we can run instead of re-downloading.
+func usableBinary(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0
 }
 
 // nixpacksDownloadURL builds the GitHub release asset URL for this host's OS/arch.
@@ -86,10 +90,21 @@ func nixpacksDownloadURL() (string, error) {
 		nixpacksVersion, nixpacksVersion, target), nil
 }
 
-// downloadNixpacks fetches the gzipped tarball at url and extracts the `nixpacks`
-// binary to dest (0755), atomically (temp file + rename). The archive holds a
-// single top-level `nixpacks` executable.
-func downloadNixpacks(ctx context.Context, url, dest string) error {
+// installTarBinary fetches the gzipped tarball at url and extracts the single
+// executable named `binary` to dest (0755), atomically. Used for both build
+// tools the agent provisions itself (nixpacks, railpack), which publish exactly
+// this asset shape.
+//
+// The temp file gets a UNIQUE name rather than dest+".tmp": two builds of
+// different projects can reach for the same tool on the same host at the same
+// instant, and a shared temp path would have them writing one file's bytes over
+// the other's before either rename. With a unique temp each writes its own copy
+// and the rename — atomic on the same filesystem — makes whichever finishes last
+// the one that stands. Both are the same release, so either wins correctly.
+func installTarBinary(ctx context.Context, url, binary, dest string) error {
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return fmt.Errorf("create tools dir: %w", err)
+	}
 	cctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	req, err := http.NewRequestWithContext(cctx, http.MethodGet, url, nil)
@@ -98,16 +113,16 @@ func downloadNixpacks(ctx context.Context, url, dest string) error {
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("download nixpacks: %w", err)
+		return fmt.Errorf("download %s: %w", binary, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download nixpacks: HTTP %d from %s", resp.StatusCode, url)
+		return fmt.Errorf("download %s: HTTP %d from %s", binary, resp.StatusCode, url)
 	}
 
 	gz, err := gzip.NewReader(resp.Body)
 	if err != nil {
-		return fmt.Errorf("gunzip nixpacks: %w", err)
+		return fmt.Errorf("gunzip %s: %w", binary, err)
 	}
 	defer gz.Close()
 
@@ -115,27 +130,31 @@ func downloadNixpacks(ctx context.Context, url, dest string) error {
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
-			return fmt.Errorf("nixpacks binary not found in archive")
+			return fmt.Errorf("%s binary not found in archive", binary)
 		}
 		if err != nil {
-			return fmt.Errorf("read nixpacks archive: %w", err)
+			return fmt.Errorf("read %s archive: %w", binary, err)
 		}
-		if hdr.Typeflag != tar.TypeReg || filepath.Base(hdr.Name) != "nixpacks" {
+		if hdr.Typeflag != tar.TypeReg || filepath.Base(hdr.Name) != binary {
 			continue
 		}
-		tmp := dest + ".tmp"
-		f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+		f, err := os.CreateTemp(filepath.Dir(dest), "."+binary+"-*.part")
 		if err != nil {
 			return err
 		}
+		tmp := f.Name()
 		// Bound the copy to defend against a decompression bomb (256 MiB ≫ the
 		// real ~30 MiB binary, but finite).
 		if _, err := io.Copy(f, io.LimitReader(tr, 256<<20)); err != nil {
 			f.Close()
 			_ = os.Remove(tmp)
-			return fmt.Errorf("extract nixpacks: %w", err)
+			return fmt.Errorf("extract %s: %w", binary, err)
 		}
 		f.Close()
+		if err := os.Chmod(tmp, 0o755); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
 		if err := os.Rename(tmp, dest); err != nil {
 			_ = os.Remove(tmp)
 			return err

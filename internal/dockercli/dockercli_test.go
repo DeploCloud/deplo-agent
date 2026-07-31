@@ -76,6 +76,67 @@ func TestTraefikRunning(t *testing.T) {
 	}
 }
 
+// ImageExportOptsSupported decides whether builds may pass
+// `--output type=image,…` — a flag the containerd image store accepts and the
+// classic graphdriver store rejects outright, so a wrong answer breaks every
+// build rather than merely slowing one. Verified against what the live daemon
+// actually reports, and asserted to be sticky (the probe costs two docker
+// round-trips and must not run per build).
+func TestImageExportOptsSupported(t *testing.T) {
+	ctx := context.Background()
+	if !Available(ctx) {
+		t.Skip("docker unavailable")
+	}
+	resetImageExportProbe()
+	t.Cleanup(resetImageExportProbe)
+
+	info, err := Run(ctx, 15*time.Second, "info", "--format", "{{json .DriverStatus}}")
+	if err != nil || info.Code != 0 {
+		t.Skipf("could not read docker info: %v %s", err, info.Stderr)
+	}
+	containerd := strings.Contains(info.Stdout, "io.containerd.snapshotter.v1")
+	bx, err := Run(ctx, 15*time.Second, "buildx", "version")
+	if err != nil {
+		t.Skip("could not probe buildx")
+	}
+	want := containerd && bx.Code == 0
+
+	if got := ImageExportOptsSupported(ctx); got != want {
+		t.Fatalf("ImageExportOptsSupported = %v; daemon says containerd=%v buildx=%v",
+			got, containerd, bx.Code == 0)
+	}
+
+	// Sticky: with the probe cached, a context that is already dead must still
+	// return the same answer — proof no further docker call is made.
+	dead, cancel := context.WithCancel(ctx)
+	cancel()
+	if got := ImageExportOptsSupported(dead); got != want {
+		t.Fatalf("cached probe re-ran (got %v on a cancelled ctx; want %v)", got, want)
+	}
+}
+
+// An inconclusive probe (docker unreachable) must NOT be cached: a daemon that
+// was momentarily down would otherwise be treated as slow for the life of the
+// agent, silently costing every later build the compression tax.
+func TestImageExportProbeDoesNotCacheInconclusive(t *testing.T) {
+	resetImageExportProbe()
+	t.Cleanup(resetImageExportProbe)
+
+	// A cancelled context makes `docker info` fail to run at all — the
+	// inconclusive path.
+	dead, cancel := context.WithCancel(context.Background())
+	cancel()
+	if ImageExportOptsSupported(dead) {
+		t.Fatal("an unreachable daemon must report false")
+	}
+	imageExportMu.Lock()
+	known := imageExportKnown
+	imageExportMu.Unlock()
+	if known {
+		t.Fatal("an inconclusive probe must not be cached")
+	}
+}
+
 // redactArgs must mask any secret-bearing token so a failed dump/restore never
 // echoes a cleartext password into an error string the control plane logs.
 func TestRedactArgs(t *testing.T) {
