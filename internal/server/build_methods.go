@@ -258,8 +258,27 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 		return k != "PORT" && !strings.HasPrefix(k, "NIXPACKS_")
 	})
 	// Phase 1: generate .nixpacks/Dockerfile WITHOUT the daemon (host binary).
+	//
+	// --cache-key pins the id of every BuildKit cache mount nixpacks emits. Its
+	// default is the build DIRECTORY, which is a fresh path per deploy, so the
+	// package manager's cache and the framework's incremental-build cache were
+	// brand new — and empty — on every single build. Keying on the app instead is
+	// what nixpacks provides the flag for.
 	prepArgs := []string{"build", buildDir, "--out", buildDir, "--no-error-without-start",
+		"--cache-key", req.GetSlug(),
 		"--env", fmt.Sprintf("PORT=%d", port)}
+	// Restrict the install phase to the manifests where that is provably safe, so
+	// a code change stops rebuilding (and re-exporting) the dependency layer. See
+	// nixpacks_install_copy.go for the gate and the escape hatch.
+	if files, ok := manifestOnlyInstallFiles(buildDir); ok {
+		if cfg, cErr := writeInstallScopeConfig(s.buildTmpDir, req.GetSlug(), files); cErr == nil {
+			defer func() { _ = os.Remove(cfg) }()
+			prepArgs = append(prepArgs, "--config", cfg)
+			e.log("info", "Installing dependencies from the manifests only, so unchanged dependencies stay cached")
+		} else {
+			e.log("warn", "could not scope the install phase: "+cErr.Error())
+		}
+	}
 	if c := strings.TrimSpace(spec.GetInstallCommand()); c != "" {
 		prepArgs = append(prepArgs, "-i", c)
 	}
@@ -303,6 +322,17 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 	if code != 0 {
 		e.result(false, fmt.Sprintf("nixpacks failed (exit %d)", code), "")
 		return false
+	}
+
+	// nixpacks also drops a convenience `build.sh` next to the Dockerfile, holding
+	// the `docker build … -t <FRESH RANDOM UUID>` it would have run itself. We never
+	// use it — but it lands INSIDE the build context, so its new UUID changed the
+	// context's content on every single deploy, which changed the cache key of the
+	// generated Dockerfile's first `COPY . /app/.`, which re-ran and re-EXPORTED
+	// every layer after it. One unused 235-byte file was defeating the entire layer
+	// cache; deleting it is what lets an unchanged commit rebuild from cache.
+	if err := os.Remove(filepath.Join(buildDir, ".nixpacks", "build.sh")); err != nil && !os.IsNotExist(err) {
+		e.log("warn", "could not remove the generated build.sh: "+err.Error())
 	}
 
 	generated := filepath.Join(buildDir, ".nixpacks", "Dockerfile")

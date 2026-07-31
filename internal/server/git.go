@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -64,6 +65,10 @@ func (s *Service) materializeGit(
 	sha, _ := gitOutput(ctx, dir, "rev-parse", "HEAD")
 	commitSha = strings.TrimSpace(sha)
 
+	// Make the build context byte-identical for a given commit, so Docker's layer
+	// cache can actually be hit (see stripVolatileGitMetadata).
+	stripVolatileGitMetadata(dir)
+
 	// Apply the optional sub-directory (the project's rootDirectory), validated to
 	// stay inside the clone — the subdir arrived off the wire, never trusted.
 	buildDir = dir
@@ -84,6 +89,46 @@ func (s *Service) materializeGit(
 		buildDir = joined
 	}
 	return buildDir, commitSha, cleanup, nil
+}
+
+// volatileGitPaths are the entries a fresh `git clone` rewrites on every run even
+// when it lands on the exact same commit: the index records each worktree file's
+// mtime and inode, and the reflogs record WHEN the clone happened. Everything
+// else git writes — objects, refs, packed-refs, config, HEAD — is a pure function
+// of the commit.
+var volatileGitPaths = []string{"index", "logs"}
+
+// stripVolatileGitMetadata deletes those entries from the clone at root.
+//
+// Why this is worth doing: the whole clone is the build context, and BuildKit
+// keys a COPY layer on the CONTENT of what it copies. Those two entries differ
+// between two clones of the SAME commit, so every deploy produced a fresh cache
+// key for the first `COPY . /app/.` — and with it re-ran, and re-exported, every
+// layer after it. On a real app here that meant a 1.88 GB node_modules layer
+// rebuilt and recompressed on a redeploy that changed nothing at all.
+//
+// Verified: two shallow clones of one commit are byte-identical once these are
+// gone. Removing them does NOT break git in the build — `rev-parse`, `log` and
+// `describe` all read refs and objects, which stay; only `status`/`diff` pay to
+// rebuild the index, which they do automatically.
+//
+// This is the property a platform that keeps a long-lived checkout and pulls
+// into it gets for free. Deplo clones fresh every deploy (it never leaves an app
+// tree lying on a host), so it has to establish the same determinism itself.
+//
+// Best-effort by design: a failure here costs a cache miss — the exact behaviour
+// we had before — never a failed deploy.
+func stripVolatileGitMetadata(root string) {
+	gitDir := filepath.Join(root, ".git")
+	// A worktree/submodule checkout has `.git` as a FILE pointing elsewhere; there
+	// is no index of ours to strip there, and following it would reach outside the
+	// clone. Only a real directory is touched.
+	if fi, err := os.Lstat(gitDir); err != nil || !fi.IsDir() {
+		return
+	}
+	for _, name := range volatileGitPaths {
+		_ = os.RemoveAll(filepath.Join(gitDir, name))
+	}
 }
 
 // authenticatedURL returns (cloneURL, display, authHeader). Credentials are
