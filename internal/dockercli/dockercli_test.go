@@ -137,6 +137,49 @@ func TestImageExportProbeDoesNotCacheInconclusive(t *testing.T) {
 	}
 }
 
+// BuildCachePruneCap must name a flag family the local CLI ACTUALLY accepts:
+// buildx renamed `--keep-storage` to `--max-used-space`/`--min-free-space`, and
+// Docker 29 dropped the old name, so guessing turns a routine cleanup sweep into
+// a hard error. Asserted by running the flags the probe chose, with a ceiling far
+// above current usage so the prune is a no-op.
+func TestBuildCachePruneCap(t *testing.T) {
+	ctx := context.Background()
+	if !Available(ctx) {
+		t.Skip("docker unavailable")
+	}
+	resetPruneCapProbe()
+	t.Cleanup(resetPruneCapProbe)
+
+	mode := BuildCachePruneCap(ctx)
+	var args []string
+	switch mode {
+	case PruneCapModern:
+		// 1 PB ceiling / 1 byte free target: accepted, reclaims nothing.
+		args = []string{"builder", "prune", "--force", "--max-used-space", "1000000000000000", "--min-free-space", "1"}
+	case PruneCapLegacy:
+		args = []string{"builder", "prune", "--force", "--keep-storage", "1000000000000000"}
+	case PruneCapNone:
+		t.Skip("this CLI takes no size cap; nothing to verify")
+	default:
+		t.Fatalf("unknown prune-cap mode %q", mode)
+	}
+	res, err := Run(ctx, 60*time.Second, args...)
+	if err != nil {
+		t.Fatalf("probe chose %q but %v failed to run: %v", mode, args, err)
+	}
+	if res.Code != 0 {
+		t.Fatalf("probe chose %q but docker rejected %v: %s", mode, args, strings.TrimSpace(res.Stderr))
+	}
+
+	// Sticky: a cancelled context must still yield the same answer, proving the
+	// probe is not re-run per sweep.
+	dead, cancel := context.WithCancel(ctx)
+	cancel()
+	if got := BuildCachePruneCap(dead); got != mode {
+		t.Fatalf("cached probe re-ran: got %q, want %q", got, mode)
+	}
+}
+
 // redactArgs must mask any secret-bearing token so a failed dump/restore never
 // echoes a cleartext password into an error string the control plane logs.
 func TestRedactArgs(t *testing.T) {

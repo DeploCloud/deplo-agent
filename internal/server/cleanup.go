@@ -114,6 +114,9 @@ type cleanupParams struct {
 	dryRun           bool
 	minAgeHours      int
 	keepImagesPerApp int
+	// dataDir is the filesystem the build-cache ceiling is derived from — the
+	// one the cache actually lands on (build_cache_cap.go).
+	dataDir string
 	// cutoff is the newest a CACHE-type object (build cache, dangling image, orphan
 	// buildkit volume) may be to qualify. ZERO means "no age filter".
 	cutoff time.Time
@@ -144,6 +147,7 @@ func (s *Service) DockerCleanup(ctx context.Context, req *pb.DockerCleanupReques
 		dryRun:           req.GetDryRun(),
 		minAgeHours:      int(req.GetMinAgeHours()),
 		keepImagesPerApp: int(req.GetKeepImagesPerApp()),
+		dataDir:          s.dataDir,
 	}
 	if params.minAgeHours < 0 {
 		params.minAgeHours = 0
@@ -397,6 +401,10 @@ func cleanBuildCache(ctx context.Context, p cleanupParams) *pb.CleanupScopeResul
 		r.ReclaimedBytes = 0
 		r.ItemsRemoved = 0
 		r.Items = nil
+		// The ceiling still runs: "the age filter found nothing to drop" is the
+		// EXACT state a growing cache is in on a busy host, so returning here would
+		// skip the bound precisely when it is needed.
+		enforceBuildCacheCeiling(ctx, p, r)
 		return r
 	}
 	// Docker prints the total it actually freed; that beats our estimate. The
@@ -417,7 +425,55 @@ func cleanBuildCache(ctx context.Context, p cleanupParams) *pb.CleanupScopeResul
 		}
 		r.ItemsRemoved = int32(len(ids))
 	}
+	enforceBuildCacheCeiling(ctx, p, r)
 	return r
+}
+
+// enforceBuildCacheCeiling caps the total size of the BuildKit cache, on top of
+// whatever the age filter just took (build_cache_cap.go explains why an age
+// filter alone is not a bound).
+//
+// It has to be its OWN prune call. `--filter until=` selects the candidate set
+// FIRST and the size ceiling only ever applies within it, so bolting the flags
+// onto the age-filtered command does nothing on the very host the ceiling exists
+// for — every app deploying daily, so nothing is ever idle long enough to
+// qualify. Measured against a real daemon: a 28 GB ceiling on a 29.55 GB cache
+// freed 0 B with `--filter until=24h` present, and 1.9 GB with the identical
+// ceiling and no filter.
+//
+// Whatever it frees is ADDED to the scope's line: the bytes come from docker's
+// own printed total, so the history stays an observation rather than a claim. A
+// failure here is not the scope's failure — the age prune already succeeded and
+// its bytes are real — so it is logged and dropped.
+func enforceBuildCacheCeiling(ctx context.Context, p cleanupParams, r *pb.CleanupScopeResult) {
+	// A dry run must not mutate, and the `--all` branch already took everything.
+	if p.dryRun || p.minAgeHours <= 0 {
+		return
+	}
+	capArgs := buildCacheCapArgs(ctx, p.dataDir)
+	if len(capArgs) == 0 {
+		return // this host's CLI takes no size flags, or the disk is unmeasurable
+	}
+	cctx, cancel := context.WithTimeout(ctx, cleanupBuilderPruneTimeout)
+	defer cancel()
+	res, err := removeObject(cctx, append([]string{"builder", "prune", "--force"}, capArgs...)...)
+	if err != nil {
+		log.Printf("deplo-agent: build-cache ceiling prune failed: %v", err)
+		return
+	}
+	if res.Code != 0 {
+		log.Printf("deplo-agent: build-cache ceiling prune failed: %s", dockerErr("builder prune", res))
+		return
+	}
+	freed, known := parsePrunedTotal(res.Stdout)
+	if !known || freed <= 0 {
+		return // already under the ceiling — the normal case, and a no-op
+	}
+	r.ReclaimedBytes += freed
+	for _, id := range prunedCacheRecordIDs(res.Stdout) {
+		addItem(r, id)
+		r.ItemsRemoved++
+	}
 }
 
 // ---------------------------------------------------------------------------

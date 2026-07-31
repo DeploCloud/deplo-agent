@@ -417,6 +417,59 @@ func resetImageExportProbe() {
 	imageExportKnown, imageExportOK = false, false
 }
 
+// Build-cache size caps. `docker builder prune` grew a size ceiling long before
+// it settled on a name: buildx ≤0.16 called it `--keep-storage`, 0.17+ split it
+// into `--max-used-space` (a ceiling on the cache) and `--min-free-space` (a
+// floor under the DISK). Docker 29 has dropped the old name entirely, so the
+// flag a host accepts has to be asked for rather than assumed — passing the
+// wrong one turns a routine sweep into a hard error.
+const (
+	// PruneCapModern accepts --max-used-space / --min-free-space.
+	PruneCapModern = "modern"
+	// PruneCapLegacy accepts only --keep-storage.
+	PruneCapLegacy = "legacy"
+	// PruneCapNone accepts no size cap at all — prune by age only.
+	PruneCapNone = "none"
+)
+
+var (
+	pruneCapMu    sync.Mutex
+	pruneCapKnown bool
+	pruneCapMode  string
+)
+
+// BuildCachePruneCap reports which size-ceiling flags `docker builder prune`
+// accepts here. Cached for the life of the agent (the CLI does not change under
+// a running agent); an inconclusive probe is not cached.
+func BuildCachePruneCap(ctx context.Context) string {
+	pruneCapMu.Lock()
+	defer pruneCapMu.Unlock()
+	if pruneCapKnown {
+		return pruneCapMode
+	}
+	res, err := Run(ctx, 15*time.Second, "builder", "prune", "--help")
+	if err != nil {
+		return PruneCapNone // inconclusive — do not cache
+	}
+	help := res.Stdout + res.Stderr
+	mode := PruneCapNone
+	switch {
+	case strings.Contains(help, "--max-used-space"):
+		mode = PruneCapModern
+	case strings.Contains(help, "--keep-storage"):
+		mode = PruneCapLegacy
+	}
+	pruneCapKnown, pruneCapMode = true, mode
+	return mode
+}
+
+// resetPruneCapProbe clears the cached probe. Tests only.
+func resetPruneCapProbe() {
+	pruneCapMu.Lock()
+	defer pruneCapMu.Unlock()
+	pruneCapKnown, pruneCapMode = false, ""
+}
+
 // EnsureNetwork creates the shared external `deplo` network if it is missing.
 func EnsureNetwork(ctx context.Context, name string) error {
 	if res, err := Run(ctx, 10*time.Second, "network", "inspect", name); err == nil && res.Code == 0 {
