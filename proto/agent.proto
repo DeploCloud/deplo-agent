@@ -186,6 +186,26 @@ service Agent {
   // rather than a fake "available".
   rpc CheckPort(CheckPortRequest) returns (CheckPortResponse);
 
+  // ONE bounded HTTP GET to a container of an app's own stack, issued from the
+  // host over Docker's network — what a compose app's icon detection reads.
+  //
+  // An app deployed as a compose stack runs PREBUILT images: its favicon is not
+  // a file anywhere on the host (the files dir holds only the config its bind
+  // mounts need), it exists only inside the image and is SERVED. The only way to
+  // see it is to ask the running app for it, exactly as a browser would.
+  //
+  // The agent resolves the target itself: the container is found by the app's own
+  // `deplo.project` label + compose service, and the request goes to THAT
+  // container's IP. The caller supplies a port, a path and a Host header — never
+  // an address — so this can never be turned into a general outbound fetch from
+  // the host (no DNS, no user-supplied IP, no scheme: plain HTTP to a container
+  // this app owns). Redirects are returned, never followed: where to go next is
+  // the control plane's decision, not the agent's.
+  //
+  // Deliberately NOT a health check and not a proxy — one request, one bounded
+  // body, no streaming. Gated behind the "http-probe" Hello capability.
+  rpc ProbeHttp(ProbeHttpRequest) returns (ProbeHttpResponse);
+
   // Reclaim Docker disk on the host. STRICTLY AN ALLOW-LIST: the agent removes
   // only what it can PROVE is unreferenced, and the proof is always a
   // container-reference REVERSE INDEX over `docker ps -aq` (running AND exited) or
@@ -912,6 +932,49 @@ message CheckPortResponse {
   bool available = 1;
   // "" when available; otherwise a human-readable reason (in use / out of range).
   string reason = 2;
+}
+
+// One HTTP GET to a container of an app's stack (see the ProbeHttp RPC comment).
+// The agent picks the ADDRESS; the caller only picks what to ask for.
+message ProbeHttpRequest {
+  // The app the container must belong to (its `deplo.project` label). Empty is
+  // refused — an unscoped probe could reach any container on the host.
+  string project_id = 1;
+  // The app's slug, used to read the compose service out of a container name
+  // (deplo-<slug>-<service>-N), exactly as ListInstances does.
+  string slug = 2;
+  // Which compose service to reach. Empty => the app's first running container
+  // (the single-image case, where the stack has exactly one).
+  string service = 3;
+  // The port INSIDE the container (1-65535) — the same port Traefik is routed
+  // to, not a published host port.
+  int32 port = 4;
+  // Absolute request path ("/", "/favicon.ico"). Must start with "/" and carry
+  // no control characters; anything else is refused rather than sent.
+  string path = 5;
+  // Host header to send. Empty => the container's IP. An app that only answers
+  // on its own hostname (ALLOWED_HOSTS, a configured site URL) needs its real
+  // domain here. Validated as a hostname — never a URL, never a header list.
+  string host = 6;
+  // Cap on the body bytes returned. 0 => the agent's default; the agent clamps
+  // to its own ceiling regardless, so a caller can never ask for an unbounded
+  // read.
+  int32 max_bytes = 7;
+}
+
+message ProbeHttpResponse {
+  // HTTP status of the response (200, 404, 301, …).
+  int32 status = 1;
+  // Content-Type header, lowercased, parameters kept ("image/png",
+  // "text/html; charset=utf-8"). Empty when the response carried none.
+  string content_type = 2;
+  // The body, truncated to max_bytes.
+  bytes body = 3;
+  // True when the body was longer than max_bytes and was cut.
+  bool truncated = 4;
+  // The Location header on a 3xx (empty otherwise). The agent does NOT follow
+  // it: the control plane decides whether the target is still this app.
+  string location = 5;
 }
 
 // In-place agent binary update (SelfUpdate). The control plane resolves the

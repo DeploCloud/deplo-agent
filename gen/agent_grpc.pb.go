@@ -70,6 +70,7 @@ const (
 	Agent_ReadStack_FullMethodName          = "/deplo.agent.v1.Agent/ReadStack"
 	Agent_Inspect_FullMethodName            = "/deplo.agent.v1.Agent/Inspect"
 	Agent_CheckPort_FullMethodName          = "/deplo.agent.v1.Agent/CheckPort"
+	Agent_ProbeHttp_FullMethodName          = "/deplo.agent.v1.Agent/ProbeHttp"
 	Agent_DockerCleanup_FullMethodName      = "/deplo.agent.v1.Agent/DockerCleanup"
 	Agent_SelfUpdate_FullMethodName         = "/deplo.agent.v1.Agent/SelfUpdate"
 	Agent_Backup_FullMethodName             = "/deplo.agent.v1.Agent/Backup"
@@ -232,6 +233,25 @@ type AgentClient interface {
 	// "checkport" Hello capability so an older agent surfaces "update the agent"
 	// rather than a fake "available".
 	CheckPort(ctx context.Context, in *CheckPortRequest, opts ...grpc.CallOption) (*CheckPortResponse, error)
+	// ONE bounded HTTP GET to a container of an app's own stack, issued from the
+	// host over Docker's network — what a compose app's icon detection reads.
+	//
+	// An app deployed as a compose stack runs PREBUILT images: its favicon is not
+	// a file anywhere on the host (the files dir holds only the config its bind
+	// mounts need), it exists only inside the image and is SERVED. The only way to
+	// see it is to ask the running app for it, exactly as a browser would.
+	//
+	// The agent resolves the target itself: the container is found by the app's own
+	// `deplo.project` label + compose service, and the request goes to THAT
+	// container's IP. The caller supplies a port, a path and a Host header — never
+	// an address — so this can never be turned into a general outbound fetch from
+	// the host (no DNS, no user-supplied IP, no scheme: plain HTTP to a container
+	// this app owns). Redirects are returned, never followed: where to go next is
+	// the control plane's decision, not the agent's.
+	//
+	// Deliberately NOT a health check and not a proxy — one request, one bounded
+	// body, no streaming. Gated behind the "http-probe" Hello capability.
+	ProbeHttp(ctx context.Context, in *ProbeHttpRequest, opts ...grpc.CallOption) (*ProbeHttpResponse, error)
 	// Reclaim Docker disk on the host. STRICTLY AN ALLOW-LIST: the agent removes
 	// only what it can PROVE is unreferenced, and the proof is always a
 	// container-reference REVERSE INDEX over `docker ps -aq` (running AND exited) or
@@ -609,6 +629,16 @@ func (c *agentClient) CheckPort(ctx context.Context, in *CheckPortRequest, opts 
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CheckPortResponse)
 	err := c.cc.Invoke(ctx, Agent_CheckPort_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) ProbeHttp(ctx context.Context, in *ProbeHttpRequest, opts ...grpc.CallOption) (*ProbeHttpResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ProbeHttpResponse)
+	err := c.cc.Invoke(ctx, Agent_ProbeHttp_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1102,6 +1132,25 @@ type AgentServer interface {
 	// "checkport" Hello capability so an older agent surfaces "update the agent"
 	// rather than a fake "available".
 	CheckPort(context.Context, *CheckPortRequest) (*CheckPortResponse, error)
+	// ONE bounded HTTP GET to a container of an app's own stack, issued from the
+	// host over Docker's network — what a compose app's icon detection reads.
+	//
+	// An app deployed as a compose stack runs PREBUILT images: its favicon is not
+	// a file anywhere on the host (the files dir holds only the config its bind
+	// mounts need), it exists only inside the image and is SERVED. The only way to
+	// see it is to ask the running app for it, exactly as a browser would.
+	//
+	// The agent resolves the target itself: the container is found by the app's own
+	// `deplo.project` label + compose service, and the request goes to THAT
+	// container's IP. The caller supplies a port, a path and a Host header — never
+	// an address — so this can never be turned into a general outbound fetch from
+	// the host (no DNS, no user-supplied IP, no scheme: plain HTTP to a container
+	// this app owns). Redirects are returned, never followed: where to go next is
+	// the control plane's decision, not the agent's.
+	//
+	// Deliberately NOT a health check and not a proxy — one request, one bounded
+	// body, no streaming. Gated behind the "http-probe" Hello capability.
+	ProbeHttp(context.Context, *ProbeHttpRequest) (*ProbeHttpResponse, error)
 	// Reclaim Docker disk on the host. STRICTLY AN ALLOW-LIST: the agent removes
 	// only what it can PROVE is unreferenced, and the proof is always a
 	// container-reference REVERSE INDEX over `docker ps -aq` (running AND exited) or
@@ -1314,6 +1363,9 @@ func (UnimplementedAgentServer) Inspect(context.Context, *InspectRequest) (*Insp
 }
 func (UnimplementedAgentServer) CheckPort(context.Context, *CheckPortRequest) (*CheckPortResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CheckPort not implemented")
+}
+func (UnimplementedAgentServer) ProbeHttp(context.Context, *ProbeHttpRequest) (*ProbeHttpResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ProbeHttp not implemented")
 }
 func (UnimplementedAgentServer) DockerCleanup(context.Context, *DockerCleanupRequest) (*DockerCleanupResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method DockerCleanup not implemented")
@@ -1674,6 +1726,24 @@ func _Agent_CheckPort_Handler(srv interface{}, ctx context.Context, dec func(int
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(AgentServer).CheckPort(ctx, req.(*CheckPortRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_ProbeHttp_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ProbeHttpRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).ProbeHttp(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_ProbeHttp_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).ProbeHttp(ctx, req.(*ProbeHttpRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -2236,6 +2306,10 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CheckPort",
 			Handler:    _Agent_CheckPort_Handler,
+		},
+		{
+			MethodName: "ProbeHttp",
+			Handler:    _Agent_ProbeHttp_Handler,
 		},
 		{
 			MethodName: "DockerCleanup",

@@ -56,6 +56,11 @@ var Capabilities = []string{
 	"self-update", // in-place agent binary update over mTLS (SelfUpdate), certs kept
 	"backup",      // dump/restore a DB or project to/from S3 (Backup/Restore/S3Check/S3Delete)
 	"checkport",   // host TCP port availability probe (CheckPort) — gates DB "expose publicly"
+	// One bounded HTTP GET to a container of an app's own stack (ProbeHttp).
+	// A compose app runs prebuilt images, so its favicon exists only inside the
+	// image and is only ever served — asking the running app is the only way to
+	// read it. An agent without this simply yields no icon for such an app.
+	"http-probe",
 	"volume-copy", // cross-host named-volume copy for a server move (ExportVolume/ImportVolume)
 	"files-copy",  // cross-host files-dir copy for a service move (ExportFiles/ImportFiles)
 	// Allow-listed Docker disk reclaim (DockerCleanup): build cache, dangling
