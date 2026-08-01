@@ -270,10 +270,12 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 	// Restrict the install phase to the manifests where that is provably safe, so
 	// a code change stops rebuilding (and re-exporting) the dependency layer. See
 	// nixpacks_install_copy.go for the gate and the escape hatch.
+	pureInstall := false
 	if files, ok := manifestOnlyInstallFiles(buildDir); ok {
 		if cfg, cErr := writeInstallScopeConfig(s.buildTmpDir, req.GetSlug(), files); cErr == nil {
 			defer func() { _ = os.Remove(cfg) }()
 			prepArgs = append(prepArgs, "--config", cfg)
+			pureInstall = true
 			e.log("info", "Installing dependencies from the manifests only, so unchanged dependencies stay cached")
 		} else {
 			e.log("warn", "could not scope the install phase: "+cErr.Error())
@@ -336,6 +338,24 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 	}
 
 	generated := filepath.Join(buildDir, ".nixpacks", "Dockerfile")
+
+	// Nixpacks declares the whole build environment ABOVE the install step, so a
+	// RUN whose only input is the lockfile still had every app variable in its
+	// cache key: editing a runtime-only secret re-installed and re-exported the
+	// whole dependency layer. Move the app's own variables below the install,
+	// where the build still sees them. Only where the install is a pure
+	// dependency install — the same gate as the scoping above; a repo that runs
+	// its own install scripts may legitimately read any of them.
+	if pureInstall {
+		moved, dErr := deferAppEnvBelowInstall(generated, envKeys, buildDir, spec.GetInstallCommand())
+		switch {
+		case dErr != nil:
+			e.log("warn", "could not move the build variables below the install step: "+dErr.Error())
+		case len(moved) > 0:
+			e.log("info", "Applying the app's variables after the install step, so changing one leaves the installed dependencies cached")
+		}
+	}
+
 	publishDir := strings.TrimSpace(spec.GetNixpacksPublishDirectory())
 
 	// Phase 2 feeds each declared ARG a value: bare `--build-arg KEY` flags with
