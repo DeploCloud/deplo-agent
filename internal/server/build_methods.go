@@ -197,7 +197,7 @@ CMD ["nginx", "-g", "daemon off;"]
 		return false
 	}
 
-	args := appendBuildArgKeys([]string{"build"}, envKeys)
+	args := appendBuildArgKeys(buildArgv(req), envKeys)
 	args = append(args, imageOutputArgs(ctx, req.GetImageRef())...)
 	args = append(args, labelArgs(req)...)
 	args = append(args, buildDir)
@@ -264,9 +264,16 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 	// package manager's cache and the framework's incremental-build cache were
 	// brand new — and empty — on every single build. Keying on the app instead is
 	// what nixpacks provides the flag for.
+	// A no-cache build deliberately DROPS --cache-key: nixpacks then falls back to
+	// keying on the build directory, a fresh path per deploy, so the cache mounts
+	// come up empty. `docker build --no-cache` alone would not do it — a
+	// type=cache mount survives it, and the package-manager + framework
+	// incremental caches live in exactly those mounts.
 	prepArgs := []string{"build", buildDir, "--out", buildDir, "--no-error-without-start",
-		"--cache-key", req.GetSlug(),
 		"--env", fmt.Sprintf("PORT=%d", port)}
+	if !req.GetNoBuildCache() {
+		prepArgs = append(prepArgs, "--cache-key", req.GetSlug())
+	}
 	// Restrict the install phase to the manifests where that is provably safe, so
 	// a code change stops rebuilding (and re-exporting) the dependency layer. See
 	// nixpacks_install_copy.go for the gate and the escape hatch.
@@ -364,7 +371,7 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 
 	if publishDir == "" {
 		// App with a start command: build the generated Dockerfile directly.
-		args := []string{"build", "-f", generated, "--build-arg", fmt.Sprintf("PORT=%d", port)}
+		args := buildArgv(req, "-f", generated, "--build-arg", fmt.Sprintf("PORT=%d", port))
 		args = appendBuildArgKeys(args, envKeys)
 		args = append(args, imageOutputArgs(ctx, req.GetImageRef())...)
 		args = append(args, labelArgs(req)...)
@@ -374,7 +381,7 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 
 	// Static publish dir: build a staging image, then nginx-wrap its output.
 	staging := "deplo-nixpacks-staging:" + imageTag(req.GetImageRef())
-	stageArgs := []string{"build", "-f", generated, "--build-arg", fmt.Sprintf("PORT=%d", port)}
+	stageArgs := buildArgv(req, "-f", generated, "--build-arg", fmt.Sprintf("PORT=%d", port))
 	stageArgs = appendBuildArgKeys(stageArgs, envKeys)
 	stageArgs = append(stageArgs, imageOutputArgs(ctx, staging)...)
 	stageArgs = append(stageArgs, buildDir)
@@ -646,7 +653,7 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 	}
 
 	args := railpackBuildArgs(frontend, planPath, buildDir, secretNames,
-		imageOutputArgs(ctx, req.GetImageRef()))
+		imageOutputArgs(ctx, req.GetImageRef()), req.GetNoBuildCache())
 	if !s.runBuildKit(ctx, 20*time.Minute, args, secretEnv, e) {
 		return false
 	}
@@ -666,8 +673,12 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 // in particular that every untrusted secret NAME stays a discrete token — is
 // testable without a daemon. Labels are deliberately absent: the frontend
 // ignores them (see the relabel pass in buildRailpack).
-func railpackBuildArgs(frontend, planPath, contextDir string, secretNames, output []string) []string {
-	args := []string{"build", "--build-arg", "BUILDKIT_SYNTAX=" + frontend, "-f", planPath}
+func railpackBuildArgs(frontend, planPath, contextDir string, secretNames, output []string, noCache bool) []string {
+	args := []string{"build"}
+	if noCache {
+		args = append(args, "--no-cache")
+	}
+	args = append(args, "--build-arg", "BUILDKIT_SYNTAX="+frontend, "-f", planPath)
 	for _, name := range secretNames {
 		args = append(args, "--secret", "id="+name+",env="+name)
 	}

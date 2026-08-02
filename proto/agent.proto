@@ -745,6 +745,21 @@ message DeployRequest {
   // and ignores the rest. Absent for BUILD_KIND_DOCKERFILE (which uses
   // `dockerfile` above) and BUILD_KIND_NONE.
   BuildSpec build_spec = 16;
+
+  // Build this deploy WITHOUT the host's layer cache: every `docker build` runs
+  // with --no-cache, and nixpacks is left on its default (per-build-dir) cache
+  // key so its BuildKit cache mounts start empty too. Set when the app's Build
+  // cache setting is off, or for the one build that follows a manual "Clear
+  // build cache". Capability: "deploy.nocache" (an older agent silently caches).
+  bool no_build_cache = 17;
+
+  // Replace the running containers even when the rendered stack is unchanged
+  // (`docker compose up --force-recreate`). `up -d` alone is a no-op for a
+  // compose stack or a prebuilt image whose config hash did not move, which is
+  // exactly the case the "Rebuild container" action exists for. Ordinary deploys
+  // leave it false so an unchanged reroute still causes no restart.
+  // Capability: "deploy.force-recreate".
+  bool force_recreate = 18;
 }
 
 // One event in the deploy stream. Exactly one of the oneof arms is set.

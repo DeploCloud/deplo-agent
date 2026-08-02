@@ -74,7 +74,7 @@ func TestRailpackBuildArgs(t *testing.T) {
 	args := railpackBuildArgs(
 		"ghcr.io/railwayapp/railpack-frontend:v0.35.0",
 		"/tmp/plan/railpack-plan.json", "/tmp/ctx", names,
-		[]string{"-t", "deplo/cwars:dpl_abc"},
+		[]string{"-t", "deplo/cwars:dpl_abc"}, false,
 	)
 
 	// No shell is ever involved: there is no `sh`/`-c` token anywhere.
@@ -106,8 +106,15 @@ func TestRailpackBuildArgs(t *testing.T) {
 	// Injection safety: a crafted secret name lands as EXACTLY one argv token in
 	// the `--secret` slot — never split, never a command.
 	evil := "x; rm -rf / #"
-	adv := railpackBuildArgs("front", "plan.json", "ctx", []string{evil}, nil)
+	adv := railpackBuildArgs("front", "plan.json", "ctx", []string{evil}, nil, false)
 	if !slices.Contains(adv, "--secret") || !slices.Contains(adv, "id="+evil+",env="+evil) {
 		t.Fatalf("hostile name not a single --secret token: %v", adv)
+	}
+
+	// A no-cache deploy must reach the railpack frontend build too — --no-cache
+	// right after the verb, where docker parses global build flags.
+	fresh := railpackBuildArgs("front", "plan.json", "ctx", nil, nil, true)
+	if fresh[0] != "build" || fresh[1] != "--no-cache" {
+		t.Fatalf("no-cache railpack argv = %v, want build --no-cache first", fresh)
 	}
 }

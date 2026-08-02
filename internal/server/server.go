@@ -42,6 +42,12 @@ var Capabilities = []string{
 	"deploy.buildpacks", // Cloud Native Buildpacks (heroku + paketo) via pack
 	"deploy.railpack",   // railpack via buildkitd/buildctl
 	"deploy.buildenv",   // req.env reaches BUILDS too (build args / plan secrets), not just the runtime stack
+	// The two "give me a genuinely fresh one" switches on DeployRequest. Split
+	// because they answer different questions and the control plane warns about
+	// them separately: no_build_cache is "don't reuse layers or nixpacks cache
+	// mounts", force_recreate is "replace the container even if nothing changed".
+	"deploy.nocache",
+	"deploy.force-recreate",
 	"metrics",
 	"container-stats", // per-container `docker stats` snapshot (ContainerStats) — the per-app/per-database Monitoring tab
 	// ONE long-lived host+container telemetry stream (StreamMetrics), sampled on

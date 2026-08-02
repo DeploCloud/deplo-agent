@@ -169,17 +169,20 @@ func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitt
 	// control plane rendered it that way), so no --env-file is needed there. A
 	// compose stack relies on `${VAR}` interpolation, so write a 0600 env-file and
 	// pass it to compose (mirrors the control plane's deployComposeStack).
-	composeArgs := []string{"compose", "-p", name, "-f", stackFile}
+	envFile := ""
 	if isCompose {
-		envFile := filepath.Join(s.stackDir, slug+".env")
+		envFile = filepath.Join(s.stackDir, slug+".env")
 		if err := os.WriteFile(envFile, []byte(renderEnvFile(req.GetEnv())), 0o600); err != nil {
 			e.result(false, "write env file: "+err.Error(), "")
 			return
 		}
-		composeArgs = append(composeArgs, "--env-file", envFile)
 	}
-	composeArgs = append(composeArgs, "up", "-d", "--remove-orphans")
-	e.log("command", "docker compose up -d")
+	composeArgs := composeUpArgs(name, stackFile, envFile, req.GetForceRecreate())
+	upLog := "docker compose up -d"
+	if req.GetForceRecreate() {
+		upLog += " --force-recreate"
+	}
+	e.log("command", upLog)
 	// A multi-service compose stack pulls SEVERAL images here (and an IMAGE deploy
 	// with pullImage=false pulls at up time too). The old 5-minute cap SIGKILLed
 	// `compose up` mid-pull on a modest network and falsely reported the deploy
@@ -340,7 +343,7 @@ func (s *Service) buildDockerfile(ctx context.Context, req *pb.DeployRequest, bu
 		// have won over the generated body above). Bare `--build-arg KEY` keeps
 		// values off argv; they ride the docker client's process env instead.
 		envKeys := dockerfileBuildEnv(dfPath, req)
-		args := appendBuildArgKeys([]string{"build"}, envKeys)
+		args := appendBuildArgKeys(buildArgv(req), envKeys)
 		args = append(args, imageOutputArgs(ctx, req.GetImageRef())...)
 		args = append(args, labels...)
 		args = append(args, buildDir)
@@ -380,7 +383,7 @@ func (s *Service) buildDockerfile(ctx context.Context, req *pb.DeployRequest, bu
 		return false
 	}
 
-	args := []string{"build", "-f", dockerfilePath}
+	args := buildArgv(req, "-f", dockerfilePath)
 	if stage := strings.TrimSpace(df.GetTargetStage()); stage != "" {
 		args = append(args, "--target", stage)
 	}
@@ -403,6 +406,41 @@ func dockerfileBuildEnv(dockerfilePath string, req *pb.DeployRequest) []string {
 		return nil
 	}
 	return dockerfileEnvKeys(string(body), req.GetEnv())
+}
+
+// composeUpArgs assembles the `docker compose … up` argv that brings a stack up.
+// envFile is "" for the single-image path (the control plane baked env into the
+// rendered `environment:` map) and a written 0600 file for a compose stack (whose
+// YAML interpolates `${VAR}`).
+//
+// forceRecreate is what makes "Rebuild container" honest: `up -d` compares
+// compose's own config hash and does NOTHING when it matches, so a compose stack
+// or a prebuilt image whose config did not move would report ready with the old
+// container still running. Ordinary deploys leave it false, so an unchanged
+// reroute still causes no restart.
+func composeUpArgs(project, stackFile, envFile string, forceRecreate bool) []string {
+	args := []string{"compose", "-p", project, "-f", stackFile}
+	if envFile != "" {
+		args = append(args, "--env-file", envFile)
+	}
+	args = append(args, "up", "-d", "--remove-orphans")
+	if forceRecreate {
+		args = append(args, "--force-recreate")
+	}
+	return args
+}
+
+// buildArgv starts a `docker build` argv, adding --no-cache when the deploy asked
+// to skip the build cache (the app's Build cache setting is off, or this is the
+// one build that follows a manual "Clear build cache"). Every build method funnels
+// its argv through here so the flag can't be honoured by some methods and silently
+// dropped by others — a half-obeyed "don't cache this" is worse than none.
+func buildArgv(req *pb.DeployRequest, rest ...string) []string {
+	args := []string{"build"}
+	if req.GetNoBuildCache() {
+		args = append(args, "--no-cache")
+	}
+	return append(args, rest...)
 }
 
 // runBuild streams a `docker build`; extraEnv carries build-env VALUES (bare
