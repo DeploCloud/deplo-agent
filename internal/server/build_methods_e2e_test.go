@@ -74,6 +74,16 @@ func TestE2E_RailpackBuildsLabelledImageWithoutBuildkitdContainer(t *testing.T) 
 	if !dockercli.Available(ctx) {
 		t.Skip("docker not available")
 	}
+	// railpack's frontend uses BuildKit's mergeop, which the daemon only enables
+	// behind the containerd image store: on a classic-store host (the GitHub
+	// runner) the build dies with "requested experimental feature mergeop has been
+	// disabled on the build server". That is the host's answer, not a regression,
+	// and failing on it makes `go test ./...` red — which is what gates the release
+	// workflow's publish step. Same probe the build path uses to pick its output
+	// flags, so this skips exactly where the real build would be unable to run.
+	if !dockercli.ImageExportOptsSupported(ctx) {
+		t.Skip("railpack's frontend needs the containerd image store (mergeop); this daemon uses the classic store")
+	}
 	s := New(t.TempDir(), t.TempDir(), "/", e2eToolsBase(t))
 
 	// A minimal Node app: railpack detects it, installs, builds and starts it.
