@@ -177,10 +177,15 @@ func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitt
 			return
 		}
 	}
-	composeArgs := composeUpArgs(name, stackFile, envFile, req.GetForceRecreate())
+	composeArgs := composeUpArgs(name, stackFile, envFile, req.GetForceRecreate(), req.GetComposeUpArgs())
 	upLog := "docker compose up -d"
 	if req.GetForceRecreate() {
 		upLog += " --force-recreate"
+	}
+	// Echo the operator's own flags into the build log — that is also how they
+	// find out a set was rejected and dropped (it simply isn't here).
+	if extra := sanitizeComposeArgs(req.GetComposeUpArgs()); len(extra) > 0 {
+		upLog += " " + strings.Join(extra, " ")
 	}
 	e.log("command", upLog)
 	// A multi-service compose stack pulls SEVERAL images here (and an IMAGE deploy
@@ -418,7 +423,7 @@ func dockerfileBuildEnv(dockerfilePath string, req *pb.DeployRequest) []string {
 // or a prebuilt image whose config did not move would report ready with the old
 // container still running. Ordinary deploys leave it false, so an unchanged
 // reroute still causes no restart.
-func composeUpArgs(project, stackFile, envFile string, forceRecreate bool) []string {
+func composeUpArgs(project, stackFile, envFile string, forceRecreate bool, extra []string) []string {
 	args := []string{"compose", "-p", project, "-f", stackFile}
 	if envFile != "" {
 		args = append(args, "--env-file", envFile)
@@ -427,7 +432,68 @@ func composeUpArgs(project, stackFile, envFile string, forceRecreate bool) []str
 	if forceRecreate {
 		args = append(args, "--force-recreate")
 	}
-	return args
+	return append(args, sanitizeComposeArgs(extra)...)
+}
+
+// The `docker compose` flags that decide WHICH stack is being brought up. They
+// are the agent's to choose — the project name keys every container and label,
+// the stack file is what the control plane just rendered, the env-file holds the
+// decrypted secrets — so an operator's extra flags may never set them, whatever
+// the control plane sends.
+const composeArgAlphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:/=,+@-"
+
+var composeArgDenied = map[string]bool{
+	"-p":                  true,
+	"--project-name":      true,
+	"-f":                  true,
+	"--file":              true,
+	"--env-file":          true,
+	"--project-directory": true,
+}
+
+// sanitizeComposeArgs vets the operator's extra `compose up` flags before they
+// reach the argv. The control plane validates them first and refuses to store a
+// bad set; this is the defence in depth that keeps the agent's own contract
+// (project name / stack file / env-file) true no matter what reaches it.
+//
+// All-or-nothing on purpose: one bad token drops the WHOLE list rather than
+// applying a filtered half of it. `-p` alone would repoint the stack, but
+// dropping `-p` while keeping the name after it would leave a stray positional
+// arg — which `compose up` reads as "bring up only this service". A silently
+// half-applied set is worse than none, and the default bring-up still runs.
+//
+// Nothing is quoted or shelled out: dockercli.Run execs docker with an argv, so
+// these are literal arguments and shell metacharacters have no meaning. They are
+// still rejected — a token carrying one means the operator expected a shell, and
+// running it as a literal would fail in a way that is hard to read.
+func sanitizeComposeArgs(extra []string) []string {
+	const maxArgs, maxLen = 24, 128
+	if len(extra) == 0 || len(extra) > maxArgs {
+		return nil
+	}
+	for _, a := range extra {
+		if a == "" || len(a) > maxLen {
+			return nil
+		}
+		for _, r := range a {
+			// An ALLOWLIST, not a ban list: every real `compose up` flag and value
+			// is made of these (`--pull`, `always`, `web=3`, `--timeout=60`,
+			// `--exit-code-from=web`), and anything else — a space, a quote, `;`,
+			// `&`, `|`, `$`, a backtick, a control character — is either a token
+			// the control plane failed to split or someone expecting a shell.
+			if !strings.ContainsRune(composeArgAlphabet, r) {
+				return nil
+			}
+		}
+		name := a
+		if i := strings.IndexByte(a, '='); i >= 0 {
+			name = a[:i]
+		}
+		if composeArgDenied[name] {
+			return nil
+		}
+	}
+	return extra
 }
 
 // buildArgv starts a `docker build` argv, adding --no-cache when the deploy asked

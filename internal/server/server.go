@@ -48,6 +48,11 @@ var Capabilities = []string{
 	// mounts", force_recreate is "replace the container even if nothing changed".
 	"deploy.nocache",
 	"deploy.force-recreate",
+	// The app's own extra `docker compose up` flags ride DeployRequest /
+	// RerouteRequest and are appended to the bring-up the agent assembles. Gated
+	// because an agent without it ignores the field entirely, and a silently
+	// unapplied flag is exactly the kind of lie the control plane warns about.
+	"deploy.compose-args",
 	"metrics",
 	"container-stats", // per-container `docker stats` snapshot (ContainerStats) — the per-app/per-database Monitoring tab
 	// ONE long-lived host+container telemetry stream (StreamMetrics), sampled on
@@ -419,15 +424,17 @@ func (s *Service) Reroute(ctx context.Context, req *pb.RerouteRequest) (*pb.Stac
 	// Single-image stacks bake env into the YAML and send empty env+mounts;
 	// compose stacks need a 0600 env-file for ${VAR} interpolation. Mirror Deploy:
 	// write+pass the env-file only when there is env to interpolate.
-	composeArgs := []string{"compose", "-p", name, "-f", stackFile}
+	envFile := ""
 	if len(req.GetEnv()) > 0 {
-		envFile := fmt.Sprintf("%s/%s.env", s.stackDir, slug)
+		envFile = fmt.Sprintf("%s/%s.env", s.stackDir, slug)
 		if err := os.WriteFile(envFile, []byte(renderEnvFile(req.GetEnv())), 0o600); err != nil {
 			return &pb.StackResult{Ok: false, Error: "write env file: " + err.Error()}, nil
 		}
-		composeArgs = append(composeArgs, "--env-file", envFile)
 	}
-	composeArgs = append(composeArgs, "up", "-d", "--remove-orphans")
+	// Through the SAME assembler as a deploy: a reroute brings the stack up too,
+	// so the operator's extra flags (and their vetting) must apply identically —
+	// two hand-rolled argvs is how one of them silently stops matching the other.
+	composeArgs := composeUpArgs(name, stackFile, envFile, false, req.GetComposeUpArgs())
 
 	res, err := dockercli.Run(ctx, 120*time.Second, composeArgs...)
 	if err != nil {
