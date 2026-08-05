@@ -133,7 +133,7 @@ func TestDeferEnvBelowInstall_bailsOnUnknownShapes(t *testing.T) {
 			"ENV CI=$CI DATABASE_URL=$DATABASE_URL", "ENV CI=true DATABASE_URL=$DATABASE_URL", 1),
 		"ENV is not adjacent to ARG": strings.Replace(nixpacksGenerated,
 			"ARG CI DATABASE_URL", "ARG CI DATABASE_URL\n", 1),
-		"no install phase": strings.Replace(nixpacksGenerated, "# install phase", "# noop", 1),
+		"no install phase":                strings.Replace(nixpacksGenerated, "# install phase", "# noop", 1),
 		"nothing after the install phase": strings.Split(nixpacksGenerated, "# build phase")[0],
 	}
 	for name, body := range cases {

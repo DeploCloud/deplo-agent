@@ -67,10 +67,10 @@ func (s *Service) ListInstances(ctx context.Context, req *pb.ListInstancesReques
 		}
 		service := serviceOf(req.GetSlug(), c.Name)
 		out = append(out, &pb.ConsoleInstance{
-			Name:    c.Name,
-			Service: service,
-			Image:   c.Image,
-			Running: state == "running",
+			Name:         c.Name,
+			Service:      service,
+			Image:        c.Image,
+			Running:      state == "running",
 			Exposed:      isExposed(service, req.GetExposeService()),
 			User:         d.User,
 			Workdir:      d.Workdir,

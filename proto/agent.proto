@@ -420,6 +420,54 @@ service Agent {
   // verifies the cert matches the pending key, atomically swaps cert+key on disk,
   // and hot-reloads its TLS config so new handshakes present the fresh cert.
   rpc InstallRenewedCert(InstallRenewedCertRequest) returns (StackResult);
+
+  // ---- HOST OPS: the four host-level actions the Servers page needs, none of
+  // which is scoped to an app. Deplo's promise is that an operator never opens a
+  // shell on their own box, and up to here every one of these was exactly that:
+  // "what CPU is this?", "what time does this host think it is?", "restart
+  // Traefik", "restart the panel" all meant SSH. Gated behind ONE "hostops"
+  // capability — they ship in the same release, so four flags would buy nothing.
+  //
+  // NOTE what is deliberately absent: a generic "run this command on the host"
+  // RPC. Each verb here is closed and named. The agent's whole security value is
+  // that the control plane can only ask for things this file enumerates. ----
+
+  // Static host identity — the neofetch answer, not the gauge. Metrics/
+  // StreamMetrics already carry the USAGE numbers (cpu %, mem used, disk used);
+  // this carries what the hardware and OS actually ARE, plus the host clock and
+  // the two pieces of host state the control plane can act on (the Traefik stack
+  // file and whether a given container id resolves). Read live, persisted
+  // nowhere agent-side.
+  rpc HostInfo(HostInfoRequest) returns (HostInfoResponse);
+
+  // Set the host's timezone (IANA name, e.g. "Europe/Rome"). `timedatectl` when
+  // present, otherwise relinking /etc/localtime. The name is validated against
+  // /usr/share/zoneinfo before anything is written — defence in depth, since the
+  // control plane validates too. Answers with a FRESH HostInfoResponse so the UI
+  // shows the moved clock without a second round trip.
+  rpc SetTimezone(SetTimezoneRequest) returns (HostInfoResponse);
+
+  // Rewrite and/or restart THIS host's `deplo-traefik` stack — the reverse proxy
+  // the installer put at $AGENT_DATA/traefik/docker-compose.yml. Per ADR-0006 the
+  // agent renders NOTHING: the compose YAML is authored control-plane-side and
+  // shipped opaque, exactly like an app stack, so the Traefik label grammar stays
+  // in one place (lib/deploy) and never leaks into Go.
+  //
+  // Refuses when that file is absent or the running Traefik is not deplo-traefik:
+  // the installer explicitly leaves an operator's own proxy alone, and so does
+  // this. The previous file is kept as docker-compose.yml.bak before any write —
+  // a config change that takes :80/:443 down must be reversible from the host.
+  rpc TraefikConfig(TraefikConfigRequest) returns (TraefikConfigResponse);
+
+  // Restart the container running the Deplo control plane on THIS host (agent 0
+  // only — a remote has no panel to restart). The caller names itself: it sends
+  // its own hostname, which inside a container IS the short container id.
+  //
+  // The restart is DETACHED and delayed by a moment on purpose: it kills the very
+  // process waiting on this RPC, so the reply has to win the race. An unresolvable
+  // hint answers ok=false with a reason — never a silent success, because "did my
+  // panel restart?" is not a question the operator can answer by looking.
+  rpc RestartControlPlane(RestartControlPlaneRequest) returns (RestartControlPlaneResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -1769,4 +1817,105 @@ message MetricsSample {
   // surface "this host is on the slow path" (~18x the CPU cost) without a second
   // RPC, and makes an automatic demotion visible instead of silent.
   string source = 4;
+}
+
+// ---------------------------------------------------------------------------
+// HOST OPS (hostops capability)
+// ---------------------------------------------------------------------------
+
+message HostInfoRequest {
+  // The path whose filesystem to measure, same contract as MetricsRequest.
+  // Empty => the agent's own --data-dir.
+  string data_dir = 1;
+  // The caller's own hostname. Inside a container that IS the short container
+  // id, which is how the agent can tell whether the control plane runs HERE and
+  // hand back a restartable container id. Empty => control_plane_container is
+  // left empty; it is never guessed from the image name, because "a container
+  // built from the deplo image" and "the container you are talking to me from"
+  // are different claims and only the second one is safe to restart.
+  string control_plane_hint = 2;
+}
+
+// What this host IS, as opposed to what it is currently doing. Every field is
+// best-effort: a value the agent could not read comes back empty/zero rather
+// than failing the call, because a missing /etc/os-release must not cost the
+// operator their CPU model too.
+message HostInfoResponse {
+  // e.g. "AMD Ryzen 5 5600X 6-Core Processor" (/proc/cpuinfo "model name").
+  string cpu_model = 1;
+  // PHYSICAL cores, deduplicated by (physical id, core id). 6 on the chip above.
+  int32 cpu_cores = 2;
+  // Logical processors — what schedulers and `nproc` count. 12 on the chip above.
+  int32 cpu_threads = 3;
+  // bytes
+  int64 mem_total_bytes = 4;
+  int64 disk_total_bytes = 5;
+  int64 disk_used_bytes = 6;
+  // /etc/os-release PRETTY_NAME, e.g. "Ubuntu 24.04.1 LTS".
+  string os_pretty = 7;
+  // uname -r, e.g. "6.8.0-136-generic".
+  string kernel = 8;
+  // uname -m, e.g. "x86_64" / "aarch64".
+  string arch = 9;
+  // Docker server version, "" when the daemon is unreachable.
+  string docker_version = 10;
+  // Docker's data root (`docker info -f {{.DockerRootDir}}`) — where images and
+  // volumes actually live, which is not always the disk the operator assumes.
+  string docker_root_dir = 11;
+  int64 uptime_sec = 12;
+  // IANA zone name, e.g. "Europe/Rome". Read from the /etc/localtime symlink.
+  string timezone = 13;
+  // The host's clock at the moment of the read, and its offset from UTC in
+  // MINUTES (not hours: Kathmandu is +345, India +330).
+  int64 time_unix_ms = 14;
+  int32 utc_offset_minutes = 15;
+  // The current $AGENT_DATA/traefik/docker-compose.yml, verbatim. Empty when
+  // Deplo did not install Traefik here — which is exactly the signal that
+  // TraefikConfig must refuse to write.
+  string traefik_compose_yaml = 16;
+  // The resolved container id for control_plane_hint, or "" when the hint named
+  // nothing running. Non-empty means RestartControlPlane can do its job.
+  string control_plane_container = 17;
+}
+
+message SetTimezoneRequest {
+  // IANA zone name. Must exist under /usr/share/zoneinfo.
+  string timezone = 1;
+  // Passed straight through to the HostInfoResponse this answers with.
+  string data_dir = 2;
+  string control_plane_hint = 3;
+}
+
+message TraefikConfigRequest {
+  // The full docker-compose.yml for the deplo-traefik stack, rendered control
+  // plane-side. Ignored when restart_only.
+  string compose_yaml = 1;
+  // Restart the existing stack without touching its file on disk. This is the
+  // plain "restart Traefik" button; a config change sends the YAML instead.
+  bool restart_only = 2;
+}
+
+message TraefikConfigResponse {
+  bool ok = 1;
+  // Why not, verbatim for the operator — most usefully "this host runs a Traefik
+  // Deplo did not install".
+  string error = 2;
+  // The stack file as it stands AFTER the operation, so the control plane never
+  // has to assume its write landed byte-for-byte.
+  string compose_yaml = 3;
+}
+
+message RestartControlPlaneRequest {
+  // The caller's own hostname / container id — see HostInfoRequest.
+  string control_plane_hint = 1;
+}
+
+message RestartControlPlaneResponse {
+  // True => a restart was SCHEDULED (moments from now), not completed: the reply
+  // has to outrun the restart it triggers, so the agent cannot report the result.
+  bool ok = 1;
+  string error = 2;
+  // The container the agent is about to restart, echoed back so the operator can
+  // see WHICH thing was named.
+  string container = 3;
 }
