@@ -1,0 +1,311 @@
+package server
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	pb "github.com/DeploCloud/deplo-agent/gen"
+	"github.com/DeploCloud/deplo-agent/internal/dockercli"
+	"github.com/DeploCloud/deplo-agent/internal/hostinfo"
+)
+
+// The four host-level verbs behind the "hostops" capability. Everything here is
+// about the HOST rather than an app, which is why none of it takes a slug — and
+// why each one is a named, closed action rather than a generic "run this". The
+// agent's whole security value is that the control plane can only ask for what
+// the proto enumerates; a RunCommand RPC would throw that away for convenience.
+
+// traefikContainer is the name install-agent.sh gives the Traefik it installs.
+// A Traefik under any OTHER name is somebody else's, and TraefikConfig refuses
+// to touch it — the installer already declines to fight for the box, and a
+// remote rewrite of an operator's own proxy would be far worse than that.
+const traefikContainer = "deplo-traefik"
+
+// SetAgentDir tells the service where the agent's own data lives (the
+// installer's $AGENT_DATA, i.e. --agent-dir) — the parent of the Traefik stack
+// this manages. A setter rather than a New parameter so every existing
+// construction site, tests included, keeps compiling unchanged; empty simply
+// means "no Traefik stack to manage here".
+func (s *Service) SetAgentDir(dir string) { s.agentDir = dir }
+
+// traefikDir is where install-agent.sh puts the Traefik it installs:
+// $AGENT_DATA/traefik, holding docker-compose.yml and acme/.
+func (s *Service) traefikDir() string {
+	if s.agentDir == "" {
+		return ""
+	}
+	return filepath.Join(s.agentDir, "traefik")
+}
+
+func (s *Service) traefikCompose() string {
+	dir := s.traefikDir()
+	if dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, "docker-compose.yml")
+}
+
+// HostInfo answers what this host IS — see the proto. Like Hello it never fails:
+// every field is best-effort, because an operator opening the hardware panel on
+// a half-broken box should still learn what they can.
+func (s *Service) HostInfo(ctx context.Context, req *pb.HostInfoRequest) (*pb.HostInfoResponse, error) {
+	return s.hostInfo(ctx, req.GetDataDir(), req.GetControlPlaneHint()), nil
+}
+
+func (s *Service) hostInfo(ctx context.Context, dataDir, cpHint string) *pb.HostInfoResponse {
+	if dataDir == "" {
+		dataDir = s.dataDir
+	}
+	info := hostinfo.Collect(dataDir)
+
+	dockerVersion, dockerRoot := "", ""
+	if dockercli.Available(ctx) {
+		dockerVersion = dockercli.ServerVersion(ctx)
+		dockerRoot = dockerRootDir(ctx)
+	}
+
+	// The Traefik stack file, when Deplo installed it here. Empty is the signal
+	// the control plane needs: it means "there is no stack of ours to rewrite",
+	// which is exactly when the dashboard toggle must not be offered.
+	traefikYaml := ""
+	if path := s.traefikCompose(); path != "" {
+		if b, err := os.ReadFile(path); err == nil {
+			traefikYaml = string(b)
+		}
+	}
+
+	return &pb.HostInfoResponse{
+		CpuModel:              info.CPUModel,
+		CpuCores:              int32(info.CPUCores),
+		CpuThreads:            int32(info.CPUThreads),
+		MemTotalBytes:         info.MemTotalBytes,
+		DiskTotalBytes:        info.DiskTotalBytes,
+		DiskUsedBytes:         info.DiskUsedBytes,
+		OsPretty:              info.OSPretty,
+		Kernel:                info.Kernel,
+		Arch:                  info.Arch,
+		DockerVersion:         dockerVersion,
+		DockerRootDir:         dockerRoot,
+		UptimeSec:             info.UptimeSec,
+		Timezone:              info.Timezone,
+		TimeUnixMs:            info.TimeUnixMs,
+		UtcOffsetMinutes:      info.UTCOffsetMinutes,
+		TraefikComposeYaml:    traefikYaml,
+		ControlPlaneContainer: resolveContainer(ctx, cpHint),
+	}
+}
+
+// dockerRootDir is where images and volumes actually live, which on a host with
+// a mounted data disk is not the root filesystem the operator is looking at.
+func dockerRootDir(ctx context.Context) string {
+	res, err := dockercli.Run(ctx, 10*time.Second, "info", "-f", "{{.DockerRootDir}}")
+	if err != nil || res.Code != 0 {
+		return ""
+	}
+	return strings.TrimSpace(res.Stdout)
+}
+
+// resolveContainer turns the caller's self-identifying hint into a container id,
+// or "" if it names nothing running.
+//
+// The hint is the control plane's OWN hostname, which inside a container is its
+// short id. We resolve it rather than searching for a container built from the
+// deplo image on purpose: "a container running the deplo image" and "the
+// container you are talking to me from" are different claims, and restarting
+// something on the strength of the first would let a second, unrelated deplo
+// image on the host become the thing that gets bounced.
+func resolveContainer(ctx context.Context, hint string) string {
+	hint = strings.TrimSpace(hint)
+	if hint == "" {
+		return ""
+	}
+	res, err := dockercli.Run(ctx, 10*time.Second, "inspect", "-f", "{{.Id}}\t{{.State.Running}}", hint)
+	if err != nil || res.Code != 0 {
+		return ""
+	}
+	id, running, ok := strings.Cut(strings.TrimSpace(res.Stdout), "\t")
+	if !ok || strings.TrimSpace(running) != "true" {
+		return ""
+	}
+	return id
+}
+
+// SetTimezone moves the host clock. Validation lives in hostinfo (the name is
+// resolved against /usr/share/zoneinfo rather than pattern-matched) because it
+// ends in a relink of /etc/localtime and must be checked where the I/O happens,
+// not only where the request was composed.
+func (s *Service) SetTimezone(ctx context.Context, req *pb.SetTimezoneRequest) (*pb.HostInfoResponse, error) {
+	tz := strings.TrimSpace(req.GetTimezone())
+	if !hostinfo.KnownTimezone(tz) {
+		return nil, status.Errorf(codes.InvalidArgument,
+			"%q is not a timezone this host knows about", tz)
+	}
+	if err := hostinfo.SetTimezone(ctx, tz); err != nil {
+		return nil, status.Errorf(codes.Internal, "could not set the timezone: %v", err)
+	}
+	// A fresh read, not an echo of the request: the point of the answer is to
+	// show the clock that MOVED, and a host where the write silently did not
+	// take should say so rather than parrot the name back.
+	return s.hostInfo(ctx, req.GetDataDir(), req.GetControlPlaneHint()), nil
+}
+
+// TraefikConfig restarts, or rewrites and restarts, this host's deplo-traefik
+// stack. The YAML is rendered control-plane-side (ADR-0006) and applied here
+// verbatim; the agent's job is the file and the bring-up, never the labels.
+func (s *Service) TraefikConfig(ctx context.Context, req *pb.TraefikConfigRequest) (*pb.TraefikConfigResponse, error) {
+	path := s.traefikCompose()
+	if path == "" {
+		return &pb.TraefikConfigResponse{
+			Ok:    false,
+			Error: "this agent has no data directory configured, so it does not manage a Traefik stack",
+		}, nil
+	}
+	if _, err := os.Stat(path); err != nil {
+		// Either Traefik was never installed here, or the operator runs their own
+		// proxy — install-agent.sh skips its Traefik when one is already up. Both
+		// mean the same thing: there is nothing of OURS to reconfigure.
+		return &pb.TraefikConfigResponse{
+			Ok: false,
+			Error: "Deplo did not install Traefik on this host, so it cannot manage it here. " +
+				"This server is either behind your own reverse proxy or has no proxy at all.",
+		}, nil
+	}
+
+	if !req.GetRestartOnly() {
+		yaml := req.GetComposeYaml()
+		if strings.TrimSpace(yaml) == "" {
+			return &pb.TraefikConfigResponse{Ok: false, Error: "no Traefik configuration was sent"}, nil
+		}
+		// Keep the outgoing file. A Traefik config change can take :80/:443 down
+		// for every app on the host, and the operator's way back must not depend
+		// on the control plane still being able to reach this agent.
+		if err := os.Rename(path, path+".bak"); err != nil {
+			return &pb.TraefikConfigResponse{
+				Ok:    false,
+				Error: fmt.Sprintf("could not back up the current Traefik config: %v", err),
+			}, nil
+		}
+		if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
+			_ = os.Rename(path+".bak", path) // put it back; nothing has restarted yet
+			return &pb.TraefikConfigResponse{
+				Ok:    false,
+				Error: fmt.Sprintf("could not write the Traefik config: %v", err),
+			}, nil
+		}
+	}
+
+	if err := s.applyTraefik(ctx, path, req.GetRestartOnly()); err != nil {
+		if !req.GetRestartOnly() {
+			// The new config did not come up. Restore the old file AND bring it
+			// back up, so the host is left routing rather than merely holding a
+			// good file it is not running.
+			if rerr := os.Rename(path+".bak", path); rerr == nil {
+				_ = s.applyTraefik(ctx, path, false)
+			}
+			return &pb.TraefikConfigResponse{
+				Ok:          false,
+				Error:       fmt.Sprintf("%v — the previous Traefik config was restored", err),
+				ComposeYaml: readFileOrEmpty(path),
+			}, nil
+		}
+		return &pb.TraefikConfigResponse{Ok: false, Error: err.Error(), ComposeYaml: readFileOrEmpty(path)}, nil
+	}
+
+	return &pb.TraefikConfigResponse{Ok: true, ComposeYaml: readFileOrEmpty(path)}, nil
+}
+
+// applyTraefik is the seam over bringUpTraefik. It exists so the rollback path
+// can be tested WITHOUT running `docker compose up` on the machine running the
+// tests — which, the one time it was not a seam, started a real Traefik on the
+// test runner from a fixture in /tmp.
+func (s *Service) applyTraefik(ctx context.Context, path string, restartOnly bool) error {
+	if s.traefikApply != nil {
+		return s.traefikApply(ctx, path, restartOnly)
+	}
+	return s.bringUpTraefik(ctx, path, restartOnly)
+}
+
+// bringUpTraefik applies the stack file. A restart-only request goes through
+// `docker restart` (cheapest, and it must NOT pick up an edited file the caller
+// did not ask to apply); a config change goes through `compose up -d`, which is
+// what actually recreates the container with new flags.
+func (s *Service) bringUpTraefik(ctx context.Context, path string, restartOnly bool) error {
+	if restartOnly {
+		res, err := dockercli.Run(ctx, 90*time.Second, "restart", traefikContainer)
+		if err != nil {
+			return fmt.Errorf("could not restart Traefik: %v", err)
+		}
+		if res.Code != 0 {
+			return fmt.Errorf("could not restart Traefik: %s", firstLine(res.Stderr))
+		}
+		return nil
+	}
+	// --force-recreate because a static-config change lives in `command:`, and
+	// compose considers a container with an unchanged image+config current.
+	res, err := dockercli.Run(ctx, 180*time.Second,
+		"compose", "-f", path, "up", "-d", "--force-recreate", "--remove-orphans")
+	if err != nil {
+		return fmt.Errorf("could not apply the Traefik configuration: %v", err)
+	}
+	if res.Code != 0 {
+		return fmt.Errorf("could not apply the Traefik configuration: %s", firstLine(res.Stderr))
+	}
+	return nil
+}
+
+// RestartControlPlane bounces the container the Deplo panel runs in on this host.
+//
+// The restart is detached and delayed because it kills the process waiting on
+// this RPC: the reply must win the race, or the operator sees a transport error
+// for an action that in fact succeeded — the single most confusing outcome
+// available here.
+func (s *Service) RestartControlPlane(ctx context.Context, req *pb.RestartControlPlaneRequest) (*pb.RestartControlPlaneResponse, error) {
+	id := resolveContainer(ctx, req.GetControlPlaneHint())
+	if id == "" {
+		return &pb.RestartControlPlaneResponse{
+			Ok: false,
+			Error: "Deplo is not running as a container on this host that the agent can restart, " +
+				"so it has to be restarted the way it was started.",
+		}, nil
+	}
+	// Deliberately NOT CommandContext: the command must outlive this RPC (and the
+	// process it restarts), so it must not be cancelled when the call returns.
+	cmd := exec.Command("sh", "-c", fmt.Sprintf("sleep 2; docker restart %s", id))
+	if err := cmd.Start(); err != nil {
+		return &pb.RestartControlPlaneResponse{
+			Ok:    false,
+			Error: fmt.Sprintf("could not schedule the restart: %v", err),
+		}, nil
+	}
+	// Reap it in the background so the agent does not accumulate a zombie for
+	// every restart. The agent survives the container it just bounced.
+	go func() { _ = cmd.Wait() }()
+
+	return &pb.RestartControlPlaneResponse{Ok: true, Container: id}, nil
+}
+
+func readFileOrEmpty(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+// firstLine keeps an error message to the one line the operator needs; docker's
+// stderr on a failed compose up can run to dozens.
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
+}

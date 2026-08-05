@@ -82,6 +82,13 @@ var Capabilities = []string{
 	// ~365d cert expires and the agent hot-reloads it WITHOUT a restart. An agent
 	// without this capability keeps its old behavior (the operator re-bootstraps).
 	"cert-renewal",
+	// The host-level verbs the Servers page needs (HostInfo, SetTimezone,
+	// TraefikConfig, RestartControlPlane): what this hardware IS, what time it
+	// thinks it is, restarting Traefik, restarting the panel. ONE flag for the
+	// four because they land in the same release, and a control plane that finds
+	// it absent tells the operator to update the agent rather than rendering a
+	// panel whose every button fails.
+	"hostops",
 }
 
 // AgentVersion is the version this agent reports over Hello. It is stamped at
@@ -115,6 +122,16 @@ type Service struct {
 	// stacks; the bind paths inside the rendered dev/gateway compose line up
 	// because the agent uses the SAME layout the control plane assumed.
 	dataBase string
+	// agentDir is the agent's OWN data root (--agent-dir, the installer's
+	// /var/lib/deplo-agent): mTLS materials, and the Traefik stack the installer
+	// puts under traefik/. Set via SetAgentDir so New's signature — and every
+	// call site that constructs a Service — is unaffected. Empty means this agent
+	// manages no Traefik stack.
+	agentDir string
+	// traefikApply overrides how the Traefik stack is brought up. nil in
+	// production (bringUpTraefik runs docker); set by tests so exercising the
+	// rollback path cannot start a container on the machine running them.
+	traefikApply func(ctx context.Context, path string, restartOnly bool) error
 
 	mu      sync.Mutex
 	deploys map[string]*inflight

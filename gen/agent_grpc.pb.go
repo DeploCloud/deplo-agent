@@ -53,55 +53,59 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Agent_Hello_FullMethodName              = "/deplo.agent.v1.Agent/Hello"
-	Agent_Metrics_FullMethodName            = "/deplo.agent.v1.Agent/Metrics"
-	Agent_ContainerStats_FullMethodName     = "/deplo.agent.v1.Agent/ContainerStats"
-	Agent_StreamMetrics_FullMethodName      = "/deplo.agent.v1.Agent/StreamMetrics"
-	Agent_Deploy_FullMethodName             = "/deplo.agent.v1.Agent/Deploy"
-	Agent_ReattachDeploy_FullMethodName     = "/deplo.agent.v1.Agent/ReattachDeploy"
-	Agent_StopStack_FullMethodName          = "/deplo.agent.v1.Agent/StopStack"
-	Agent_StartStack_FullMethodName         = "/deplo.agent.v1.Agent/StartStack"
-	Agent_DestroyStack_FullMethodName       = "/deplo.agent.v1.Agent/DestroyStack"
-	Agent_Reroute_FullMethodName            = "/deplo.agent.v1.Agent/Reroute"
-	Agent_ExportVolume_FullMethodName       = "/deplo.agent.v1.Agent/ExportVolume"
-	Agent_ImportVolume_FullMethodName       = "/deplo.agent.v1.Agent/ImportVolume"
-	Agent_ExportFiles_FullMethodName        = "/deplo.agent.v1.Agent/ExportFiles"
-	Agent_ImportFiles_FullMethodName        = "/deplo.agent.v1.Agent/ImportFiles"
-	Agent_ReadStack_FullMethodName          = "/deplo.agent.v1.Agent/ReadStack"
-	Agent_Inspect_FullMethodName            = "/deplo.agent.v1.Agent/Inspect"
-	Agent_CheckPort_FullMethodName          = "/deplo.agent.v1.Agent/CheckPort"
-	Agent_ProbeHttp_FullMethodName          = "/deplo.agent.v1.Agent/ProbeHttp"
-	Agent_DockerCleanup_FullMethodName      = "/deplo.agent.v1.Agent/DockerCleanup"
-	Agent_SelfUpdate_FullMethodName         = "/deplo.agent.v1.Agent/SelfUpdate"
-	Agent_Backup_FullMethodName             = "/deplo.agent.v1.Agent/Backup"
-	Agent_Restore_FullMethodName            = "/deplo.agent.v1.Agent/Restore"
-	Agent_S3Check_FullMethodName            = "/deplo.agent.v1.Agent/S3Check"
-	Agent_S3Delete_FullMethodName           = "/deplo.agent.v1.Agent/S3Delete"
-	Agent_FollowLogs_FullMethodName         = "/deplo.agent.v1.Agent/FollowLogs"
-	Agent_Attach_FullMethodName             = "/deplo.agent.v1.Agent/Attach"
-	Agent_ListInstances_FullMethodName      = "/deplo.agent.v1.Agent/ListInstances"
-	Agent_Exec_FullMethodName               = "/deplo.agent.v1.Agent/Exec"
-	Agent_ShellLabel_FullMethodName         = "/deplo.agent.v1.Agent/ShellLabel"
-	Agent_ListFiles_FullMethodName          = "/deplo.agent.v1.Agent/ListFiles"
-	Agent_ReadFile_FullMethodName           = "/deplo.agent.v1.Agent/ReadFile"
-	Agent_WriteFile_FullMethodName          = "/deplo.agent.v1.Agent/WriteFile"
-	Agent_UploadFile_FullMethodName         = "/deplo.agent.v1.Agent/UploadFile"
-	Agent_CreateDir_FullMethodName          = "/deplo.agent.v1.Agent/CreateDir"
-	Agent_DeleteFile_FullMethodName         = "/deplo.agent.v1.Agent/DeleteFile"
-	Agent_RenameFile_FullMethodName         = "/deplo.agent.v1.Agent/RenameFile"
-	Agent_FilesExist_FullMethodName         = "/deplo.agent.v1.Agent/FilesExist"
-	Agent_StartDev_FullMethodName           = "/deplo.agent.v1.Agent/StartDev"
-	Agent_StopDev_FullMethodName            = "/deplo.agent.v1.Agent/StopDev"
-	Agent_ResetDevWorkspace_FullMethodName  = "/deplo.agent.v1.Agent/ResetDevWorkspace"
-	Agent_TeardownDev_FullMethodName        = "/deplo.agent.v1.Agent/TeardownDev"
-	Agent_EnsureGateway_FullMethodName      = "/deplo.agent.v1.Agent/EnsureGateway"
-	Agent_ProvisionSshUser_FullMethodName   = "/deplo.agent.v1.Agent/ProvisionSshUser"
-	Agent_DeprovisionSshUser_FullMethodName = "/deplo.agent.v1.Agent/DeprovisionSshUser"
-	Agent_StartTunnel_FullMethodName        = "/deplo.agent.v1.Agent/StartTunnel"
-	Agent_GetTunnel_FullMethodName          = "/deplo.agent.v1.Agent/GetTunnel"
-	Agent_StopTunnel_FullMethodName         = "/deplo.agent.v1.Agent/StopTunnel"
-	Agent_RenewalCSR_FullMethodName         = "/deplo.agent.v1.Agent/RenewalCSR"
-	Agent_InstallRenewedCert_FullMethodName = "/deplo.agent.v1.Agent/InstallRenewedCert"
+	Agent_Hello_FullMethodName               = "/deplo.agent.v1.Agent/Hello"
+	Agent_Metrics_FullMethodName             = "/deplo.agent.v1.Agent/Metrics"
+	Agent_ContainerStats_FullMethodName      = "/deplo.agent.v1.Agent/ContainerStats"
+	Agent_StreamMetrics_FullMethodName       = "/deplo.agent.v1.Agent/StreamMetrics"
+	Agent_Deploy_FullMethodName              = "/deplo.agent.v1.Agent/Deploy"
+	Agent_ReattachDeploy_FullMethodName      = "/deplo.agent.v1.Agent/ReattachDeploy"
+	Agent_StopStack_FullMethodName           = "/deplo.agent.v1.Agent/StopStack"
+	Agent_StartStack_FullMethodName          = "/deplo.agent.v1.Agent/StartStack"
+	Agent_DestroyStack_FullMethodName        = "/deplo.agent.v1.Agent/DestroyStack"
+	Agent_Reroute_FullMethodName             = "/deplo.agent.v1.Agent/Reroute"
+	Agent_ExportVolume_FullMethodName        = "/deplo.agent.v1.Agent/ExportVolume"
+	Agent_ImportVolume_FullMethodName        = "/deplo.agent.v1.Agent/ImportVolume"
+	Agent_ExportFiles_FullMethodName         = "/deplo.agent.v1.Agent/ExportFiles"
+	Agent_ImportFiles_FullMethodName         = "/deplo.agent.v1.Agent/ImportFiles"
+	Agent_ReadStack_FullMethodName           = "/deplo.agent.v1.Agent/ReadStack"
+	Agent_Inspect_FullMethodName             = "/deplo.agent.v1.Agent/Inspect"
+	Agent_CheckPort_FullMethodName           = "/deplo.agent.v1.Agent/CheckPort"
+	Agent_ProbeHttp_FullMethodName           = "/deplo.agent.v1.Agent/ProbeHttp"
+	Agent_DockerCleanup_FullMethodName       = "/deplo.agent.v1.Agent/DockerCleanup"
+	Agent_SelfUpdate_FullMethodName          = "/deplo.agent.v1.Agent/SelfUpdate"
+	Agent_Backup_FullMethodName              = "/deplo.agent.v1.Agent/Backup"
+	Agent_Restore_FullMethodName             = "/deplo.agent.v1.Agent/Restore"
+	Agent_S3Check_FullMethodName             = "/deplo.agent.v1.Agent/S3Check"
+	Agent_S3Delete_FullMethodName            = "/deplo.agent.v1.Agent/S3Delete"
+	Agent_FollowLogs_FullMethodName          = "/deplo.agent.v1.Agent/FollowLogs"
+	Agent_Attach_FullMethodName              = "/deplo.agent.v1.Agent/Attach"
+	Agent_ListInstances_FullMethodName       = "/deplo.agent.v1.Agent/ListInstances"
+	Agent_Exec_FullMethodName                = "/deplo.agent.v1.Agent/Exec"
+	Agent_ShellLabel_FullMethodName          = "/deplo.agent.v1.Agent/ShellLabel"
+	Agent_ListFiles_FullMethodName           = "/deplo.agent.v1.Agent/ListFiles"
+	Agent_ReadFile_FullMethodName            = "/deplo.agent.v1.Agent/ReadFile"
+	Agent_WriteFile_FullMethodName           = "/deplo.agent.v1.Agent/WriteFile"
+	Agent_UploadFile_FullMethodName          = "/deplo.agent.v1.Agent/UploadFile"
+	Agent_CreateDir_FullMethodName           = "/deplo.agent.v1.Agent/CreateDir"
+	Agent_DeleteFile_FullMethodName          = "/deplo.agent.v1.Agent/DeleteFile"
+	Agent_RenameFile_FullMethodName          = "/deplo.agent.v1.Agent/RenameFile"
+	Agent_FilesExist_FullMethodName          = "/deplo.agent.v1.Agent/FilesExist"
+	Agent_StartDev_FullMethodName            = "/deplo.agent.v1.Agent/StartDev"
+	Agent_StopDev_FullMethodName             = "/deplo.agent.v1.Agent/StopDev"
+	Agent_ResetDevWorkspace_FullMethodName   = "/deplo.agent.v1.Agent/ResetDevWorkspace"
+	Agent_TeardownDev_FullMethodName         = "/deplo.agent.v1.Agent/TeardownDev"
+	Agent_EnsureGateway_FullMethodName       = "/deplo.agent.v1.Agent/EnsureGateway"
+	Agent_ProvisionSshUser_FullMethodName    = "/deplo.agent.v1.Agent/ProvisionSshUser"
+	Agent_DeprovisionSshUser_FullMethodName  = "/deplo.agent.v1.Agent/DeprovisionSshUser"
+	Agent_StartTunnel_FullMethodName         = "/deplo.agent.v1.Agent/StartTunnel"
+	Agent_GetTunnel_FullMethodName           = "/deplo.agent.v1.Agent/GetTunnel"
+	Agent_StopTunnel_FullMethodName          = "/deplo.agent.v1.Agent/StopTunnel"
+	Agent_RenewalCSR_FullMethodName          = "/deplo.agent.v1.Agent/RenewalCSR"
+	Agent_InstallRenewedCert_FullMethodName  = "/deplo.agent.v1.Agent/InstallRenewedCert"
+	Agent_HostInfo_FullMethodName            = "/deplo.agent.v1.Agent/HostInfo"
+	Agent_SetTimezone_FullMethodName         = "/deplo.agent.v1.Agent/SetTimezone"
+	Agent_TraefikConfig_FullMethodName       = "/deplo.agent.v1.Agent/TraefikConfig"
+	Agent_RestartControlPlane_FullMethodName = "/deplo.agent.v1.Agent/RestartControlPlane"
 )
 
 // AgentClient is the client API for Agent service.
@@ -404,6 +408,39 @@ type AgentClient interface {
 	// verifies the cert matches the pending key, atomically swaps cert+key on disk,
 	// and hot-reloads its TLS config so new handshakes present the fresh cert.
 	InstallRenewedCert(ctx context.Context, in *InstallRenewedCertRequest, opts ...grpc.CallOption) (*StackResult, error)
+	// Static host identity — the neofetch answer, not the gauge. Metrics/
+	// StreamMetrics already carry the USAGE numbers (cpu %, mem used, disk used);
+	// this carries what the hardware and OS actually ARE, plus the host clock and
+	// the two pieces of host state the control plane can act on (the Traefik stack
+	// file and whether a given container id resolves). Read live, persisted
+	// nowhere agent-side.
+	HostInfo(ctx context.Context, in *HostInfoRequest, opts ...grpc.CallOption) (*HostInfoResponse, error)
+	// Set the host's timezone (IANA name, e.g. "Europe/Rome"). `timedatectl` when
+	// present, otherwise relinking /etc/localtime. The name is validated against
+	// /usr/share/zoneinfo before anything is written — defence in depth, since the
+	// control plane validates too. Answers with a FRESH HostInfoResponse so the UI
+	// shows the moved clock without a second round trip.
+	SetTimezone(ctx context.Context, in *SetTimezoneRequest, opts ...grpc.CallOption) (*HostInfoResponse, error)
+	// Rewrite and/or restart THIS host's `deplo-traefik` stack — the reverse proxy
+	// the installer put at $AGENT_DATA/traefik/docker-compose.yml. Per ADR-0006 the
+	// agent renders NOTHING: the compose YAML is authored control-plane-side and
+	// shipped opaque, exactly like an app stack, so the Traefik label grammar stays
+	// in one place (lib/deploy) and never leaks into Go.
+	//
+	// Refuses when that file is absent or the running Traefik is not deplo-traefik:
+	// the installer explicitly leaves an operator's own proxy alone, and so does
+	// this. The previous file is kept as docker-compose.yml.bak before any write —
+	// a config change that takes :80/:443 down must be reversible from the host.
+	TraefikConfig(ctx context.Context, in *TraefikConfigRequest, opts ...grpc.CallOption) (*TraefikConfigResponse, error)
+	// Restart the container running the Deplo control plane on THIS host (agent 0
+	// only — a remote has no panel to restart). The caller names itself: it sends
+	// its own hostname, which inside a container IS the short container id.
+	//
+	// The restart is DETACHED and delayed by a moment on purpose: it kills the very
+	// process waiting on this RPC, so the reply has to win the race. An unresolvable
+	// hint answers ok=false with a reason — never a silent success, because "did my
+	// panel restart?" is not a question the operator can answer by looking.
+	RestartControlPlane(ctx context.Context, in *RestartControlPlaneRequest, opts ...grpc.CallOption) (*RestartControlPlaneResponse, error)
 }
 
 type agentClient struct {
@@ -1003,6 +1040,46 @@ func (c *agentClient) InstallRenewedCert(ctx context.Context, in *InstallRenewed
 	return out, nil
 }
 
+func (c *agentClient) HostInfo(ctx context.Context, in *HostInfoRequest, opts ...grpc.CallOption) (*HostInfoResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(HostInfoResponse)
+	err := c.cc.Invoke(ctx, Agent_HostInfo_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) SetTimezone(ctx context.Context, in *SetTimezoneRequest, opts ...grpc.CallOption) (*HostInfoResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(HostInfoResponse)
+	err := c.cc.Invoke(ctx, Agent_SetTimezone_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) TraefikConfig(ctx context.Context, in *TraefikConfigRequest, opts ...grpc.CallOption) (*TraefikConfigResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TraefikConfigResponse)
+	err := c.cc.Invoke(ctx, Agent_TraefikConfig_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) RestartControlPlane(ctx context.Context, in *RestartControlPlaneRequest, opts ...grpc.CallOption) (*RestartControlPlaneResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RestartControlPlaneResponse)
+	err := c.cc.Invoke(ctx, Agent_RestartControlPlane_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AgentServer is the server API for Agent service.
 // All implementations must embed UnimplementedAgentServer
 // for forward compatibility.
@@ -1303,6 +1380,39 @@ type AgentServer interface {
 	// verifies the cert matches the pending key, atomically swaps cert+key on disk,
 	// and hot-reloads its TLS config so new handshakes present the fresh cert.
 	InstallRenewedCert(context.Context, *InstallRenewedCertRequest) (*StackResult, error)
+	// Static host identity — the neofetch answer, not the gauge. Metrics/
+	// StreamMetrics already carry the USAGE numbers (cpu %, mem used, disk used);
+	// this carries what the hardware and OS actually ARE, plus the host clock and
+	// the two pieces of host state the control plane can act on (the Traefik stack
+	// file and whether a given container id resolves). Read live, persisted
+	// nowhere agent-side.
+	HostInfo(context.Context, *HostInfoRequest) (*HostInfoResponse, error)
+	// Set the host's timezone (IANA name, e.g. "Europe/Rome"). `timedatectl` when
+	// present, otherwise relinking /etc/localtime. The name is validated against
+	// /usr/share/zoneinfo before anything is written — defence in depth, since the
+	// control plane validates too. Answers with a FRESH HostInfoResponse so the UI
+	// shows the moved clock without a second round trip.
+	SetTimezone(context.Context, *SetTimezoneRequest) (*HostInfoResponse, error)
+	// Rewrite and/or restart THIS host's `deplo-traefik` stack — the reverse proxy
+	// the installer put at $AGENT_DATA/traefik/docker-compose.yml. Per ADR-0006 the
+	// agent renders NOTHING: the compose YAML is authored control-plane-side and
+	// shipped opaque, exactly like an app stack, so the Traefik label grammar stays
+	// in one place (lib/deploy) and never leaks into Go.
+	//
+	// Refuses when that file is absent or the running Traefik is not deplo-traefik:
+	// the installer explicitly leaves an operator's own proxy alone, and so does
+	// this. The previous file is kept as docker-compose.yml.bak before any write —
+	// a config change that takes :80/:443 down must be reversible from the host.
+	TraefikConfig(context.Context, *TraefikConfigRequest) (*TraefikConfigResponse, error)
+	// Restart the container running the Deplo control plane on THIS host (agent 0
+	// only — a remote has no panel to restart). The caller names itself: it sends
+	// its own hostname, which inside a container IS the short container id.
+	//
+	// The restart is DETACHED and delayed by a moment on purpose: it kills the very
+	// process waiting on this RPC, so the reply has to win the race. An unresolvable
+	// hint answers ok=false with a reason — never a silent success, because "did my
+	// panel restart?" is not a question the operator can answer by looking.
+	RestartControlPlane(context.Context, *RestartControlPlaneRequest) (*RestartControlPlaneResponse, error)
 	mustEmbedUnimplementedAgentServer()
 }
 
@@ -1459,6 +1569,18 @@ func (UnimplementedAgentServer) RenewalCSR(context.Context, *RenewalCSRRequest) 
 }
 func (UnimplementedAgentServer) InstallRenewedCert(context.Context, *InstallRenewedCertRequest) (*StackResult, error) {
 	return nil, status.Error(codes.Unimplemented, "method InstallRenewedCert not implemented")
+}
+func (UnimplementedAgentServer) HostInfo(context.Context, *HostInfoRequest) (*HostInfoResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method HostInfo not implemented")
+}
+func (UnimplementedAgentServer) SetTimezone(context.Context, *SetTimezoneRequest) (*HostInfoResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetTimezone not implemented")
+}
+func (UnimplementedAgentServer) TraefikConfig(context.Context, *TraefikConfigRequest) (*TraefikConfigResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method TraefikConfig not implemented")
+}
+func (UnimplementedAgentServer) RestartControlPlane(context.Context, *RestartControlPlaneRequest) (*RestartControlPlaneResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RestartControlPlane not implemented")
 }
 func (UnimplementedAgentServer) mustEmbedUnimplementedAgentServer() {}
 func (UnimplementedAgentServer) testEmbeddedByValue()               {}
@@ -2260,6 +2382,78 @@ func _Agent_InstallRenewedCert_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Agent_HostInfo_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(HostInfoRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).HostInfo(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_HostInfo_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).HostInfo(ctx, req.(*HostInfoRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_SetTimezone_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetTimezoneRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).SetTimezone(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_SetTimezone_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).SetTimezone(ctx, req.(*SetTimezoneRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_TraefikConfig_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TraefikConfigRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).TraefikConfig(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_TraefikConfig_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).TraefikConfig(ctx, req.(*TraefikConfigRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_RestartControlPlane_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RestartControlPlaneRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).RestartControlPlane(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_RestartControlPlane_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).RestartControlPlane(ctx, req.(*RestartControlPlaneRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Agent_ServiceDesc is the grpc.ServiceDesc for Agent service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -2410,6 +2604,22 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "InstallRenewedCert",
 			Handler:    _Agent_InstallRenewedCert_Handler,
+		},
+		{
+			MethodName: "HostInfo",
+			Handler:    _Agent_HostInfo_Handler,
+		},
+		{
+			MethodName: "SetTimezone",
+			Handler:    _Agent_SetTimezone_Handler,
+		},
+		{
+			MethodName: "TraefikConfig",
+			Handler:    _Agent_TraefikConfig_Handler,
+		},
+		{
+			MethodName: "RestartControlPlane",
+			Handler:    _Agent_RestartControlPlane_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

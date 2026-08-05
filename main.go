@@ -137,6 +137,10 @@ func main() {
 
 	srv := grpc.NewServer(opts...)
 	svc := server.New(*stackDir, *buildTmpDir, *dataDir, *dataBase)
+	// The agent's own data root — where the installer put Traefik's stack, which
+	// TraefikConfig manages. Distinct from --data-base (the host data root the
+	// control plane shares); conflating them would point Traefik ops at /data.
+	svc.SetAgentDir(*agentDir)
 	if certMgr != nil {
 		svc.EnableCertRenewal(certMgr) // makes RenewalCSR / InstallRenewedCert live
 	}
