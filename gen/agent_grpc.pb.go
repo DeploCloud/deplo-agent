@@ -82,6 +82,9 @@ const (
 	Agent_ListInstances_FullMethodName       = "/deplo.agent.v1.Agent/ListInstances"
 	Agent_Exec_FullMethodName                = "/deplo.agent.v1.Agent/Exec"
 	Agent_ShellLabel_FullMethodName          = "/deplo.agent.v1.Agent/ShellLabel"
+	Agent_StartJob_FullMethodName            = "/deplo.agent.v1.Agent/StartJob"
+	Agent_PollJob_FullMethodName             = "/deplo.agent.v1.Agent/PollJob"
+	Agent_KillJob_FullMethodName             = "/deplo.agent.v1.Agent/KillJob"
 	Agent_ListFiles_FullMethodName           = "/deplo.agent.v1.Agent/ListFiles"
 	Agent_ReadFile_FullMethodName            = "/deplo.agent.v1.Agent/ReadFile"
 	Agent_WriteFile_FullMethodName           = "/deplo.agent.v1.Agent/WriteFile"
@@ -356,6 +359,20 @@ type AgentClient interface {
 	// The default (or chosen) container's shell label ("/bin/sh" | "/bin/bash" |
 	// "raw exec (no shell)") for the console banner — replaces shellLabel.
 	ShellLabel(ctx context.Context, in *ShellLabelRequest, opts ...grpc.CallOption) (*ShellLabelResponse, error)
+	// Spawn a command in a container and return immediately with its handle. The
+	// container check and the shell probe happen INSIDE the job goroutine (they
+	// cost up to ~25s on a cold shell-plan cache), so this RPC is a map insert:
+	// a pre-spawn failure surfaces through PollJob as
+	// {running: false, exit_code: -1, stderr: "..."} rather than as an RPC error.
+	StartJob(ctx context.Context, in *StartJobRequest, opts ...grpc.CallOption) (*StartJobResponse, error)
+	// The job's current state. Output is returned ONLY on the terminal poll —
+	// streaming it every minute for every in-flight job would be megabytes of
+	// wire for data nobody stores, and the container's own logs are right there.
+	PollJob(ctx context.Context, in *PollJobRequest, opts ...grpc.CallOption) (*PollJobResponse, error)
+	// Kill a running job (the user pressed Stop, or the control plane's own
+	// deadline passed while this agent still reported it running). Idempotent:
+	// an unknown or already-finished job answers {found: false}, not an error.
+	KillJob(ctx context.Context, in *KillJobRequest, opts ...grpc.CallOption) (*KillJobResponse, error)
 	ListFiles(ctx context.Context, in *ListFilesRequest, opts ...grpc.CallOption) (*ListFilesResponse, error)
 	ReadFile(ctx context.Context, in *ReadFileRequest, opts ...grpc.CallOption) (*ReadFileResponse, error)
 	WriteFile(ctx context.Context, in *WriteFileRequest, opts ...grpc.CallOption) (*FileEntryResult, error)
@@ -816,6 +833,36 @@ func (c *agentClient) ShellLabel(ctx context.Context, in *ShellLabelRequest, opt
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ShellLabelResponse)
 	err := c.cc.Invoke(ctx, Agent_ShellLabel_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) StartJob(ctx context.Context, in *StartJobRequest, opts ...grpc.CallOption) (*StartJobResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StartJobResponse)
+	err := c.cc.Invoke(ctx, Agent_StartJob_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) PollJob(ctx context.Context, in *PollJobRequest, opts ...grpc.CallOption) (*PollJobResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PollJobResponse)
+	err := c.cc.Invoke(ctx, Agent_PollJob_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) KillJob(ctx context.Context, in *KillJobRequest, opts ...grpc.CallOption) (*KillJobResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(KillJobResponse)
+	err := c.cc.Invoke(ctx, Agent_KillJob_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1328,6 +1375,20 @@ type AgentServer interface {
 	// The default (or chosen) container's shell label ("/bin/sh" | "/bin/bash" |
 	// "raw exec (no shell)") for the console banner — replaces shellLabel.
 	ShellLabel(context.Context, *ShellLabelRequest) (*ShellLabelResponse, error)
+	// Spawn a command in a container and return immediately with its handle. The
+	// container check and the shell probe happen INSIDE the job goroutine (they
+	// cost up to ~25s on a cold shell-plan cache), so this RPC is a map insert:
+	// a pre-spawn failure surfaces through PollJob as
+	// {running: false, exit_code: -1, stderr: "..."} rather than as an RPC error.
+	StartJob(context.Context, *StartJobRequest) (*StartJobResponse, error)
+	// The job's current state. Output is returned ONLY on the terminal poll —
+	// streaming it every minute for every in-flight job would be megabytes of
+	// wire for data nobody stores, and the container's own logs are right there.
+	PollJob(context.Context, *PollJobRequest) (*PollJobResponse, error)
+	// Kill a running job (the user pressed Stop, or the control plane's own
+	// deadline passed while this agent still reported it running). Idempotent:
+	// an unknown or already-finished job answers {found: false}, not an error.
+	KillJob(context.Context, *KillJobRequest) (*KillJobResponse, error)
 	ListFiles(context.Context, *ListFilesRequest) (*ListFilesResponse, error)
 	ReadFile(context.Context, *ReadFileRequest) (*ReadFileResponse, error)
 	WriteFile(context.Context, *WriteFileRequest) (*FileEntryResult, error)
@@ -1509,6 +1570,15 @@ func (UnimplementedAgentServer) Exec(context.Context, *ExecRequest) (*ExecRespon
 }
 func (UnimplementedAgentServer) ShellLabel(context.Context, *ShellLabelRequest) (*ShellLabelResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ShellLabel not implemented")
+}
+func (UnimplementedAgentServer) StartJob(context.Context, *StartJobRequest) (*StartJobResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method StartJob not implemented")
+}
+func (UnimplementedAgentServer) PollJob(context.Context, *PollJobRequest) (*PollJobResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PollJob not implemented")
+}
+func (UnimplementedAgentServer) KillJob(context.Context, *KillJobRequest) (*KillJobResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method KillJob not implemented")
 }
 func (UnimplementedAgentServer) ListFiles(context.Context, *ListFilesRequest) (*ListFilesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListFiles not implemented")
@@ -2036,6 +2106,60 @@ func _Agent_ShellLabel_Handler(srv interface{}, ctx context.Context, dec func(in
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Agent_StartJob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StartJobRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).StartJob(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_StartJob_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).StartJob(ctx, req.(*StartJobRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_PollJob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PollJobRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).PollJob(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_PollJob_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).PollJob(ctx, req.(*PollJobRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_KillJob_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(KillJobRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).KillJob(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_KillJob_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).KillJob(ctx, req.(*KillJobRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Agent_ListFiles_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ListFilesRequest)
 	if err := dec(in); err != nil {
@@ -2532,6 +2656,18 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ShellLabel",
 			Handler:    _Agent_ShellLabel_Handler,
+		},
+		{
+			MethodName: "StartJob",
+			Handler:    _Agent_StartJob_Handler,
+		},
+		{
+			MethodName: "PollJob",
+			Handler:    _Agent_PollJob_Handler,
+		},
+		{
+			MethodName: "KillJob",
+			Handler:    _Agent_KillJob_Handler,
 		},
 		{
 			MethodName: "ListFiles",

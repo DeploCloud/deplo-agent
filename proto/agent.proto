@@ -331,6 +331,42 @@ service Agent {
   // "raw exec (no shell)") for the console banner — replaces shellLabel.
   rpc ShellLabel(ShellLabelRequest) returns (ShellLabelResponse);
 
+  // ---- CRON JOBS: a scheduled `docker exec` the AGENT owns for its whole
+  // lifetime, polled by the control plane's scheduler ----
+  //
+  // Deliberately NOT Exec. Exec is unary with a hard 30s ceiling because a
+  // console REPL types one command and waits for it; a cron job runs for
+  // minutes or hours and must survive a control-plane restart, so the process
+  // lives here, on a JOB-scoped context, exactly like a Deploy does. The
+  // control plane holds no connection between Start and the terminal Poll:
+  // rebooting Deplo mid-job does not kill the job, and the real exit code is
+  // still harvested afterwards.
+  //
+  // The job_id lives as long as THIS agent process. It survives a control-plane
+  // restart and does not survive an agent restart — a PollJob that answers
+  // `found: false` is how the control plane learns it lost track (which it
+  // records as `lost`, never as a failure: the command very likely completed).
+  //
+  // Gated behind the `cron` Hello capability. An agent without it gets the RPC
+  // as UNIMPLEMENTED and the control plane says "update this server's agent".
+
+  // Spawn a command in a container and return immediately with its handle. The
+  // container check and the shell probe happen INSIDE the job goroutine (they
+  // cost up to ~25s on a cold shell-plan cache), so this RPC is a map insert:
+  // a pre-spawn failure surfaces through PollJob as
+  // {running: false, exit_code: -1, stderr: "..."} rather than as an RPC error.
+  rpc StartJob(StartJobRequest) returns (StartJobResponse);
+
+  // The job's current state. Output is returned ONLY on the terminal poll —
+  // streaming it every minute for every in-flight job would be megabytes of
+  // wire for data nobody stores, and the container's own logs are right there.
+  rpc PollJob(PollJobRequest) returns (PollJobResponse);
+
+  // Kill a running job (the user pressed Stop, or the control plane's own
+  // deadline passed while this agent still reported it running). Idempotent:
+  // an unknown or already-finished job answers {found: false}, not an error.
+  rpc KillJob(KillJobRequest) returns (KillJobResponse);
+
   // ---- PART C: project config files (repoints lib/data/project-files.ts off
   // the control plane's local fs onto the project's host; the anti-traversal
   // sandbox is re-enforced agent-side via internal/safepath since the path
@@ -1399,6 +1435,78 @@ message ShellLabelRequest {
 
 message ShellLabelResponse {
   string label = 1;          // "/bin/sh" | "/bin/bash" | "raw exec (no shell)"
+}
+
+// ---------------------------------------------------------------------------
+// CRON JOBS — agent-tracked container execs
+// ---------------------------------------------------------------------------
+
+// The retained-output ceiling for a job, per stream. Declared HERE, on the
+// contract, because both sides trim: the agent so a `RUN yes` cannot grow the
+// shared host's memory, the control plane defensively so a regressed agent
+// cannot fill Postgres. Keep the two in step — lib/data/crons.ts names the same
+// number.
+//
+// 16 KiB is ~200 lines: plenty for the tail of a job, and 16 KiB x 2 streams x
+// the 500-run retention ceiling is ~16 MB per job in the control-plane database.
+// Anything bigger belongs in the container's own logs, not in a run record.
+//
+// (proto has no string constants; this comment IS the declaration.)
+
+message CronEnvVar {
+  string name = 1;
+  string value = 2;
+}
+
+message StartJobRequest {
+  // Re-validated agent-side against the container's `deplo.project` label, so a
+  // control plane bug can never exec into another tenant's container.
+  string project_id = 1;
+  // Resolved LIVE by the control plane right before every attempt (a redeploy
+  // mints a new container), never read back from a stored run row.
+  string container = 2;
+  string image = 3;            // shell-plan cache key, as in ExecRequest
+  // "sh" | "bash" | "" (probe, as Exec does). A named shell that the image does
+  // not have FAILS the job — it never silently falls back to the other one,
+  // because `set -o pipefail` and `[[` change meaning between them.
+  string shell = 4;
+  string command = 5;          // run as `<shell> -lc <command>`
+  int32 timeout_seconds = 6;   // agent-side hard deadline; 0 => 3600
+  string workdir = 7;          // docker exec -w
+  string user = 8;             // docker exec -u
+  // Injected with `docker exec -e KEY` + the value in the docker CLIENT's own
+  // environment, so a secret never rides argv where every user on the host can
+  // read it out of `ps`. Same discipline as the REDISCLI_AUTH path in backup.go.
+  repeated CronEnvVar env = 9;
+}
+
+message StartJobResponse {
+  // Opaque handle, valid for the lifetime of THIS agent process only.
+  string job_id = 1;
+}
+
+message PollJobRequest { string job_id = 1; }
+
+message PollJobResponse {
+  // false => this agent has no record of the job: it restarted, or the job
+  // finished long enough ago to be evicted. The control plane records the run
+  // as `lost` (outcome unknown), never as a failure.
+  bool found = 1;
+  bool running = 2;
+  // Meaningful only when found && !running. -1 means the command never spawned
+  // (no such container, no shell, the named shell is missing) — stderr says why.
+  int32 exit_code = 3;
+  string stdout = 4;           // EMPTY while running; else the last 16 KiB
+  string stderr = 5;           // EMPTY while running; else the last 16 KiB
+  bool timed_out = 6;          // killed at timeout_seconds rather than exiting
+  int64 started_at_unix = 7;
+  int64 finished_at_unix = 8;  // 0 while running
+}
+
+message KillJobRequest { string job_id = 1; }
+
+message KillJobResponse {
+  bool found = 1;              // false = nothing to kill; not an error
 }
 
 // ---------------------------------------------------------------------------

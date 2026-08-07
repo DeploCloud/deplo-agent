@@ -72,6 +72,12 @@ var Capabilities = []string{
 	// image and is only ever served — asking the running app is the only way to
 	// read it. An agent without this simply yields no icon for such an app.
 	"http-probe",
+	// Scheduled `docker exec` the agent owns for its whole lifetime
+	// (StartJob/PollJob/KillJob) — the Cron jobs feature. Separate from `Exec`,
+	// which is the console's synchronous 30s-capped call: a cron job runs for
+	// hours and must survive a control-plane restart, so the process lives here
+	// on a job-scoped context and the control plane polls for it.
+	"cron",
 	"volume-copy", // cross-host named-volume copy for a server move (ExportVolume/ImportVolume)
 	"files-copy",  // cross-host files-dir copy for a service move (ExportFiles/ImportFiles)
 	// Allow-listed Docker disk reclaim (DockerCleanup): build cache, dangling
@@ -135,6 +141,12 @@ type Service struct {
 
 	mu      sync.Mutex
 	deploys map[string]*inflight
+	// Cron jobs this agent is running or recently finished (job.go). Same mutex
+	// as `deploys` and the same ownership rule: the process lives on a
+	// job-scoped context, so a control-plane disconnect never kills it. The map
+	// is agent-process state on purpose — an agent restart loses it, and PollJob
+	// answers `found: false` rather than inventing an outcome.
+	jobs map[string]*job
 
 	// mTLS leaf renewal (nil for --insecure / tests). certMgr hot-swaps the live
 	// server cert; pendingKey is the freshly-generated key from a RenewalCSR,
@@ -157,6 +169,7 @@ func New(stackDir, buildTmpDir, dataDir, dataBase string) *Service {
 		dataDir:     dataDir,
 		dataBase:    dataBase,
 		deploys:     map[string]*inflight{},
+		jobs:        map[string]*job{},
 	}
 }
 
