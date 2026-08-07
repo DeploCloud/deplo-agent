@@ -100,7 +100,7 @@ func TestStartJobRefusesBeyondTheLiveCap(t *testing.T) {
 		t.Fatalf("err = %v, want ResourceExhausted at the cap", err)
 	}
 
-	// A FINISHED job does not count against the cap — only live ones do.
+	// A FINISHED job does not count against the cap - only live ones do.
 	for _, j := range s.jobs {
 		j.done = true
 		break
@@ -188,7 +188,7 @@ func TestKillJobIsIdempotent(t *testing.T) {
 		t.Fatalf("first kill: found=%v err=%v", first.GetFound(), err)
 	}
 	// Killing an unknown id, or one that already finished, answers found:false
-	// rather than erroring — the Stop button races the job's natural exit.
+	// rather than erroring - the Stop button races the job's natural exit.
 	s.finishJob(j, -1, false, "", "stopped")
 	second, err := s.KillJob(context.Background(), &pb.KillJobRequest{JobId: "j1"})
 	if err != nil || second.GetFound() {
@@ -205,7 +205,7 @@ func TestStartJobReturnsBeforeTouchingDocker(t *testing.T) {
 		t.Skip("docker not available")
 	}
 	s := newTestService(t)
-	// The container does not exist, so the goroutine's assertOwned fails — but
+	// The container does not exist, so the goroutine's assertOwned fails - but
 	// that is the POINT: the RPC must have returned long before it found out.
 	// With the checks in front of the spawn this call would take seconds.
 	start := time.Now()
@@ -219,7 +219,7 @@ func TestStartJobReturnsBeforeTouchingDocker(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if elapsed > time.Second {
-		t.Fatalf("StartJob took %s — the container check must be inside the goroutine", elapsed)
+		t.Fatalf("StartJob took %s - the container check must be inside the goroutine", elapsed)
 	}
 	if resp.GetJobId() == "" {
 		t.Fatal("no job id")

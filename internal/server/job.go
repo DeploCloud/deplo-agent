@@ -18,7 +18,7 @@ import (
 
 // job.go implements the cron-job half of the contract: StartJob / PollJob /
 // KillJob. A cron job is a `docker exec` the AGENT owns for its whole lifetime,
-// on a JOB-scoped context — never the RPC's — so a control-plane restart does
+// on a JOB-scoped context - never the RPC's - so a control-plane restart does
 // not kill it, exactly like a Deploy (D5). The control plane holds no connection
 // between the start and the terminal poll; it comes back a minute later and
 // asks.
@@ -36,7 +36,7 @@ import (
 const (
 	// Retained output per stream, per job. Attacker-controlled (`yes | head -c
 	// 2G` is a legal cron command) and this agent is a root process shared by
-	// every app on the host, so the buffer is a fixed-size ring — it never grows
+	// every app on the host, so the buffer is a fixed-size ring - it never grows
 	// with the command's output. Same reasoning as inflight.go's log budget.
 	// Kept in step with CRON_OUTPUT_TAIL_BYTES in the control plane's
 	// lib/data/crons.ts; the number is declared on the contract (agent.proto).
@@ -44,7 +44,7 @@ const (
 
 	// How long a FINISHED job is kept so the control plane can still collect its
 	// result. The scheduler polls once a minute, so this is ~30 missed ticks of
-	// slack — enough to survive a control-plane restart, a lease handover, or a
+	// slack - enough to survive a control-plane restart, a lease handover, or a
 	// network partition, without holding results for a host's whole uptime.
 	cronRetainFinished = 30 * time.Minute
 
@@ -61,7 +61,7 @@ const (
 )
 
 // tailBuf keeps the LAST n bytes written to it and nothing else. The tail, not
-// the head: a job's value is its ending — the error, the summary line — while
+// the head: a job's value is its ending - the error, the summary line - while
 // the head is startup boilerplate. Writes past the ceiling are free (no
 // allocation, no growth), which is what makes an unbounded producer harmless.
 type tailBuf struct {
@@ -107,7 +107,7 @@ func (t *tailBuf) String() string {
 	if t.max < 1<<10 {
 		kept = fmt.Sprintf("%d bytes", t.max)
 	}
-	return fmt.Sprintf("[deplo] earlier output trimmed — showing the last %s\n%s", kept, string(b))
+	return fmt.Sprintf("[deplo] earlier output trimmed - showing the last %s\n%s", kept, string(b))
 }
 
 // job is one cron execution the agent is running or has recently finished.
@@ -135,7 +135,7 @@ func newJobID() string {
 }
 
 // StartJob spawns the command and returns its handle. It is a map insert and a
-// `go` — nothing that can block. `assertOwned` (a 5s docker inspect) and
+// `go` - nothing that can block. `assertOwned` (a 5s docker inspect) and
 // `resolveShellPlan` (up to four 5s shell probes on a cold cache) run INSIDE the
 // goroutine: in front of the spawn they would make this RPC take up to ~25
 // seconds, and the control plane's scheduler fires every job in one tick.
@@ -194,7 +194,7 @@ func (s *Service) StartJob(ctx context.Context, req *pb.StartJobRequest) (*pb.St
 // result.
 func (s *Service) driveJob(ctx context.Context, id string, req *pb.StartJobRequest, j *job) {
 	defer j.cancel()
-	// A panic in the exec path must cost ONE cron run, not the whole agent —
+	// A panic in the exec path must cost ONE cron run, not the whole agent -
 	// which on a shared host would take down every tenant's deploys, streams and
 	// metrics. Same containment as driveDeploy.
 	func() {
@@ -223,7 +223,7 @@ func (s *Service) runJob(ctx context.Context, req *pb.StartJobRequest, j *job) {
 
 	// The shell prefix. An empty request shell means "whatever this image has",
 	// which is what Exec does; a NAMED shell that the image lacks is a hard
-	// failure rather than a silent substitution — `set -o pipefail`, `[[` and
+	// failure rather than a silent substitution - `set -o pipefail`, `[[` and
 	// arrays all change meaning between bash and sh, so quietly running a bash
 	// script under sh produces a wrong result that looks like a bug in the user's
 	// command.
@@ -283,7 +283,7 @@ func (s *Service) runJob(ctx context.Context, req *pb.StartJobRequest, j *job) {
 
 	// StreamOut writes stdout to the ring and hands stderr lines to the callback
 	// (which writes to the other ring), so neither buffer ever holds more than
-	// its ceiling — the output is trimmed as it arrives, not after.
+	// its ceiling - the output is trimmed as it arrives, not after.
 	execStart := time.Now()
 	code, err := dockercli.StreamOut(ctx, timeout, j.stdout, func(line string) {
 		_, _ = j.stderr.Write([]byte(line + "\n"))

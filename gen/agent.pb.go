@@ -4996,7 +4996,7 @@ type StartJobRequest struct {
 	Container string `protobuf:"bytes,2,opt,name=container,proto3" json:"container,omitempty"`
 	Image     string `protobuf:"bytes,3,opt,name=image,proto3" json:"image,omitempty"` // shell-plan cache key, as in ExecRequest
 	// "sh" | "bash" | "" (probe, as Exec does). A named shell that the image does
-	// not have FAILS the job — it never silently falls back to the other one,
+	// not have FAILS the job - it never silently falls back to the other one,
 	// because `set -o pipefail` and `[[` change meaning between them.
 	Shell          string `protobuf:"bytes,4,opt,name=shell,proto3" json:"shell,omitempty"`
 	Command        string `protobuf:"bytes,5,opt,name=command,proto3" json:"command,omitempty"`                                      // run as `<shell> -lc <command>`
@@ -5201,7 +5201,7 @@ type PollJobResponse struct {
 	Found   bool `protobuf:"varint,1,opt,name=found,proto3" json:"found,omitempty"`
 	Running bool `protobuf:"varint,2,opt,name=running,proto3" json:"running,omitempty"`
 	// Meaningful only when found && !running. -1 means the command never spawned
-	// (no such container, no shell, the named shell is missing) — stderr says why.
+	// (no such container, no shell, the named shell is missing) - stderr says why.
 	ExitCode       int32  `protobuf:"varint,3,opt,name=exit_code,json=exitCode,proto3" json:"exit_code,omitempty"`
 	Stdout         string `protobuf:"bytes,4,opt,name=stdout,proto3" json:"stdout,omitempty"`                      // EMPTY while running; else the last 16 KiB
 	Stderr         string `protobuf:"bytes,5,opt,name=stderr,proto3" json:"stderr,omitempty"`                      // EMPTY while running; else the last 16 KiB

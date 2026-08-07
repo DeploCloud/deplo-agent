@@ -73,7 +73,7 @@ var Capabilities = []string{
 	// read it. An agent without this simply yields no icon for such an app.
 	"http-probe",
 	// Scheduled `docker exec` the agent owns for its whole lifetime
-	// (StartJob/PollJob/KillJob) — the Cron jobs feature. Separate from `Exec`,
+	// (StartJob/PollJob/KillJob) - the Cron jobs feature. Separate from `Exec`,
 	// which is the console's synchronous 30s-capped call: a cron job runs for
 	// hours and must survive a control-plane restart, so the process lives here
 	// on a job-scoped context and the control plane polls for it.
@@ -144,7 +144,7 @@ type Service struct {
 	// Cron jobs this agent is running or recently finished (job.go). Same mutex
 	// as `deploys` and the same ownership rule: the process lives on a
 	// job-scoped context, so a control-plane disconnect never kills it. The map
-	// is agent-process state on purpose — an agent restart loses it, and PollJob
+	// is agent-process state on purpose - an agent restart loses it, and PollJob
 	// answers `found: false` rather than inventing an outcome.
 	jobs map[string]*job
 

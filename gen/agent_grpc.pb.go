@@ -365,7 +365,7 @@ type AgentClient interface {
 	// a pre-spawn failure surfaces through PollJob as
 	// {running: false, exit_code: -1, stderr: "..."} rather than as an RPC error.
 	StartJob(ctx context.Context, in *StartJobRequest, opts ...grpc.CallOption) (*StartJobResponse, error)
-	// The job's current state. Output is returned ONLY on the terminal poll —
+	// The job's current state. Output is returned ONLY on the terminal poll -
 	// streaming it every minute for every in-flight job would be megabytes of
 	// wire for data nobody stores, and the container's own logs are right there.
 	PollJob(ctx context.Context, in *PollJobRequest, opts ...grpc.CallOption) (*PollJobResponse, error)
@@ -1381,7 +1381,7 @@ type AgentServer interface {
 	// a pre-spawn failure surfaces through PollJob as
 	// {running: false, exit_code: -1, stderr: "..."} rather than as an RPC error.
 	StartJob(context.Context, *StartJobRequest) (*StartJobResponse, error)
-	// The job's current state. Output is returned ONLY on the terminal poll —
+	// The job's current state. Output is returned ONLY on the terminal poll -
 	// streaming it every minute for every in-flight job would be megabytes of
 	// wire for data nobody stores, and the container's own logs are right there.
 	PollJob(context.Context, *PollJobRequest) (*PollJobResponse, error)
