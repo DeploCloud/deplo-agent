@@ -35,13 +35,25 @@ const (
 	maxWriteBytes = 1024 * 1024 // 1 MiB
 )
 
-// slugPattern is the shape a Deplo project slug always has (the control plane
-// sanitises to [a-z0-9-] at creation). The `slug` arrives off the wire and is
-// JOINED INTO the files root, so — exactly like the relative `path` — it must be
-// validated where the I/O runs and never trusted: a slug like "../../etc" would
-// otherwise escape <stack-dir>/files entirely. Defence in depth behind the
-// control plane's own sanitisation.
-var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+// slugPattern is the shape a Deplo DEPLOY KEY always has. It arrives off the
+// wire and is JOINED INTO the files root, so — exactly like the relative `path`
+// — it must be validated where the I/O runs and never trusted: a slug like
+// "../../etc" would otherwise escape <stack-dir>/files entirely. Defence in
+// depth behind the control plane's own sanitisation.
+//
+// The optional `__<suffix>` is what lets ONE app own more than one stack on a
+// host: the control plane names a pull request preview `<slug>__pr-<n>` and
+// every host-side artifact after it — container, stack file, files dir, named
+// volumes, Traefik router key. A production deploy's key is the bare app slug,
+// byte for byte, so nothing already running is affected. An app slug is
+// `[a-z0-9-]` and can never contain `__`, which is what makes the split
+// unambiguous in both directions.
+//
+// Widening this does NOT weaken the containment it exists for: both halves stay
+// `[a-z0-9-]`, so a dot, a slash and a leading dash remain unrepresentable and
+// "../../etc" is refused exactly as before. Underscore is an ordinary filename
+// character that means nothing to the path resolver.
+var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*(__[a-z0-9][a-z0-9-]*)?$`)
 
 func validateSlug(slug string) error {
 	if !slugPattern.MatchString(slug) {

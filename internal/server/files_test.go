@@ -210,6 +210,49 @@ func TestFiles_RejectBadSlug(t *testing.T) {
 	}
 }
 
+// A DEPLOY KEY may carry one `__<suffix>`, which is how one app owns more than
+// one stack on a host (a pull request preview is `<slug>__pr-<n>`). The point of
+// this test is that widening the pattern for it did not open the containment
+// hole the pattern exists to close.
+func TestValidateSlug_DeployKeySuffix(t *testing.T) {
+	good := []string{
+		"app",            // production: the bare slug, unchanged
+		"my-app",         //
+		"blog__pr-42",    // a pull request preview
+		"a1-b2-c3__pr-1", //
+		"app__staging",   // any other deploy target the control plane may name
+	}
+	for _, slug := range good {
+		if err := validateSlug(slug); err != nil {
+			t.Errorf("validateSlug(%q) = %v, want nil", slug, err)
+		}
+	}
+
+	// Everything that could escape <stack-dir>/files, or reach it through the
+	// new suffix, must still be refused. `__` buys exactly one extra segment of
+	// the SAME alphabet and nothing else.
+	bad := []string{
+		"app__",        // empty suffix
+		"__pr-1",       // empty base
+		"app__pr__1",   // only one separator
+		"app__../etc",  // traversal via the suffix
+		"app__.",       // a dot is still unrepresentable
+		"app__A",       // upper case is still refused
+		"app__-x",      // a suffix may not start with a dash
+		"app_pr-1",     // a single underscore is not the separator
+		"../../../etc", // the originals, unchanged
+		"..",
+		"a/b",
+		"App",
+		"",
+	}
+	for _, slug := range bad {
+		if err := validateSlug(slug); err == nil {
+			t.Errorf("validateSlug(%q) = nil error, want rejection", slug)
+		}
+	}
+}
+
 func TestFiles_Exist(t *testing.T) {
 	ctx := context.Background()
 	s, _ := newFilesService(t, "app")
