@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -54,25 +55,40 @@ const (
 )
 
 // bkEmitter funnels BackupEvents over the stream (mirrors deploy.go's emitter).
+//
+// SERIALISED, unlike deploy.go's, because this one has two writers. Under
+// `stream_out` the artifact's data frames are sent from the RPC goroutine while
+// the producer goroutine is still emitting log lines ("Archiving volume …") from
+// inside the pipe — and grpc-go forbids concurrent Send on one stream: it
+// mutates per-stream state with no lock of its own, so the race is data
+// corruption on the wire rather than an error anyone would see.
 type bkEmitter struct {
+	mu   sync.Mutex
 	send func(*pb.BackupEvent) error
 }
 
+func (e *bkEmitter) emit(ev *pb.BackupEvent) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.send(ev)
+}
+
 func (e *bkEmitter) log(level, text string) {
-	_ = e.send(&pb.BackupEvent{Event: &pb.BackupEvent_Log{Log: &pb.LogLine{Level: level, Text: text}}})
+	_ = e.emit(&pb.BackupEvent{Event: &pb.BackupEvent_Log{Log: &pb.LogLine{Level: level, Text: text}}})
 }
 func (e *bkEmitter) result(ok bool, errMsg, objectKey string, size int64) {
 	e.resultWithDigest(ok, errMsg, objectKey, size, "")
 }
 func (e *bkEmitter) resultWithDigest(ok bool, errMsg, objectKey string, size int64, digest string) {
-	_ = e.send(&pb.BackupEvent{Event: &pb.BackupEvent_Result{
+	_ = e.emit(&pb.BackupEvent{Event: &pb.BackupEvent_Result{
 		Result: &pb.BackupResult{Ok: ok, Error: errMsg, ObjectKey: objectKey, SizeBytes: size, Sha256: digest},
 	}})
 }
 
-// data emits one slice of the finished artifact, for a stream_out relay.
+// data emits one slice of the finished artifact, for a stream_out relay. Called
+// from the RPC goroutine while `log` may be called from the producer's.
 func (e *bkEmitter) data(b []byte) error {
-	return e.send(&pb.BackupEvent{Event: &pb.BackupEvent_Data{Data: b}})
+	return e.emit(&pb.BackupEvent{Event: &pb.BackupEvent_Data{Data: b}})
 }
 
 // rsEmitter funnels RestoreEvents over the stream.

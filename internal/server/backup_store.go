@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"filippo.io/age"
 	"google.golang.org/grpc/codes"
@@ -64,6 +65,11 @@ const (
 	// delete is ever issued for it). So writes land here, fsync, and rename —
 	// and a leftover is swept by the next check.
 	storePartialSuffix = ".partial"
+	// storePartialStaleAfter is how long a `.partial` must have been UNTOUCHED
+	// before a sweep may remove it. An in-flight write touches its file
+	// continuously, the agent caps a dump at 30 minutes, and the control plane's
+	// deadline is an hour — so an hour of silence means nobody is writing it.
+	storePartialStaleAfter = time.Hour
 	// storeChunkBytes is the payload size of one StoreChunk data frame, matching
 	// volumecopy.go's chunkBytes: comfortably under the gRPC max message size,
 	// big enough that framing overhead is noise on a multi-GB artifact.
@@ -355,16 +361,37 @@ func pruneEmptyDirs(root, dir string) {
 // sweepPartials removes `.partial` artifacts left by an interrupted write. Runs
 // on every check, which is the one moment the operator is already looking at the
 // destination and a surprise reclaim is welcome rather than alarming.
+//
+// It skips anything written RECENTLY, and that guard is not optional. The
+// managed root is shared by every destination and every team on the host, and a
+// check is triggered by something as ordinary as opening the destination
+// dropdown — which fires a live probe of every destination. Without the guard,
+// one person opening a picker deletes the temp file of a backup another team has
+// been streaming for twenty minutes, and the write dies on its final rename,
+// after the whole dump, with "no such file or directory".
+//
+// An in-flight write advances the file's mtime continuously (io.Copy), so quiet
+// for storePartialStaleAfter means nothing is writing it: the agent caps a dump
+// at 30 minutes and the control plane's RPC deadline is an hour, so an hour of
+// silence is dead by any measure.
 func sweepPartials(root string) int {
 	n := 0
+	cutoff := time.Now().Add(-storePartialStaleAfter)
 	_ = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil // unreadable subtree: skip, never fail the check
 		}
-		if !d.IsDir() && strings.HasSuffix(p, storePartialSuffix) {
-			if os.Remove(p) == nil {
-				n++
-			}
+		if d.IsDir() || !strings.HasSuffix(p, storePartialSuffix) {
+			return nil
+		}
+		info, ierr := d.Info()
+		// Unreadable stat: leave it. Deleting a file we know nothing about is
+		// the wrong side to err on when the alternative is a wasted gigabyte.
+		if ierr != nil || info.ModTime().After(cutoff) {
+			return nil
+		}
+		if os.Remove(p) == nil {
+			n++
 		}
 		return nil
 	})

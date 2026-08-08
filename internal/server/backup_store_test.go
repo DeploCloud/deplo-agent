@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"filippo.io/age"
 
@@ -257,6 +258,44 @@ func TestStoreWrite_partialWriteLeavesNoArtifact(t *testing.T) {
 	}
 }
 
+// The sweep must not touch a write that is STILL HAPPENING.
+//
+// The root is shared by every destination and every team on the host, and a
+// check is fired by something as ordinary as opening the destination dropdown.
+// Without an age guard, one person opening a picker deletes the temp file of
+// another team's twenty-minute backup, which then dies on its final rename.
+func TestSweepPartials_leavesAnInFlightWriteAlone(t *testing.T) {
+	s, root := newStoreService(t)
+	dir := filepath.Join(root, "deplo", "team_b", "app", "x")
+	if err := os.MkdirAll(dir, storeDirPerm); err != nil {
+		t.Fatal(err)
+	}
+	inFlight := filepath.Join(dir, "b.tar.gz.age"+storePartialSuffix)
+	if err := os.WriteFile(inFlight, []byte("still streaming"), storeFilePerm); err != nil {
+		t.Fatal(err)
+	}
+	// Freshly written, i.e. exactly what an in-progress relay looks like.
+	res := s.storeCheck(&pb.StoreTarget{})
+	if !res.GetOk() {
+		t.Fatalf("check failed: %s", res.GetError())
+	}
+	if _, err := os.Stat(inFlight); err != nil {
+		t.Fatal("the sweep deleted a temp file that was being written right now")
+	}
+
+	// Backdate it past the staleness window: now it is debris and must go.
+	old := time.Now().Add(-storePartialStaleAfter - time.Minute)
+	if err := os.Chtimes(inFlight, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if res := s.storeCheck(&pb.StoreTarget{}); !res.GetOk() {
+		t.Fatalf("check failed: %s", res.GetError())
+	}
+	if _, err := os.Stat(inFlight); err == nil {
+		t.Error("a long-abandoned .partial must still be reclaimed")
+	}
+}
+
 func TestSweepPartials_reclaimsStrandedTempFiles(t *testing.T) {
 	s, root := newStoreService(t)
 	dir := filepath.Join(root, "deplo", "t", "app", "x")
@@ -265,6 +304,11 @@ func TestSweepPartials_reclaimsStrandedTempFiles(t *testing.T) {
 	}
 	stranded := filepath.Join(dir, "a.tar.gz.age"+storePartialSuffix)
 	if err := os.WriteFile(stranded, []byte("interrupted"), storeFilePerm); err != nil {
+		t.Fatal(err)
+	}
+	// Aged out, so the sweep is allowed to touch it.
+	old := time.Now().Add(-storePartialStaleAfter - time.Minute)
+	if err := os.Chtimes(stranded, old, old); err != nil {
 		t.Fatal(err)
 	}
 	res := s.storeCheck(&pb.StoreTarget{})
