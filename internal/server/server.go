@@ -80,6 +80,14 @@ var Capabilities = []string{
 	"cron",
 	"volume-copy", // cross-host named-volume copy for a server move (ExportVolume/ImportVolume)
 	"files-copy",  // cross-host files-dir copy for a service move (ExportFiles/ImportFiles)
+	// Backup artifacts held on THIS host's filesystem instead of an S3 bucket:
+	// the StoreTarget arms of Backup/Restore/S3Check/S3Delete, plus the relay
+	// primitives ReadStoreFile / WriteStoreFile / RestoreFrom. Split from
+	// "backup" rather than folded into it because the two shipped in different
+	// releases, and an agent that can dump to S3 but cannot hold artifacts must
+	// fail the SECOND thing with a clear "update the agent" instead of silently
+	// accepting a store request it would ignore.
+	"backup-store",
 	// Allow-listed Docker disk reclaim (DockerCleanup): build cache, dangling
 	// images, orphaned buildkit volumes, unused app images. NEVER a bare prune.
 	"docker-cleanup",

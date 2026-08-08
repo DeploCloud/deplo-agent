@@ -246,53 +246,115 @@ service Agent {
   // plane can tell the operator to fall back to re-running the installer.
   rpc SelfUpdate(SelfUpdateRequest) returns (SelfUpdateResponse);
 
-  // ---- BACKUPS: dump/restore a database or project to/from S3, and the S3
-  // affordances the control plane needs (connectivity check + object delete).
-  // Routes ALL backup work through the OWNING server's agent (ADR-0007): the
-  // agent has the Docker socket + host fs the dump needs, and an S3 client
-  // (minio-go) so the bytes never round-trip through the control plane. The
-  // control plane stays the source of truth — it decrypts the S3 creds and
-  // builds the object key, then sends them here over mTLS; the agent streams
-  // the dump straight to (or from) the bucket. Gated behind the "backup"
-  // Hello capability so an older agent surfaces a clear "update the agent"
-  // error rather than a fake success (forward-compatible, D6). ----
+  // ---- BACKUPS: dump/restore a database or project to/from a DESTINATION,
+  // plus the affordances the control plane needs (connectivity check + object
+  // delete). Routes ALL backup work through the OWNING server's agent
+  // (ADR-0007): the agent has the Docker socket + host fs the dump needs, and
+  // the destination clients (minio-go for S3, the local filesystem for a store),
+  // so the bytes never round-trip through the control plane. The control plane
+  // stays the source of truth — it decrypts the creds and builds the object key,
+  // then sends them here over mTLS; the agent streams the dump straight to (or
+  // from) the destination. Gated behind the "backup" Hello capability so an
+  // older agent surfaces a clear "update the agent" error rather than a fake
+  // success (forward-compatible, D6). ----
+  //
+  // A destination is ONE of two shapes, and the messages below carry both arms
+  // with exactly one set:
+  //
+  //   S3Target    — an S3-compatible bucket (the original shape).
+  //   StoreTarget — a directory on THIS host's filesystem. Store artifacts are
+  //                 ALWAYS age-encrypted (BackupRequest.age_recipient), and the
+  //                 root is validated agent-side (see StoreTarget). Gated behind
+  //                 the "backup-store" capability.
+  //
+  // Writing to ANOTHER server's disk is deliberately NOT a third arm: agents are
+  // a star and can neither dial nor trust a peer. The control plane relays
+  // instead — it asks the SOURCE agent for a byte stream
+  // (BackupRequest.stream_out) and feeds those bytes into WriteStoreFile on the
+  // DESTINATION agent, exactly as it already relays ExportVolume into
+  // ImportVolume for a server move.
 
-  // Back up a database or a project to S3, streaming progress. DATABASE → the
-  // agent `docker exec`s the engine's dump tool (per the format table in
-  // docs/research/dbs-backups/PLAN.md), gzip-compresses the stream, and uploads
-  // it to S3 via a multipart PUT (minio-go), so no temp file and no
-  // control-plane round-trip. PROJECT → the agent tars the project's named +
-  // compose-stack volumes (via a throwaway helper container that mounts them),
-  // the project files dir, and the rendered compose/env snapshot, gzip-compresses,
-  // and uploads. Host bind mounts are EXCLUDED (shared cross-tenant paths,
-  // outside Deplo). The terminal BackupResult carries the final object key +
-  // byte size the control plane records on the BackupRun.
+  // Back up a database or a project to a destination, streaming progress.
+  // DATABASE → the agent `docker exec`s the engine's dump tool (per the format
+  // table in docs/research/dbs-backups/PLAN.md), gzip-compresses the stream, and
+  // writes it out, so no temp file and no control-plane round-trip. PROJECT →
+  // the agent tars the project's named + compose-stack volumes (via a throwaway
+  // helper container that mounts them), the project files dir, and the rendered
+  // compose/env snapshot, gzip-compresses, and writes it out. Host bind mounts
+  // are EXCLUDED (shared cross-tenant paths, outside Deplo). The terminal
+  // BackupResult carries the final object key + byte size the control plane
+  // records on the BackupRun.
+  //
+  // The SINK is one of three, in the order the request selects them: `s3` (a
+  // multipart PUT via minio-go), `store` (an age-encrypted file under a
+  // validated root on this host), or — when `stream_out` is set — this RPC's own
+  // BackupEvent.data frames, so the control plane can relay the artifact to
+  // another host's WriteStoreFile. All three consume the SAME producer: the
+  // compression and the age wrap happen once, in the source pipeline, so a
+  // relayed artifact is ciphertext before it ever leaves this host.
   rpc Backup(BackupRequest) returns (stream BackupEvent);
 
-  // Restore a database or project from a previously-uploaded S3 object, IN
-  // PLACE, streaming progress. DATABASE → download the object, decompress, and
-  // restore per the format table — drop-and-recreate, guaranteed by the dump
-  // format (pg `--clean --if-exists`, mysql `--add-drop-table`, mongo `--drop`)
-  // so a restore overwrites rather than appends. PROJECT → stop the stack, wipe
-  // + untar the volumes + files, re-`Reroute` the snapshot compose/env (which
-  // restarts the stack) = full data + config in place. A restart failure (e.g.
-  // a snapshot image that no longer exists) is reported clearly on the stream
-  // rather than silently leaving the stack down.
+  // Restore a database or project from a previously-written artifact, IN PLACE,
+  // streaming progress. DATABASE → read the artifact, decrypt (store only),
+  // decompress, and restore per the format table — drop-and-recreate, guaranteed
+  // by the dump format (pg `--clean --if-exists`, mysql `--add-drop-table`,
+  // mongo `--drop`) so a restore overwrites rather than appends. PROJECT → stop
+  // the stack, wipe + untar the volumes + files, re-`Reroute` the snapshot
+  // compose/env (which restarts the stack) = full data + config in place. A
+  // restart failure (e.g. a snapshot image that no longer exists) is reported
+  // clearly on the stream rather than silently leaving the stack down.
+  //
+  // This RPC reads the artifact from a destination THIS host can reach (`s3` or
+  // a local `store`). When the artifact lives on another server's disk, the
+  // control plane uses RestoreFrom instead and streams the bytes in.
   rpc Restore(RestoreRequest) returns (stream RestoreEvent);
 
-  // Verify S3 connectivity + the destination bucket for the "Test connection"
-  // button (makes lib/data/s3.ts testS3 real). The agent HEADs/stats the bucket
-  // with the supplied creds and reports reachable + writable, with a human
-  // message on failure. Any agent advertising "backup" can serve it — it needs
-  // no Docker, only the S3 client — so the control plane can run it on any
-  // reachable backup-capable server.
+  // Verify a destination for the "Test connection" button. S3 → HEAD/stat the
+  // bucket with the supplied creds and report reachable + writable. STORE →
+  // resolve the root, create it if it is the agent's own managed one, verify the
+  // sentinel for a custom one, probe writability, sweep stale `.partial` files,
+  // and report free/total bytes so the UI can show headroom. An S3 check needs
+  // no Docker and no host state, so any agent advertising "backup" can serve it;
+  // a STORE check is about THIS host's disk, so it must run on the destination's
+  // own server.
   rpc S3Check(S3CheckRequest) returns (S3CheckResponse);
 
-  // Delete S3 objects by exact key or by prefix. Backs retention pruning (the
+  // Delete artifacts by exact key or by prefix. Backs retention pruning (the
   // control plane deletes objects older than retentionDays for a backup) and
   // the "delete artifacts too" branch of target deletion. Idempotent: a missing
   // object is not an error. Returns how many objects were removed.
   rpc S3Delete(S3DeleteRequest) returns (S3DeleteResponse);
+
+  // ---- BACKUP STORES: the relay primitives that let an artifact live on a
+  // server that is NOT the one running the workload. Gated behind the
+  // "backup-store" capability. Modelled 1:1 on ExportVolume / ImportVolume —
+  // same framing, same chunk size, same "control plane is the wire" topology. ----
+
+  // Stream an artifact OUT of this host's store, for a restore or a download
+  // whose reader lives elsewhere. Emits `data` frames only (no header). The
+  // bytes are exactly what was written: still age-encrypted, so the control
+  // plane relaying them never holds plaintext.
+  rpc ReadStoreFile(ReadStoreFileRequest) returns (stream StoreChunk);
+
+  // Receive an artifact INTO this host's store. The FIRST client message MUST
+  // carry `header` (the destination root + object key); every following message
+  // carries `data`. The agent writes to `<key>.partial`, fsyncs, and renames on
+  // a clean end — so a broken relay leaves a sweepable temp file rather than a
+  // truncated artifact at the real key that retention would later hand to a
+  // restore. The terminal StoreResult carries the bytes written and their
+  // sha256: on a filesystem there is no ETag, so this is the only durable proof
+  // of what landed, and it is what the control plane records on the run.
+  rpc WriteStoreFile(stream StoreChunk) returns (StoreResult);
+
+  // Restore from an artifact this host CANNOT reach — the cross-host half of
+  // Restore. Bidirectional because a restore must both receive bytes and report
+  // progress: the first client message carries the header (kind + descriptor +
+  // the age identity), every following message carries a slice of the artifact,
+  // and the agent pipes them straight into the same restore chain Restore uses.
+  // Deliberately NOT "stage the artifact to a temp file then call Restore": that
+  // would need a full artifact's worth of free space on the very host being
+  // restored, plus cleanup that has to survive an agent restart.
+  rpc RestoreFrom(stream RestoreChunk) returns (stream RestoreEvent);
 
   // ---- PART C: console observability (replaces lib/logs + lib/attach +
   // the direct-Docker half of lib/data/console.ts for remote projects) ----
@@ -554,6 +616,11 @@ message HelloResponse {
   // The "backup" capability gates the Backup/Restore/S3Check/S3Delete RPCs: the
   // control plane preflights it (AgentBackupUnsupportedError when absent) so an
   // older agent gives a clear "update the agent" message, never a fake success.
+  // "backup-store" is its younger sibling and gates the destination arms that
+  // write to this host's disk (StoreTarget) plus ReadStoreFile/WriteStoreFile/
+  // RestoreFrom. Split from "backup" on purpose: an agent old enough to dump to
+  // S3 but not to hold artifacts must fail the SECOND thing clearly instead of
+  // failing both or, worse, accepting a store request it will ignore.
   repeated string capabilities = 5;
   // Whether a Traefik reverse proxy is running on this host (a container on the
   // shared `deplo` network that reads the deploy labels and routes traffic).
@@ -1167,6 +1234,33 @@ message S3Target {
   bool path_style = 7;
 }
 
+// A directory on THIS host's filesystem that holds backup artifacts — the second
+// destination shape, for a user who would rather keep backups on a VPS they
+// already pay for than sign up for a bucket.
+//
+// `root` is the one field in this whole contract that is a host path arriving off
+// the wire, and it is treated accordingly. The agent NEVER writes or deletes
+// under a root just because it was asked to:
+//
+//   - Empty root => the agent's OWN managed store (<data-base>/backups, i.e. the
+//     sibling of --stack-dir), which it creates 0700 on first use. This is the
+//     default and the only shape a non-admin can produce.
+//   - Non-empty root => accepted ONLY if it is absolute AND contains the sentinel
+//     file `.deplo-backups` that the agent itself wrote during an S3Check on an
+//     empty (or already-marked) directory. A typo'd `/var/lib/docker` therefore
+//     fails closed instead of becoming a remote `rm -rf` on the next retention
+//     sweep — which is exactly what an unguarded root plus S3Delete(prefix) is.
+//
+// `object_key` is the control plane's usual key
+// (deplo/<teamId>/<kind>/<targetId>/<stamp>-<runId>.<ext>.age), resolved under the
+// root with the same containment guard the file RPCs use: relative, no "..", and
+// realpath-confirmed inside. The team segment is what keeps two teams sharing one
+// storage host out of each other's artifacts.
+message StoreTarget {
+  string root = 1;
+  string object_key = 2;
+}
+
 // The database descriptor for a DATABASE backup/restore. The control plane
 // resolves the container name + engine details from its store; the agent stays
 // dumb about Deplo's DB model and just runs the right tool inside the container.
@@ -1224,10 +1318,26 @@ message ProjectDescriptor {
 
 message BackupRequest {
   BackupKind kind = 1;
+  // The destination: exactly one of `s3` / `store`, unless `stream_out` is set
+  // (in which case neither is needed — the caller IS the sink).
   S3Target s3 = 2;
   // Exactly one of these is set, per `kind`.
   DatabaseDescriptor database = 3;
   ProjectDescriptor project = 4;
+  StoreTarget store = 5;
+  // The age recipient ("age1…", an X25519 public key) the artifact is encrypted
+  // to. REQUIRED whenever the artifact is not going to S3 — a store write or a
+  // stream_out relay with an empty recipient is an ERROR, never a silent
+  // plaintext write. The matching identity stays in the control plane and only
+  // ever travels on a RestoreRequest, so this host can write backups it cannot
+  // itself read, and a compromised storage box yields nothing.
+  string age_recipient = 6;
+  // Emit the artifact as BackupEvent.data frames instead of writing it anywhere.
+  // Set by the control plane when the destination is a store on ANOTHER server:
+  // it relays these frames into WriteStoreFile there. `s3`/`store` are ignored.
+  // The BackupResult still reports the size this host produced — the durable
+  // number is the destination's StoreResult.bytes_written.
+  bool stream_out = 7;
 }
 
 // One event in the backup stream. Exactly one arm is set; the terminal arm is
@@ -1237,18 +1347,28 @@ message BackupEvent {
   oneof event {
     LogLine log = 1;
     BackupResult result = 2;
+    // A slice of the finished artifact, emitted only under
+    // BackupRequest.stream_out. Interleaves freely with `log` frames — the arms
+    // are a oneof, so a consumer that predates this field decodes an unknown
+    // field and drops it rather than mis-reading a log line.
+    bytes data = 3;
   }
 }
 
 message BackupResult {
-  // True => the dump+upload completed and the object is in the bucket.
+  // True => the dump completed and the artifact reached its destination.
   bool ok = 1;
   // A human-readable reason on failure (empty on success).
   string error = 2;
-  // The object key written (echoes S3Target.object_key on success) and its size
-  // in bytes — recorded on the control plane's BackupRun.
+  // The object key written (echoes the destination's object_key on success) and
+  // its size in bytes — recorded on the control plane's BackupRun.
   string object_key = 3;
   int64 size_bytes = 4;
+  // Hex sha256 of the artifact as written. Empty for an S3 upload (the bucket
+  // has its own ETag); set for a store write and for a stream_out relay, where
+  // it is the source's half of the integrity check against the destination's
+  // StoreResult.sha256.
+  string sha256 = 5;
 }
 
 message RestoreRequest {
@@ -1256,6 +1376,12 @@ message RestoreRequest {
   S3Target s3 = 2; // object_key points at the artifact to restore FROM
   DatabaseDescriptor database = 3;
   ProjectDescriptor project = 4;
+  StoreTarget store = 5; // object_key points at the artifact to restore FROM
+  // The age identity ("AGE-SECRET-KEY-1…") the artifact was encrypted to.
+  // REQUIRED for a store restore. Kept on THIS message and never on
+  // BackupRequest so a private key cannot ride a routine nightly backup out to a
+  // storage host.
+  string age_identity = 6;
 }
 
 message RestoreEvent {
@@ -1273,23 +1399,41 @@ message RestoreResult {
 message S3CheckRequest {
   // Bucket coordinates + creds; object_key is ignored (this is a bucket probe).
   S3Target s3 = 1;
+  // Set instead of `s3` to probe a STORE root on this host: resolve it, honour
+  // the sentinel rule, create the managed root if that is what was asked for,
+  // round-trip a probe file, sweep stale `.partial` artifacts, and report
+  // headroom. object_key is ignored.
+  StoreTarget store = 2;
 }
 
 message S3CheckResponse {
-  // True when the bucket is reachable AND writable with these creds.
+  // True when the destination is reachable AND writable.
   bool ok = 1;
   // "" on success; a human-readable reason otherwise (bad creds, no bucket,
-  // network) — surfaced as the destination's status detail.
+  // unmarked root, read-only mount) — surfaced as the destination's status detail.
   string error = 2;
+  // Store probes only (0 for S3): the resolved root's filesystem headroom, so the
+  // UI can show how much room a destination has left without a second RPC. The
+  // dump's size is not knowable before it exists, so this is information for the
+  // operator, never a pre-flight gate.
+  int64 free_bytes = 3;
+  int64 total_bytes = 4;
+  // The root the agent actually resolved (the managed one when the request left
+  // `root` empty), so the UI can show the real path rather than a blank.
+  string root = 5;
 }
 
 message S3DeleteRequest {
   // s3.object_key is the key (or, with `prefix`, the prefix) to remove.
   S3Target s3 = 1;
-  // When true, delete EVERY object under s3.object_key as a prefix (retention /
-  // delete-with-artifacts of a whole target's folder). When false, delete the
-  // single exact key. Defaults to a single-key delete.
+  // When true, delete EVERY object under the destination's object_key as a
+  // prefix (retention / delete-with-artifacts of a whole target's folder). When
+  // false, delete the single exact key. Defaults to a single-key delete.
   bool prefix = 2;
+  // Set instead of `s3` to delete from a STORE on this host. A prefix delete
+  // here is a recursive directory removal, which is why StoreTarget's root rules
+  // are not optional: a prefix that resolves to the root itself is REFUSED.
+  StoreTarget store = 3;
 }
 
 message S3DeleteResponse {
@@ -1297,6 +1441,62 @@ message S3DeleteResponse {
   string error = 2;
   // How many objects were deleted (0 when already absent — still ok, idempotent).
   int64 deleted = 3;
+}
+
+// ---------------------------------------------------------------------------
+// BACKUP STORES — the cross-host relay (ReadStoreFile / WriteStoreFile /
+// RestoreFrom). Framing mirrors VolumeChunk exactly.
+// ---------------------------------------------------------------------------
+
+message ReadStoreFileRequest {
+  // The artifact to stream out. Same root rules as every other StoreTarget.
+  StoreTarget store = 1;
+}
+
+// A framed chunk of an artifact transfer. ReadStoreFile emits a sequence of
+// `data` chunks (no header). WriteStoreFile expects the FIRST message to be a
+// `header` and all following messages to be `data`.
+message StoreChunk {
+  message Header {
+    // Where to land the artifact on the DESTINATION host.
+    StoreTarget store = 1;
+    // Overwrite an artifact already at this key. False by default: object keys
+    // carry a run id and are unique, so a collision means something is wrong and
+    // silently clobbering it would destroy a good backup.
+    bool overwrite = 2;
+  }
+  oneof frame {
+    Header header = 1;
+    // A raw slice of the (already age-encrypted) artifact. Chunked well under
+    // the gRPC max message size; reassembled in order on the destination.
+    bytes data = 2;
+  }
+}
+
+message StoreResult {
+  bool ok = 1;
+  string error = 2;
+  // What actually landed. A filesystem has no ETag, so these two are the only
+  // durable proof of the transfer, and they are what the control plane records
+  // on the BackupRun — not the source's own count.
+  int64 bytes_written = 3;
+  string sha256 = 4;
+}
+
+// A framed chunk of a cross-host restore (RestoreFrom), mirroring StoreChunk.
+message RestoreChunk {
+  message Header {
+    BackupKind kind = 1;
+    DatabaseDescriptor database = 2;
+    ProjectDescriptor project = 3;
+    // The age identity the artifact was encrypted to. Always required: this RPC
+    // exists only for store artifacts, and those are always encrypted.
+    string age_identity = 4;
+  }
+  oneof frame {
+    Header header = 1;
+    bytes data = 2;
+  }
 }
 
 // ---------------------------------------------------------------------------

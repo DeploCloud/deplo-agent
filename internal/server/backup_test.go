@@ -384,10 +384,47 @@ func TestBackup_missingKeyResultsInFailure(t *testing.T) {
 	}
 	res := st.lastResult(t)
 	if res.GetOk() {
-		t.Error("a backup with no S3 object key must fail, not succeed")
+		t.Error("a backup with no destination must fail, not succeed")
 	}
-	if !strings.Contains(res.GetError(), "object key") {
-		t.Errorf("error should mention the missing key, got %q", res.GetError())
+	if !strings.Contains(res.GetError(), "destination") {
+		t.Errorf("error should mention the missing destination, got %q", res.GetError())
+	}
+}
+
+// A store backup with no encryption key must FAIL rather than quietly writing a
+// plaintext artifact. Store artifacts are always encrypted, and "the recipient
+// was missing so we wrote it in the clear" is the one outcome that has to be
+// impossible: nothing downstream would ever notice.
+func TestBackup_storeWithoutRecipientRefuses(t *testing.T) {
+	s := New(t.TempDir(), t.TempDir(), "/", t.TempDir())
+	st := &fakeBackupStream{}
+	req := &pb.BackupRequest{
+		Kind:  pb.BackupKind_BACKUP_KIND_DATABASE,
+		Store: &pb.StoreTarget{ObjectKey: "deplo/t/database/x/ts.dump.gz.age"},
+	}
+	if err := s.Backup(req, st); err != nil {
+		t.Fatalf("Backup rpc error: %v", err)
+	}
+	res := st.lastResult(t)
+	if res.GetOk() {
+		t.Fatal("a store backup with no recipient must fail")
+	}
+	if !strings.Contains(res.GetError(), "encrypted") {
+		t.Errorf("error should say the artifact must be encrypted, got %q", res.GetError())
+	}
+}
+
+// Same rule for the relay: a stream_out backup is destined for another host's
+// disk, so it must be ciphertext before it leaves this one.
+func TestBackup_streamOutWithoutRecipientRefuses(t *testing.T) {
+	s := New(t.TempDir(), t.TempDir(), "/", t.TempDir())
+	st := &fakeBackupStream{}
+	req := &pb.BackupRequest{Kind: pb.BackupKind_BACKUP_KIND_DATABASE, StreamOut: true}
+	if err := s.Backup(req, st); err != nil {
+		t.Fatalf("Backup rpc error: %v", err)
+	}
+	if st.lastResult(t).GetOk() {
+		t.Error("a relayed backup with no recipient must fail")
 	}
 }
 
@@ -413,7 +450,30 @@ func TestRestore_missingKey(t *testing.T) {
 		t.Fatalf("Restore rpc error: %v", err)
 	}
 	if st.lastResult(t).GetOk() {
-		t.Error("a restore with no S3 object key must fail")
+		t.Error("a restore with no artifact to read must fail")
+	}
+}
+
+// A store restore needs the recovery key. Without it the agent must refuse
+// rather than trying to gunzip ciphertext and reporting a confusing
+// "not a Deplo backup".
+func TestRestore_storeWithoutIdentityRefuses(t *testing.T) {
+	root := t.TempDir()
+	s := New(t.TempDir(), t.TempDir(), "/", root)
+	st := &fakeRestoreStream{}
+	req := &pb.RestoreRequest{
+		Kind:  pb.BackupKind_BACKUP_KIND_DATABASE,
+		Store: &pb.StoreTarget{ObjectKey: "deplo/t/database/x/ts.dump.gz.age"},
+	}
+	if err := s.Restore(req, st); err != nil {
+		t.Fatalf("Restore rpc error: %v", err)
+	}
+	res := st.lastResult(t)
+	if res.GetOk() {
+		t.Fatal("a store restore with no identity must fail")
+	}
+	if !strings.Contains(res.GetError(), "recovery key") {
+		t.Errorf("error should mention the recovery key, got %q", res.GetError())
 	}
 }
 
@@ -433,17 +493,19 @@ func TestS3Delete_missingKey(t *testing.T) {
 	}
 }
 
-// "backup" must be advertised in Hello so the control plane's capability
-// preflight passes against this agent.
+// "backup" and "backup-store" must both be advertised in Hello so the control
+// plane's capability preflight passes against this agent.
 func TestCapabilities_advertisesBackup(t *testing.T) {
-	found := false
-	for _, c := range Capabilities {
-		if c == "backup" {
-			found = true
+	for _, want := range []string{"backup", "backup-store"} {
+		found := false
+		for _, c := range Capabilities {
+			if c == want {
+				found = true
+			}
 		}
-	}
-	if !found {
-		t.Error("Capabilities must advertise \"backup\"")
+		if !found {
+			t.Errorf("Capabilities must advertise %q", want)
+		}
 	}
 }
 

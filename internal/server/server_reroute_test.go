@@ -8,7 +8,23 @@ import (
 	"time"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
+	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
+
+// teardownStack removes whatever the real `docker compose up` inside Reroute
+// brought up. Registered by every test here that passes a ComposeYaml: on a host
+// WITHOUT docker the up fails and this is a no-op, but on a host WITH docker it
+// succeeds, and without this the suite leaves a stray nginx running against a
+// t.TempDir compose file that no longer exists.
+func teardownStack(t *testing.T, s *Service, slug string) {
+	t.Helper()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		_, _ = dockercli.Run(ctx, 60*time.Second,
+			"compose", "-p", "deplo-"+slug, "-f", s.stackPath(slug), "down", "-v", "--remove-orphans")
+	})
+}
 
 // A reroute with no rendered compose is a no-op failure (mirrors Deploy's
 // missing-compose guard): Ok:false with a clear error and no stack file written.
@@ -18,7 +34,7 @@ func TestReroute_missingComposeFailsCleanly(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	res, err := s.Reroute(ctx, &pb.RerouteRequest{Slug: "myapp"})
+	res, err := s.Reroute(ctx, &pb.RerouteRequest{Slug: "deplo-agent-test-reroute"})
 	if err != nil {
 		t.Fatalf("Reroute rpc error: %v", err)
 	}
@@ -29,7 +45,7 @@ func TestReroute_missingComposeFailsCleanly(t *testing.T) {
 		t.Error("expected an error message for a missing compose")
 	}
 	// Nothing should have been written for a rejected request.
-	if _, err := os.Stat(s.stackPath("myapp")); err == nil {
+	if _, err := os.Stat(s.stackPath("deplo-agent-test-reroute")); err == nil {
 		t.Error("stack file written despite missing compose")
 	}
 }
@@ -38,15 +54,29 @@ func TestReroute_missingComposeFailsCleanly(t *testing.T) {
 // files BEFORE it runs `compose up`, so the on-disk artefacts are observable
 // even on a host without docker (the compose call then just fails). This asserts
 // the file-writing half of the verb — the part that is host-independent.
+//
+// TWO things about this test are deliberate, and both exist because it calls the
+// REAL Reroute, which really runs `docker compose up` on whatever host the suite
+// happens to run on:
+//
+//   - The slug is namespaced. It used to be "myapp", and `compose up` brings the
+//     project up with --remove-orphans: on a host with a live app slugged myapp,
+//     running the suite deleted that app's containers.
+//   - The stack is torn down afterwards. On a host WITH docker the `up` succeeds,
+//     so without this the suite leaves a stray nginx behind pointing at a t.TempDir
+//     that no longer exists.
 func TestReroute_writesStackEnvAndMountFiles(t *testing.T) {
 	stackDir := t.TempDir()
 	s := New(stackDir, t.TempDir(), "/", "")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	const slug = "deplo-agent-test-reroute"
+	teardownStack(t, s, slug)
+
 	const yaml = "services:\n  web:\n    image: nginx\n"
 	_, _ = s.Reroute(ctx, &pb.RerouteRequest{
-		Slug:        "myapp",
+		Slug:        slug,
 		ComposeYaml: yaml,
 		Env:         map[string]string{"FOO": "bar", "BAZ": "qux"},
 		Mounts: []*pb.MountFile{
@@ -57,7 +87,7 @@ func TestReroute_writesStackEnvAndMountFiles(t *testing.T) {
 	// files written before it, so the return value is intentionally ignored.
 
 	// Stack file: exact YAML, 0644.
-	stackFile := s.stackPath("myapp")
+	stackFile := s.stackPath("deplo-agent-test-reroute")
 	got, err := os.ReadFile(stackFile)
 	if err != nil {
 		t.Fatalf("read stack file: %v", err)
@@ -72,7 +102,7 @@ func TestReroute_writesStackEnvAndMountFiles(t *testing.T) {
 	}
 
 	// Env file: rendered KEY=VALUE (sorted), 0600.
-	envFile := filepath.Join(stackDir, "myapp.env")
+	envFile := filepath.Join(stackDir, "deplo-agent-test-reroute.env")
 	envGot, err := os.ReadFile(envFile)
 	if err != nil {
 		t.Fatalf("read env file: %v", err)
@@ -87,7 +117,7 @@ func TestReroute_writesStackEnvAndMountFiles(t *testing.T) {
 	}
 
 	// Mount file: materialised under files/<slug>/.
-	mountFile := filepath.Join(stackDir, "files", "myapp", "nginx.conf")
+	mountFile := filepath.Join(stackDir, "files", "deplo-agent-test-reroute", "nginx.conf")
 	mGot, err := os.ReadFile(mountFile)
 	if err != nil {
 		t.Fatalf("read mount file: %v", err)
@@ -104,13 +134,14 @@ func TestReroute_noEnvWritesNoEnvFile(t *testing.T) {
 	s := New(stackDir, t.TempDir(), "/", "")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	teardownStack(t, s, "deplo-agent-test-reroute")
 
 	_, _ = s.Reroute(ctx, &pb.RerouteRequest{
-		Slug:        "myapp",
+		Slug:        "deplo-agent-test-reroute",
 		ComposeYaml: "services:\n  web:\n    image: nginx\n",
 	})
 
-	if _, err := os.Stat(filepath.Join(stackDir, "myapp.env")); err == nil {
+	if _, err := os.Stat(filepath.Join(stackDir, "deplo-agent-test-reroute.env")); err == nil {
 		t.Error("env file written for an env-less reroute")
 	}
 }
@@ -142,11 +173,11 @@ func TestReadStack_presentFileReturnsYaml(t *testing.T) {
 	defer cancel()
 
 	const yaml = "services:\n  web:\n    image: nginx:1.27\n"
-	if err := os.WriteFile(s.stackPath("myapp"), []byte(yaml), 0o644); err != nil {
+	if err := os.WriteFile(s.stackPath("deplo-agent-test-reroute"), []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	resp, err := s.ReadStack(ctx, &pb.StackRef{Slug: "myapp"})
+	resp, err := s.ReadStack(ctx, &pb.StackRef{Slug: "deplo-agent-test-reroute"})
 	if err != nil {
 		t.Fatalf("ReadStack rpc error: %v", err)
 	}

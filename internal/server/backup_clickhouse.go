@@ -2,7 +2,6 @@ package server
 
 import (
 	"bufio"
-	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -11,7 +10,6 @@ import (
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
-	"github.com/DeploCloud/deplo-agent/internal/s3client"
 )
 
 // backup_clickhouse.go implements clickhouse backup/restore, which — unlike the
@@ -138,27 +136,19 @@ func (s *Service) dumpClickhouse(ctx context.Context, d *pb.DatabaseDescriptor, 
 // restoreClickhouse streams the backed-up SQL script back through
 // `clickhouse-client --multiquery`, which replays the DROP/CREATE/INSERT
 // statements (drop-and-recreate overwrite).
-func (s *Service) restoreClickhouse(ctx context.Context, req *pb.RestoreRequest, e *rsEmitter) {
-	d := req.GetDatabase()
-	key := req.GetS3().GetObjectKey()
-	e.log("info", fmt.Sprintf("Restoring clickhouse database %q into container %q from %s", d.GetDbName(), d.GetContainer(), key))
+func (s *Service) restoreClickhouse(ctx context.Context, d *pb.DatabaseDescriptor, src *artifactSource, e *rsEmitter) {
+	e.log("info", fmt.Sprintf("Restoring clickhouse database %q into container %q from %s", d.GetDbName(), d.GetContainer(), src.label))
 
-	obj, derr := s3client.Download(ctx, s3cfg(req.GetS3()), key)
-	if derr != nil {
-		e.result(false, "open S3 object: "+derr.Error())
+	rd, closeSrc, oerr := src.open(ctx)
+	if oerr != nil {
+		e.result(false, statusMessage(oerr))
 		return
 	}
-	defer obj.Close()
-	gz, gerr := gzip.NewReader(obj)
-	if gerr != nil {
-		e.result(false, "open gzip stream (is the object a Deplo backup?): "+gerr.Error())
-		return
-	}
-	defer gz.Close()
+	defer closeSrc()
 
 	argv, env := chClientPrefix(d, true)
 	argv = append(argv, "--multiquery")
-	code, rerr := dockercli.PipeIn(ctx, backupStepTimeout, gz, env, argv...)
+	code, rerr := dockercli.PipeIn(ctx, backupStepTimeout, rd, env, argv...)
 	if rerr != nil {
 		e.result(false, "restore: "+rerr.Error())
 		return

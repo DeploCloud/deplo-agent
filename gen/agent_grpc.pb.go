@@ -77,6 +77,9 @@ const (
 	Agent_Restore_FullMethodName             = "/deplo.agent.v1.Agent/Restore"
 	Agent_S3Check_FullMethodName             = "/deplo.agent.v1.Agent/S3Check"
 	Agent_S3Delete_FullMethodName            = "/deplo.agent.v1.Agent/S3Delete"
+	Agent_ReadStoreFile_FullMethodName       = "/deplo.agent.v1.Agent/ReadStoreFile"
+	Agent_WriteStoreFile_FullMethodName      = "/deplo.agent.v1.Agent/WriteStoreFile"
+	Agent_RestoreFrom_FullMethodName         = "/deplo.agent.v1.Agent/RestoreFrom"
 	Agent_FollowLogs_FullMethodName          = "/deplo.agent.v1.Agent/FollowLogs"
 	Agent_Attach_FullMethodName              = "/deplo.agent.v1.Agent/Attach"
 	Agent_ListInstances_FullMethodName       = "/deplo.agent.v1.Agent/ListInstances"
@@ -297,39 +300,76 @@ type AgentClient interface {
 	// locate/replace its own binary (e.g. a read-only install dir), so the control
 	// plane can tell the operator to fall back to re-running the installer.
 	SelfUpdate(ctx context.Context, in *SelfUpdateRequest, opts ...grpc.CallOption) (*SelfUpdateResponse, error)
-	// Back up a database or a project to S3, streaming progress. DATABASE → the
-	// agent `docker exec`s the engine's dump tool (per the format table in
-	// docs/research/dbs-backups/PLAN.md), gzip-compresses the stream, and uploads
-	// it to S3 via a multipart PUT (minio-go), so no temp file and no
-	// control-plane round-trip. PROJECT → the agent tars the project's named +
-	// compose-stack volumes (via a throwaway helper container that mounts them),
-	// the project files dir, and the rendered compose/env snapshot, gzip-compresses,
-	// and uploads. Host bind mounts are EXCLUDED (shared cross-tenant paths,
-	// outside Deplo). The terminal BackupResult carries the final object key +
-	// byte size the control plane records on the BackupRun.
+	// Back up a database or a project to a destination, streaming progress.
+	// DATABASE → the agent `docker exec`s the engine's dump tool (per the format
+	// table in docs/research/dbs-backups/PLAN.md), gzip-compresses the stream, and
+	// writes it out, so no temp file and no control-plane round-trip. PROJECT →
+	// the agent tars the project's named + compose-stack volumes (via a throwaway
+	// helper container that mounts them), the project files dir, and the rendered
+	// compose/env snapshot, gzip-compresses, and writes it out. Host bind mounts
+	// are EXCLUDED (shared cross-tenant paths, outside Deplo). The terminal
+	// BackupResult carries the final object key + byte size the control plane
+	// records on the BackupRun.
+	//
+	// The SINK is one of three, in the order the request selects them: `s3` (a
+	// multipart PUT via minio-go), `store` (an age-encrypted file under a
+	// validated root on this host), or — when `stream_out` is set — this RPC's own
+	// BackupEvent.data frames, so the control plane can relay the artifact to
+	// another host's WriteStoreFile. All three consume the SAME producer: the
+	// compression and the age wrap happen once, in the source pipeline, so a
+	// relayed artifact is ciphertext before it ever leaves this host.
 	Backup(ctx context.Context, in *BackupRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[BackupEvent], error)
-	// Restore a database or project from a previously-uploaded S3 object, IN
-	// PLACE, streaming progress. DATABASE → download the object, decompress, and
-	// restore per the format table — drop-and-recreate, guaranteed by the dump
-	// format (pg `--clean --if-exists`, mysql `--add-drop-table`, mongo `--drop`)
-	// so a restore overwrites rather than appends. PROJECT → stop the stack, wipe
-	// + untar the volumes + files, re-`Reroute` the snapshot compose/env (which
-	// restarts the stack) = full data + config in place. A restart failure (e.g.
-	// a snapshot image that no longer exists) is reported clearly on the stream
-	// rather than silently leaving the stack down.
+	// Restore a database or project from a previously-written artifact, IN PLACE,
+	// streaming progress. DATABASE → read the artifact, decrypt (store only),
+	// decompress, and restore per the format table — drop-and-recreate, guaranteed
+	// by the dump format (pg `--clean --if-exists`, mysql `--add-drop-table`,
+	// mongo `--drop`) so a restore overwrites rather than appends. PROJECT → stop
+	// the stack, wipe + untar the volumes + files, re-`Reroute` the snapshot
+	// compose/env (which restarts the stack) = full data + config in place. A
+	// restart failure (e.g. a snapshot image that no longer exists) is reported
+	// clearly on the stream rather than silently leaving the stack down.
+	//
+	// This RPC reads the artifact from a destination THIS host can reach (`s3` or
+	// a local `store`). When the artifact lives on another server's disk, the
+	// control plane uses RestoreFrom instead and streams the bytes in.
 	Restore(ctx context.Context, in *RestoreRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RestoreEvent], error)
-	// Verify S3 connectivity + the destination bucket for the "Test connection"
-	// button (makes lib/data/s3.ts testS3 real). The agent HEADs/stats the bucket
-	// with the supplied creds and reports reachable + writable, with a human
-	// message on failure. Any agent advertising "backup" can serve it — it needs
-	// no Docker, only the S3 client — so the control plane can run it on any
-	// reachable backup-capable server.
+	// Verify a destination for the "Test connection" button. S3 → HEAD/stat the
+	// bucket with the supplied creds and report reachable + writable. STORE →
+	// resolve the root, create it if it is the agent's own managed one, verify the
+	// sentinel for a custom one, probe writability, sweep stale `.partial` files,
+	// and report free/total bytes so the UI can show headroom. An S3 check needs
+	// no Docker and no host state, so any agent advertising "backup" can serve it;
+	// a STORE check is about THIS host's disk, so it must run on the destination's
+	// own server.
 	S3Check(ctx context.Context, in *S3CheckRequest, opts ...grpc.CallOption) (*S3CheckResponse, error)
-	// Delete S3 objects by exact key or by prefix. Backs retention pruning (the
+	// Delete artifacts by exact key or by prefix. Backs retention pruning (the
 	// control plane deletes objects older than retentionDays for a backup) and
 	// the "delete artifacts too" branch of target deletion. Idempotent: a missing
 	// object is not an error. Returns how many objects were removed.
 	S3Delete(ctx context.Context, in *S3DeleteRequest, opts ...grpc.CallOption) (*S3DeleteResponse, error)
+	// Stream an artifact OUT of this host's store, for a restore or a download
+	// whose reader lives elsewhere. Emits `data` frames only (no header). The
+	// bytes are exactly what was written: still age-encrypted, so the control
+	// plane relaying them never holds plaintext.
+	ReadStoreFile(ctx context.Context, in *ReadStoreFileRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[StoreChunk], error)
+	// Receive an artifact INTO this host's store. The FIRST client message MUST
+	// carry `header` (the destination root + object key); every following message
+	// carries `data`. The agent writes to `<key>.partial`, fsyncs, and renames on
+	// a clean end — so a broken relay leaves a sweepable temp file rather than a
+	// truncated artifact at the real key that retention would later hand to a
+	// restore. The terminal StoreResult carries the bytes written and their
+	// sha256: on a filesystem there is no ETag, so this is the only durable proof
+	// of what landed, and it is what the control plane records on the run.
+	WriteStoreFile(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[StoreChunk, StoreResult], error)
+	// Restore from an artifact this host CANNOT reach — the cross-host half of
+	// Restore. Bidirectional because a restore must both receive bytes and report
+	// progress: the first client message carries the header (kind + descriptor +
+	// the age identity), every following message carries a slice of the artifact,
+	// and the agent pipes them straight into the same restore chain Restore uses.
+	// Deliberately NOT "stage the artifact to a temp file then call Restore": that
+	// would need a full artifact's worth of free space on the very host being
+	// restored, plus cleanup that has to survive an agent restart.
+	RestoreFrom(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[RestoreChunk, RestoreEvent], error)
 	// Stream a container's live runtime logs (`docker logs -f --tail N`) as raw
 	// byte chunks. Output-only — there is no stdin. The control plane proxies these
 	// chunks straight into the unchanged SSE log route. Closing the stream (browser
@@ -777,9 +817,54 @@ func (c *agentClient) S3Delete(ctx context.Context, in *S3DeleteRequest, opts ..
 	return out, nil
 }
 
+func (c *agentClient) ReadStoreFile(ctx context.Context, in *ReadStoreFileRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[StoreChunk], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[9], Agent_ReadStoreFile_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[ReadStoreFileRequest, StoreChunk]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Agent_ReadStoreFileClient = grpc.ServerStreamingClient[StoreChunk]
+
+func (c *agentClient) WriteStoreFile(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[StoreChunk, StoreResult], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[10], Agent_WriteStoreFile_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[StoreChunk, StoreResult]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Agent_WriteStoreFileClient = grpc.ClientStreamingClient[StoreChunk, StoreResult]
+
+func (c *agentClient) RestoreFrom(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[RestoreChunk, RestoreEvent], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[11], Agent_RestoreFrom_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[RestoreChunk, RestoreEvent]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Agent_RestoreFromClient = grpc.BidiStreamingClient[RestoreChunk, RestoreEvent]
+
 func (c *agentClient) FollowLogs(ctx context.Context, in *FollowLogsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LogChunk], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[9], Agent_FollowLogs_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[12], Agent_FollowLogs_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -798,7 +883,7 @@ type Agent_FollowLogsClient = grpc.ServerStreamingClient[LogChunk]
 
 func (c *agentClient) Attach(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AttachInput, AttachOutput], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[10], Agent_Attach_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[13], Agent_Attach_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -951,7 +1036,7 @@ func (c *agentClient) FilesExist(ctx context.Context, in *FilesExistRequest, opt
 
 func (c *agentClient) StartDev(ctx context.Context, in *StartDevRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[DeployEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[11], Agent_StartDev_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[14], Agent_StartDev_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -980,7 +1065,7 @@ func (c *agentClient) StopDev(ctx context.Context, in *StopDevRequest, opts ...g
 
 func (c *agentClient) ResetDevWorkspace(ctx context.Context, in *StartDevRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[DeployEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[12], Agent_ResetDevWorkspace_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[15], Agent_ResetDevWorkspace_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1313,39 +1398,76 @@ type AgentServer interface {
 	// locate/replace its own binary (e.g. a read-only install dir), so the control
 	// plane can tell the operator to fall back to re-running the installer.
 	SelfUpdate(context.Context, *SelfUpdateRequest) (*SelfUpdateResponse, error)
-	// Back up a database or a project to S3, streaming progress. DATABASE → the
-	// agent `docker exec`s the engine's dump tool (per the format table in
-	// docs/research/dbs-backups/PLAN.md), gzip-compresses the stream, and uploads
-	// it to S3 via a multipart PUT (minio-go), so no temp file and no
-	// control-plane round-trip. PROJECT → the agent tars the project's named +
-	// compose-stack volumes (via a throwaway helper container that mounts them),
-	// the project files dir, and the rendered compose/env snapshot, gzip-compresses,
-	// and uploads. Host bind mounts are EXCLUDED (shared cross-tenant paths,
-	// outside Deplo). The terminal BackupResult carries the final object key +
-	// byte size the control plane records on the BackupRun.
+	// Back up a database or a project to a destination, streaming progress.
+	// DATABASE → the agent `docker exec`s the engine's dump tool (per the format
+	// table in docs/research/dbs-backups/PLAN.md), gzip-compresses the stream, and
+	// writes it out, so no temp file and no control-plane round-trip. PROJECT →
+	// the agent tars the project's named + compose-stack volumes (via a throwaway
+	// helper container that mounts them), the project files dir, and the rendered
+	// compose/env snapshot, gzip-compresses, and writes it out. Host bind mounts
+	// are EXCLUDED (shared cross-tenant paths, outside Deplo). The terminal
+	// BackupResult carries the final object key + byte size the control plane
+	// records on the BackupRun.
+	//
+	// The SINK is one of three, in the order the request selects them: `s3` (a
+	// multipart PUT via minio-go), `store` (an age-encrypted file under a
+	// validated root on this host), or — when `stream_out` is set — this RPC's own
+	// BackupEvent.data frames, so the control plane can relay the artifact to
+	// another host's WriteStoreFile. All three consume the SAME producer: the
+	// compression and the age wrap happen once, in the source pipeline, so a
+	// relayed artifact is ciphertext before it ever leaves this host.
 	Backup(*BackupRequest, grpc.ServerStreamingServer[BackupEvent]) error
-	// Restore a database or project from a previously-uploaded S3 object, IN
-	// PLACE, streaming progress. DATABASE → download the object, decompress, and
-	// restore per the format table — drop-and-recreate, guaranteed by the dump
-	// format (pg `--clean --if-exists`, mysql `--add-drop-table`, mongo `--drop`)
-	// so a restore overwrites rather than appends. PROJECT → stop the stack, wipe
-	// + untar the volumes + files, re-`Reroute` the snapshot compose/env (which
-	// restarts the stack) = full data + config in place. A restart failure (e.g.
-	// a snapshot image that no longer exists) is reported clearly on the stream
-	// rather than silently leaving the stack down.
+	// Restore a database or project from a previously-written artifact, IN PLACE,
+	// streaming progress. DATABASE → read the artifact, decrypt (store only),
+	// decompress, and restore per the format table — drop-and-recreate, guaranteed
+	// by the dump format (pg `--clean --if-exists`, mysql `--add-drop-table`,
+	// mongo `--drop`) so a restore overwrites rather than appends. PROJECT → stop
+	// the stack, wipe + untar the volumes + files, re-`Reroute` the snapshot
+	// compose/env (which restarts the stack) = full data + config in place. A
+	// restart failure (e.g. a snapshot image that no longer exists) is reported
+	// clearly on the stream rather than silently leaving the stack down.
+	//
+	// This RPC reads the artifact from a destination THIS host can reach (`s3` or
+	// a local `store`). When the artifact lives on another server's disk, the
+	// control plane uses RestoreFrom instead and streams the bytes in.
 	Restore(*RestoreRequest, grpc.ServerStreamingServer[RestoreEvent]) error
-	// Verify S3 connectivity + the destination bucket for the "Test connection"
-	// button (makes lib/data/s3.ts testS3 real). The agent HEADs/stats the bucket
-	// with the supplied creds and reports reachable + writable, with a human
-	// message on failure. Any agent advertising "backup" can serve it — it needs
-	// no Docker, only the S3 client — so the control plane can run it on any
-	// reachable backup-capable server.
+	// Verify a destination for the "Test connection" button. S3 → HEAD/stat the
+	// bucket with the supplied creds and report reachable + writable. STORE →
+	// resolve the root, create it if it is the agent's own managed one, verify the
+	// sentinel for a custom one, probe writability, sweep stale `.partial` files,
+	// and report free/total bytes so the UI can show headroom. An S3 check needs
+	// no Docker and no host state, so any agent advertising "backup" can serve it;
+	// a STORE check is about THIS host's disk, so it must run on the destination's
+	// own server.
 	S3Check(context.Context, *S3CheckRequest) (*S3CheckResponse, error)
-	// Delete S3 objects by exact key or by prefix. Backs retention pruning (the
+	// Delete artifacts by exact key or by prefix. Backs retention pruning (the
 	// control plane deletes objects older than retentionDays for a backup) and
 	// the "delete artifacts too" branch of target deletion. Idempotent: a missing
 	// object is not an error. Returns how many objects were removed.
 	S3Delete(context.Context, *S3DeleteRequest) (*S3DeleteResponse, error)
+	// Stream an artifact OUT of this host's store, for a restore or a download
+	// whose reader lives elsewhere. Emits `data` frames only (no header). The
+	// bytes are exactly what was written: still age-encrypted, so the control
+	// plane relaying them never holds plaintext.
+	ReadStoreFile(*ReadStoreFileRequest, grpc.ServerStreamingServer[StoreChunk]) error
+	// Receive an artifact INTO this host's store. The FIRST client message MUST
+	// carry `header` (the destination root + object key); every following message
+	// carries `data`. The agent writes to `<key>.partial`, fsyncs, and renames on
+	// a clean end — so a broken relay leaves a sweepable temp file rather than a
+	// truncated artifact at the real key that retention would later hand to a
+	// restore. The terminal StoreResult carries the bytes written and their
+	// sha256: on a filesystem there is no ETag, so this is the only durable proof
+	// of what landed, and it is what the control plane records on the run.
+	WriteStoreFile(grpc.ClientStreamingServer[StoreChunk, StoreResult]) error
+	// Restore from an artifact this host CANNOT reach — the cross-host half of
+	// Restore. Bidirectional because a restore must both receive bytes and report
+	// progress: the first client message carries the header (kind + descriptor +
+	// the age identity), every following message carries a slice of the artifact,
+	// and the agent pipes them straight into the same restore chain Restore uses.
+	// Deliberately NOT "stage the artifact to a temp file then call Restore": that
+	// would need a full artifact's worth of free space on the very host being
+	// restored, plus cleanup that has to survive an agent restart.
+	RestoreFrom(grpc.BidiStreamingServer[RestoreChunk, RestoreEvent]) error
 	// Stream a container's live runtime logs (`docker logs -f --tail N`) as raw
 	// byte chunks. Output-only — there is no stdin. The control plane proxies these
 	// chunks straight into the unchanged SSE log route. Closing the stream (browser
@@ -1555,6 +1677,15 @@ func (UnimplementedAgentServer) S3Check(context.Context, *S3CheckRequest) (*S3Ch
 }
 func (UnimplementedAgentServer) S3Delete(context.Context, *S3DeleteRequest) (*S3DeleteResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method S3Delete not implemented")
+}
+func (UnimplementedAgentServer) ReadStoreFile(*ReadStoreFileRequest, grpc.ServerStreamingServer[StoreChunk]) error {
+	return status.Error(codes.Unimplemented, "method ReadStoreFile not implemented")
+}
+func (UnimplementedAgentServer) WriteStoreFile(grpc.ClientStreamingServer[StoreChunk, StoreResult]) error {
+	return status.Error(codes.Unimplemented, "method WriteStoreFile not implemented")
+}
+func (UnimplementedAgentServer) RestoreFrom(grpc.BidiStreamingServer[RestoreChunk, RestoreEvent]) error {
+	return status.Error(codes.Unimplemented, "method RestoreFrom not implemented")
 }
 func (UnimplementedAgentServer) FollowLogs(*FollowLogsRequest, grpc.ServerStreamingServer[LogChunk]) error {
 	return status.Error(codes.Unimplemented, "method FollowLogs not implemented")
@@ -2033,6 +2164,31 @@ func _Agent_S3Delete_Handler(srv interface{}, ctx context.Context, dec func(inte
 	}
 	return interceptor(ctx, in, info, handler)
 }
+
+func _Agent_ReadStoreFile_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(ReadStoreFileRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(AgentServer).ReadStoreFile(m, &grpc.GenericServerStream[ReadStoreFileRequest, StoreChunk]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Agent_ReadStoreFileServer = grpc.ServerStreamingServer[StoreChunk]
+
+func _Agent_WriteStoreFile_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(AgentServer).WriteStoreFile(&grpc.GenericServerStream[StoreChunk, StoreResult]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Agent_WriteStoreFileServer = grpc.ClientStreamingServer[StoreChunk, StoreResult]
+
+func _Agent_RestoreFrom_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(AgentServer).RestoreFrom(&grpc.GenericServerStream[RestoreChunk, RestoreEvent]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Agent_RestoreFromServer = grpc.BidiStreamingServer[RestoreChunk, RestoreEvent]
 
 func _Agent_FollowLogs_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(FollowLogsRequest)
@@ -2803,6 +2959,22 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 			StreamName:    "Restore",
 			Handler:       _Agent_Restore_Handler,
 			ServerStreams: true,
+		},
+		{
+			StreamName:    "ReadStoreFile",
+			Handler:       _Agent_ReadStoreFile_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "WriteStoreFile",
+			Handler:       _Agent_WriteStoreFile_Handler,
+			ClientStreams: true,
+		},
+		{
+			StreamName:    "RestoreFrom",
+			Handler:       _Agent_RestoreFrom_Handler,
+			ServerStreams: true,
+			ClientStreams: true,
 		},
 		{
 			StreamName:    "FollowLogs",

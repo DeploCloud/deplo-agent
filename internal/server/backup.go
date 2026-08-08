@@ -2,7 +2,6 @@ package server
 
 import (
 	"archive/tar"
-	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -63,9 +62,17 @@ func (e *bkEmitter) log(level, text string) {
 	_ = e.send(&pb.BackupEvent{Event: &pb.BackupEvent_Log{Log: &pb.LogLine{Level: level, Text: text}}})
 }
 func (e *bkEmitter) result(ok bool, errMsg, objectKey string, size int64) {
+	e.resultWithDigest(ok, errMsg, objectKey, size, "")
+}
+func (e *bkEmitter) resultWithDigest(ok bool, errMsg, objectKey string, size int64, digest string) {
 	_ = e.send(&pb.BackupEvent{Event: &pb.BackupEvent_Result{
-		Result: &pb.BackupResult{Ok: ok, Error: errMsg, ObjectKey: objectKey, SizeBytes: size},
+		Result: &pb.BackupResult{Ok: ok, Error: errMsg, ObjectKey: objectKey, SizeBytes: size, Sha256: digest},
 	}})
+}
+
+// data emits one slice of the finished artifact, for a stream_out relay.
+func (e *bkEmitter) data(b []byte) error {
+	return e.send(&pb.BackupEvent{Event: &pb.BackupEvent_Data{Data: b}})
 }
 
 // rsEmitter funnels RestoreEvents over the stream.
@@ -102,35 +109,40 @@ func (s *Service) Backup(req *pb.BackupRequest, stream pb.Agent_BackupServer) er
 	e := &bkEmitter{send: stream.Send}
 	ctx := stream.Context()
 
-	if req.GetS3() == nil || req.GetS3().GetObjectKey() == "" {
-		e.result(false, "backup request missing S3 target / object key", "", 0)
+	dest, err := destinationFromBackup(s, req, e.data)
+	if err != nil {
+		e.result(false, statusMessage(err), "", 0)
 		return nil
 	}
 	switch req.GetKind() {
 	case pb.BackupKind_BACKUP_KIND_DATABASE:
-		s.backupDatabase(ctx, req, e)
+		s.backupDatabase(ctx, req.GetDatabase(), dest, e)
 	case pb.BackupKind_BACKUP_KIND_PROJECT:
-		s.backupProject(ctx, req, e)
+		s.backupProject(ctx, req.GetProject(), dest, e)
 	default:
 		e.result(false, "unknown backup kind", "", 0)
 	}
 	return nil
 }
 
-// Restore restores a database or project from an S3 object, in place.
+// Restore restores a database or project from an artifact this host can reach
+// (an S3 object or a local store), in place. The cross-host case — the artifact
+// lives on another server's disk — is RestoreFrom, which streams the bytes in
+// and then joins these exact same paths.
 func (s *Service) Restore(req *pb.RestoreRequest, stream pb.Agent_RestoreServer) error {
 	e := &rsEmitter{send: stream.Send}
 	ctx := stream.Context()
 
-	if req.GetS3() == nil || req.GetS3().GetObjectKey() == "" {
-		e.result(false, "restore request missing S3 target / object key")
+	src, err := sourceFromRestore(s, req)
+	if err != nil {
+		e.result(false, statusMessage(err))
 		return nil
 	}
 	switch req.GetKind() {
 	case pb.BackupKind_BACKUP_KIND_DATABASE:
-		s.restoreDatabase(ctx, req, e)
+		s.restoreDatabase(ctx, req.GetDatabase(), src, e)
 	case pb.BackupKind_BACKUP_KIND_PROJECT:
-		s.restoreProject(ctx, req, e)
+		s.restoreProject(ctx, req.GetProject(), src, e)
 	default:
 		e.result(false, "unknown restore kind")
 	}
@@ -260,19 +272,17 @@ func restoreArgv(d *pb.DatabaseDescriptor) (argv []string, env []string, err err
 	}
 }
 
-func (s *Service) backupDatabase(ctx context.Context, req *pb.BackupRequest, e *bkEmitter) {
-	d := req.GetDatabase()
+func (s *Service) backupDatabase(ctx context.Context, d *pb.DatabaseDescriptor, dest *artifactDestination, e *bkEmitter) {
 	if d == nil || d.GetContainer() == "" {
 		e.result(false, "database backup request missing descriptor / container", "", 0)
 		return
 	}
-	key := req.GetS3().GetObjectKey()
 	e.log("info", fmt.Sprintf("Dumping %s database %q from container %q", d.GetDbType(), d.GetDbName(), d.GetContainer()))
 
-	// The dump PRODUCER writes the raw dump bytes into `w` (which is the gzip
-	// writer feeding the S3 upload). Most engines are a single `docker exec`
+	// The dump PRODUCER writes the raw dump bytes into `w` (the head of the
+	// gzip → age → destination chain). Most engines are a single `docker exec`
 	// piped to stdout; clickhouse is a multi-statement SQL script the agent
-	// assembles per table. Both shapes funnel through the same gzip→S3 pipeline.
+	// assembles per table. Both shapes funnel through the same pipeline.
 	var produce func(w io.Writer) error
 	switch strings.ToLower(d.GetDbType()) {
 	case "clickhouse":
@@ -295,38 +305,20 @@ func (s *Service) backupDatabase(ctx context.Context, req *pb.BackupRequest, e *
 		}
 	}
 
-	// Pipeline: producer → gzip → S3 multipart PUT. A pipe couples the producer
-	// to the uploader so there is no temp file; the upload reads as the dump
-	// writes. The producer runs in a goroutine writing the pipe; the uploader
-	// reads on this goroutine.
-	pr, pw := io.Pipe()
-	gz := gzip.NewWriter(pw)
-	go func() {
-		// Run the producer, then close gzip BEFORE the pipe so the reader sees a
-		// clean EOF (gzip trailer flushed) — or the producer's error, which aborts
-		// the upload with that cause.
-		derr := produce(gz)
-		cerr := gz.Close()
-		if derr != nil {
-			pw.CloseWithError(derr)
-			return
-		}
-		pw.CloseWithError(cerr) // nil on success => clean EOF
-	}()
-
-	size, uerr := s3client.Upload(ctx, s3cfg(req.GetS3()), key, pr)
-	if uerr != nil {
-		// Drain/cancel the producer so the dump goroutine isn't left blocked.
-		_ = pr.CloseWithError(uerr)
-		e.result(false, "upload to S3: "+uerr.Error(), "", 0)
+	// Pipeline: producer → gzip → (age) → destination. A pipe couples the producer
+	// to the writer so there is no temp file; the destination reads as the dump
+	// writes, whether that destination is a bucket, this host's disk, or the
+	// relay stream back to the control plane.
+	size, digest, werr := s.writeArtifact(ctx, dest, produce)
+	if werr != nil {
+		e.result(false, statusMessage(werr), "", 0)
 		return
 	}
-	e.log("info", fmt.Sprintf("Uploaded %s (%d bytes)", key, size))
-	e.result(true, "", key, size)
+	e.log("info", fmt.Sprintf("Wrote %s (%d bytes)", dest.label, size))
+	e.resultWithDigest(true, "", dest.key, size, digest)
 }
 
-func (s *Service) restoreDatabase(ctx context.Context, req *pb.RestoreRequest, e *rsEmitter) {
-	d := req.GetDatabase()
+func (s *Service) restoreDatabase(ctx context.Context, d *pb.DatabaseDescriptor, src *artifactSource, e *rsEmitter) {
 	if d == nil || d.GetContainer() == "" {
 		e.result(false, "database restore request missing descriptor / container")
 		return
@@ -338,33 +330,25 @@ func (s *Service) restoreDatabase(ctx context.Context, req *pb.RestoreRequest, e
 		// every other unsupported/erroring engine fails.
 		switch err {
 		case errRedisRestoreSeparate:
-			s.restoreRedis(ctx, req, e)
+			s.restoreRedis(ctx, d, src, e)
 		case errClickhouseSeparate:
-			s.restoreClickhouse(ctx, req, e)
+			s.restoreClickhouse(ctx, d, src, e)
 		default:
 			e.result(false, err.Error())
 		}
 		return
 	}
-	key := req.GetS3().GetObjectKey()
-	e.log("info", fmt.Sprintf("Restoring %s database %q into container %q from %s", d.GetDbType(), d.GetDbName(), d.GetContainer(), key))
+	e.log("info", fmt.Sprintf("Restoring %s database %q into container %q from %s", d.GetDbType(), d.GetDbName(), d.GetContainer(), src.label))
 
-	obj, derr := s3client.Download(ctx, s3cfg(req.GetS3()), key)
-	if derr != nil {
-		e.result(false, "open S3 object: "+derr.Error())
+	// Chain: destination → (age-decrypt) → gunzip → docker exec -i stdin.
+	rd, closeSrc, oerr := src.open(ctx)
+	if oerr != nil {
+		e.result(false, statusMessage(oerr))
 		return
 	}
-	defer obj.Close()
+	defer closeSrc()
 
-	gz, gerr := gzip.NewReader(obj)
-	if gerr != nil {
-		e.result(false, "open gzip stream (is the object a Deplo backup?): "+gerr.Error())
-		return
-	}
-	defer gz.Close()
-
-	// Pipeline: S3 object → gunzip → docker exec -i stdin (the restore tool).
-	code, rerr := dockercli.PipeIn(ctx, backupStepTimeout, gz, env, argv...)
+	code, rerr := dockercli.PipeIn(ctx, backupStepTimeout, rd, env, argv...)
 	if rerr != nil {
 		e.result(false, "restore: "+rerr.Error())
 		return
@@ -392,11 +376,9 @@ var errRedisRestoreSeparate = fmt.Errorf("redis restore uses the dedicated file-
 // This requires the container to be restarted by its supervisor; if it isn't
 // (no restart policy), the stream reports the failure clearly rather than
 // leaving redis down silently.
-func (s *Service) restoreRedis(ctx context.Context, req *pb.RestoreRequest, e *rsEmitter) {
-	d := req.GetDatabase()
+func (s *Service) restoreRedis(ctx context.Context, d *pb.DatabaseDescriptor, src *artifactSource, e *rsEmitter) {
 	c, pw := d.GetContainer(), d.GetPassword()
-	key := req.GetS3().GetObjectKey()
-	e.log("info", fmt.Sprintf("Restoring redis %q into container %q from %s", d.GetDbName(), c, key))
+	e.log("info", fmt.Sprintf("Restoring redis %q into container %q from %s", d.GetDbName(), c, src.label))
 
 	// redis-cli auth rides in REDISCLI_AUTH (env), forwarded via `-e REDISCLI_AUTH`
 	// (name only) so the password never lands on the host docker-client's argv.
@@ -426,20 +408,14 @@ func (s *Service) restoreRedis(ctx context.Context, req *pb.RestoreRequest, e *r
 	}
 
 	// 3. Stream the decompressed RDB into the container's dump file.
-	obj, derr := s3client.Download(ctx, s3cfg(req.GetS3()), key)
-	if derr != nil {
-		e.result(false, "open S3 object: "+derr.Error())
+	rd, closeSrc, oerr := src.open(ctx)
+	if oerr != nil {
+		e.result(false, statusMessage(oerr))
 		return
 	}
-	defer obj.Close()
-	gz, gerr := gzip.NewReader(obj)
-	if gerr != nil {
-		e.result(false, "open gzip stream (is the object a Deplo backup?): "+gerr.Error())
-		return
-	}
-	defer gz.Close()
+	defer closeSrc()
 	// `sh -c 'cat > <path>'` writes the piped bytes into the container fs.
-	if code, werr := dockercli.PipeIn(ctx, backupStepTimeout, gz, nil,
+	if code, werr := dockercli.PipeIn(ctx, backupStepTimeout, rd, nil,
 		"exec", "-i", c, "sh", "-c", "cat > "+shellQuote(rdbPath)); werr != nil {
 		e.result(false, "write RDB into container: "+werr.Error())
 		return
@@ -551,8 +527,7 @@ func shellQuote(s string) string {
 //
 // Restore reverses it: wipe + repopulate the volumes + files, then re-Reroute
 // the snapshot so the stack restarts on the EXACT backed-up config.
-func (s *Service) backupProject(ctx context.Context, req *pb.BackupRequest, e *bkEmitter) {
-	p := req.GetProject()
+func (s *Service) backupProject(ctx context.Context, p *pb.ProjectDescriptor, dest *artifactDestination, e *bkEmitter) {
 	if p == nil || p.GetSlug() == "" {
 		e.result(false, "project backup request missing descriptor / slug", "", 0)
 		return
@@ -561,32 +536,27 @@ func (s *Service) backupProject(ctx context.Context, req *pb.BackupRequest, e *b
 		e.result(false, err.Error(), "", 0)
 		return
 	}
-	key := req.GetS3().GetObjectKey()
 	e.log("info", fmt.Sprintf("Backing up project %q (%d volume(s), files=%v)", p.GetSlug(), len(p.GetVolumeNames()), p.GetIncludeFiles()))
 
-	pr, pw := io.Pipe()
-	go func() {
-		gz := gzip.NewWriter(pw)
-		tw := tar.NewWriter(gz)
+	// The tar lives INSIDE the producer so its trailer is written before the
+	// gzip and age layers are finished — the one ordering that yields a readable
+	// artifact (see artifactWriter.Close).
+	produce := func(w io.Writer) error {
+		tw := tar.NewWriter(w)
 		err := s.writeProjectArchive(ctx, p, tw, e)
-		// Finish the tar + gzip BEFORE closing the pipe so the trailer is written.
 		if cerr := tw.Close(); err == nil {
 			err = cerr
 		}
-		if cerr := gz.Close(); err == nil {
-			err = cerr
-		}
-		pw.CloseWithError(err)
-	}()
+		return err
+	}
 
-	size, uerr := s3client.Upload(ctx, s3cfg(req.GetS3()), key, pr)
-	if uerr != nil {
-		_ = pr.CloseWithError(uerr)
-		e.result(false, "upload to S3: "+uerr.Error(), "", 0)
+	size, digest, werr := s.writeArtifact(ctx, dest, produce)
+	if werr != nil {
+		e.result(false, statusMessage(werr), "", 0)
 		return
 	}
-	e.log("info", fmt.Sprintf("Uploaded %s (%d bytes)", key, size))
-	e.result(true, "", key, size)
+	e.log("info", fmt.Sprintf("Wrote %s (%d bytes)", dest.label, size))
+	e.resultWithDigest(true, "", dest.key, size, digest)
 }
 
 // writeProjectArchive streams the project's volumes + files + snapshot into tw.
@@ -715,8 +685,7 @@ func (s *Service) archiveVolume(ctx context.Context, vol string, tw *tar.Writer,
 // restarts the stack on the EXACT backed-up config). A restart failure (e.g. a
 // snapshot image that no longer exists) is reported clearly rather than leaving
 // the stack silently down.
-func (s *Service) restoreProject(ctx context.Context, req *pb.RestoreRequest, e *rsEmitter) {
-	p := req.GetProject()
+func (s *Service) restoreProject(ctx context.Context, p *pb.ProjectDescriptor, src *artifactSource, e *rsEmitter) {
 	if p == nil || p.GetSlug() == "" {
 		e.result(false, "project restore request missing descriptor / slug")
 		return
@@ -726,8 +695,7 @@ func (s *Service) restoreProject(ctx context.Context, req *pb.RestoreRequest, e 
 		e.result(false, err.Error())
 		return
 	}
-	key := req.GetS3().GetObjectKey()
-	e.log("info", fmt.Sprintf("Restoring project %q from %s", slug, key))
+	e.log("info", fmt.Sprintf("Restoring project %q from %s", slug, src.label))
 
 	// Stop the stack so volumes aren't written under us while we wipe them.
 	e.log("info", "Stopping the stack")
@@ -735,20 +703,14 @@ func (s *Service) restoreProject(ctx context.Context, req *pb.RestoreRequest, e 
 		e.log("warn", "stack stop: "+err.Error()+" (continuing)")
 	}
 
-	obj, derr := s3client.Download(ctx, s3cfg(req.GetS3()), key)
-	if derr != nil {
-		e.result(false, "open S3 object: "+derr.Error())
+	rd, closeSrc, oerr := src.open(ctx)
+	if oerr != nil {
+		e.result(false, statusMessage(oerr))
 		return
 	}
-	defer obj.Close()
-	gz, gerr := gzip.NewReader(obj)
-	if gerr != nil {
-		e.result(false, "open gzip stream (is the object a Deplo backup?): "+gerr.Error())
-		return
-	}
-	defer gz.Close()
+	defer closeSrc()
 
-	snapshot, err := s.unpackProjectArchive(ctx, slug, p.GetVolumeNames(), gz, e)
+	snapshot, err := s.unpackProjectArchive(ctx, slug, p.GetVolumeNames(), rd, e)
 	if err != nil {
 		e.result(false, err.Error())
 		return
@@ -958,8 +920,11 @@ func (s *Service) unpackProjectArchive(ctx context.Context, slug string, volumeN
 // S3Check verifies the bucket is reachable + writable for the "Test connection"
 // button. Any agent advertising "backup" can serve it (no Docker needed).
 func (s *Service) S3Check(ctx context.Context, req *pb.S3CheckRequest) (*pb.S3CheckResponse, error) {
+	if req.GetStore() != nil {
+		return s.storeCheck(req.GetStore()), nil
+	}
 	if req.GetS3() == nil {
-		return nil, status.Error(codes.InvalidArgument, "s3 check request missing target")
+		return nil, status.Error(codes.InvalidArgument, "check request missing destination")
 	}
 	if err := s3client.Check(ctx, s3cfg(req.GetS3())); err != nil {
 		return &pb.S3CheckResponse{Ok: false, Error: err.Error()}, nil
@@ -967,11 +932,27 @@ func (s *Service) S3Check(ctx context.Context, req *pb.S3CheckRequest) (*pb.S3Ch
 	return &pb.S3CheckResponse{Ok: true}, nil
 }
 
-// S3Delete deletes a single object (or, with prefix=true, a whole target folder)
-// — backs retention + delete-with-artifacts. Idempotent.
+// S3Delete deletes a single artifact (or, with prefix=true, a whole target
+// folder) — backs retention + delete-with-artifacts. Idempotent.
 func (s *Service) S3Delete(ctx context.Context, req *pb.S3DeleteRequest) (*pb.S3DeleteResponse, error) {
+	if t := req.GetStore(); t != nil {
+		root, err := s.resolveStoreRoot(t.GetRoot(), false)
+		if err != nil {
+			return &pb.S3DeleteResponse{Ok: false, Error: statusMessage(err)}, nil
+		}
+		var n int64
+		if req.GetPrefix() {
+			n, err = storeDeletePrefix(root, t.GetObjectKey())
+		} else {
+			n, err = storeDeleteOne(root, t.GetObjectKey())
+		}
+		if err != nil {
+			return &pb.S3DeleteResponse{Ok: false, Error: statusMessage(err)}, nil
+		}
+		return &pb.S3DeleteResponse{Ok: true, Deleted: n}, nil
+	}
 	if req.GetS3() == nil || req.GetS3().GetObjectKey() == "" {
-		return nil, status.Error(codes.InvalidArgument, "s3 delete request missing key/prefix")
+		return nil, status.Error(codes.InvalidArgument, "delete request missing key/prefix")
 	}
 	cfg := s3cfg(req.GetS3())
 	var (
