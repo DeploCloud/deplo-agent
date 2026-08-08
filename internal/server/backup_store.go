@@ -704,12 +704,28 @@ func (s *Service) ReadStoreFile(req *pb.ReadStoreFileRequest, stream pb.Agent_Re
 	}
 	defer f.Close()
 
+	// Verbatim by default (a relay must not see plaintext); decrypted when the
+	// caller sends an identity, which is the download case. Deliberately NOT
+	// gunzipped: what the user wants is the .tar.gz / .dump.gz itself.
+	var src io.Reader = f
+	if id := req.GetAgeIdentity(); id != "" {
+		identity, perr := age.ParseX25519Identity(id)
+		if perr != nil {
+			return status.Errorf(codes.InvalidArgument, "invalid backup decryption key: %v", perr)
+		}
+		dec, derr := age.Decrypt(f, identity)
+		if derr != nil {
+			return fmt.Errorf("decrypt backup (is this the right recovery key?): %w", derr)
+		}
+		src = dec
+	}
+
 	buf := make([]byte, storeChunkBytes)
 	for {
 		if err := stream.Context().Err(); err != nil {
 			return err
 		}
-		n, rerr := f.Read(buf)
+		n, rerr := src.Read(buf)
 		if n > 0 {
 			// Copy before Send, for the same reason writeArtifact does: the frame
 			// must not alias a buffer the next Read overwrites.

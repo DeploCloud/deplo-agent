@@ -331,9 +331,11 @@ service Agent {
   // same framing, same chunk size, same "control plane is the wire" topology. ----
 
   // Stream an artifact OUT of this host's store, for a restore or a download
-  // whose reader lives elsewhere. Emits `data` frames only (no header). The
-  // bytes are exactly what was written: still age-encrypted, so the control
-  // plane relaying them never holds plaintext.
+  // whose reader lives elsewhere. Emits `data` frames only (no header). By
+  // default the bytes are exactly what was written — still age-encrypted — so a
+  // control plane relaying them to another host never holds plaintext. Pass
+  // `age_identity` to decrypt on the way out instead, which is what a user
+  // downloading their own backup needs.
   rpc ReadStoreFile(ReadStoreFileRequest) returns (stream StoreChunk);
 
   // Receive an artifact INTO this host's store. The FIRST client message MUST
@@ -1451,6 +1453,16 @@ message S3DeleteResponse {
 message ReadStoreFileRequest {
   // The artifact to stream out. Same root rules as every other StoreTarget.
   StoreTarget store = 1;
+  // When set, DECRYPT on the way out (but do not decompress): the caller gets
+  // the .tar.gz / .dump.gz the user actually wants to download. Empty means ship
+  // the bytes verbatim, which is what a cross-host relay wants — there the
+  // control plane must never see plaintext.
+  //
+  // Decryption lives here rather than in the control plane because age is a
+  // STREAM: the agent decrypts chunk by chunk at constant memory, while a
+  // control plane doing it would have to hold a multi-GB artifact to do the same
+  // job.
+  string age_identity = 2;
 }
 
 // A framed chunk of an artifact transfer. ReadStoreFile emits a sequence of

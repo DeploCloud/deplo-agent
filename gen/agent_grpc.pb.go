@@ -348,9 +348,11 @@ type AgentClient interface {
 	// object is not an error. Returns how many objects were removed.
 	S3Delete(ctx context.Context, in *S3DeleteRequest, opts ...grpc.CallOption) (*S3DeleteResponse, error)
 	// Stream an artifact OUT of this host's store, for a restore or a download
-	// whose reader lives elsewhere. Emits `data` frames only (no header). The
-	// bytes are exactly what was written: still age-encrypted, so the control
-	// plane relaying them never holds plaintext.
+	// whose reader lives elsewhere. Emits `data` frames only (no header). By
+	// default the bytes are exactly what was written — still age-encrypted — so a
+	// control plane relaying them to another host never holds plaintext. Pass
+	// `age_identity` to decrypt on the way out instead, which is what a user
+	// downloading their own backup needs.
 	ReadStoreFile(ctx context.Context, in *ReadStoreFileRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[StoreChunk], error)
 	// Receive an artifact INTO this host's store. The FIRST client message MUST
 	// carry `header` (the destination root + object key); every following message
@@ -1446,9 +1448,11 @@ type AgentServer interface {
 	// object is not an error. Returns how many objects were removed.
 	S3Delete(context.Context, *S3DeleteRequest) (*S3DeleteResponse, error)
 	// Stream an artifact OUT of this host's store, for a restore or a download
-	// whose reader lives elsewhere. Emits `data` frames only (no header). The
-	// bytes are exactly what was written: still age-encrypted, so the control
-	// plane relaying them never holds plaintext.
+	// whose reader lives elsewhere. Emits `data` frames only (no header). By
+	// default the bytes are exactly what was written — still age-encrypted — so a
+	// control plane relaying them to another host never holds plaintext. Pass
+	// `age_identity` to decrypt on the way out instead, which is what a user
+	// downloading their own backup needs.
 	ReadStoreFile(*ReadStoreFileRequest, grpc.ServerStreamingServer[StoreChunk]) error
 	// Receive an artifact INTO this host's store. The FIRST client message MUST
 	// carry `header` (the destination root + object key); every following message
