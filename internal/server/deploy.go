@@ -160,8 +160,24 @@ func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitt
 		e.result(false, "deploy request missing rendered compose", "")
 		return
 	}
-	if err := os.WriteFile(stackFile, []byte(req.GetComposeYaml()), 0o644); err != nil {
+	// 0600, and an explicit Chmod after it, because this file can hold SECRETS.
+	// A single-image stack has its environment baked into the rendered YAML by the
+	// control plane (a compose stack gets a --env-file instead, which was already
+	// 0600) - so at 0644 every API key, auth secret and database password of every
+	// single-image app on this host was readable by any process that is not root.
+	//
+	// The Chmod is not belt-and-braces: os.WriteFile applies its mode ONLY when it
+	// creates the file, so every stack already on disk would have kept 0644
+	// forever, through any number of redeploys.
+	//
+	// Nothing but root reads this: the agent renders it and `docker compose -f`
+	// runs from this process.
+	if err := os.WriteFile(stackFile, []byte(req.GetComposeYaml()), 0o600); err != nil {
 		e.result(false, "write stack file: "+err.Error(), "")
+		return
+	}
+	if err := os.Chmod(stackFile, 0o600); err != nil {
+		e.result(false, "secure stack file: "+err.Error(), "")
 		return
 	}
 

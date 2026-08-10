@@ -458,7 +458,13 @@ func (s *Service) Reroute(ctx context.Context, req *pb.RerouteRequest) (*pb.Stac
 	}
 
 	stackFile := s.stackPath(slug)
-	if err := os.WriteFile(stackFile, []byte(req.GetComposeYaml()), 0o644); err != nil {
+	// 0600 + Chmod, same as the deploy path writes it: this YAML carries a
+	// single-image app's whole environment, and Reroute is what a RESTORE runs -
+	// so without this a restore would quietly hand the file back its old 0644.
+	if err := os.Chmod(stackFile, 0o600); err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	if err := os.WriteFile(stackFile, []byte(req.GetComposeYaml()), 0o600); err != nil {
 		return &pb.StackResult{Ok: false, Error: "write stack file: " + err.Error()}, nil
 	}
 
