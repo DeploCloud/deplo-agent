@@ -3,6 +3,8 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"os"
 	"path/filepath"
@@ -685,5 +687,99 @@ func TestRestoreConfig_fallsBackToTheArchive(t *testing.T) {
 	}
 	if got := rr.GetMounts()[0].GetContent(); got != "archived" {
 		t.Errorf("with no mounts from the control plane, the archive's must be used: %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// An artifact has to be the one the control plane wrote
+// ---------------------------------------------------------------------------
+
+// The pre-emptive shape: a store artifact is a local file, so a tampered one is
+// caught before the caller stops a stack or wipes a single volume for it.
+func TestVerifyStoreDigest_catchesATamperedArtifactUpFront(t *testing.T) {
+	s, root := newStoreService(t)
+	recipient, identity := testKeypair(t)
+	key := "deplo/team_a/app/prj_1/20260101T000000Z-brun_1.tar.gz.age"
+
+	dest, err := destinationFromBackup(s, &pb.BackupRequest{
+		Kind:         pb.BackupKind_BACKUP_KIND_PROJECT,
+		Store:        &pb.StoreTarget{ObjectKey: key},
+		AgeRecipient: recipient,
+	}, nil)
+	if err != nil {
+		t.Fatalf("destinationFromBackup: %v", err)
+	}
+	_, digest, err := s.writeArtifact(context.Background(), dest, func(w io.Writer) error {
+		_, werr := w.Write([]byte("the real backup"))
+		return werr
+	})
+	if err != nil {
+		t.Fatalf("writeArtifact: %v", err)
+	}
+
+	if verr := verifyStoreDigest(root, key, digest); verr != nil {
+		t.Errorf("an untouched artifact must verify: %v", verr)
+	}
+	if verr := verifyStoreDigest(root, key, ""); verr != nil {
+		t.Errorf("a run with no recorded digest must still restore: %v", verr)
+	}
+
+	// A compromised storage host can forge one: it holds the recipient, which is a
+	// PUBLIC key it is handed on every backup. age proves confidentiality, not who
+	// wrote the file, so the digest is the only thing standing here.
+	forged, err := age.ParseX25519Recipient(recipient)
+	if err != nil {
+		t.Fatalf("parse recipient: %v", err)
+	}
+	var buf bytes.Buffer
+	enc, err := age.Encrypt(&buf, forged)
+	if err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+	_, _ = enc.Write([]byte("services:\n  x:\n    privileged: true\n"))
+	_ = enc.Close()
+	if werr := os.WriteFile(filepath.Join(root, key), buf.Bytes(), storeFilePerm); werr != nil {
+		t.Fatalf("plant forged artifact: %v", werr)
+	}
+	if verr := verifyStoreDigest(root, key, digest); verr == nil {
+		t.Fatal("a forged artifact must be refused, even though it decrypts fine")
+	}
+	// It really does decrypt: the refusal is the digest's doing, nothing else.
+	if _, oerr := openArtifactReader(bytes.NewReader(buf.Bytes()), identity); oerr == nil {
+		t.Log("confirmed: the forged artifact is valid age, only the digest catches it")
+	}
+}
+
+// The streaming shape: an S3 object or a relayed artifact can only be hashed as
+// it goes past, so the verdict lands at the end - which for a project is still
+// before the stack configuration is re-applied.
+func TestVerifyingReader_settlesOnlyOnFinish(t *testing.T) {
+	payload := bytes.Repeat([]byte("artifact"), 1024)
+	sum := sha256.Sum256(payload)
+	good := hex.EncodeToString(sum[:])
+
+	v := &verifyingReader{r: bytes.NewReader(payload), sum: sha256.New(), expected: good}
+	if _, err := io.ReadAll(v); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if err := v.finish(); err != nil {
+		t.Errorf("an untouched stream must verify: %v", err)
+	}
+
+	// gzip and age stop at their own trailer rather than at EOF, so finish() has
+	// to drain the rest itself - a reader that only checked on io.EOF would never
+	// fire at all.
+	partial := &verifyingReader{r: bytes.NewReader(payload), sum: sha256.New(), expected: good}
+	if _, err := io.CopyN(io.Discard, partial, 64); err != nil {
+		t.Fatalf("partial read: %v", err)
+	}
+	if err := partial.finish(); err != nil {
+		t.Errorf("finish must hash the undrained tail too: %v", err)
+	}
+
+	bad := &verifyingReader{r: bytes.NewReader(append(payload, '!')), sum: sha256.New(), expected: good}
+	_, _ = io.ReadAll(bad)
+	if err := bad.finish(); err == nil {
+		t.Error("a stream that does not match its recorded digest must be refused")
 	}
 }

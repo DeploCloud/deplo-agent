@@ -157,6 +157,10 @@ func (s *Service) restoreClickhouse(ctx context.Context, d *pb.DatabaseDescripto
 		e.result(false, fmt.Sprintf("clickhouse-client exited %d", code))
 		return
 	}
+	if verr := src.verify(); verr != nil {
+		e.result(false, statusMessage(verr))
+		return
+	}
 	e.log("info", "Restore complete")
 	e.result(true, "")
 }

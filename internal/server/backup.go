@@ -374,6 +374,15 @@ func (s *Service) restoreDatabase(ctx context.Context, d *pb.DatabaseDescriptor,
 		e.result(false, fmt.Sprintf("restore tool exited %d", code))
 		return
 	}
+	// A dump is applied AS it streams, so for a streaming source this verdict
+	// arrives after the fact. Saying so is still the only honest option: the
+	// operator has to know the data they just restored came from an artifact that
+	// is not the one Deplo wrote. (A store artifact was proven before any of this
+	// ran, which is the shape the default destination uses.)
+	if verr := src.verify(); verr != nil {
+		e.result(false, statusMessage(verr))
+		return
+	}
 	e.log("info", "Restore complete")
 	e.result(true, "")
 }
@@ -450,6 +459,10 @@ func (s *Service) restoreRedis(ctx context.Context, d *pb.DatabaseDescriptor, sr
 	// 5. Wait for the supervisor to bring redis back AND for it to answer PING.
 	if !waitRedisReady(ctx, c, pw, 60*time.Second) {
 		e.result(false, "redis did not come back after SHUTDOWN NOSAVE — ensure the container has a restart policy")
+		return
+	}
+	if verr := src.verify(); verr != nil {
+		e.result(false, statusMessage(verr))
 		return
 	}
 	e.log("info", "Restore complete")
@@ -730,6 +743,15 @@ func (s *Service) restoreProject(ctx context.Context, p *pb.ProjectDescriptor, s
 	snapshot, err := s.unpackProjectArchive(ctx, slug, p.GetVolumeNames(), rd, e)
 	if err != nil {
 		e.result(false, err.Error())
+		return
+	}
+
+	// The last point this can still refuse. A streaming source (an S3 object, a
+	// relayed artifact) is only provably the right one once it has all gone past,
+	// and that moment is HERE: the archive is unpacked, nothing has been executed,
+	// and re-applying the stack configuration is the next thing that would.
+	if verr := src.verify(); verr != nil {
+		e.result(false, statusMessage(verr))
 		return
 	}
 

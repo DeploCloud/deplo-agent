@@ -1395,6 +1395,18 @@ message RestoreRequest {
   // BackupRequest so a private key cannot ride a routine nightly backup out to a
   // storage host.
   string age_identity = 6;
+  // The hex sha256 the control plane recorded when it WROTE this artifact, so
+  // the agent can prove the bytes it is about to act on are that artifact. Empty
+  // means "no recorded digest" - a run taken before integrity checking shipped -
+  // and the check is skipped rather than failing every old restore point.
+  //
+  // It matters because an artifact is not trusted input: a bucket object is
+  // replaceable by anyone with write access, and a store artifact is forgeable by
+  // a compromised storage host (age gives confidentiality, not authenticity - the
+  // recipient is a public key that host is handed on every backup). The digest is
+  // verified as the stream is consumed, so a mismatch aborts the restore before
+  // the stack configuration is ever re-applied.
+  string expected_sha256 = 7;
 }
 
 message RestoreEvent {
@@ -1474,6 +1486,18 @@ message ReadStoreFileRequest {
   // control plane doing it would have to hold a multi-GB artifact to do the same
   // job.
   string age_identity = 2;
+  // The hex sha256 the control plane recorded when it WROTE this artifact, so
+  // the agent can prove the bytes it is about to act on are that artifact. Empty
+  // means "no recorded digest" - a run taken before integrity checking shipped -
+  // and the check is skipped rather than failing every old restore point.
+  //
+  // It matters because an artifact is not trusted input: a bucket object is
+  // replaceable by anyone with write access, and a store artifact is forgeable by
+  // a compromised storage host (age gives confidentiality, not authenticity - the
+  // recipient is a public key that host is handed on every backup). The digest is
+  // verified as the stream is consumed, so a mismatch aborts the restore before
+  // the stack configuration is ever re-applied.
+  string expected_sha256 = 3;
 }
 
 // A framed chunk of an artifact transfer. ReadStoreFile emits a sequence of
@@ -1515,6 +1539,18 @@ message RestoreChunk {
     // The age identity the artifact was encrypted to. Always required: this RPC
     // exists only for store artifacts, and those are always encrypted.
     string age_identity = 4;
+    // The hex sha256 the control plane recorded when it WROTE this artifact, so
+    // the agent can prove the bytes it is about to act on are that artifact. Empty
+    // means "no recorded digest" - a run taken before integrity checking shipped -
+    // and the check is skipped rather than failing every old restore point.
+    //
+    // It matters because an artifact is not trusted input: a bucket object is
+    // replaceable by anyone with write access, and a store artifact is forgeable by
+    // a compromised storage host (age gives confidentiality, not authenticity - the
+    // recipient is a public key that host is handed on every backup). The digest is
+    // verified as the stream is consumed, so a mismatch aborts the restore before
+    // the stack configuration is ever re-applied.
+    string expected_sha256 = 5;
   }
   oneof frame {
     Header header = 1;

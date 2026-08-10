@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 	"path"
@@ -513,6 +514,87 @@ func openArtifactReader(src io.Reader, identity string) (io.ReadCloser, error) {
 // artifactSource / artifactSink — where a backup goes, where a restore reads
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Integrity — proving an artifact is the one the control plane wrote
+// ---------------------------------------------------------------------------
+//
+// An artifact is NOT trusted input. A bucket object can be replaced by anyone
+// with write access to the bucket, and a store artifact can be FORGED by a
+// compromised storage host, because age gives confidentiality and not
+// authenticity: the recipient is a public key that host is handed on every
+// single backup. So the control plane records the sha256 of what it wrote, sends
+// it back on the restore, and these two helpers check it.
+//
+// TWO SHAPES, because only one of them can be pre-emptive:
+//
+//   - A store artifact is a LOCAL FILE. verifyStoreDigest reads it once up front,
+//     before the stack is stopped or a single volume is wiped, so a tampered
+//     artifact costs nothing but the read. That is the case worth optimising for:
+//     it is the shape the platform's own default destination uses.
+//   - An S3 object or a relayed stream can only be hashed as it goes past, so
+//     verifyingReader reports at the end. For a project that is still in time -
+//     the archive is unpacked first and the stack configuration re-applied after,
+//     so a mismatch aborts before anything is executed. For a database the dump
+//     has already been piped into the engine, and the honest thing is to say so.
+
+// verifyStoreDigest hashes an artifact already on this host and compares it to
+// the digest the control plane recorded. An empty `expected` means the run
+// predates integrity checking, so there is nothing to compare against.
+func verifyStoreDigest(root, key, expected string) error {
+	if expected == "" {
+		return nil
+	}
+	f, err := storeOpen(root, key)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	sum := sha256.New()
+	if _, cerr := io.Copy(sum, f); cerr != nil {
+		return fmt.Errorf("read backup artifact to verify it: %w", cerr)
+	}
+	return digestMismatch(hex.EncodeToString(sum.Sum(nil)), expected)
+}
+
+// digestMismatch is the ONE place the comparison and its wording live, so a
+// store check and a stream check can never disagree about what went wrong.
+func digestMismatch(got, expected string) error {
+	if strings.EqualFold(got, expected) {
+		return nil
+	}
+	return status.Errorf(codes.DataLoss,
+		"this backup is not the one Deplo wrote: expected sha256 %s, the artifact is %s. "+
+			"Refusing to restore it - the file has been changed or replaced since the backup ran.",
+		expected, got)
+}
+
+// verifyingReader hashes what passes through it and fails once the stream ends.
+// `finish` is what actually decides: gzip and age both stop reading at their own
+// trailer rather than at EOF, so nothing here can rely on seeing io.EOF - the
+// caller drains and asks, at the point where it still has somewhere to abort to.
+type verifyingReader struct {
+	r        io.Reader
+	sum      hash.Hash
+	expected string
+}
+
+func (v *verifyingReader) Read(p []byte) (int, error) {
+	n, err := v.r.Read(p)
+	if n > 0 {
+		v.sum.Write(p[:n])
+	}
+	return n, err
+}
+
+func (v *verifyingReader) finish() error {
+	// Whatever the decompressor left behind still counts toward the digest: it
+	// hashes the artifact as WRITTEN, not as consumed.
+	if _, err := io.Copy(v.sum, v.r); err != nil {
+		return fmt.Errorf("read the rest of the artifact to verify it: %w", err)
+	}
+	return digestMismatch(hex.EncodeToString(v.sum.Sum(nil)), v.expected)
+}
+
 // artifactSource names where a restore reads its artifact, so restoreDatabase /
 // restoreProject / restoreRedis / restoreClickhouse stay identical whether the
 // bytes come from S3, from this host's disk, or from a RestoreFrom relay.
@@ -521,6 +603,11 @@ type artifactSource struct {
 	store *pb.StoreTarget
 	// identity decrypts a store artifact (and a relayed one). Empty for S3.
 	identity string
+	// expectedSha256 is the digest the control plane recorded for this artifact.
+	// Empty for a run taken before integrity checking shipped.
+	expectedSha256 string
+	// verifier is set by open() for the streaming shapes; verify() consults it.
+	verifier *verifyingReader
 	// stream, when set, IS the artifact — the cross-host RestoreFrom case, where
 	// there is no destination on this host to open.
 	stream io.Reader
@@ -542,6 +629,11 @@ func sourceFromRestore(s *Service, req *pb.RestoreRequest) (*artifactSource, err
 		if err != nil {
 			return nil, err
 		}
+		// The artifact is right here, so prove it is the right one NOW - before the
+		// caller stops a stack or wipes a volume for it.
+		if verr := verifyStoreDigest(root, req.GetStore().GetObjectKey(), req.GetExpectedSha256()); verr != nil {
+			return nil, verr
+		}
 		return &artifactSource{
 			store:    &pb.StoreTarget{Root: root, ObjectKey: req.GetStore().GetObjectKey()},
 			identity: req.GetAgeIdentity(),
@@ -552,9 +644,10 @@ func sourceFromRestore(s *Service, req *pb.RestoreRequest) (*artifactSource, err
 		// written before bucket artifacts were encrypted, and openArtifactReader
 		// then skips the age layer — which is why old object keys keep restoring.
 		return &artifactSource{
-			s3:       req.GetS3(),
-			identity: req.GetAgeIdentity(),
-			label:    req.GetS3().GetObjectKey(),
+			s3:             req.GetS3(),
+			identity:       req.GetAgeIdentity(),
+			expectedSha256: req.GetExpectedSha256(),
+			label:          req.GetS3().GetObjectKey(),
 		}, nil
 	default:
 		return nil, status.Error(codes.InvalidArgument, "restore request names no artifact to restore from")
@@ -586,6 +679,14 @@ func (a *artifactSource) open(ctx context.Context) (io.Reader, func(), error) {
 		raw = obj
 		closes = append(closes, func() { _ = obj.Close() })
 	}
+	// Hash the RAW bytes - the artifact as written, ciphertext and all - so the
+	// digest means the same thing the writer meant. Wrapping after the decryption
+	// would hash the plaintext, which is not what anyone recorded. The store shape
+	// is already verified up front, so it never lands here.
+	if a.expectedSha256 != "" {
+		a.verifier = &verifyingReader{r: raw, sum: sha256.New(), expected: a.expectedSha256}
+		raw = a.verifier
+	}
 	rc, err := openArtifactReader(raw, a.identity)
 	if err != nil {
 		for _, c := range closes {
@@ -599,6 +700,16 @@ func (a *artifactSource) open(ctx context.Context) (io.Reader, func(), error) {
 			c()
 		}
 	}, nil
+}
+
+// verify settles a STREAMING source's digest. A no-op for a store artifact
+// (already checked before anything was touched) and for a run with no recorded
+// digest. Call it at the last point the restore can still refuse.
+func (a *artifactSource) verify() error {
+	if a.verifier == nil {
+		return nil
+	}
+	return a.verifier.finish()
 }
 
 // artifactDestination names where a finished artifact lands, so backupDatabase
@@ -771,6 +882,15 @@ func (s *Service) ReadStoreFile(req *pb.ReadStoreFileRequest, stream pb.Agent_Re
 	}
 	defer f.Close()
 
+	// Prove it is the artifact the control plane wrote BEFORE streaming a byte of
+	// it. A download hands the file to a person and a relay-restore hands it to
+	// another host; neither should receive something that has been replaced on
+	// this disk since the backup ran. It costs one extra read of a local file, and
+	// unlike the streaming shapes it can still refuse.
+	if verr := verifyStoreDigest(root, t.GetObjectKey(), req.GetExpectedSha256()); verr != nil {
+		return verr
+	}
+
 	// Verbatim by default (a relay must not see plaintext); decrypted when the
 	// caller sends an identity, which is the download case. Deliberately NOT
 	// gunzipped: what the user wants is the .tar.gz / .dump.gz itself.
@@ -916,7 +1036,12 @@ func (s *Service) RestoreFrom(stream pb.Agent_RestoreFromServer) error {
 	}()
 	defer pr.Close()
 
-	src := &artifactSource{stream: pr, identity: h.GetAgeIdentity(), label: "the control plane"}
+	src := &artifactSource{
+		stream:         pr,
+		identity:       h.GetAgeIdentity(),
+		expectedSha256: h.GetExpectedSha256(),
+		label:          "the control plane",
+	}
 	switch h.GetKind() {
 	case pb.BackupKind_BACKUP_KIND_DATABASE:
 		s.restoreDatabase(ctx, h.GetDatabase(), src, e)
