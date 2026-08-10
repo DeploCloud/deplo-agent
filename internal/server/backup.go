@@ -755,7 +755,7 @@ func (s *Service) restoreProject(ctx context.Context, p *pb.ProjectDescriptor, s
 		return
 	}
 
-	rr := restoreConfig(slug, p, snapshot)
+	rr := restoreConfig(slug, p, snapshot, src.integrityProven)
 	if rr.ComposeYaml == "" {
 		e.log("warn", "No compose snapshot in the archive; leaving the stack stopped")
 		e.result(true, "")
@@ -777,38 +777,61 @@ func (s *Service) restoreProject(ctx context.Context, p *pb.ProjectDescriptor, s
 
 // restoreConfig picks the stack configuration a restore brings back up, and it
 // is the one place in this file where "which of two sources do we trust" is
-// decided — so it is its own function, with its own test.
+// decided - so it is its own function, with its own test.
 //
-// THE CONTROL PLANE'S DESCRIPTOR WINS; the archive's snapshot is the fallback.
-// It used to be the other way round, and that inversion was the single place a
-// backup artifact turned into executable input: this YAML is written to the
-// stack file and handed to `docker compose up`, so an artifact that declares a
-// bind mount of `/`, or `privileged: true`, or the docker socket, is root on
-// this host. An artifact is not trusted bytes. An S3 object can be replaced by
-// anyone with write access to the bucket, and a store artifact can be FORGED by
-// a compromised storage host: age gives confidentiality, not authenticity, and
-// the recipient is a public key that host is handed on every single backup.
+// A backup is meant to restore DATA AND CONFIG: the archive carries the compose
+// and env the app was actually running, so a restore puts back the state the
+// operator remembers, not today's config wrapped around last month's volumes.
+// That is what `proven` gates, and nothing else.
 //
-// The descriptor arrives down the mTLS channel from the control plane, the only
-// party this agent trusts, so preferring it costs nothing on the happy path -
-// for any backup of a config that still exists the two are identical. The
-// archive still wins when the control plane sends nothing, which is what keeps a
-// restore working after the config it captured is gone; that fallback is covered
-// instead by the control plane refusing to restore an artifact whose sha256 does
-// not match the one it recorded when it wrote it.
-func restoreConfig(slug string, p *pb.ProjectDescriptor, snap projectSnapshot) *pb.RerouteRequest {
-	compose := p.GetComposeYaml()
-	if compose == "" {
-		compose = snap.compose
+// PROVEN means the control plane recorded a sha256 when it wrote this artifact
+// and the agent has just re-checked it - up front for a store artifact, at the
+// end of the stream for the others. Then the archive is exactly the bytes deplo
+// produced and its snapshot is as trustworthy as the descriptor.
+//
+// UNPROVEN is a run taken before integrity checking shipped, and there the
+// descriptor wins. It has to: this YAML is written to the stack file and handed
+// to `docker compose up`, so an artifact declaring a bind mount of `/`, or
+// `privileged: true`, or the docker socket, is root on this host. An artifact is
+// not trusted bytes - an S3 object can be replaced by anyone with write access
+// to the bucket, and a store artifact can be FORGED by a compromised storage
+// host, because age gives confidentiality and not authenticity: the recipient is
+// a public key that host is handed on every single backup.
+//
+// The descriptor is also the fallback whenever the archive carries nothing,
+// which is what keeps a restore working for a config that no longer exists.
+func restoreConfig(
+	slug string,
+	p *pb.ProjectDescriptor,
+	snap projectSnapshot,
+	proven bool,
+) *pb.RerouteRequest {
+	// `first` is whichever source this restore trusts; the other is the fallback.
+	pick := func(fromArchive, fromControlPlane string) string {
+		if proven && fromArchive != "" {
+			return fromArchive
+		}
+		if fromControlPlane != "" {
+			return fromControlPlane
+		}
+		return fromArchive
 	}
+	compose := pick(snap.compose, p.GetComposeYaml())
+
 	env := p.GetEnvSnapshot()
-	if len(env) == 0 {
+	if proven && len(snap.env) > 0 {
+		env = snap.env
+	} else if len(env) == 0 {
 		env = snap.env
 	}
+
 	mounts := p.GetMounts()
-	if len(mounts) == 0 {
+	if proven && len(snap.mounts) > 0 {
+		mounts = snap.mounts
+	} else if len(mounts) == 0 {
 		mounts = snap.mounts
 	}
+
 	return &pb.RerouteRequest{Slug: slug, ComposeYaml: compose, Env: env, Mounts: mounts}
 }
 

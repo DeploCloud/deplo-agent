@@ -642,7 +642,38 @@ func TestSourceFromRestore_s3CarriesTheIdentity(t *testing.T) {
 // reachable - a bucket object anyone with write access replaces, or a store
 // artifact a compromised storage host forges with the public recipient it is
 // handed on every backup - and it ends up at `docker compose up` as root.
-func TestRestoreConfig_theControlPlaneWinsOverTheArchive(t *testing.T) {
+func TestRestoreConfig_aProvenArchiveRestoresItsOwnConfig(t *testing.T) {
+	// The whole point of the snapshot: a restore puts back the config the app was
+	// running, not today's config wrapped around last month's volumes.
+	archived := "services:\n  web:\n    image: app:0\n"
+	rr := restoreConfig("blog", &pb.ProjectDescriptor{
+		ComposeYaml: "services:\n  web:\n    image: app:2\n",
+		EnvSnapshot: map[string]string{"FROM": "today"},
+		Mounts:      []*pb.MountFile{{Path: "a.conf", Content: "today"}},
+	}, projectSnapshot{
+		compose: archived,
+		env:     map[string]string{"FROM": "archive"},
+		mounts:  []*pb.MountFile{{Path: "a.conf", Content: "archived"}},
+	}, true)
+
+	if rr.GetComposeYaml() != archived {
+		t.Error("a proven archive must restore the config it captured")
+	}
+	if rr.GetEnv()["FROM"] != "archive" {
+		t.Error("a proven archive must restore the env it captured")
+	}
+	if got := rr.GetMounts()[0].GetContent(); got != "archived" {
+		t.Errorf("a proven archive must restore its own mounts: %q", got)
+	}
+}
+
+// The artifact's own compose is what a restore executes. It is attacker-
+// reachable - a bucket object anyone with write access replaces, or a store
+// artifact a compromised storage host forges with the public recipient it is
+// handed on every backup - and it ends up at `docker compose up` as root. With
+// no digest to check it against, the control plane's descriptor is the only
+// thing here that came from a party this agent trusts.
+func TestRestoreConfig_anUnprovenArchiveNeverWins(t *testing.T) {
 	trusted := "services:\n  web:\n    image: app:1\n"
 	hostile := "services:\n  web:\n    image: alpine\n    privileged: true\n    volumes: ['/:/host']\n"
 
@@ -654,39 +685,41 @@ func TestRestoreConfig_theControlPlaneWinsOverTheArchive(t *testing.T) {
 		compose: hostile,
 		env:     map[string]string{"FROM": "archive"},
 		mounts:  []*pb.MountFile{{Path: "a.conf", Content: "hostile"}},
-	})
+	}, false)
 
 	if rr.GetComposeYaml() != trusted {
-		t.Error("the archive's compose must never win over the control plane's")
+		t.Error("an unverifiable archive must never reach `docker compose up`")
 	}
 	if rr.GetEnv()["FROM"] != "control-plane" {
-		t.Error("the archive's env must never win over the control plane's")
+		t.Error("an unverifiable archive's env must not win either")
 	}
 	if got := rr.GetMounts()[0].GetContent(); got != "trusted" {
-		t.Errorf("the archive's mounts must never win: %q", got)
+		t.Errorf("an unverifiable archive's mounts must not win: %q", got)
 	}
 	if rr.GetSlug() != "blog" {
 		t.Errorf("slug = %q", rr.GetSlug())
 	}
 }
 
-// The archive is still the fallback, which is what keeps a restore working after
-// the config it captured no longer exists control-plane side.
+// Either way, the archive is the fallback when the control plane sends nothing -
+// which is what keeps a restore working for a config that no longer exists.
 func TestRestoreConfig_fallsBackToTheArchive(t *testing.T) {
 	archived := "services:\n  web:\n    image: app:0\n"
-	rr := restoreConfig("blog", &pb.ProjectDescriptor{}, projectSnapshot{
-		compose: archived,
-		env:     map[string]string{"FROM": "archive"},
-		mounts:  []*pb.MountFile{{Path: "a.conf", Content: "archived"}},
-	})
-	if rr.GetComposeYaml() != archived {
-		t.Error("with nothing from the control plane, the archive must be used")
-	}
-	if rr.GetEnv()["FROM"] != "archive" {
-		t.Error("with no env from the control plane, the archive's must be used")
-	}
-	if got := rr.GetMounts()[0].GetContent(); got != "archived" {
-		t.Errorf("with no mounts from the control plane, the archive's must be used: %q", got)
+	for _, proven := range []bool{true, false} {
+		rr := restoreConfig("blog", &pb.ProjectDescriptor{}, projectSnapshot{
+			compose: archived,
+			env:     map[string]string{"FROM": "archive"},
+			mounts:  []*pb.MountFile{{Path: "a.conf", Content: "archived"}},
+		}, proven)
+		if rr.GetComposeYaml() != archived {
+			t.Errorf("proven=%v: with nothing from the control plane, use the archive", proven)
+		}
+		if rr.GetEnv()["FROM"] != "archive" {
+			t.Errorf("proven=%v: same for the env", proven)
+		}
+		if got := rr.GetMounts()[0].GetContent(); got != "archived" {
+			t.Errorf("proven=%v: same for the mounts: %q", proven, got)
+		}
 	}
 }
 
@@ -781,5 +814,42 @@ func TestVerifyingReader_settlesOnlyOnFinish(t *testing.T) {
 	_, _ = io.ReadAll(bad)
 	if err := bad.finish(); err == nil {
 		t.Error("a stream that does not match its recorded digest must be refused")
+	}
+}
+
+// verify() is also what promotes a streaming source to "proven", which is what
+// lets its own configuration snapshot be restored rather than discarded.
+func TestArtifactSource_verifyMarksTheSourceProven(t *testing.T) {
+	payload := []byte("artifact")
+	sum := sha256.Sum256(payload)
+	src := &artifactSource{
+		verifier: &verifyingReader{
+			r:        bytes.NewReader(payload),
+			sum:      sha256.New(),
+			expected: hex.EncodeToString(sum[:]),
+		},
+	}
+	if src.integrityProven {
+		t.Fatal("nothing is proven before it has been checked")
+	}
+	if err := src.verify(); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if !src.integrityProven {
+		t.Error("a stream that matched its digest is proven")
+	}
+
+	failing := &artifactSource{
+		verifier: &verifyingReader{
+			r:        bytes.NewReader([]byte("something else")),
+			sum:      sha256.New(),
+			expected: hex.EncodeToString(sum[:]),
+		},
+	}
+	if err := failing.verify(); err == nil {
+		t.Fatal("a mismatch must error")
+	}
+	if failing.integrityProven {
+		t.Error("a mismatch must never mark the source proven")
 	}
 }

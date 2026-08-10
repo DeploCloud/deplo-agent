@@ -608,6 +608,11 @@ type artifactSource struct {
 	expectedSha256 string
 	// verifier is set by open() for the streaming shapes; verify() consults it.
 	verifier *verifyingReader
+	// integrityProven is true once this artifact has been checked against the
+	// digest the control plane recorded - up front for a store artifact, at the
+	// end of the stream for the others. It is what decides whether the ARCHIVE's
+	// own configuration snapshot may be trusted (see restoreConfig).
+	integrityProven bool
 	// stream, when set, IS the artifact — the cross-host RestoreFrom case, where
 	// there is no destination on this host to open.
 	stream io.Reader
@@ -635,9 +640,10 @@ func sourceFromRestore(s *Service, req *pb.RestoreRequest) (*artifactSource, err
 			return nil, verr
 		}
 		return &artifactSource{
-			store:    &pb.StoreTarget{Root: root, ObjectKey: req.GetStore().GetObjectKey()},
-			identity: req.GetAgeIdentity(),
-			label:    filepath.Join(root, req.GetStore().GetObjectKey()),
+			store:           &pb.StoreTarget{Root: root, ObjectKey: req.GetStore().GetObjectKey()},
+			identity:        req.GetAgeIdentity(),
+			integrityProven: req.GetExpectedSha256() != "",
+			label:           filepath.Join(root, req.GetStore().GetObjectKey()),
 		}, nil
 	case req.GetS3() != nil && req.GetS3().GetObjectKey() != "":
 		// The identity rides an S3 restore too. Empty means a LEGACY artifact,
@@ -709,7 +715,11 @@ func (a *artifactSource) verify() error {
 	if a.verifier == nil {
 		return nil
 	}
-	return a.verifier.finish()
+	if err := a.verifier.finish(); err != nil {
+		return err
+	}
+	a.integrityProven = true
+	return nil
 }
 
 // artifactDestination names where a finished artifact lands, so backupDatabase
