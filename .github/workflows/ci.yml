@@ -6,6 +6,11 @@ on:
   push:
     branches: ["main"]
   pull_request:
+  # Weekly, so an advisory published against a dependency we already ship turns
+  # the repo red on its own instead of waiting for the next commit. Mirrors the
+  # control plane's weekly `bun audit` run.
+  schedule:
+    - cron: "0 6 * * 1"
 
 jobs:
   test:
@@ -17,6 +22,13 @@ jobs:
           go-version-file: go.mod
           cache: true
       - run: go vet ./...
+      # The agent's gRPC port is reachable by anyone who can open a socket, and
+      # the TLS handshake + client-cert parse happen BEFORE mTLS proves anything
+      # — so a stdlib crypto/tls or crypto/x509 advisory is pre-auth surface here.
+      # `go-version-file: go.mod` above means the `go` directive is also the
+      # toolchain pin: bump it to patch the standard library.
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
       - run: go test ./...
       - name: Verify it builds static for both target arches
         run: |
