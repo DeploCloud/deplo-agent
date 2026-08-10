@@ -397,9 +397,21 @@ func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.Stack
 	}
 	res, err := dockercli.Run(ctx, 90*time.Second, downArgs...)
 	if err == nil && res.Code == 0 {
-		if ref.GetRemoveVolumes() {
-			s.removeStackFiles(slug)
-		}
+		// The stack files go on ANY successful `down`, not just a `down -v`.
+		//
+		// They used to be swept only when volumes were removed too, and deleting an
+		// App deliberately keeps its volumes - so every app ever deleted left its
+		// rendered compose and its env file behind, permanently. On a long-lived
+		// host that is dozens of files nothing will ever read again, each holding
+		// the env the app was running with. They were also the largest group of
+		// world-readable secrets on disk before the mode fix.
+		//
+		// Nothing needs them once the stack is down: the compose is re-rendered by
+		// the control plane on every deploy, and a surviving named volume is found
+		// by its own docker name, not by this file. The FAILED paths below still
+		// keep them, which is where the "a retry needs it" reasoning actually
+		// applies.
+		s.removeStackFiles(slug)
 		return &pb.StackResult{Ok: true}, nil
 	}
 	// `rm -f` is idempotent for a missing container (exit 0), so the common

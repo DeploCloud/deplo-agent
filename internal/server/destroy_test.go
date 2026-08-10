@@ -130,9 +130,12 @@ func TestDestroyStack_removeVolumesDownFailKeepsFileAndReportsNotOk(t *testing.T
 	}
 }
 
-// Without removeVolumes the stack file is LEFT in place (the original app-teardown
-// behaviour): only the containers come down, the compose file and volumes survive.
-func TestDestroyStack_keepsStackFileByDefault(t *testing.T) {
+// A successful teardown sweeps the stack files whether or not volumes went with
+// them. Deleting an App deliberately KEEPS its volumes, so pinning the sweep to
+// removeVolumes meant every deleted app left its rendered compose and its env
+// file on the host permanently - dozens of files nothing would read again, each
+// holding the environment that app ran with.
+func TestDestroyStack_sweepsStackFilesOnAnySuccessfulDown(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if !dockercli.Available(ctx) {
@@ -143,7 +146,11 @@ func TestDestroyStack_keepsStackFileByDefault(t *testing.T) {
 
 	slug := "app-keepfile-xyz"
 	stackFile := filepath.Join(stackDir, slug+".yml")
-	if err := os.WriteFile(stackFile, []byte("services: {}\n"), 0o644); err != nil {
+	envFile := filepath.Join(stackDir, slug+".env")
+	if err := os.WriteFile(stackFile, []byte("services: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(envFile, []byte("FOO=bar\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -154,7 +161,10 @@ func TestDestroyStack_keepsStackFileByDefault(t *testing.T) {
 	if !res.GetOk() {
 		t.Fatalf("destroy should be Ok, got err=%q", res.GetError())
 	}
-	if _, err := os.Stat(stackFile); err != nil {
-		t.Errorf("default destroy must leave the stack file in place, stat err=%v", err)
+	if _, err := os.Stat(stackFile); !os.IsNotExist(err) {
+		t.Errorf("a successful destroy must sweep the stack file, stat err=%v", err)
+	}
+	if _, err := os.Stat(envFile); !os.IsNotExist(err) {
+		t.Errorf("and the env file with it, stat err=%v", err)
 	}
 }
