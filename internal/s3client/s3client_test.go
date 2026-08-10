@@ -86,3 +86,62 @@ func TestNew_ssrfGuard(t *testing.T) {
 		t.Errorf("opt-in private endpoint: unexpected error %v", err)
 	}
 }
+
+// The quirk flags are an allowlist, and everything else is DROPPED rather than
+// refused — an agent mid-rollout will see flags a newer control plane accepted,
+// and failing there would make one destination work per host.
+func TestParseExtraArgs(t *testing.T) {
+	opts, unknown := parseExtraArgs([]string{
+		"--s3-force-path-style=true",
+		"--s3-sign-accept-encoding=false",
+		"--s3-insecure-skip-verify=true",
+		"--s3-disable-content-sha256=true",
+	})
+	if opts.forcePathStyle == nil || !*opts.forcePathStyle {
+		t.Errorf("force-path-style: want true, got %v", opts.forcePathStyle)
+	}
+	// Inverted: signing the header OFF is what stops Go adding it after signing.
+	if !opts.noCompression {
+		t.Error("sign-accept-encoding=false should disable compression")
+	}
+	if !opts.insecureSkipVerify || !opts.disableContentSha256 {
+		t.Errorf("skip-verify/content-sha256 not applied: %+v", opts)
+	}
+	if len(unknown) != 0 {
+		t.Errorf("allowed flags reported as unknown: %v", unknown)
+	}
+}
+
+func TestParseExtraArgs_dropsWhatItDoesNotKnow(t *testing.T) {
+	opts, unknown := parseExtraArgs([]string{
+		"--s3-upload-cutoff=200M", // real rclone flag, not one we map
+		"--s3-force-path-style",   // no value
+		"--s3-force-path-style=maybe",
+		"",
+	})
+	if opts.forcePathStyle != nil || opts.noCompression || opts.insecureSkipVerify {
+		t.Errorf("nothing should have been applied, got %+v", opts)
+	}
+	if len(unknown) != 4 {
+		t.Errorf("want 4 unknown tokens, got %d (%v)", len(unknown), unknown)
+	}
+}
+
+// A flag that changes how the client is built must not stop it being built.
+func TestNew_withExtraArgs(t *testing.T) {
+	cfg := Config{
+		Endpoint:             "http://127.0.0.1:9000",
+		Bucket:               "b",
+		AccessKey:            "a",
+		SecretKey:            "s",
+		AllowPrivateEndpoint: true,
+		ExtraArgs: []string{
+			"--s3-sign-accept-encoding=false",
+			"--s3-insecure-skip-verify=true",
+			"--not-a-flag-we-know=true",
+		},
+	}
+	if _, err := New(cfg); err != nil {
+		t.Fatalf("New with extra args: %v", err)
+	}
+}

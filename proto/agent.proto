@@ -1245,6 +1245,21 @@ message S3Target {
   // flag on instance admin - the same bar as a custom store path - so the person
   // turning it on is the person who owns the network.
   bool allow_private_endpoint = 8;
+  // Per-destination quirks of ONE S3-compatible store, as `--flag=value` tokens
+  // (`--s3-sign-accept-encoding=false`, `--s3-force-path-style=true`, …).
+  //
+  // Every S3-compatible gateway is S3-compatible in its own way, and the ones
+  // that need a workaround need a different one each. Rather than grow a bool per
+  // gateway on this message - each of which then has to be understood by every
+  // agent that ever sees it - the control plane sends the operator's tokens and
+  // the agent maps the ones it knows onto minio-go options.
+  //
+  // Both sides validate against an allowlist and BOTH sides drop what they do not
+  // recognise: an unknown flag must never fail a backup, because the alternative
+  // is a fleet where the same destination works on one host and refuses on the
+  // next. Capability: "backup-s3-args" (an older agent ignores the field
+  // entirely, and the control plane says so rather than pretending it applied).
+  repeated string extra_args = 9;
 }
 
 // A directory on THIS host's filesystem that holds backup artifacts — the second

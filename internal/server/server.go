@@ -101,6 +101,13 @@ var Capabilities = []string{
 	// `allow_private_endpoint` rides the same flag: a self-hosted bucket on an
 	// RFC1918 address is unreachable without it.
 	"backup-encrypt-s3",
+	// `S3Target.extra_args` is read: a destination's advanced quirk flags
+	// (`--s3-sign-accept-encoding=false`, `--s3-force-path-style=true`, …) reach
+	// the minio client instead of being ignored. Unlike the encryption flag above
+	// this is a SOFT gate - the control plane sends the flags either way and warns
+	// when the agent is too old, because a dropped workaround is a slower or
+	// noisier backup, not a backup that silently lost its encryption.
+	"backup-s3-args",
 	// Allow-listed Docker disk reclaim (DockerCleanup): build cache, dangling
 	// images, orphaned buildkit volumes, unused app images. NEVER a bare prune.
 	"docker-cleanup",

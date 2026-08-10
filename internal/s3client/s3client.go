@@ -12,9 +12,12 @@ package s3client
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
+	"log"
 	"net"
+	"strconv"
 	"strings"
 
 	"github.com/minio/minio-go/v7"
@@ -37,6 +40,72 @@ type Config struct {
 	// dials it as root, so a value like 169.254.169.254 (cloud metadata) or
 	// 127.0.0.1 must not be reachable unless the destination explicitly opted in.
 	AllowPrivateEndpoint bool
+	// ExtraArgs are the destination's advanced quirk flags (`--flag=value`), as
+	// the operator typed them. See parseExtraArgs: anything not on the allowlist
+	// is DROPPED, never an error.
+	ExtraArgs []string
+}
+
+// extraOptions is what a Config's ExtraArgs actually amount to, once the tokens
+// the agent understands have been picked out of them.
+type extraOptions struct {
+	// forcePathStyle overrides the control plane's provider-derived choice.
+	forcePathStyle *bool
+	// noCompression stops Go's transport adding `Accept-Encoding: gzip` AFTER
+	// the request was signed — the header the signature does not cover, which is
+	// what some gateways reject.
+	noCompression bool
+	// insecureSkipVerify accepts any TLS certificate. For a self-hosted store on
+	// a self-signed cert, which is an ordinary thing on a private network.
+	insecureSkipVerify bool
+	// disableContentSha256 uploads without the streaming content hash, for
+	// gateways that reject the trailer it produces.
+	disableContentSha256 bool
+}
+
+/*
+parseExtraArgs reads the flags this agent knows out of a destination's tokens.
+
+It is an ALLOWLIST, and unknown tokens are dropped rather than refused. Both
+sides validate — the control plane refuses an unknown flag at the form, so one
+arriving here means the two versions disagree, which happens on every fleet
+mid-rollout. Failing the backup would make the same destination work on one host
+and refuse on the next, for a flag whose entire purpose is a workaround; the
+honest behaviour is to apply what this version understands and log the rest.
+
+Accepted shape is `--flag=value` with a boolean value, matching the vocabulary of
+the tools operators already reach for when a gateway misbehaves.
+*/
+func parseExtraArgs(args []string) (extraOptions, []string) {
+	var opts extraOptions
+	var unknown []string
+	for _, raw := range args {
+		name, value, ok := strings.Cut(strings.TrimSpace(raw), "=")
+		if !ok {
+			unknown = append(unknown, raw)
+			continue
+		}
+		on, err := strconv.ParseBool(value)
+		if err != nil {
+			unknown = append(unknown, raw)
+			continue
+		}
+		switch name {
+		case "--s3-force-path-style":
+			opts.forcePathStyle = &on
+		case "--s3-sign-accept-encoding":
+			// Inverted on purpose: the flag says whether Accept-Encoding takes
+			// part in the signature, and turning it OFF is what needs doing.
+			opts.noCompression = !on
+		case "--s3-insecure-skip-verify":
+			opts.insecureSkipVerify = on
+		case "--s3-disable-content-sha256":
+			opts.disableContentSha256 = on
+		default:
+			unknown = append(unknown, raw)
+		}
+	}
+	return opts, unknown
 }
 
 // New builds a minio client for a destination. The endpoint may arrive with a
@@ -57,12 +126,39 @@ func New(cfg Config) (*minio.Client, error) {
 	if err := validateEndpointHost(endpoint, cfg.AllowPrivateEndpoint); err != nil {
 		return nil, err
 	}
-	return minio.New(endpoint, &minio.Options{
+	extra, unknown := parseExtraArgs(cfg.ExtraArgs)
+	if len(unknown) > 0 {
+		log.Printf("s3: ignoring %d flag(s) this agent does not understand: %s",
+			len(unknown), strings.Join(unknown, " "))
+	}
+	pathStyle := cfg.PathStyle
+	if extra.forcePathStyle != nil {
+		pathStyle = *extra.forcePathStyle
+	}
+	opts := &minio.Options{
 		Creds:        credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
 		Secure:       secure,
 		Region:       cfg.Region,
-		BucketLookup: bucketLookup(cfg.PathStyle),
-	})
+		BucketLookup: bucketLookup(pathStyle),
+	}
+	// A custom transport only when something asked for one: minio-go's default is
+	// tuned for S3 (connection pooling, keep-alives), and replacing it wholesale
+	// to flip one bool would cost more than the flag is worth.
+	if extra.noCompression || extra.insecureSkipVerify {
+		tr, err := minio.DefaultTransport(secure)
+		if err != nil {
+			return nil, fmt.Errorf("s3: build transport: %w", err)
+		}
+		tr.DisableCompression = extra.noCompression
+		if extra.insecureSkipVerify {
+			if tr.TLSClientConfig == nil {
+				tr.TLSClientConfig = &tls.Config{}
+			}
+			tr.TLSClientConfig.InsecureSkipVerify = true
+		}
+		opts.Transport = tr
+	}
+	return minio.New(endpoint, opts)
 }
 
 func bucketLookup(pathStyle bool) minio.BucketLookupType {
@@ -140,8 +236,11 @@ func Upload(ctx context.Context, cfg Config, key string, r io.Reader) (int64, er
 	if err != nil {
 		return 0, err
 	}
+	extra, _ := parseExtraArgs(cfg.ExtraArgs)
 	info, err := cl.PutObject(ctx, cfg.Bucket, key, r, -1, minio.PutObjectOptions{
 		ContentType: "application/octet-stream",
+		// Some gateways reject the streaming-signature trailer this produces.
+		DisableContentSha256: extra.disableContentSha256,
 	})
 	if err != nil {
 		return 0, err

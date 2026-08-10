@@ -115,6 +115,7 @@ func s3cfg(t *pb.S3Target) s3client.Config {
 		SecretKey:            t.GetSecretKey(),
 		PathStyle:            t.GetPathStyle(),
 		AllowPrivateEndpoint: t.GetAllowPrivateEndpoint(),
+		ExtraArgs:            t.GetExtraArgs(),
 	}
 }
 
