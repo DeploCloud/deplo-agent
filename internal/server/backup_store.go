@@ -92,24 +92,28 @@ func (s *Service) managedStoreRoot() string {
 // resolveStoreRoot turns the wire's `root` into an absolute path this agent is
 // willing to write to and delete under, or an error explaining why not.
 //
-// `create` is set only by the check path: a probe may bring the managed root (or
-// a sentinel) into being, but a backup/restore/delete must never create a root —
-// if it is not there, something is wrong and inventing it would write artifacts
-// into a directory nobody vetted.
+// `create` gates the CUSTOM-root path only: an operator-supplied directory is
+// marked with the sentinel exactly once, by a check, because that marking is the
+// act of vetting it. A backup or a delete must never mark a fresh path it was
+// merely pointed at.
+//
+// The MANAGED root is created on demand by every path, and that asymmetry is the
+// point: this agent derives that path itself from --stack-dir, so there is
+// nothing to vet and nothing an caller can influence. Gating it behind a check
+// made the platform's own default destination — the one seeded for every team so
+// that backups work with no configuration at all — fail its first run with "test
+// the destination first". Worse, the only thing that ran a check was a mutation
+// requiring `manage_backup_destinations`, so a member holding `manage_backups`
+// alone could not get out of it: the fix for their backup was a permission they
+// were deliberately not given.
 func (s *Service) resolveStoreRoot(root string, create bool) (string, error) {
 	managed := s.managedStoreRoot()
 	if strings.TrimSpace(root) == "" {
-		if create {
-			if err := os.MkdirAll(managed, storeDirPerm); err != nil {
-				return "", status.Errorf(codes.Internal, "create backup store %q: %v", managed, err)
-			}
-			if err := writeStoreSentinel(managed); err != nil {
-				return "", err
-			}
+		if err := os.MkdirAll(managed, storeDirPerm); err != nil {
+			return "", status.Errorf(codes.Internal, "create backup store %q: %v", managed, err)
 		}
-		if _, err := os.Stat(managed); err != nil {
-			return "", status.Errorf(codes.FailedPrecondition,
-				"backup store %q does not exist yet; test the destination first", managed)
+		if err := writeStoreSentinel(managed); err != nil {
+			return "", err
 		}
 		return managed, nil
 	}
@@ -218,7 +222,12 @@ func storeWrite(root, key string, r io.Reader, overwrite bool) (int64, string, e
 		return 0, "", fmt.Errorf("create backup directory: %w", err)
 	}
 	tmp := dst + storePartialSuffix
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, storeFilePerm)
+	// O_NOFOLLOW: resolveInside realpath-checks every EXISTING component, but the
+	// leaf is joined lexically because it usually does not exist yet — so a symlink
+	// planted at exactly this name is the one thing left that could redirect the
+	// write. Anyone who can plant it already has the host, so this is depth rather
+	// than the barrier; it costs a flag.
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY|syscall.O_NOFOLLOW, storeFilePerm)
 	if err != nil {
 		return 0, "", fmt.Errorf("open backup artifact: %w", err)
 	}
@@ -260,7 +269,10 @@ func storeOpen(root, key string) (io.ReadCloser, error) {
 	if err != nil {
 		return nil, err
 	}
-	f, err := os.Open(src)
+	// O_NOFOLLOW for the same reason storeWrite uses it: the leaf is the one
+	// component resolveInside cannot realpath-check, and reading through a symlink
+	// planted there would stream a file that is not a backup out to whoever asked.
+	f, err := os.OpenFile(src, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, status.Errorf(codes.NotFound, "no backup artifact at %q on this server", key)
@@ -536,7 +548,14 @@ func sourceFromRestore(s *Service, req *pb.RestoreRequest) (*artifactSource, err
 			label:    filepath.Join(root, req.GetStore().GetObjectKey()),
 		}, nil
 	case req.GetS3() != nil && req.GetS3().GetObjectKey() != "":
-		return &artifactSource{s3: req.GetS3(), label: req.GetS3().GetObjectKey()}, nil
+		// The identity rides an S3 restore too. Empty means a LEGACY artifact,
+		// written before bucket artifacts were encrypted, and openArtifactReader
+		// then skips the age layer — which is why old object keys keep restoring.
+		return &artifactSource{
+			s3:       req.GetS3(),
+			identity: req.GetAgeIdentity(),
+			label:    req.GetS3().GetObjectKey(),
+		}, nil
 	default:
 		return nil, status.Error(codes.InvalidArgument, "restore request names no artifact to restore from")
 	}
@@ -630,7 +649,23 @@ func destinationFromBackup(s *Service, req *pb.BackupRequest, send func([]byte) 
 			label:     storeObjectLabel(root, key),
 		}, nil
 	case req.GetS3() != nil && req.GetS3().GetObjectKey() != "":
-		return &artifactDestination{s3: req.GetS3(), key: req.GetS3().GetObjectKey(), label: req.GetS3().GetObjectKey()}, nil
+		// A bucket artifact is encrypted too, whenever a recipient is sent. It was
+		// not, originally, and the asymmetry was the worst kind: a project archive
+		// carries the app's ENTIRE decrypted env (the restore has to write the real
+		// .env back), so the one destination shape deplo shipped first was the one
+		// that put every secret in a bucket in the clear.
+		//
+		// An empty recipient is still accepted HERE and only here, because it is
+		// what a destination created before this release sends, and refusing it
+		// would break every existing schedule. The control plane is what stops a
+		// silent downgrade: it refuses to run a backup for an encrypted destination
+		// unless this agent advertises "backup-encrypt-s3".
+		return &artifactDestination{
+			s3:        req.GetS3(),
+			recipient: recipient,
+			key:       req.GetS3().GetObjectKey(),
+			label:     req.GetS3().GetObjectKey(),
+		}, nil
 	default:
 		return nil, status.Error(codes.InvalidArgument, "backup request names no destination")
 	}
@@ -698,13 +733,18 @@ func (s *Service) writeArtifact(ctx context.Context, dest *artifactDestination, 
 	case dest.store != nil:
 		return storeWrite(dest.store.GetRoot(), dest.store.GetObjectKey(), pr, false)
 	default:
-		n, uerr := s3client.Upload(ctx, s3cfg(dest.s3), dest.key, pr)
+		// Hash on the way past. The bucket's own ETag is not usable as an integrity
+		// check: it is a multipart-dependent digest of the object as the PROVIDER
+		// saw it, so it proves nothing about the bytes deplo produced, and the
+		// control plane cannot compare it to anything. A sha256 taken here is the
+		// artifact's identity, recorded on the run and re-checked before a restore
+		// ever feeds these bytes to `docker compose up`.
+		sum := sha256.New()
+		n, uerr := s3client.Upload(ctx, s3cfg(dest.s3), dest.key, io.TeeReader(pr, sum))
 		if uerr != nil {
 			return 0, "", fmt.Errorf("upload to S3: %w", uerr)
 		}
-		// No digest for S3: the bucket keeps its own ETag, and computing one here
-		// would mean hashing bytes minio-go has already streamed away.
-		return n, "", nil
+		return n, hex.EncodeToString(sum.Sum(nil)), nil
 	}
 }
 

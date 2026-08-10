@@ -88,6 +88,19 @@ var Capabilities = []string{
 	// fail the SECOND thing with a clear "update the agent" instead of silently
 	// accepting a store request it would ignore.
 	"backup-store",
+	// Two things that changed about a BUCKET artifact, shipped as one flag because
+	// they land together and a control plane that finds it absent must fall back on
+	// both at once:
+	//   - `age_recipient` is honoured for an S3 destination, so a bucket artifact
+	//     is encrypted like a store one. Without this the field is ignored and the
+	//     archive - which carries the app's whole decrypted env - lands in the
+	//     bucket in the clear, so the control plane REFUSES to run rather than let
+	//     an encrypted destination silently downgrade.
+	//   - the upload reports a sha256, which is what lets the control plane prove
+	//     an artifact is the one it wrote before a restore executes its compose.
+	// `allow_private_endpoint` rides the same flag: a self-hosted bucket on an
+	// RFC1918 address is unreachable without it.
+	"backup-encrypt-s3",
 	// Allow-listed Docker disk reclaim (DockerCleanup): build cache, dangling
 	// images, orphaned buildkit volumes, unused app images. NEVER a bare prune.
 	"docker-cleanup",

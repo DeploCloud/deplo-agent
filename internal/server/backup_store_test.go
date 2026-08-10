@@ -530,3 +530,160 @@ func TestWriteArtifact_streamOutEmitsCiphertext(t *testing.T) {
 		t.Error("the relayed artifact did not round-trip")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// The managed root is the agent's own, so every path may create it
+// ---------------------------------------------------------------------------
+
+// A write path must bring the MANAGED root into being on its own. Gating that
+// behind a check made the platform's default destination fail its very first
+// backup with "test the destination first" - and the only thing that ran a check
+// needed a capability the person taking the backup was deliberately not given.
+func TestResolveStoreRoot_managedRootIsCreatedByAWritePath(t *testing.T) {
+	base := t.TempDir()
+	s := New(filepath.Join(base, "stacks"), t.TempDir(), "/", base)
+	managed := filepath.Join(base, "backups")
+	if _, err := os.Stat(managed); !os.IsNotExist(err) {
+		t.Fatalf("the store must not exist before the first call: %v", err)
+	}
+
+	root, err := s.resolveStoreRoot("", false) // false == a backup, not a check
+	if err != nil {
+		t.Fatalf("a write path must create the managed root: %v", err)
+	}
+	if root != managed {
+		t.Errorf("root = %q, want %q", root, managed)
+	}
+	if _, err := os.Stat(filepath.Join(root, storeSentinel)); err != nil {
+		t.Errorf("the managed root must be marked even when created by a write: %v", err)
+	}
+}
+
+// A CUSTOM root keeps the old rule: only a check may mark one, because marking
+// it IS the act of vetting it. A backup pointed at an unmarked path fails.
+func TestResolveStoreRoot_customRootStillNeedsACheckToMarkIt(t *testing.T) {
+	base := t.TempDir()
+	s := New(filepath.Join(base, "stacks"), t.TempDir(), "/", base)
+	custom := t.TempDir() // exists, empty, unmarked
+
+	if _, err := s.resolveStoreRoot(custom, false); err == nil {
+		t.Fatal("a write must refuse a custom root the agent has not marked")
+	}
+	if _, err := s.resolveStoreRoot(custom, true); err != nil {
+		t.Fatalf("a check must mark an empty custom root: %v", err)
+	}
+	if _, err := s.resolveStoreRoot(custom, false); err != nil {
+		t.Fatalf("once marked, a write must accept it: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// A bucket artifact is encrypted and hashed too
+// ---------------------------------------------------------------------------
+
+func TestDestinationFromBackup_s3CarriesTheRecipient(t *testing.T) {
+	base := t.TempDir()
+	s := New(filepath.Join(base, "stacks"), t.TempDir(), "/", base)
+	recipient, _ := testKeypair(t)
+
+	dest, err := destinationFromBackup(s, &pb.BackupRequest{
+		Kind:         pb.BackupKind_BACKUP_KIND_PROJECT,
+		S3:           &pb.S3Target{Bucket: "b", ObjectKey: "deplo/t/app/a/x.tar.gz.age"},
+		AgeRecipient: recipient,
+	}, nil)
+	if err != nil {
+		t.Fatalf("destinationFromBackup: %v", err)
+	}
+	// Without this the archive - which carries the app's whole decrypted env -
+	// lands in the bucket in the clear.
+	if dest.recipient != recipient {
+		t.Errorf("an S3 destination must encrypt to %q, got %q", recipient, dest.recipient)
+	}
+
+	// A destination created before bucket encryption sends no recipient, and must
+	// keep working rather than fail closed on an agent that now supports it.
+	legacy, err := destinationFromBackup(s, &pb.BackupRequest{
+		Kind: pb.BackupKind_BACKUP_KIND_PROJECT,
+		S3:   &pb.S3Target{Bucket: "b", ObjectKey: "deplo/t/app/a/x.tar.gz"},
+	}, nil)
+	if err != nil {
+		t.Fatalf("legacy destinationFromBackup: %v", err)
+	}
+	if legacy.recipient != "" {
+		t.Errorf("a legacy S3 destination must stay plaintext, got recipient %q", legacy.recipient)
+	}
+}
+
+func TestSourceFromRestore_s3CarriesTheIdentity(t *testing.T) {
+	base := t.TempDir()
+	s := New(filepath.Join(base, "stacks"), t.TempDir(), "/", base)
+	_, identity := testKeypair(t)
+
+	src, err := sourceFromRestore(s, &pb.RestoreRequest{
+		Kind:        pb.BackupKind_BACKUP_KIND_PROJECT,
+		S3:          &pb.S3Target{Bucket: "b", ObjectKey: "deplo/t/app/a/x.tar.gz.age"},
+		AgeIdentity: identity,
+	})
+	if err != nil {
+		t.Fatalf("sourceFromRestore: %v", err)
+	}
+	if src.identity != identity {
+		t.Errorf("an S3 restore must decrypt with the identity, got %q", src.identity)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// A restore trusts the control plane, not the artifact
+// ---------------------------------------------------------------------------
+
+// The artifact's own compose is what a restore used to execute. It is attacker-
+// reachable - a bucket object anyone with write access replaces, or a store
+// artifact a compromised storage host forges with the public recipient it is
+// handed on every backup - and it ends up at `docker compose up` as root.
+func TestRestoreConfig_theControlPlaneWinsOverTheArchive(t *testing.T) {
+	trusted := "services:\n  web:\n    image: app:1\n"
+	hostile := "services:\n  web:\n    image: alpine\n    privileged: true\n    volumes: ['/:/host']\n"
+
+	rr := restoreConfig("blog", &pb.ProjectDescriptor{
+		ComposeYaml: trusted,
+		EnvSnapshot: map[string]string{"FROM": "control-plane"},
+		Mounts:      []*pb.MountFile{{Path: "a.conf", Content: "trusted"}},
+	}, projectSnapshot{
+		compose: hostile,
+		env:     map[string]string{"FROM": "archive"},
+		mounts:  []*pb.MountFile{{Path: "a.conf", Content: "hostile"}},
+	})
+
+	if rr.GetComposeYaml() != trusted {
+		t.Error("the archive's compose must never win over the control plane's")
+	}
+	if rr.GetEnv()["FROM"] != "control-plane" {
+		t.Error("the archive's env must never win over the control plane's")
+	}
+	if got := rr.GetMounts()[0].GetContent(); got != "trusted" {
+		t.Errorf("the archive's mounts must never win: %q", got)
+	}
+	if rr.GetSlug() != "blog" {
+		t.Errorf("slug = %q", rr.GetSlug())
+	}
+}
+
+// The archive is still the fallback, which is what keeps a restore working after
+// the config it captured no longer exists control-plane side.
+func TestRestoreConfig_fallsBackToTheArchive(t *testing.T) {
+	archived := "services:\n  web:\n    image: app:0\n"
+	rr := restoreConfig("blog", &pb.ProjectDescriptor{}, projectSnapshot{
+		compose: archived,
+		env:     map[string]string{"FROM": "archive"},
+		mounts:  []*pb.MountFile{{Path: "a.conf", Content: "archived"}},
+	})
+	if rr.GetComposeYaml() != archived {
+		t.Error("with nothing from the control plane, the archive must be used")
+	}
+	if rr.GetEnv()["FROM"] != "archive" {
+		t.Error("with no env from the control plane, the archive's must be used")
+	}
+	if got := rr.GetMounts()[0].GetContent(); got != "archived" {
+		t.Errorf("with no mounts from the control plane, the archive's must be used: %q", got)
+	}
+}

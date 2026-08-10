@@ -1234,6 +1234,17 @@ message S3Target {
   // host). MinIO / many S3-compatibles need this; AWS uses virtual-host style.
   // The control plane decides from the destination's provider.
   bool path_style = 7;
+  // Opt OUT of the SSRF guard that refuses an endpoint resolving to a loopback,
+  // link-local or private address. Default false, and it stays false for every
+  // destination anyone can create from the normal form: the endpoint arrives off
+  // the wire and the agent dials it as root, so 169.254.169.254 must not be
+  // reachable by accident.
+  //
+  // It exists because deplo is a SELF-HOSTING platform and "my MinIO is at
+  // 10.0.0.5" is the ordinary case, not the attack. The control plane gates the
+  // flag on instance admin - the same bar as a custom store path - so the person
+  // turning it on is the person who owns the network.
+  bool allow_private_endpoint = 8;
 }
 
 // A directory on THIS host's filesystem that holds backup artifacts — the second

@@ -108,12 +108,13 @@ func (e *rsEmitter) result(ok bool, errMsg string) {
 // s3cfg maps the wire S3Target to the s3client.Config (object_key handled per call).
 func s3cfg(t *pb.S3Target) s3client.Config {
 	return s3client.Config{
-		Endpoint:  t.GetEndpoint(),
-		Region:    t.GetRegion(),
-		Bucket:    t.GetBucket(),
-		AccessKey: t.GetAccessKey(),
-		SecretKey: t.GetSecretKey(),
-		PathStyle: t.GetPathStyle(),
+		Endpoint:             t.GetEndpoint(),
+		Region:               t.GetRegion(),
+		Bucket:               t.GetBucket(),
+		AccessKey:            t.GetAccessKey(),
+		SecretKey:            t.GetSecretKey(),
+		PathStyle:            t.GetPathStyle(),
+		AllowPrivateEndpoint: t.GetAllowPrivateEndpoint(),
 	}
 }
 
@@ -732,28 +733,13 @@ func (s *Service) restoreProject(ctx context.Context, p *pb.ProjectDescriptor, s
 		return
 	}
 
-	// Re-Reroute the snapshot so the stack restarts on the exact backed-up config.
-	// Prefer the snapshot captured in the archive; fall back to the descriptor's
-	// (the control plane sends both for resilience).
-	composeYaml := snapshot.compose
-	if composeYaml == "" {
-		composeYaml = p.GetComposeYaml()
-	}
-	if composeYaml == "" {
+	rr := restoreConfig(slug, p, snapshot)
+	if rr.ComposeYaml == "" {
 		e.log("warn", "No compose snapshot in the archive; leaving the stack stopped")
 		e.result(true, "")
 		return
 	}
 	e.log("info", "Re-applying the backed-up stack configuration")
-	rr := &pb.RerouteRequest{
-		Slug:        slug,
-		ComposeYaml: composeYaml,
-		Env:         snapshot.env,
-		Mounts:      snapshot.mounts,
-	}
-	if len(rr.Env) == 0 {
-		rr.Env = p.GetEnvSnapshot()
-	}
 	res, rerr := s.Reroute(ctx, rr)
 	if rerr != nil {
 		e.result(false, "restart stack: "+rerr.Error())
@@ -765,6 +751,43 @@ func (s *Service) restoreProject(ctx context.Context, p *pb.ProjectDescriptor, s
 	}
 	e.log("info", "Restore complete; stack restarted")
 	e.result(true, "")
+}
+
+// restoreConfig picks the stack configuration a restore brings back up, and it
+// is the one place in this file where "which of two sources do we trust" is
+// decided — so it is its own function, with its own test.
+//
+// THE CONTROL PLANE'S DESCRIPTOR WINS; the archive's snapshot is the fallback.
+// It used to be the other way round, and that inversion was the single place a
+// backup artifact turned into executable input: this YAML is written to the
+// stack file and handed to `docker compose up`, so an artifact that declares a
+// bind mount of `/`, or `privileged: true`, or the docker socket, is root on
+// this host. An artifact is not trusted bytes. An S3 object can be replaced by
+// anyone with write access to the bucket, and a store artifact can be FORGED by
+// a compromised storage host: age gives confidentiality, not authenticity, and
+// the recipient is a public key that host is handed on every single backup.
+//
+// The descriptor arrives down the mTLS channel from the control plane, the only
+// party this agent trusts, so preferring it costs nothing on the happy path -
+// for any backup of a config that still exists the two are identical. The
+// archive still wins when the control plane sends nothing, which is what keeps a
+// restore working after the config it captured is gone; that fallback is covered
+// instead by the control plane refusing to restore an artifact whose sha256 does
+// not match the one it recorded when it wrote it.
+func restoreConfig(slug string, p *pb.ProjectDescriptor, snap projectSnapshot) *pb.RerouteRequest {
+	compose := p.GetComposeYaml()
+	if compose == "" {
+		compose = snap.compose
+	}
+	env := p.GetEnvSnapshot()
+	if len(env) == 0 {
+		env = snap.env
+	}
+	mounts := p.GetMounts()
+	if len(mounts) == 0 {
+		mounts = snap.mounts
+	}
+	return &pb.RerouteRequest{Slug: slug, ComposeYaml: compose, Env: env, Mounts: mounts}
 }
 
 // projectSnapshot is the config recovered from the archive's snapshot/ entries.
