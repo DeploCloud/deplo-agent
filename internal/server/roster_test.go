@@ -1027,10 +1027,14 @@ func TestRosterHostCountPublishesGenuineZero(t *testing.T) {
 	// The host genuinely empties out: a real 0, not a failed read.
 	f.set(func(f *fakeDocker) { f.hostRunning = 0 })
 	r.markDirty()
-	waitFor(t, "a rebuild after the host emptied out", func() bool {
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		return f.listHits >= 2
+	// Wait on the COUNT, not on listHits. rebuild() calls list() first and
+	// publishes the count last, so "a second listing started" says nothing about
+	// whether the new figure has landed — the wait would return mid-rebuild and
+	// read the stale 4. It is not a weaker assertion: the regression this guards
+	// (a genuine 0 discarded as if the read had failed) leaves the count at 4
+	// forever, so waitFor times out and fails.
+	waitFor(t, "the host count to fall to a genuine 0", func() bool {
+		return r.HostRunningCount() == 0
 	})
 
 	if got := r.HostRunningCount(); got != 0 {
