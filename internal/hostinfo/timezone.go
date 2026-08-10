@@ -7,9 +7,17 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/DeploCloud/deplo-agent/internal/safepath"
 )
+
+// setMu serialises the write. Two admins can press Save at the same moment, and
+// both requests land in THIS process, the only writer of /etc/localtime on the
+// box. Without it they race on one fixed temp path: whichever creates the
+// symlink second fails with EEXIST, and the operator is told the host refused a
+// perfectly good zone.
+var setMu sync.Mutex
 
 // SetTimezone points the host's clock at an IANA zone.
 //
@@ -30,6 +38,9 @@ func SetTimezone(ctx context.Context, tz string) error {
 	if err != nil {
 		return err
 	}
+
+	setMu.Lock()
+	defer setMu.Unlock()
 
 	if path, lookErr := exec.LookPath("timedatectl"); lookErr == nil {
 		cmd := exec.CommandContext(ctx, path, "set-timezone", tz)

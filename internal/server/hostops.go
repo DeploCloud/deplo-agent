@@ -193,13 +193,20 @@ func (s *Service) TraefikConfig(ctx context.Context, req *pb.TraefikConfigReques
 				Error: fmt.Sprintf("could not back up the current Traefik config: %v", err),
 			}, nil
 		}
-		if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
+		// 0600, not 0644: this file can carry the private key of a TLS certificate
+		// the operator installed (an inline compose config), and acme.json beside
+		// it is 0600 for exactly the same reason. Only root reads either. The
+		// backup is tightened too — it is a copy of the same secret, and a file
+		// created before this change keeps its old mode through the rename.
+		if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
 			_ = os.Rename(path+".bak", path) // put it back; nothing has restarted yet
 			return &pb.TraefikConfigResponse{
 				Ok:    false,
 				Error: fmt.Sprintf("could not write the Traefik config: %v", err),
 			}, nil
 		}
+		_ = os.Chmod(path, 0o600)
+		_ = os.Chmod(path+".bak", 0o600)
 	}
 
 	if err := s.applyTraefik(ctx, path, req.GetRestartOnly()); err != nil {

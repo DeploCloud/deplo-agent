@@ -147,6 +147,34 @@ func TestTraefikConfigWritesAndKeepsABackup(t *testing.T) {
 	}
 }
 
+// The config can carry the private key of a TLS certificate the operator pasted
+// in, and the .bak is a copy of the same secret. Both must end up 0600 even
+// though the file already on disk was 0644 (a rename keeps the old mode, so
+// writing the new bytes is not on its own enough).
+func TestTraefikConfigIsNotWorldReadable(t *testing.T) {
+	svc, path := serviceWithTraefik(t, "services:\n  traefik:\n    image: traefik:v3.7\n")
+	svc.traefikApply = func(context.Context, string, bool) error { return nil }
+
+	res, err := svc.TraefikConfig(context.Background(), &pb.TraefikConfigRequest{
+		ComposeYaml: "services:\n  traefik:\n    image: traefik:v3.7\n    command: [--api.dashboard=true]\n",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.GetOk() {
+		t.Fatalf("expected success, got %q", res.GetError())
+	}
+	for _, p := range []string{path, path + ".bak"} {
+		st, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if mode := st.Mode().Perm(); mode != 0o600 {
+			t.Errorf("%s must be 0600, got %#o", filepath.Base(p), mode)
+		}
+	}
+}
+
 // restart_only must never look at compose_yaml — the plain "restart Traefik"
 // button must not become a silent config change.
 func TestTraefikConfigRestartOnlyLeavesTheFileAlone(t *testing.T) {
