@@ -95,10 +95,14 @@ func TestReroute_writesStackEnvAndMountFiles(t *testing.T) {
 	if string(got) != yaml {
 		t.Fatalf("stack file = %q, want %q", got, yaml)
 	}
+	// 0600, like the env file below: for a SINGLE-IMAGE app the control plane
+	// bakes the whole environment into this YAML, so it holds exactly the secrets
+	// the env file is protected for. Reroute is also the path a restore runs, so
+	// getting this wrong here would quietly undo the deploy path's mode.
 	if info, err := os.Stat(stackFile); err != nil {
 		t.Fatalf("stat stack file: %v", err)
-	} else if perm := info.Mode().Perm(); perm != 0o644 {
-		t.Errorf("stack file perm = %o, want 0644", perm)
+	} else if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("stack file perm = %o, want 0600", perm)
 	}
 
 	// Env file: rendered KEY=VALUE (sorted), 0600.
