@@ -756,7 +756,7 @@ func (s *Service) restoreProject(ctx context.Context, p *pb.ProjectDescriptor, s
 		return
 	}
 
-	rr := restoreConfig(slug, p, snapshot, src.integrityProven)
+	rr := restoreConfig(slug, p, snapshot, src.integrityProven, src.configUntrusted)
 	if rr.ComposeYaml == "" {
 		e.log("warn", "No compose snapshot in the archive; leaving the stack stopped")
 		e.result(true, "")
@@ -806,14 +806,25 @@ func restoreConfig(
 	p *pb.ProjectDescriptor,
 	snap projectSnapshot,
 	proven bool,
+	untrusted bool,
 ) *pb.RerouteRequest {
 	// `first` is whichever source this restore trusts; the other is the fallback.
+	//
+	// UNTRUSTED removes the fallback entirely, and it has to: "prefer the control
+	// plane's" is not a guard when the control plane has none to prefer. An app
+	// never deployed on this host has no stack file and an app with no variables
+	// has no env, and in both cases the archive would win by default. For a file
+	// somebody uploaded that means the uploader picks what `docker compose up`
+	// runs and what environment it runs with, which is root on this machine.
 	pick := func(fromArchive, fromControlPlane string) string {
 		if proven && fromArchive != "" {
 			return fromArchive
 		}
 		if fromControlPlane != "" {
 			return fromControlPlane
+		}
+		if untrusted {
+			return ""
 		}
 		return fromArchive
 	}
@@ -822,14 +833,14 @@ func restoreConfig(
 	env := p.GetEnvSnapshot()
 	if proven && len(snap.env) > 0 {
 		env = snap.env
-	} else if len(env) == 0 {
+	} else if len(env) == 0 && !untrusted {
 		env = snap.env
 	}
 
 	mounts := p.GetMounts()
 	if proven && len(snap.mounts) > 0 {
 		mounts = snap.mounts
-	} else if len(mounts) == 0 {
+	} else if len(mounts) == 0 && !untrusted {
 		mounts = snap.mounts
 	}
 

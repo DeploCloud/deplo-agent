@@ -1582,6 +1582,21 @@ message RestoreChunk {
     // verified as the stream is consumed, so a mismatch aborts the restore before
     // the stack configuration is ever re-applied.
     string expected_sha256 = 5;
+    // The artifact came from OUTSIDE the fleet - a file somebody uploaded - so
+    // nothing in it may ever configure what comes back up.
+    //
+    // Without this the archive is still a fallback. `restoreConfig` prefers the
+    // control plane's compose/env/mounts for an unproven artifact, but falls back
+    // to the archive's whenever the control plane sent none: an app never
+    // deployed on this host has no stack file, an app with no variables has no
+    // env. That fallback exists for artifacts Deplo itself wrote, before it
+    // recorded digests. For an uploaded one it means the uploader chooses what
+    // `docker compose up` runs and what environment it runs with.
+    //
+    // Default false, so every existing caller keeps the behaviour it has. Gated
+    // by the `backup-untrusted-config` capability, because an agent that ignores
+    // this field would silently restore exactly what the flag exists to prevent.
+    bool untrusted_config = 6;
   }
   oneof frame {
     Header header = 1;

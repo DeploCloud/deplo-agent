@@ -658,7 +658,7 @@ func TestRestoreConfig_aProvenArchiveRestoresItsOwnConfig(t *testing.T) {
 		compose: archived,
 		env:     map[string]string{"FROM": "archive"},
 		mounts:  []*pb.MountFile{{Path: "a.conf", Content: "archived"}},
-	}, true)
+	}, true, false)
 
 	if rr.GetComposeYaml() != archived {
 		t.Error("a proven archive must restore the config it captured")
@@ -689,7 +689,7 @@ func TestRestoreConfig_anUnprovenArchiveNeverWins(t *testing.T) {
 		compose: hostile,
 		env:     map[string]string{"FROM": "archive"},
 		mounts:  []*pb.MountFile{{Path: "a.conf", Content: "hostile"}},
-	}, false)
+	}, false, false)
 
 	if rr.GetComposeYaml() != trusted {
 		t.Error("an unverifiable archive must never reach `docker compose up`")
@@ -714,7 +714,7 @@ func TestRestoreConfig_fallsBackToTheArchive(t *testing.T) {
 			compose: archived,
 			env:     map[string]string{"FROM": "archive"},
 			mounts:  []*pb.MountFile{{Path: "a.conf", Content: "archived"}},
-		}, proven)
+		}, proven, false)
 		if rr.GetComposeYaml() != archived {
 			t.Errorf("proven=%v: with nothing from the control plane, use the archive", proven)
 		}
@@ -1023,5 +1023,45 @@ func TestReadStoreFile_namingNoArtifactIsRefused(t *testing.T) {
 	s, _ := newStoreService(t)
 	if err := s.ReadStoreFile(&pb.ReadStoreFileRequest{}, &fakeReadStoreStream{}); err == nil {
 		t.Fatal("a request naming neither a store nor a bucket must be refused")
+	}
+}
+
+// An UPLOADED artifact contributes data and nothing else. This is the case the
+// two tests above do not cover: "prefer the control plane's" is not a guard when
+// the control plane has none to prefer, and an app never deployed on this host
+// has no stack file, an app with no variables has no env. Without the flag the
+// archive wins both by default - and for a file somebody uploaded that means the
+// uploader chooses what `docker compose up` runs, which is root on this machine.
+func TestRestoreConfig_anUntrustedArchiveNeverConfiguresAnything(t *testing.T) {
+	hostile := "services:\n  x:\n    image: alpine\n    privileged: true\n    volumes: ['/:/host']\n"
+
+	// Nothing from the control plane, which is exactly when the fallback fired.
+	rr := restoreConfig("blog", &pb.ProjectDescriptor{}, projectSnapshot{
+		compose: hostile,
+		env:     map[string]string{"LD_PRELOAD": "/tmp/evil.so"},
+		mounts:  []*pb.MountFile{{Path: "a.conf", Content: "hostile"}},
+	}, false, true)
+
+	if rr.GetComposeYaml() != "" {
+		t.Error("an uploaded archive must never reach `docker compose up`")
+	}
+	if len(rr.GetEnv()) != 0 {
+		t.Errorf("an uploaded archive must not choose the environment either: %v", rr.GetEnv())
+	}
+	if len(rr.GetMounts()) != 0 {
+		t.Errorf("nor the config files: %v", rr.GetMounts())
+	}
+
+	// And it must not be able to displace a control plane that DID send config.
+	trusted := "services:\n  web:\n    image: app:1\n"
+	rr = restoreConfig("blog", &pb.ProjectDescriptor{
+		ComposeYaml: trusted,
+		EnvSnapshot: map[string]string{"FROM": "control-plane"},
+	}, projectSnapshot{
+		compose: hostile,
+		env:     map[string]string{"FROM": "archive"},
+	}, false, true)
+	if rr.GetComposeYaml() != trusted || rr.GetEnv()["FROM"] != "control-plane" {
+		t.Error("the control plane's own config must still be what comes back up")
 	}
 }

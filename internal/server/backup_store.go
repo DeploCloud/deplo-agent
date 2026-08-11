@@ -613,6 +613,11 @@ type artifactSource struct {
 	// end of the stream for the others. It is what decides whether the ARCHIVE's
 	// own configuration snapshot may be trusted (see restoreConfig).
 	integrityProven bool
+	// configUntrusted says the artifact came from outside the fleet - somebody
+	// uploaded it - so its configuration snapshot is never used, not even as the
+	// fallback restoreConfig would otherwise reach for when the control plane
+	// sent none. Only the data comes out of an archive like this.
+	configUntrusted bool
 	// stream, when set, IS the artifact — the cross-host RestoreFrom case, where
 	// there is no destination on this host to open.
 	stream io.Reader
@@ -1096,10 +1101,11 @@ func (s *Service) RestoreFrom(stream pb.Agent_RestoreFromServer) error {
 	defer pr.Close()
 
 	src := &artifactSource{
-		stream:         pr,
-		identity:       h.GetAgeIdentity(),
-		expectedSha256: h.GetExpectedSha256(),
-		label:          "the control plane",
+		stream:          pr,
+		identity:        h.GetAgeIdentity(),
+		expectedSha256:  h.GetExpectedSha256(),
+		configUntrusted: h.GetUntrustedConfig(),
+		label:           "the control plane",
 	}
 	switch h.GetKind() {
 	case pb.BackupKind_BACKUP_KIND_DATABASE:

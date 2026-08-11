@@ -116,6 +116,12 @@ var Capabilities = []string{
 	// give. Its own flag rather than folded into "backup-store": that one is
 	// about artifacts held on this host's disk, and this is the opposite case.
 	"backup-s3-read",
+	// RestoreFrom honours `untrusted_config`: an artifact that came from outside
+	// the fleet contributes DATA only, never the compose/env/mounts the stack
+	// comes back up with. An agent without this ignores the field, and ignoring
+	// it means restoring exactly what the flag exists to prevent - so the control
+	// plane refuses the upload rather than sending it to an agent that would.
+	"backup-untrusted-config",
 	// Allow-listed Docker disk reclaim (DockerCleanup): build cache, dangling
 	// images, orphaned buildkit volumes, unused app images. NEVER a bare prune.
 	"docker-cleanup",
