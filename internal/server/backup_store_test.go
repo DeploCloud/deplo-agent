@@ -2,11 +2,15 @@ package server
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -851,5 +855,173 @@ func TestArtifactSource_verifyMarksTheSourceProven(t *testing.T) {
 	}
 	if failing.integrityProven {
 		t.Error("a mismatch must never mark the source proven")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ReadStoreFile — the two shapes an artifact can be read from
+// ---------------------------------------------------------------------------
+
+// fakeBucket serves ONE object over plain http, ignoring the signature: what is
+// under test is this agent's plumbing, not minio-go's signing. Path-style, so
+// the object is at /<bucket>/<key>.
+func fakeBucket(t *testing.T, key string, body []byte) *pb.S3Target {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, key) {
+			http.NotFound(w, r)
+			return
+		}
+		// A real modtime, not the zero value: ServeContent omits Last-Modified for
+		// a zero time and minio-go refuses a response without one.
+		modtime := time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)
+		http.ServeContent(w, r, path.Base(key), modtime, bytes.NewReader(body))
+	}))
+	t.Cleanup(srv.Close)
+	return &pb.S3Target{
+		Endpoint:  srv.URL,
+		Region:    "us-east-1",
+		Bucket:    "deplo-test",
+		AccessKey: "k",
+		SecretKey: "s",
+		ObjectKey: key,
+		PathStyle: true,
+		// httptest listens on 127.0.0.1, which the SSRF guard refuses by default —
+		// the same flag a self-hosted bucket on the operator's own network needs.
+		AllowPrivateEndpoint: true,
+	}
+}
+
+// encryptedArtifact builds what a backup actually writes: gzip inside age.
+func encryptedArtifact(t *testing.T, recipient string, payload []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	aw, err := newArtifactWriter(&buf, recipient)
+	if err != nil {
+		t.Fatalf("newArtifactWriter: %v", err)
+	}
+	if _, err := aw.Writer().Write(payload); err != nil {
+		t.Fatalf("write payload: %v", err)
+	}
+	if err := aw.Close(); err != nil {
+		t.Fatalf("close artifact: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// The download case for a BUCKET artifact: decrypted on the way out, and
+// deliberately still gzip. Handing over a bare tar would be a different file
+// from the one the panel promises.
+func TestReadStoreFile_s3DecryptsButDoesNotDecompress(t *testing.T) {
+	s, _ := newStoreService(t)
+	recipient, identity := testKeypair(t)
+	payload := bytes.Repeat([]byte("bucket artifact payload\n"), 5_000)
+	artifact := encryptedArtifact(t, recipient, payload)
+	sum := sha256.Sum256(artifact)
+
+	stream := &fakeReadStoreStream{}
+	if err := s.ReadStoreFile(&pb.ReadStoreFileRequest{
+		S3:             fakeBucket(t, "deplo/team_a/app/prj_1/x.tar.gz.age", artifact),
+		AgeIdentity:    identity,
+		ExpectedSha256: hex.EncodeToString(sum[:]),
+	}, stream); err != nil {
+		t.Fatalf("ReadStoreFile: %v", err)
+	}
+
+	got := stream.buf.Bytes()
+	if len(got) < 2 || got[0] != 0x1f || got[1] != 0x8b {
+		t.Fatal("what leaves must still be gzip: the user asked for the .tar.gz")
+	}
+	gz, err := gzip.NewReader(bytes.NewReader(got))
+	if err != nil {
+		t.Fatalf("gunzip what was streamed: %v", err)
+	}
+	unpacked, err := io.ReadAll(gz)
+	if err != nil {
+		t.Fatalf("read gunzipped: %v", err)
+	}
+	if !bytes.Equal(unpacked, payload) {
+		t.Errorf("round trip mismatch: %d bytes, want %d", len(unpacked), len(payload))
+	}
+}
+
+// No identity is the RELAY shape, and it must stay verbatim: the control plane
+// passing a bucket artifact to another host has no business seeing plaintext.
+func TestReadStoreFile_s3WithoutIdentityStaysCiphertext(t *testing.T) {
+	s, _ := newStoreService(t)
+	recipient, _ := testKeypair(t)
+	artifact := encryptedArtifact(t, recipient, []byte("secret env inside"))
+
+	stream := &fakeReadStoreStream{}
+	if err := s.ReadStoreFile(&pb.ReadStoreFileRequest{
+		S3: fakeBucket(t, "deplo/team_a/db/db_1/x.dump.gz.age", artifact),
+	}, stream); err != nil {
+		t.Fatalf("ReadStoreFile: %v", err)
+	}
+	if !bytes.Equal(stream.buf.Bytes(), artifact) {
+		t.Error("a read with no identity must hand back exactly what was stored")
+	}
+	if bytes.Contains(stream.buf.Bytes(), []byte("secret env inside")) {
+		t.Error("plaintext must never appear in the relay shape")
+	}
+}
+
+// The asymmetry, pinned in both directions. A bucket object cannot be hashed
+// before it is fetched, so its verdict lands at the END — after bytes have
+// already gone. That is the honest outcome, not a bug, and the caller must not
+// mistake it for the guarantee the store shape gives.
+func TestReadStoreFile_s3DigestFailsOnlyAfterTheBytesAreGone(t *testing.T) {
+	s, _ := newStoreService(t)
+	recipient, identity := testKeypair(t)
+	artifact := encryptedArtifact(t, recipient, bytes.Repeat([]byte("payload\n"), 5_000))
+	wrong := sha256.Sum256([]byte("a different artifact"))
+
+	stream := &fakeReadStoreStream{}
+	err := s.ReadStoreFile(&pb.ReadStoreFileRequest{
+		S3:             fakeBucket(t, "deplo/team_a/app/prj_1/x.tar.gz.age", artifact),
+		AgeIdentity:    identity,
+		ExpectedSha256: hex.EncodeToString(wrong[:]),
+	}, stream)
+	if err == nil {
+		t.Fatal("an object that does not match its recorded digest must be refused")
+	}
+	if stream.buf.Len() == 0 {
+		t.Error("this is the shape that CANNOT refuse up front; if it now can, say so here")
+	}
+}
+
+// The other half of the asymmetry: an artifact on this host's disk is hashed
+// before a single byte leaves, so it really can refuse.
+func TestReadStoreFile_storeDigestRefusesBeforeAnyBytes(t *testing.T) {
+	s, root := newStoreService(t)
+	recipient, identity := testKeypair(t)
+	key := "deplo/team_a/app/prj_1/20260101T000000Z-brun_1.tar.gz.age"
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(root, key)), 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	artifact := encryptedArtifact(t, recipient, []byte("on this disk"))
+	if err := os.WriteFile(filepath.Join(root, key), artifact, storeFilePerm); err != nil {
+		t.Fatalf("plant artifact: %v", err)
+	}
+	wrong := sha256.Sum256([]byte("a different artifact"))
+
+	stream := &fakeReadStoreStream{}
+	err := s.ReadStoreFile(&pb.ReadStoreFileRequest{
+		Store:          &pb.StoreTarget{ObjectKey: key},
+		AgeIdentity:    identity,
+		ExpectedSha256: hex.EncodeToString(wrong[:]),
+	}, stream)
+	if err == nil {
+		t.Fatal("a tampered artifact on disk must be refused")
+	}
+	if stream.buf.Len() != 0 {
+		t.Error("the store shape must refuse BEFORE it streams anything")
+	}
+}
+
+func TestReadStoreFile_namingNoArtifactIsRefused(t *testing.T) {
+	s, _ := newStoreService(t)
+	if err := s.ReadStoreFile(&pb.ReadStoreFileRequest{}, &fakeReadStoreStream{}); err == nil {
+		t.Fatal("a request naming neither a store nor a bucket must be refused")
 	}
 }

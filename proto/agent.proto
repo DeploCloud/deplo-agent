@@ -330,8 +330,9 @@ service Agent {
   // "backup-store" capability. Modelled 1:1 on ExportVolume / ImportVolume —
   // same framing, same chunk size, same "control plane is the wire" topology. ----
 
-  // Stream an artifact OUT of this host's store, for a restore or a download
-  // whose reader lives elsewhere. Emits `data` frames only (no header). By
+  // Stream an artifact OUT, for a restore or a download whose reader lives
+  // elsewhere. The artifact is either on this host's store or in a bucket this
+  // host can dial (`store` or `s3`). Emits `data` frames only (no header). By
   // default the bytes are exactly what was written — still age-encrypted — so a
   // control plane relaying them to another host never holds plaintext. Pass
   // `age_identity` to decrypt on the way out instead, which is what a user
@@ -1513,6 +1514,21 @@ message ReadStoreFileRequest {
   // verified as the stream is consumed, so a mismatch aborts the restore before
   // the stack configuration is ever re-applied.
   string expected_sha256 = 3;
+  // Set INSTEAD of `store` to read the artifact out of a BUCKET. Same job, same
+  // framing, same decryption: the only difference is where the bytes come from.
+  //
+  // It exists because a backup a user cannot get their hands on is half a
+  // backup. Without this the panel could only offer Download for artifacts kept
+  // on a server's disk, and a bucket artifact came with instructions: fetch the
+  // object with your own S3 credentials, then decrypt it yourself with age.
+  // That is the sort of answer this platform exists not to give.
+  //
+  // One difference the caller must know about: a file on disk can be hashed
+  // before a single byte is sent, but a bucket object can only be checked AS IT
+  // GOES PAST. So an S3 read that fails its digest fails at the END, after bytes
+  // have already been handed over, and the stream closes in error rather than
+  // completing. Gated by the `backup-s3-read` capability.
+  S3Target s3 = 4;
 }
 
 // A framed chunk of an artifact transfer. ReadStoreFile emits a sequence of

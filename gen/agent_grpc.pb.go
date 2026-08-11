@@ -347,8 +347,9 @@ type AgentClient interface {
 	// the "delete artifacts too" branch of target deletion. Idempotent: a missing
 	// object is not an error. Returns how many objects were removed.
 	S3Delete(ctx context.Context, in *S3DeleteRequest, opts ...grpc.CallOption) (*S3DeleteResponse, error)
-	// Stream an artifact OUT of this host's store, for a restore or a download
-	// whose reader lives elsewhere. Emits `data` frames only (no header). By
+	// Stream an artifact OUT, for a restore or a download whose reader lives
+	// elsewhere. The artifact is either on this host's store or in a bucket this
+	// host can dial (`store` or `s3`). Emits `data` frames only (no header). By
 	// default the bytes are exactly what was written — still age-encrypted — so a
 	// control plane relaying them to another host never holds plaintext. Pass
 	// `age_identity` to decrypt on the way out instead, which is what a user
@@ -1447,8 +1448,9 @@ type AgentServer interface {
 	// the "delete artifacts too" branch of target deletion. Idempotent: a missing
 	// object is not an error. Returns how many objects were removed.
 	S3Delete(context.Context, *S3DeleteRequest) (*S3DeleteResponse, error)
-	// Stream an artifact OUT of this host's store, for a restore or a download
-	// whose reader lives elsewhere. Emits `data` frames only (no header). By
+	// Stream an artifact OUT, for a restore or a download whose reader lives
+	// elsewhere. The artifact is either on this host's store or in a bucket this
+	// host can dial (`store` or `s3`). Emits `data` frames only (no header). By
 	// default the bytes are exactly what was written — still age-encrypted — so a
 	// control plane relaying them to another host never holds plaintext. Pass
 	// `age_identity` to decrypt on the way out instead, which is what a user

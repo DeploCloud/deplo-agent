@@ -493,10 +493,11 @@ func TestS3Delete_missingKey(t *testing.T) {
 	}
 }
 
-// "backup" and "backup-store" must both be advertised in Hello so the control
-// plane's capability preflight passes against this agent.
+// Every backup flag this agent implements must be advertised in Hello, or the
+// control plane's preflight refuses the feature it is standing in front of and
+// tells the operator to update an agent that is already new enough.
 func TestCapabilities_advertisesBackup(t *testing.T) {
-	for _, want := range []string{"backup", "backup-store"} {
+	for _, want := range []string{"backup", "backup-store", "backup-s3-read"} {
 		found := false
 		for _, c := range Capabilities {
 			if c == want {

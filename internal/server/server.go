@@ -108,6 +108,14 @@ var Capabilities = []string{
 	// when the agent is too old, because a dropped workaround is a slower or
 	// noisier backup, not a backup that silently lost its encryption.
 	"backup-s3-args",
+	// ReadStoreFile accepts an S3Target, so a BUCKET artifact can be streamed out
+	// decrypted the same way a store one already is. Without it the control plane
+	// has no way to hand a user a backup that lives in their bucket, and the
+	// Download button can only say "fetch the object with your own credentials
+	// and decrypt it yourself" - which is the answer this platform exists not to
+	// give. Its own flag rather than folded into "backup-store": that one is
+	// about artifacts held on this host's disk, and this is the opposite case.
+	"backup-s3-read",
 	// Allow-listed Docker disk reclaim (DockerCleanup): build cache, dangling
 	// images, orphaned buildkit volumes, unused app images. NEVER a bare prune.
 	"docker-cleanup",

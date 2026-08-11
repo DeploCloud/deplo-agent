@@ -873,44 +873,86 @@ func (s *Service) writeArtifact(ctx context.Context, dest *artifactDestination, 
 // The store RPCs — cross-host relay primitives
 // ---------------------------------------------------------------------------
 
-// ReadStoreFile streams an artifact out of this host's store. Emits `data`
-// frames only. The bytes are exactly what was written — still age-encrypted — so
-// the control plane relaying them to another agent, or to a user's browser,
-// never holds plaintext it did not explicitly ask to decrypt.
-func (s *Service) ReadStoreFile(req *pb.ReadStoreFileRequest, stream pb.Agent_ReadStoreFileServer) error {
-	t := req.GetStore()
-	if t == nil {
-		return status.Error(codes.InvalidArgument, "read store request missing target")
-	}
-	root, err := s.resolveStoreRoot(t.GetRoot(), false)
-	if err != nil {
-		return err
-	}
-	f, err := storeOpen(root, t.GetObjectKey())
-	if err != nil {
-		return err
-	}
-	defer f.Close()
+// readSourceFor resolves WHERE ReadStoreFile reads from: this host's store, or a
+// bucket this host can dial. It returns the RAW artifact (ciphertext as written),
+// a close, and the verifier that still owes an answer - nil when the digest was
+// already settled or there is none to check.
+//
+// The asymmetry between the two is the whole reason this is its own function. A
+// file on this disk can be hashed BEFORE a byte is sent, so a store read can
+// still refuse. A bucket object can only be hashed as it goes past, so its
+// verdict lands at the end, after bytes have been handed over. Both are honest;
+// they are not the same guarantee, and the caller must not confuse them.
+func (s *Service) readSourceFor(
+	ctx context.Context,
+	req *pb.ReadStoreFileRequest,
+) (io.Reader, func(), *verifyingReader, error) {
+	switch {
+	case req.GetStore() != nil:
+		t := req.GetStore()
+		root, err := s.resolveStoreRoot(t.GetRoot(), false)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		// Prove it is the artifact the control plane wrote BEFORE opening it to
+		// stream. A download hands the file to a person and a relay-restore hands
+		// it to another host; neither should receive something that has been
+		// replaced on this disk since the backup ran. It costs one extra read of a
+		// local file, and unlike the streaming shapes it can still refuse.
+		if verr := verifyStoreDigest(root, t.GetObjectKey(), req.GetExpectedSha256()); verr != nil {
+			return nil, nil, nil, verr
+		}
+		f, err := storeOpen(root, t.GetObjectKey())
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		return f, func() { _ = f.Close() }, nil, nil
 
-	// Prove it is the artifact the control plane wrote BEFORE streaming a byte of
-	// it. A download hands the file to a person and a relay-restore hands it to
-	// another host; neither should receive something that has been replaced on
-	// this disk since the backup ran. It costs one extra read of a local file, and
-	// unlike the streaming shapes it can still refuse.
-	if verr := verifyStoreDigest(root, t.GetObjectKey(), req.GetExpectedSha256()); verr != nil {
-		return verr
+	case req.GetS3() != nil:
+		t := req.GetS3()
+		obj, err := s3client.Download(ctx, s3cfg(t), t.GetObjectKey())
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("open S3 object: %w", err)
+		}
+		if req.GetExpectedSha256() == "" {
+			return obj, func() { _ = obj.Close() }, nil, nil
+		}
+		// Hash the RAW bytes - the artifact as written, ciphertext and all - so the
+		// digest means what the writer meant. Wrapping after the decryption would
+		// hash the plaintext, which is not what anyone recorded.
+		v := &verifyingReader{r: obj, sum: sha256.New(), expected: req.GetExpectedSha256()}
+		return v, func() { _ = obj.Close() }, v, nil
+
+	default:
+		return nil, nil, nil, status.Error(
+			codes.InvalidArgument, "read store request names no artifact to read")
 	}
+}
+
+// ReadStoreFile streams an artifact out, from this host's store or from a bucket
+// it can dial. Emits `data` frames only. The bytes are exactly what was written
+// — still age-encrypted — so the control plane relaying them to another agent, or
+// to a user's browser, never holds plaintext it did not explicitly ask to
+// decrypt.
+func (s *Service) ReadStoreFile(req *pb.ReadStoreFileRequest, stream pb.Agent_ReadStoreFileServer) error {
+	raw, closeSrc, verifier, err := s.readSourceFor(stream.Context(), req)
+	if err != nil {
+		return err
+	}
+	defer closeSrc()
 
 	// Verbatim by default (a relay must not see plaintext); decrypted when the
 	// caller sends an identity, which is the download case. Deliberately NOT
-	// gunzipped: what the user wants is the .tar.gz / .dump.gz itself.
-	var src io.Reader = f
+	// gunzipped: what the user wants is the .tar.gz / .dump.gz itself. That is
+	// also why this does not reuse openArtifactReader, which decompresses because
+	// every one of ITS callers is feeding tar or a database engine.
+	src := raw
 	if id := req.GetAgeIdentity(); id != "" {
 		identity, perr := age.ParseX25519Identity(id)
 		if perr != nil {
 			return status.Errorf(codes.InvalidArgument, "invalid backup decryption key: %v", perr)
 		}
-		dec, derr := age.Decrypt(f, identity)
+		dec, derr := age.Decrypt(raw, identity)
 		if derr != nil {
 			return fmt.Errorf("decrypt backup (is this the right recovery key?): %w", derr)
 		}
@@ -935,6 +977,13 @@ func (s *Service) ReadStoreFile(req *pb.ReadStoreFileRequest, stream pb.Agent_Re
 			}
 		}
 		if rerr == io.EOF {
+			// The bucket shape's verdict is only available here, once the whole
+			// object has gone past. Failing AFTER the bytes were sent is the honest
+			// outcome: the client's stream ends in an error and it has a truncated
+			// file, rather than a complete file nobody checked.
+			if verifier != nil {
+				return verifier.finish()
+			}
 			return nil
 		}
 		if rerr != nil {
