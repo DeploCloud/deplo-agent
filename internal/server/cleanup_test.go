@@ -1155,3 +1155,44 @@ func TestDockerCleanup_buildCacheCeiling_prunesWhatTheAgeFilterCannot(t *testing
 			r.GetItems(), r.GetItemsRemoved())
 	}
 }
+
+// A compose stack builds one image per SERVICE under one deplo.slug, and the map
+// is keyed by slug alone - so an app's number has to apply to each of its services
+// independently, exactly as the scalar always did. Ranking them together would
+// keep one service's newest N and eat every other service's.
+func TestDockerCleanup_unusedAppImages_keepPerSlugAppliesPerService(t *testing.T) {
+	h := newFixture(t)
+	now := time.Now()
+	gen := func(hoursAgo int) string {
+		return now.Add(-time.Duration(hoursAgo) * time.Hour).Format(time.RFC3339Nano)
+	}
+	h.managedImages = []string{"w1", "w2", "w3", "a1", "a2", "a3"}
+	h.imageRows = map[string]string{
+		"w1": "sha256:w1|shop|web|" + gen(2) + "|100000000",
+		"w2": "sha256:w2|shop|web|" + gen(4) + "|100000000",
+		"w3": "sha256:w3|shop|web|" + gen(6) + "|100000000",
+		"a1": "sha256:a1|shop|api|" + gen(2) + "|100000000",
+		"a2": "sha256:a2|shop|api|" + gen(4) + "|100000000",
+		"a3": "sha256:a3|shop|api|" + gen(6) + "|100000000",
+	}
+	h.install(t)
+
+	if _, err := newService(t).DockerCleanup(context.Background(), &pb.DockerCleanupRequest{
+		Scopes:           []pb.CleanupScope{pb.CleanupScope_CLEANUP_SCOPE_UNUSED_APP_IMAGES},
+		KeepImagesPerApp: 1,
+		KeepPerSlug:      map[string]int32{"shop": 2},
+	}); err != nil {
+		t.Fatalf("DockerCleanup: %v", err)
+	}
+	// Each service keeps its own newest 2; only the third of each goes.
+	got := h.argv()
+	want := []string{"rmi sha256:w3", "rmi sha256:a3"}
+	if len(got) != len(want) {
+		t.Fatalf("argv = %q, want %q - the per-slug keep did not apply per service", got, want)
+	}
+	for _, w := range want {
+		if !containsString(got, w) {
+			t.Fatalf("argv = %q, missing %q", got, w)
+		}
+	}
+}
