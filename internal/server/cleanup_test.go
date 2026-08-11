@@ -530,6 +530,78 @@ func TestDockerCleanup_unusedAppImages_composeServicesRankApart(t *testing.T) {
 	}
 }
 
+// keep_per_slug is what carries an app's ROLLBACK DEPTH: two apps on one host keep
+// different numbers of generations, and an app the map does not name falls back to
+// the host-wide scalar. One number for the whole box could only starve the deep app
+// or make the shallow one pay for it.
+func TestDockerCleanup_unusedAppImages_keepPerSlug(t *testing.T) {
+	h := newFixture(t)
+	now := time.Now()
+	gen := func(hoursAgo int) string {
+		return now.Add(-time.Duration(hoursAgo) * time.Hour).Format(time.RFC3339Nano)
+	}
+	// "deep" keeps 3 (an app with 2 rollbacks), "flat" is absent from the map and
+	// takes the scalar 1. Neither app's images are referenced by a container, so
+	// rank is the only thing deciding what survives.
+	h.managedImages = []string{"deep1", "deep2", "deep3", "deep4", "flat1", "flat2"}
+	h.imageRows = map[string]string{
+		"deep1": "sha256:deep1|deep|<no value>|" + gen(2) + "|100000000",
+		"deep2": "sha256:deep2|deep|<no value>|" + gen(4) + "|100000000",
+		"deep3": "sha256:deep3|deep|<no value>|" + gen(6) + "|100000000",
+		"deep4": "sha256:deep4|deep|<no value>|" + gen(8) + "|100000000",
+		"flat1": "sha256:flat1|flat|<no value>|" + gen(2) + "|100000000",
+		"flat2": "sha256:flat2|flat|<no value>|" + gen(4) + "|100000000",
+	}
+	h.install(t)
+
+	if _, err := newService(t).DockerCleanup(context.Background(), &pb.DockerCleanupRequest{
+		Scopes:           []pb.CleanupScope{pb.CleanupScope_CLEANUP_SCOPE_UNUSED_APP_IMAGES},
+		KeepImagesPerApp: 1,
+		KeepPerSlug:      map[string]int32{"deep": 3},
+	}); err != nil {
+		t.Fatalf("DockerCleanup: %v", err)
+	}
+	// deep: ranks 0-2 kept (deep1/2/3), deep4 removed. flat: rank 0 kept, flat2 removed.
+	got := h.argv()
+	want := []string{"rmi sha256:deep4", "rmi sha256:flat2"}
+	if len(got) != len(want) {
+		t.Fatalf("argv = %q, want %q — per-slug keep did not override, or leaked to the other app", got, want)
+	}
+	for _, w := range want {
+		if !containsString(got, w) {
+			t.Fatalf("argv = %q, missing %q", got, w)
+		}
+	}
+}
+
+// A zero (or negative) per-slug value must floor at 1 exactly like the scalar does:
+// an app that keeps no images at all is an app that cannot be started again without
+// a rebuild, which is the one outcome this scope refuses to produce.
+func TestDockerCleanup_unusedAppImages_keepPerSlugFloorsAtOne(t *testing.T) {
+	h := newFixture(t)
+	h.install(t)
+
+	if _, err := newService(t).DockerCleanup(context.Background(), &pb.DockerCleanupRequest{
+		Scopes:           []pb.CleanupScope{pb.CleanupScope_CLEANUP_SCOPE_UNUSED_APP_IMAGES},
+		KeepImagesPerApp: 2,
+		KeepPerSlug:      map[string]int32{"web": 0},
+	}); err != nil {
+		t.Fatalf("DockerCleanup: %v", err)
+	}
+	// web's newest (aaa) is kept by the floor of 1 — and in use anyway; ccc and eee
+	// both go. A zero honoured literally would have tried to remove aaa too.
+	got := h.argv()
+	want := []string{"rmi sha256:ccc", "rmi sha256:eee"}
+	if len(got) != len(want) {
+		t.Fatalf("argv = %q, want %q", got, want)
+	}
+	for _, w := range want {
+		if !containsString(got, w) {
+			t.Fatalf("argv = %q, missing %q", got, w)
+		}
+	}
+}
+
 // The prune scopes must PRUNE even when their own enumeration finds no candidate:
 // the enumeration is the preview, docker's own `until=` filter is the decision.
 // Gating on the pre-count is how a host kept 20GB docker itself called reclaimable

@@ -114,6 +114,10 @@ type cleanupParams struct {
 	dryRun           bool
 	minAgeHours      int
 	keepImagesPerApp int
+	// keepPerSlug overrides keepImagesPerApp for the slugs it names — an app's own
+	// rollback depth. Absent slug => the scalar. Normalised with the same floor of
+	// 1, so a scope reading it can never keep zero images of an app.
+	keepPerSlug map[string]int
 	// dataDir is the filesystem the build-cache ceiling is derived from — the
 	// one the cache actually lands on (build_cache_cap.go).
 	dataDir string
@@ -123,6 +127,17 @@ type cleanupParams struct {
 	// appImageCutoff is the newest an APP image may be to qualify — always
 	// appImageDeployGrace ago, never the policy cutoff. See the constant's comment.
 	appImageCutoff time.Time
+}
+
+// keepImagesFor is how many of an app's newest images survive: its own entry when
+// the control plane sent one, the host-wide scalar otherwise. Both are already
+// floored at 1 by the normalisation in DockerCleanup, so this can only answer a
+// number that keeps at least the current tag.
+func (p cleanupParams) keepImagesFor(slug string) int {
+	if n, ok := p.keepPerSlug[slug]; ok {
+		return n
+	}
+	return p.keepImagesPerApp
 }
 
 // DockerCleanup reclaims Docker disk on this host within the allow-listed scopes
@@ -156,6 +171,18 @@ func (s *Service) DockerCleanup(ctx context.Context, req *pb.DockerCleanupReques
 		// Always keep the current tag, even when no container references it: a
 		// stopped app must stay redeployable without a rebuild from source.
 		params.keepImagesPerApp = 1
+	}
+	// Same floor per slug, applied here rather than at every read, so no scope can
+	// be handed a zero. An empty map stays nil — keepImagesFor then answers the
+	// scalar for every app, which is exactly the pre-rollback behaviour.
+	if raw := req.GetKeepPerSlug(); len(raw) > 0 {
+		params.keepPerSlug = make(map[string]int, len(raw))
+		for slug, n := range raw {
+			if n < 1 {
+				n = 1
+			}
+			params.keepPerSlug[slug] = int(n)
+		}
 	}
 	if params.minAgeHours > 0 {
 		params.cutoff = time.Now().Add(-time.Duration(params.minAgeHours) * time.Hour)
@@ -678,10 +705,12 @@ func cleanOrphanBuildkitCache(ctx context.Context, p cleanupParams, idx *contain
 //	   min_age let a host that redeploys many times a day pile up superseded
 //	   1-2GB images that never aged into eligibility and saturate its disk while
 //	   every sweep reported success/0.
-//	d. it is not among the newest keep_images_per_app images of its group — the
-//	   deplo.slug, subdivided by the deplo.service image label when present
-//	   (a compose stack builds one image per service under the same slug;
-//	   ranking them together would keep one service's image and eat the rest's).
+//	d. it is not among the newest N images of its group — the deplo.slug,
+//	   subdivided by the deplo.service image label when present (a compose stack
+//	   builds one image per service under the same slug; ranking them together
+//	   would keep one service's image and eat the rest's). N is the app's own
+//	   keep_per_slug entry when the control plane sent one — that is the app's
+//	   rollback depth — and keep_images_per_app otherwise.
 //
 // (b) is the one label test in this file, and it is not an ownership test: it only
 // NARROWS what we will even consider, so a mislabelled object is left alone rather
@@ -738,8 +767,14 @@ func cleanUnusedAppImages(ctx context.Context, p cleanupParams, idx *containerIn
 			return group[i].id < group[j].id // stable, deterministic tiebreak
 		})
 
+		// How deep this app keeps its history. Read off the group rather than the
+		// map key: every member carries the same slug, and the key also holds the
+		// service. A compose stack's services each keep the APP's number, which is
+		// what the scalar did before there was a per-app one.
+		keep := p.keepImagesFor(group[0].slug)
+
 		for rank, im := range group {
-			if rank < p.keepImagesPerApp {
+			if rank < keep {
 				continue // (d) among the newest kept for this app
 			}
 			if idx.images[im.id] {

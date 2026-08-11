@@ -125,6 +125,13 @@ var Capabilities = []string{
 	// Allow-listed Docker disk reclaim (DockerCleanup): build cache, dangling
 	// images, orphaned buildkit volumes, unused app images. NEVER a bare prune.
 	"docker-cleanup",
+	// DockerCleanupRequest.keep_per_slug is read: app-image retention is per APP
+	// instead of one number for the whole host, which is what lets each app carry
+	// its own rollback depth. A SOFT gate — an agent without it ignores the map, so
+	// the control plane compensates by raising the scalar to the map's maximum.
+	// That over-keeps here rather than under-keeping, because the failure this
+	// exists to prevent is deleting the image a rollback was about to run.
+	"cleanup.keep-per-slug",
 	// mTLS leaf renewal over the existing pinned channel (RenewalCSR +
 	// InstallRenewedCert): the control plane re-signs a fresh CSR before the
 	// ~365d cert expires and the agent hot-reloads it WITHOUT a restart. An agent
