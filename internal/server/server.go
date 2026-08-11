@@ -127,7 +127,7 @@ var Capabilities = []string{
 	"docker-cleanup",
 	// DockerCleanupRequest.keep_per_slug is read: app-image retention is per APP
 	// instead of one number for the whole host, which is what lets each app carry
-	// its own rollback depth. A SOFT gate — an agent without it ignores the map, so
+	// its own rollback depth. A SOFT gate - an agent without it ignores the map, so
 	// the control plane compensates by raising the scalar to the map's maximum.
 	// That over-keeps here rather than under-keeping, because the failure this
 	// exists to prevent is deleting the image a rollback was about to run.

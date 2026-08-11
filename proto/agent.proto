@@ -2106,13 +2106,13 @@ message DockerCleanupRequest {
   // for the whole host would either starve the app that wants five rollbacks or
   // make every other app on the box pay for it in disk. The control plane sends
   // one entry per app on this host; a preview stack (`<slug>__pr-<n>`) is never in
-  // the map and keeps falling back to the scalar, which is correct — a preview is
+  // the map and keeps falling back to the scalar, which is correct - a preview is
   // not a rollback target.
   //
   // Gated by the "cleanup.keep-per-slug" Hello capability: an agent without it
   // ignores this field entirely, so the control plane compensates by RAISING the
   // scalar to the map's maximum. That over-keeps on an old host rather than
-  // under-keeping — a rollback still works, it just costs more disk until the
+  // under-keeping - a rollback still works, it just costs more disk until the
   // agent is updated.
   map<string, int32> keep_per_slug = 5;
 }

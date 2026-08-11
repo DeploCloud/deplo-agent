@@ -565,7 +565,7 @@ func TestDockerCleanup_unusedAppImages_keepPerSlug(t *testing.T) {
 	got := h.argv()
 	want := []string{"rmi sha256:deep4", "rmi sha256:flat2"}
 	if len(got) != len(want) {
-		t.Fatalf("argv = %q, want %q — per-slug keep did not override, or leaked to the other app", got, want)
+		t.Fatalf("argv = %q, want %q - per-slug keep did not override, or leaked to the other app", got, want)
 	}
 	for _, w := range want {
 		if !containsString(got, w) {
@@ -588,7 +588,7 @@ func TestDockerCleanup_unusedAppImages_keepPerSlugFloorsAtOne(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("DockerCleanup: %v", err)
 	}
-	// web's newest (aaa) is kept by the floor of 1 — and in use anyway; ccc and eee
+	// web's newest (aaa) is kept by the floor of 1 - and in use anyway; ccc and eee
 	// both go. A zero honoured literally would have tried to remove aaa too.
 	got := h.argv()
 	want := []string{"rmi sha256:ccc", "rmi sha256:eee"}

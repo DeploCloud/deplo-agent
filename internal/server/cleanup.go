@@ -114,7 +114,7 @@ type cleanupParams struct {
 	dryRun           bool
 	minAgeHours      int
 	keepImagesPerApp int
-	// keepPerSlug overrides keepImagesPerApp for the slugs it names — an app's own
+	// keepPerSlug overrides keepImagesPerApp for the slugs it names - an app's own
 	// rollback depth. Absent slug => the scalar. Normalised with the same floor of
 	// 1, so a scope reading it can never keep zero images of an app.
 	keepPerSlug map[string]int
@@ -173,7 +173,7 @@ func (s *Service) DockerCleanup(ctx context.Context, req *pb.DockerCleanupReques
 		params.keepImagesPerApp = 1
 	}
 	// Same floor per slug, applied here rather than at every read, so no scope can
-	// be handed a zero. An empty map stays nil — keepImagesFor then answers the
+	// be handed a zero. An empty map stays nil - keepImagesFor then answers the
 	// scalar for every app, which is exactly the pre-rollback behaviour.
 	if raw := req.GetKeepPerSlug(); len(raw) > 0 {
 		params.keepPerSlug = make(map[string]int, len(raw))
@@ -705,12 +705,12 @@ func cleanOrphanBuildkitCache(ctx context.Context, p cleanupParams, idx *contain
 //	   min_age let a host that redeploys many times a day pile up superseded
 //	   1-2GB images that never aged into eligibility and saturate its disk while
 //	   every sweep reported success/0.
-//	d. it is not among the newest N images of its group — the deplo.slug,
+//	d. it is not among the newest N images of its group - the deplo.slug,
 //	   subdivided by the deplo.service image label when present (a compose stack
 //	   builds one image per service under the same slug; ranking them together
 //	   would keep one service's image and eat the rest's). N is the app's own
-//	   keep_per_slug entry when the control plane sent one — that is the app's
-//	   rollback depth — and keep_images_per_app otherwise.
+//	   keep_per_slug entry when the control plane sent one - that is the app's
+//	   rollback depth - and keep_images_per_app otherwise.
 //
 // (b) is the one label test in this file, and it is not an ownership test: it only
 // NARROWS what we will even consider, so a mislabelled object is left alone rather
