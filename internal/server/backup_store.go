@@ -445,6 +445,23 @@ func storeFreeBytes(root string) (free, total int64) {
 type artifactWriter struct {
 	gz  io.WriteCloser
 	age io.WriteCloser // nil when the destination takes plaintext (S3)
+	// gzOut counts gzip's OUTPUT, which is the artifact minus its age layer —
+	// the .tar.gz / .dump.gz a download actually delivers. Counting anywhere else
+	// answers a different question: at gzip's input it is the uncompressed tar,
+	// at the sink it is the ciphertext (already reported as size_bytes).
+	gzOut *countingWriter
+}
+
+// countingWriter tallies the bytes that pass through it.
+type countingWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += int64(n)
+	return n, err
 }
 
 // newArtifactWriter builds the chain over `sink`. An empty recipient yields a
@@ -465,12 +482,17 @@ func newArtifactWriter(sink io.Writer, recipient string) (*artifactWriter, error
 		a.age = enc
 		w = enc
 	}
-	a.gz = gzip.NewWriter(w)
+	a.gzOut = &countingWriter{w: w}
+	a.gz = gzip.NewWriter(a.gzOut)
 	return a, nil
 }
 
 // Writer is what the dump producer writes into.
 func (a *artifactWriter) Writer() io.Writer { return a.gz }
+
+// DecryptedSize is how many bytes the artifact holds once its age layer is
+// removed. Only meaningful after Close (gzip's trailer lands there).
+func (a *artifactWriter) DecryptedSize() int64 { return a.gzOut.n }
 
 // Close finishes the chain in the ONE order that produces a readable artifact:
 // gzip's trailer first, then age's final-chunk marker. Skipping the age Close
@@ -797,11 +819,30 @@ func destinationFromBackup(s *Service, req *pb.BackupRequest, send func([]byte) 
 	}
 }
 
+// artifactWritten is what landed at a destination. The two sizes are different
+// numbers and mean different things, which is exactly why they are named fields
+// and not two int64 returns anyone could swap.
+type artifactWritten struct {
+	// size is the artifact AS STORED — ciphertext when it is encrypted, and the
+	// number the control plane records on the run.
+	size int64
+	// decryptedSize is that same artifact with its age layer removed: the
+	// .tar.gz / .dump.gz a download hands over, and so its Content-Length. Equal
+	// to size for an unencrypted (legacy bucket) artifact, because then there is
+	// no layer to remove.
+	decryptedSize int64
+	digest        string
+}
+
 // writeArtifact runs `produce` through the gzip (+age) chain into the
 // destination, and reports what landed. One function for all three sinks, so the
 // compression, the encryption and the close ordering exist in exactly one place.
-func (s *Service) writeArtifact(ctx context.Context, dest *artifactDestination, produce func(io.Writer) error) (size int64, digest string, err error) {
+func (s *Service) writeArtifact(ctx context.Context, dest *artifactDestination, produce func(io.Writer) error) (out artifactWritten, err error) {
 	pr, pw := io.Pipe()
+	// Written by the producer goroutine BEFORE it closes the pipe, read here only
+	// after the read side has seen EOF — the pipe close is the happens-before
+	// edge, the same one that makes the artifact itself safe to read.
+	var decrypted int64
 	go func() {
 		aw, aerr := newArtifactWriter(pw, dest.recipient)
 		if aerr != nil {
@@ -814,6 +855,7 @@ func (s *Service) writeArtifact(ctx context.Context, dest *artifactDestination, 
 		if cerr := aw.Close(); perr == nil {
 			perr = cerr
 		}
+		decrypted = aw.DecryptedSize()
 		pw.CloseWithError(perr) // nil => clean EOF
 	}()
 	// Any early return must unblock the producer, or the dump goroutine hangs on
@@ -828,9 +870,10 @@ func (s *Service) writeArtifact(ctx context.Context, dest *artifactDestination, 
 	case dest.stream != nil:
 		sum := sha256.New()
 		buf := make([]byte, storeChunkBytes)
+		var size int64
 		for {
 			if cerr := ctx.Err(); cerr != nil {
-				return 0, "", cerr
+				return artifactWritten{}, cerr
 			}
 			n, rerr := pr.Read(buf)
 			if n > 0 {
@@ -846,18 +889,22 @@ func (s *Service) writeArtifact(ctx context.Context, dest *artifactDestination, 
 				frame := make([]byte, n)
 				copy(frame, buf[:n])
 				if serr := dest.stream(frame); serr != nil {
-					return 0, "", serr
+					return artifactWritten{}, serr
 				}
 			}
 			if rerr == io.EOF {
-				return size, hex.EncodeToString(sum.Sum(nil)), nil
+				return artifactWritten{size: size, decryptedSize: decrypted, digest: hex.EncodeToString(sum.Sum(nil))}, nil
 			}
 			if rerr != nil {
-				return 0, "", rerr
+				return artifactWritten{}, rerr
 			}
 		}
 	case dest.store != nil:
-		return storeWrite(dest.store.GetRoot(), dest.store.GetObjectKey(), pr, false)
+		n, digest, werr := storeWrite(dest.store.GetRoot(), dest.store.GetObjectKey(), pr, false)
+		if werr != nil {
+			return artifactWritten{}, werr
+		}
+		return artifactWritten{size: n, decryptedSize: decrypted, digest: digest}, nil
 	default:
 		// Hash on the way past. The bucket's own ETag is not usable as an integrity
 		// check: it is a multipart-dependent digest of the object as the PROVIDER
@@ -868,9 +915,9 @@ func (s *Service) writeArtifact(ctx context.Context, dest *artifactDestination, 
 		sum := sha256.New()
 		n, uerr := s3client.Upload(ctx, s3cfg(dest.s3), dest.key, io.TeeReader(pr, sum))
 		if uerr != nil {
-			return 0, "", fmt.Errorf("upload to S3: %w", uerr)
+			return artifactWritten{}, fmt.Errorf("upload to S3: %w", uerr)
 		}
-		return n, hex.EncodeToString(sum.Sum(nil)), nil
+		return artifactWritten{size: n, decryptedSize: decrypted, digest: hex.EncodeToString(sum.Sum(nil))}, nil
 	}
 }
 

@@ -449,13 +449,14 @@ func TestWriteArtifact_storeRoundTripThroughSource(t *testing.T) {
 		t.Fatalf("destinationFromBackup: %v", err)
 	}
 
-	n, digest, err := s.writeArtifact(context.Background(), dest, func(w io.Writer) error {
+	written, err := s.writeArtifact(context.Background(), dest, func(w io.Writer) error {
 		_, werr := w.Write(payload)
 		return werr
 	})
 	if err != nil {
 		t.Fatalf("writeArtifact: %v", err)
 	}
+	n, digest := written.size, written.digest
 	if n <= 0 || digest == "" {
 		t.Errorf("a store write must report size + digest, got n=%d digest=%q", n, digest)
 	}
@@ -510,13 +511,14 @@ func TestWriteArtifact_streamOutEmitsCiphertext(t *testing.T) {
 		t.Fatalf("destinationFromBackup: %v", err)
 	}
 
-	n, digest, err := s.writeArtifact(context.Background(), dest, func(w io.Writer) error {
+	written, err := s.writeArtifact(context.Background(), dest, func(w io.Writer) error {
 		_, werr := w.Write(payload)
 		return werr
 	})
 	if err != nil {
 		t.Fatalf("writeArtifact: %v", err)
 	}
+	n, digest := written.size, written.digest
 	if int64(relayed.Len()) != n {
 		t.Errorf("relayed %d bytes, reported %d", relayed.Len(), n)
 	}
@@ -746,13 +748,14 @@ func TestVerifyStoreDigest_catchesATamperedArtifactUpFront(t *testing.T) {
 	if err != nil {
 		t.Fatalf("destinationFromBackup: %v", err)
 	}
-	_, digest, err := s.writeArtifact(context.Background(), dest, func(w io.Writer) error {
+	written, err := s.writeArtifact(context.Background(), dest, func(w io.Writer) error {
 		_, werr := w.Write([]byte("the real backup"))
 		return werr
 	})
 	if err != nil {
 		t.Fatalf("writeArtifact: %v", err)
 	}
+	digest := written.digest
 
 	if verr := verifyStoreDigest(root, key, digest); verr != nil {
 		t.Errorf("an untouched artifact must verify: %v", verr)
@@ -1063,5 +1066,82 @@ func TestRestoreConfig_anUntrustedArchiveNeverConfiguresAnything(t *testing.T) {
 	}, false, true)
 	if rr.GetComposeYaml() != trusted || rr.GetEnv()["FROM"] != "control-plane" {
 		t.Error("the control plane's own config must still be what comes back up")
+	}
+}
+
+// TestWriteArtifact_decryptedSizeIsWhatADownloadDelivers pins the number the
+// download's Content-Length is built from.
+//
+// It is the ONE thing that must not be approximately right: a Content-Length one
+// byte off a stream the browser then reads to EOF is a download the browser
+// calls corrupt, or one it waits forever for. So this decrypts the artifact
+// exactly as ReadStoreFile does (age layer off, gzip layer left ON — the .gz IS
+// the file the user asked for) and counts what comes out.
+func TestWriteArtifact_decryptedSizeIsWhatADownloadDelivers(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		encrypt bool
+		payload []byte
+	}{
+		// Several chunk boundaries: age frames at 64 KiB, so a payload spanning
+		// more than one chunk is where a per-chunk tag would be miscounted.
+		{"encrypted, multi-chunk", true, bytes.Repeat([]byte("volume bytes\n"), 40_000)},
+		{"encrypted, tiny", true, []byte("x")},
+		{"unencrypted legacy bucket", false, bytes.Repeat([]byte("dump\n"), 1_000)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, root := newStoreService(t)
+			recipient, identity := testKeypair(t)
+			if !tc.encrypt {
+				recipient, identity = "", ""
+			}
+			key := "deplo/team_a/app/prj_1/20260101T000000Z-brun_1.tar.gz"
+			dest := &artifactDestination{
+				store:     &pb.StoreTarget{Root: root, ObjectKey: key},
+				recipient: recipient,
+				key:       key,
+			}
+			written, err := s.writeArtifact(context.Background(), dest, func(w io.Writer) error {
+				_, werr := w.Write(tc.payload)
+				return werr
+			})
+			if err != nil {
+				t.Fatalf("writeArtifact: %v", err)
+			}
+
+			raw, err := os.ReadFile(filepath.Join(root, key))
+			if err != nil {
+				t.Fatalf("read artifact: %v", err)
+			}
+			var delivered []byte
+			if identity == "" {
+				delivered = raw
+			} else {
+				id, perr := age.ParseX25519Identity(identity)
+				if perr != nil {
+					t.Fatalf("parse identity: %v", perr)
+				}
+				dec, derr := age.Decrypt(bytes.NewReader(raw), id)
+				if derr != nil {
+					t.Fatalf("decrypt: %v", derr)
+				}
+				delivered, err = io.ReadAll(dec)
+				if err != nil {
+					t.Fatalf("read decrypted: %v", err)
+				}
+			}
+			if int64(len(delivered)) != written.decryptedSize {
+				t.Errorf("a download delivers %d bytes but the run would advertise %d",
+					len(delivered), written.decryptedSize)
+			}
+			if !tc.encrypt && written.decryptedSize != written.size {
+				t.Errorf("with no age layer the two sizes must agree: stored %d, decrypted %d",
+					written.size, written.decryptedSize)
+			}
+			if tc.encrypt && written.decryptedSize >= written.size {
+				t.Errorf("the age layer only adds bytes: stored %d, decrypted %d",
+					written.size, written.decryptedSize)
+			}
+		})
 	}
 }

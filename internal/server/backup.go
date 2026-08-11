@@ -77,11 +77,18 @@ func (e *bkEmitter) log(level, text string) {
 	_ = e.emit(&pb.BackupEvent{Event: &pb.BackupEvent_Log{Log: &pb.LogLine{Level: level, Text: text}}})
 }
 func (e *bkEmitter) result(ok bool, errMsg, objectKey string, size int64) {
-	e.resultWithDigest(ok, errMsg, objectKey, size, "")
+	e.emitResult(ok, errMsg, objectKey, artifactWritten{size: size})
 }
-func (e *bkEmitter) resultWithDigest(ok bool, errMsg, objectKey string, size int64, digest string) {
+func (e *bkEmitter) emitResult(ok bool, errMsg, objectKey string, w artifactWritten) {
 	_ = e.emit(&pb.BackupEvent{Event: &pb.BackupEvent_Result{
-		Result: &pb.BackupResult{Ok: ok, Error: errMsg, ObjectKey: objectKey, SizeBytes: size, Sha256: digest},
+		Result: &pb.BackupResult{
+			Ok:                 ok,
+			Error:              errMsg,
+			ObjectKey:          objectKey,
+			SizeBytes:          w.size,
+			Sha256:             w.digest,
+			DecryptedSizeBytes: w.decryptedSize,
+		},
 	}})
 }
 
@@ -327,13 +334,13 @@ func (s *Service) backupDatabase(ctx context.Context, d *pb.DatabaseDescriptor, 
 	// to the writer so there is no temp file; the destination reads as the dump
 	// writes, whether that destination is a bucket, this host's disk, or the
 	// relay stream back to the control plane.
-	size, digest, werr := s.writeArtifact(ctx, dest, produce)
+	written, werr := s.writeArtifact(ctx, dest, produce)
 	if werr != nil {
 		e.result(false, statusMessage(werr), "", 0)
 		return
 	}
-	e.log("info", fmt.Sprintf("Wrote %s (%d bytes)", dest.label, size))
-	e.resultWithDigest(true, "", dest.key, size, digest)
+	e.log("info", fmt.Sprintf("Wrote %s (%d bytes)", dest.label, written.size))
+	e.emitResult(true, "", dest.key, written)
 }
 
 func (s *Service) restoreDatabase(ctx context.Context, d *pb.DatabaseDescriptor, src *artifactSource, e *rsEmitter) {
@@ -581,13 +588,13 @@ func (s *Service) backupProject(ctx context.Context, p *pb.ProjectDescriptor, de
 		return err
 	}
 
-	size, digest, werr := s.writeArtifact(ctx, dest, produce)
+	written, werr := s.writeArtifact(ctx, dest, produce)
 	if werr != nil {
 		e.result(false, statusMessage(werr), "", 0)
 		return
 	}
-	e.log("info", fmt.Sprintf("Wrote %s (%d bytes)", dest.label, size))
-	e.resultWithDigest(true, "", dest.key, size, digest)
+	e.log("info", fmt.Sprintf("Wrote %s (%d bytes)", dest.label, written.size))
+	e.emitResult(true, "", dest.key, written)
 }
 
 // writeProjectArchive streams the project's volumes + files + snapshot into tw.

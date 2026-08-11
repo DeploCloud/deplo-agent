@@ -576,3 +576,38 @@ func (f *fakeRestoreStream) lastResult(t *testing.T) *pb.RestoreResult {
 	t.Fatal("no terminal RestoreResult emitted on the stream")
 	return nil
 }
+
+// TestHasDotDot covers the VOLUME arm's traversal guard, the sibling of
+// extractToDir's. It matters more than it looks: a volume entry is re-emitted
+// into a helper container's `tar -x`, which honours "../" happily, and an
+// UPLOADED artifact is a file a person picked off their own disk.
+func TestHasDotDot(t *testing.T) {
+	for _, bad := range []string{
+		"..",
+		"../etc/passwd",
+		"data/../../escape",
+		"data/..",
+		"./../x",
+	} {
+		if !hasDotDot(bad) {
+			t.Errorf("%q must be rejected as a traversal", bad)
+		}
+	}
+	for _, ok := range []string{
+		"data/file",
+		"..hidden",
+		"a..b/c",
+		"...",
+		"data/..file",
+		"",
+		// A backslash is an ORDINARY character in a POSIX filename, and both the
+		// agent and the helper container's `tar -x` are Linux. This is one weird
+		// file name, not a traversal, and treating it as one would refuse a
+		// legitimate restore.
+		`..\..\x`,
+	} {
+		if hasDotDot(ok) {
+			t.Errorf("%q is a legitimate name and must not be rejected", ok)
+		}
+	}
+}

@@ -1398,6 +1398,20 @@ message BackupResult {
   // it is the source's half of the integrity check against the destination's
   // StoreResult.sha256.
   string sha256 = 5;
+  // How big the artifact is once DECRYPTED — i.e. exactly how many bytes
+  // ReadStoreFile emits when it is handed an age identity, which is what a
+  // download hands to a browser.
+  //
+  // It is not derivable from size_bytes: age adds a header plus a tag per 64 KiB
+  // chunk, so the stored artifact is always a little larger than the .tar.gz /
+  // .dump.gz inside it, and only the writer ever sees both numbers. Without it
+  // the download can send no Content-Length, and a browser with no
+  // Content-Length shows a download with no size, no percentage and no estimate
+  // — it looks like it is running forever.
+  //
+  // Zero means an agent from before this field: the control plane records
+  // nothing and the download stays length-less, exactly as it was.
+  int64 decrypted_size_bytes = 6;
 }
 
 message RestoreRequest {
