@@ -243,6 +243,24 @@ func Upload(ctx context.Context, cfg Config, key string, r io.Reader) (int64, er
 		DisableContentSha256: extra.disableContentSha256,
 	})
 	if err != nil {
+		// A multipart upload that dies mid-flight leaves its uploaded parts in the
+		// bucket. minio-go tries to abort them, but it does so on the SAME context
+		// that just failed, so the abort itself fails whenever the cause was a
+		// cancellation - which is exactly the case a canceled backup produces. The
+		// parts then sit there: invisible to an object listing, billed all the
+		// same, and for a backup that is gigabytes of an artifact nobody wanted.
+		//
+		// So sweep them on a context of our own. Best effort by construction: the
+		// upload's error is the one worth reporting, and a bucket that will not
+		// answer this cannot be made to.
+		if cerr := ctx.Err(); cerr != nil {
+			// context.Background(), not `ctx`: `ctx` is the cancellation we are
+			// cleaning up after, and reusing it is precisely the bug this exists to
+			// work around.
+			if rerr := cl.RemoveIncompleteUpload(context.Background(), cfg.Bucket, key); rerr != nil {
+				log.Printf("s3: could not clear the incomplete upload at %q: %v", key, rerr)
+			}
+		}
 		return 0, err
 	}
 	return info.Size, nil
