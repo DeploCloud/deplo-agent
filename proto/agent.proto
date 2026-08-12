@@ -178,10 +178,20 @@ service Agent {
 
   // The destination half of an image copy (see ExportImage). The FIRST client
   // message MUST be an ImageChunk carrying `header`; every subsequent message
-  // carries `data`. The agent pipes the reassembled stream through gunzip into
-  // `docker image load`. Terminal StoreResult reports bytes + sha256 of what
-  // actually landed, the same proof of transfer WriteStoreFile returns - a loaded
-  // image has no ETag either. Capability: "image-copy".
+  // carries `data`. The agent pipes the reassembled stream into `docker image
+  // load`, which decompresses it itself.
+  //
+  // The archive is NOT trusted to name itself: `docker load` restores whatever
+  // RepoTags it declares, not the tag the caller announced, so an archive could
+  // carry a second image and replace a neighbouring app's - or a base image - on a
+  // host that merely accepted a build. The agent diffs the host's tag list either
+  // side of the load and REFUSES (removing them) if any other `deplo/` tag
+  // appeared. Scoped to that namespace on purpose: other deploys mutate the same
+  // host concurrently, so treating a base image someone else just pulled as
+  // smuggled would break a deploy that did nothing wrong.
+  // Terminal StoreResult reports bytes + sha256 of what actually landed, the same
+  // proof of transfer WriteStoreFile returns - a loaded image has no ETag either.
+  // Capability: "image-copy".
   rpc ImportImage(stream ImageChunk) returns (StoreResult);
 
   // Read back the rendered stack YAML the agent has on disk (<stack_dir>/<slug>.yml)
@@ -1129,10 +1139,11 @@ message ExportImageRequest {
 // emits `data` chunks (no header); ImportImage expects a `header` first then `data`.
 message ImageChunk {
   message Header {
-    // The tag the stream is expected to carry, for the log line and for error
-    // messages. `docker load` restores whatever tags the archive names, so this is
-    // not what the load keys on - it is the caller's declaration of intent, and a
-    // mismatch with the archive is worth saying out loud.
+    // The tag the stream is expected to carry. `docker load` restores whatever
+    // tags the archive names, so this is not what the load keys on - it is the
+    // caller's DECLARATION, and the agent enforces it: any other tag the archive
+    // brings is removed and the import fails. Must be `deplo/<name>:<tag>`; the
+    // namespace is re-validated agent-side because this RPC also deletes images.
     string image_ref = 1;
   }
   oneof frame {

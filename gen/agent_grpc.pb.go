@@ -239,10 +239,20 @@ type AgentClient interface {
 	ExportImage(ctx context.Context, in *ExportImageRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ImageChunk], error)
 	// The destination half of an image copy (see ExportImage). The FIRST client
 	// message MUST be an ImageChunk carrying `header`; every subsequent message
-	// carries `data`. The agent pipes the reassembled stream through gunzip into
-	// `docker image load`. Terminal StoreResult reports bytes + sha256 of what
-	// actually landed, the same proof of transfer WriteStoreFile returns - a loaded
-	// image has no ETag either. Capability: "image-copy".
+	// carries `data`. The agent pipes the reassembled stream into `docker image
+	// load`, which decompresses it itself.
+	//
+	// The archive is NOT trusted to name itself: `docker load` restores whatever
+	// RepoTags it declares, not the tag the caller announced, so an archive could
+	// carry a second image and replace a neighbouring app's - or a base image - on a
+	// host that merely accepted a build. The agent diffs the host's tag list either
+	// side of the load and REFUSES (removing them) if any other `deplo/` tag
+	// appeared. Scoped to that namespace on purpose: other deploys mutate the same
+	// host concurrently, so treating a base image someone else just pulled as
+	// smuggled would break a deploy that did nothing wrong.
+	// Terminal StoreResult reports bytes + sha256 of what actually landed, the same
+	// proof of transfer WriteStoreFile returns - a loaded image has no ETag either.
+	// Capability: "image-copy".
 	ImportImage(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[ImageChunk, StoreResult], error)
 	// Read back the rendered stack YAML the agent has on disk (<stack_dir>/<slug>.yml)
 	// for the "View full compose" preview. The single-image/built stack's image ref
@@ -1391,10 +1401,20 @@ type AgentServer interface {
 	ExportImage(*ExportImageRequest, grpc.ServerStreamingServer[ImageChunk]) error
 	// The destination half of an image copy (see ExportImage). The FIRST client
 	// message MUST be an ImageChunk carrying `header`; every subsequent message
-	// carries `data`. The agent pipes the reassembled stream through gunzip into
-	// `docker image load`. Terminal StoreResult reports bytes + sha256 of what
-	// actually landed, the same proof of transfer WriteStoreFile returns - a loaded
-	// image has no ETag either. Capability: "image-copy".
+	// carries `data`. The agent pipes the reassembled stream into `docker image
+	// load`, which decompresses it itself.
+	//
+	// The archive is NOT trusted to name itself: `docker load` restores whatever
+	// RepoTags it declares, not the tag the caller announced, so an archive could
+	// carry a second image and replace a neighbouring app's - or a base image - on a
+	// host that merely accepted a build. The agent diffs the host's tag list either
+	// side of the load and REFUSES (removing them) if any other `deplo/` tag
+	// appeared. Scoped to that namespace on purpose: other deploys mutate the same
+	// host concurrently, so treating a base image someone else just pulled as
+	// smuggled would break a deploy that did nothing wrong.
+	// Terminal StoreResult reports bytes + sha256 of what actually landed, the same
+	// proof of transfer WriteStoreFile returns - a loaded image has no ETag either.
+	// Capability: "image-copy".
 	ImportImage(grpc.ClientStreamingServer[ImageChunk, StoreResult]) error
 	// Read back the rendered stack YAML the agent has on disk (<stack_dir>/<slug>.yml)
 	// for the "View full compose" preview. The single-image/built stack's image ref

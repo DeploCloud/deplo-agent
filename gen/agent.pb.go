@@ -9005,10 +9005,11 @@ func (x *FilesChunk_Header) GetWipeFirst() bool {
 
 type ImageChunk_Header struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The tag the stream is expected to carry, for the log line and for error
-	// messages. `docker load` restores whatever tags the archive names, so this is
-	// not what the load keys on - it is the caller's declaration of intent, and a
-	// mismatch with the archive is worth saying out loud.
+	// The tag the stream is expected to carry. `docker load` restores whatever
+	// tags the archive names, so this is not what the load keys on - it is the
+	// caller's DECLARATION, and the agent enforces it: any other tag the archive
+	// brings is removed and the import fails. Must be `deplo/<name>:<tag>`; the
+	// namespace is re-validated agent-side because this RPC also deletes images.
 	ImageRef      string `protobuf:"bytes,1,opt,name=image_ref,json=imageRef,proto3" json:"image_ref,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
