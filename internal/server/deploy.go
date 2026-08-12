@@ -60,6 +60,23 @@ func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitt
 	name := "deplo-" + slug
 	stackFile := filepath.Join(s.stackDir, slug+".yml")
 
+	// A BUILD-ONLY deploy compiles for a host it is not: it must actually build
+	// something, and that something must be one image the caller can then stream
+	// away. A compose stack has neither (its services come up from their own
+	// images, and there is no single ref), and BUILD_KIND_NONE builds nothing at
+	// all - accepting either would report a success that produced no artifact.
+	if req.GetBuildOnly() {
+		if req.GetSourceKind() == pb.SourceKind_SOURCE_KIND_COMPOSE {
+			e.result(false, "build-only is not supported for a compose stack (no single image to move)", "")
+			return
+		}
+		if req.GetBuildKind() == pb.BuildKind_BUILD_KIND_NONE ||
+			req.GetBuildKind() == pb.BuildKind_BUILD_KIND_UNSPECIFIED {
+			e.result(false, "build-only requires a build method (nothing would be built)", "")
+			return
+		}
+	}
+
 	if err := os.MkdirAll(s.stackDir, 0o755); err != nil {
 		e.result(false, "create stack dir: "+err.Error(), "")
 		return
@@ -145,6 +162,17 @@ func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitt
 		}
 	default:
 		e.result(false, "unknown source kind", "")
+		return
+	}
+
+	// A BUILD SERVER stops here. The image is built and tagged; nothing is written
+	// to the stack dir and no container of this app runs on this host. The caller
+	// streams the image off with ExportImage and releases it on the target with an
+	// ordinary SOURCE_KIND_IMAGE deploy - which is what a rollback already is.
+	// `ready` means the image exists, the only claim this host can make.
+	if req.GetBuildOnly() {
+		e.log("info", "Built "+imageRef+" (build server: nothing is started here)")
+		e.result(true, "", commitSha)
 		return
 	}
 

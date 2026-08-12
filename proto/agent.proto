@@ -163,6 +163,27 @@ service Agent {
   // StackResult reports success/failure.
   rpc ImportFiles(stream FilesChunk) returns (StackResult);
 
+  // Stream a BUILT IMAGE off this host, for a build server: the third sibling of
+  // the volume and files-dir relays, and the same star-topology reasoning - the
+  // control plane calls ExportImage on the BUILDER and feeds the chunks into
+  // ImportImage on the host that will run it. No registry, no agent↔agent link.
+  //
+  // `docker save <ref>` piped through gzip, framed like VolumeChunk. Only a local
+  // `deplo/<key>:<dep>` tag is ever asked for, and the ref is re-validated agent
+  // side before it reaches argv. `remove_after` deletes the image here once the
+  // last byte is written: on a build server the image is a courier, not an
+  // artifact - what is worth keeping is the BuildKit cache, which this never
+  // touches. Capability: "image-copy".
+  rpc ExportImage(ExportImageRequest) returns (stream ImageChunk);
+
+  // The destination half of an image copy (see ExportImage). The FIRST client
+  // message MUST be an ImageChunk carrying `header`; every subsequent message
+  // carries `data`. The agent pipes the reassembled stream through gunzip into
+  // `docker image load`. Terminal StoreResult reports bytes + sha256 of what
+  // actually landed, the same proof of transfer WriteStoreFile returns - a loaded
+  // image has no ETag either. Capability: "image-copy".
+  rpc ImportImage(stream ImageChunk) returns (StoreResult);
+
   // Read back the rendered stack YAML the agent has on disk (<stack_dir>/<slug>.yml)
   // for the "View full compose" preview. The single-image/built stack's image ref
   // + env live only in this file (not on the project), so the preview must read it
@@ -632,6 +653,17 @@ message HelloResponse {
   // the same read-live-not-stored model as health. Without Traefik, deployed
   // apps run on the host but are not reachable on their domains.
   bool traefik_running = 6;
+  // This host's CPU architecture, from Go's runtime.GOARCH: "amd64" or "arm64"
+  // (the two the release publishes binaries for). Reported so the control plane
+  // can refuse to BUILD an image on one host and run it on a host of the other -
+  // an amd64 image loaded on an arm64 box starts and dies with `exec format
+  // error`, long after the deploy called itself a success. An agent too old to
+  // send this leaves it "", which the control plane reads as "unknown" and which
+  // can never match another host's arch, so a build server is simply not offered
+  // until both ends are new enough. Constant for the life of the host, but sent
+  // on every Hello for the same reason `docker_version` is: nothing here is
+  // stored on the agent side.
+  string host_arch = 7;
 }
 
 // ---------------------------------------------------------------------------
@@ -923,6 +955,26 @@ message DeployRequest {
   // anything that would (see sanitizeComposeArgs).
   // Capability: "deploy.compose-args" (an older agent silently ignores them).
   repeated string compose_up_args = 19;
+
+  // Build the image and STOP: no stack file is written, nothing is brought up,
+  // and this host runs no container for the app. Set when the app builds on a
+  // BUILD SERVER - a host that compiles for machines it does not run on. The
+  // caller then streams the image off with ExportImage and releases it on the
+  // target host with an ordinary SOURCE_KIND_IMAGE deploy (pull_image=false),
+  // which is byte for byte what a rollback already does.
+  //
+  // Everything else about the stream is unchanged: the same PhaseChange/LogLine
+  // events, the same seq numbering, the same ReattachDeploy replay - a build
+  // server's logs are the app's build logs and belong in the same deployment.
+  // The terminal DeployResult reports the BUILD's outcome; `ready` means the
+  // image exists and is tagged, not that anything is running.
+  //
+  // Only meaningful for a request that actually builds: BUILD_KIND_NONE and
+  // SOURCE_KIND_COMPOSE are rejected outright rather than silently producing an
+  // empty success (a compose stack has no single image to move).
+  // Capability: "deploy.build-only" - an older agent would IGNORE this field and
+  // deploy the app on the build server, so the control plane must preflight it.
+  bool build_only = 20;
 }
 
 // One event in the deploy stream. Exactly one of the oneof arms is set.
@@ -1057,6 +1109,36 @@ message FilesChunk {
   }
   oneof frame {
     Header header = 1;
+    bytes data = 2;
+  }
+}
+
+message ExportImageRequest {
+  // The image tag to `docker save`, always the control plane's own
+  // `deplo/<deploy_key>:<deployment id[:12]>`. Re-validated agent-side with the
+  // same guard the build output uses, so a ref carrying shell or CSV metacharacters
+  // never reaches argv.
+  string image_ref = 1;
+  // `docker rmi` the image here once the stream completes successfully. True for
+  // every build-server transfer: the builder holds no app images, only cache. A
+  // failed export never removes anything.
+  bool remove_after = 2;
+}
+
+// A framed chunk of a cross-host IMAGE transfer, mirroring VolumeChunk. ExportImage
+// emits `data` chunks (no header); ImportImage expects a `header` first then `data`.
+message ImageChunk {
+  message Header {
+    // The tag the stream is expected to carry, for the log line and for error
+    // messages. `docker load` restores whatever tags the archive names, so this is
+    // not what the load keys on - it is the caller's declaration of intent, and a
+    // mismatch with the archive is worth saying out loud.
+    string image_ref = 1;
+  }
+  oneof frame {
+    Header header = 1;
+    // A raw slice of the gzipped `docker save` stream. Same 1 MiB framing as the
+    // volume relay; reassembled in order on the destination.
     bytes data = 2;
   }
 }

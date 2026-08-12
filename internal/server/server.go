@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"sync"
 	"time"
@@ -144,6 +145,17 @@ var Capabilities = []string{
 	// it absent tells the operator to update the agent rather than rendering a
 	// panel whose every button fails.
 	"hostops",
+	// DeployRequest.build_only is honoured: this agent can build an image and stop,
+	// for a BUILD SERVER that compiles for hosts it does not run on. A HARD gate,
+	// and the reason is the failure mode of ignoring it - an older agent would read
+	// the unknown field as absent and DEPLOY the app on the build server, quietly
+	// running production on the wrong machine.
+	"deploy.build-only",
+	// ExportImage/ImportImage: a built image streams host-to-host through the
+	// control plane, the third sibling of the volume and files-dir relays. Both
+	// halves under one flag because a copy needs both ends and there is no useful
+	// state where a host can send but not receive.
+	"image-copy",
 }
 
 // AgentVersion is the version this agent reports over Hello. It is stamped at
@@ -241,6 +253,12 @@ func (s *Service) Hello(ctx context.Context, req *pb.HelloRequest) (*pb.HelloRes
 		// Read live so the control plane can set the server's traefikEnabled from
 		// each Hello rather than a stored value that goes stale.
 		TraefikRunning: available && dockercli.TraefikRunning(ctx),
+		// This binary's own architecture, which is the host's: the release publishes
+		// linux/amd64 and linux/arm64 and the installer picks by `uname -m`. The
+		// control plane compares it across two hosts before letting one BUILD for the
+		// other - an amd64 image loaded on an arm64 box dies with `exec format error`
+		// at run time, long after the deploy called itself a success.
+		HostArch: runtime.GOARCH,
 	}, nil
 }
 
