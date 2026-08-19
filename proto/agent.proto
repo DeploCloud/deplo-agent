@@ -163,6 +163,24 @@ service Agent {
   // StackResult reports success/failure.
   rpc ImportFiles(stream FilesChunk) returns (StackResult);
 
+  // Copy an arbitrary HOST DIRECTORY off this machine — the bind-mount half of a
+  // migration from another platform, where a service's data may sit in a plain
+  // directory rather than in a Docker volume.
+  //
+  // Deliberately narrow, because this is the one RPC that names a host path off the
+  // wire. The path must already EXIST and be a directory (a `-v /missing:/v` mount
+  // would otherwise create it and export nothing, the same trap ExportVolume has),
+  // and a short list of system roots is refused outright. The real gate is on the
+  // control-plane side: instance admin plus the host-volumes grant, which is the
+  // same power a compose stack with a bind mount already has — this is a second
+  // door onto it, never a wider one.
+  rpc ExportHostPath(ExportHostPathRequest) returns (stream VolumeChunk);
+
+  // The destination half of a host-directory copy (see ExportHostPath). First
+  // message carries the header (target path + wipe flag), the rest carry the
+  // gzipped tar. Same deferred wipe as ImportVolume: no data, no wipe.
+  rpc ImportHostPath(stream HostPathChunk) returns (StackResult);
+
   // Stream a BUILT IMAGE off this host, for a build server: the third sibling of
   // the volume and files-dir relays, and the same star-topology reasoning - the
   // control plane calls ExportImage on the BUILDER and feeds the chunks into
@@ -1063,11 +1081,42 @@ message StackRef {
 message StackResult {
   bool ok = 1;
   string error = 2;
+  // ImportVolume / ImportFiles only: how many bytes of the COMPRESSED stream this
+  // host actually consumed, and their sha256. The control plane relays the stream,
+  // so it knows both for the sending side and cross-checks them here — the same
+  // digest check the backup relay makes. Zero/empty from an agent older than the
+  // fields, and from every other RPC that answers with a StackResult: treat them as
+  // "not reported", never as "nothing arrived".
+  int64 bytes_written = 3;
+  string sha256 = 4;
 }
 
 // ---------------------------------------------------------------------------
 // Cross-host volume copy (server move) — see ExportVolume / ImportVolume
 // ---------------------------------------------------------------------------
+
+message ExportHostPathRequest {
+  // An ABSOLUTE, already-existing host directory. Refused when it is missing, is
+  // not a directory, climbs with "..", or names one of the system roots the agent
+  // will not hand over wholesale.
+  string path = 1;
+}
+
+message HostPathChunk {
+  message Header {
+    // The ABSOLUTE host directory on the DESTINATION to untar into. Created if it
+    // does not exist (its PARENT must, so a typo cannot scatter a tree across the
+    // filesystem); refused for the same system roots as the export.
+    string path = 1;
+    // Empty the target first. Applied on the FIRST DATA FRAME, never on the header
+    // alone — see VolumeChunk.Header.wipe_first for why.
+    bool wipe_first = 2;
+  }
+  oneof frame {
+    Header header = 1;
+    bytes data = 2;
+  }
+}
 
 message ExportVolumeRequest {
   // The FULL Docker named volume to tar out (e.g. `deplo-db-mydb_db-mydb-data`).
@@ -1090,6 +1139,11 @@ message VolumeChunk {
     // Empty the target volume before untarring (default true for a move, so the
     // import overwrites rather than merges into whatever the freshly-provisioned
     // stack initialised). A false value appends onto existing contents.
+    //
+    // The wipe happens when the FIRST DATA FRAME ARRIVES, never on this header
+    // alone: a header followed by nothing is what a failed or empty export looks
+    // like, and emptying a volume for one of those destroys the data the copy was
+    // supposed to protect. No data, no wipe.
     bool wipe_first = 2;
   }
   oneof frame {

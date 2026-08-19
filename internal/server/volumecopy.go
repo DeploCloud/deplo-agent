@@ -2,9 +2,16 @@ package server
 
 import (
 	"compress/gzip"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
+	"strings"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
@@ -35,6 +42,11 @@ const volumeCopyTimeout = 30 * time.Minute
 // enough that framing overhead is negligible on a multi-GB volume.
 const chunkBytes = 1 << 20 // 1 MiB
 
+// volumeExistsTimeout bounds the one `docker volume inspect` that gates an export.
+// A local daemon query: short on purpose, so a wedged daemon fails the copy rather
+// than holding the stream open for the copy's own 30 minutes.
+const volumeExistsTimeout = 15 * time.Second
+
 // ExportVolume tars a named volume from a read-only helper container, gzips it, and
 // streams it out as raw byte chunks. The caller is expected to have QUIESCED the
 // source first (stopped the owning stack) so the on-disk files can't change under
@@ -49,6 +61,16 @@ func (s *Service) ExportVolume(req *pb.ExportVolumeRequest, stream pb.Agent_Expo
 		return fmt.Errorf("export volume: %w", err)
 	}
 	ctx := stream.Context()
+
+	// The volume must ALREADY be here. `docker run -v <name>:/v` creates a missing
+	// named volume instead of failing, so without this an export of a volume that is
+	// not on this host succeeds, emits a complete EMPTY archive, and leaves a stray
+	// volume behind — and the destination has already been wiped by the time the
+	// caller could tell. Every Dokploy import lost all of its data exactly this way.
+	// NotFound, so the caller can say which host was asked and for what.
+	if err := assertVolumeExists(ctx, vol); err != nil {
+		return err
+	}
 
 	// gzip the tar as it is produced, writing compressed bytes straight into the
 	// stream via chunkWriter — no temp file, no full-archive buffering.
@@ -81,6 +103,25 @@ func (s *Service) ExportVolume(req *pb.ExportVolumeRequest, stream pb.Agent_Expo
 	}
 	if code != 0 {
 		return fmt.Errorf("export volume %q: tar exited %d", vol, code)
+	}
+	return nil
+}
+
+// assertVolumeExists answers NotFound when the named volume is not on this host.
+// One `docker volume inspect`, before anything is mounted: the check exists because
+// the MOUNT is what creates it, so by the time the tar runs it is too late to tell
+// a real volume from one Docker made up on the spot.
+func assertVolumeExists(ctx context.Context, vol string) error {
+	res, err := dockercli.Run(ctx, volumeExistsTimeout, "volume", "inspect", vol)
+	if err != nil {
+		return status.Errorf(codes.Unavailable, "docker is not reachable on this host: %v", err)
+	}
+	if res.Code != 0 {
+		return status.Errorf(
+			codes.NotFound,
+			"no volume named %q on this host - nothing to export (docker: %s)",
+			vol, strings.TrimSpace(res.Stderr),
+		)
 	}
 	return nil
 }
@@ -134,21 +175,17 @@ func (s *Service) ImportVolume(stream pb.Agent_ImportVolumeServer) error {
 	}
 	hdr := first.GetHeader()
 	if hdr == nil {
-		return sendImportResult(stream, false, "first message must carry a header (volume name)")
+		return sendImportResult(stream, false, 0, "", "first message must carry a header (volume name)")
 	}
 	vol := hdr.GetVolumeName()
 	if err := validateVolumeName(vol); err != nil {
-		return sendImportResult(stream, false, fmt.Sprintf("import volume: %v", err))
+		return sendImportResult(stream, false, 0, "", fmt.Sprintf("import volume: %v", err))
 	}
 
-	// 2. Optionally empty the target so the import overwrites rather than merges into
-	//    whatever the freshly-provisioned stack initialised. wipeVolume keeps the
-	//    volume itself (it stays attached to the stopped stack), just clears it.
-	if hdr.GetWipeFirst() {
-		if err := wipeVolume(ctx, vol); err != nil {
-			return sendImportResult(stream, false, fmt.Sprintf("wipe target volume %q: %v", vol, err))
-		}
-	}
+	// 2. The wipe is DEFERRED to the first data frame (below). Emptying the target
+	//    here, on the header alone, is what turned a failed or empty export into
+	//    data loss: the source may still send nothing at all, and by then the
+	//    destination is already gone. See the header's own comment in the proto.
 
 	// 3. Reassemble the data frames into a byte stream (a pipe the untar reads),
 	//    gunzip it, and feed it to `tar -C /v -xf -` in a helper container. The
@@ -174,10 +211,14 @@ func (s *Service) ImportVolume(stream pb.Agent_ImportVolumeServer) error {
 	if gzErr != nil {
 		_ = pw.CloseWithError(gzErr)
 		<-done
-		return sendImportResult(stream, false, fmt.Sprintf("import volume %q: %v", vol, gzErr))
+		return sendImportResult(stream, false, 0, "", fmt.Sprintf("import volume %q: %v", vol, gzErr))
 	}
 
 	var recvErr error
+	var wipeErr error
+	var received int64
+	digest := sha256.New()
+	wiped := false
 	for {
 		msg, rerr := stream.Recv()
 		if rerr == io.EOF {
@@ -189,6 +230,17 @@ func (s *Service) ImportVolume(stream pb.Agent_ImportVolumeServer) error {
 		}
 		// A stray header mid-stream is a protocol violation; ignore non-data frames.
 		if data := msg.GetData(); len(data) > 0 {
+			// The first real byte is what earns the wipe: a stream that ends here
+			// having sent nothing leaves the destination exactly as it was.
+			if hdr.GetWipeFirst() && !wiped {
+				if err := wipeVolume(ctx, vol); err != nil {
+					wipeErr = err
+					break
+				}
+				wiped = true
+			}
+			received += int64(len(data))
+			digest.Write(data)
 			if _, werr := gz.Write(data); werr != nil {
 				recvErr = werr
 				break
@@ -202,16 +254,25 @@ func (s *Service) ImportVolume(stream pb.Agent_ImportVolumeServer) error {
 	_ = pw.Close()
 	extractErr := <-done
 
+	if wipeErr != nil {
+		return sendImportResult(stream, false, 0, "", fmt.Sprintf("wipe target volume %q: %v", vol, wipeErr))
+	}
 	if recvErr != nil {
-		return sendImportResult(stream, false, fmt.Sprintf("import volume %q: receive: %v", vol, recvErr))
+		return sendImportResult(stream, false, 0, "", fmt.Sprintf("import volume %q: receive: %v", vol, recvErr))
 	}
 	if gzCloseErr != nil {
-		return sendImportResult(stream, false, fmt.Sprintf("import volume %q: decompress: %v", vol, gzCloseErr))
+		return sendImportResult(stream, false, 0, "", fmt.Sprintf("import volume %q: decompress: %v", vol, gzCloseErr))
 	}
 	if extractErr != nil {
-		return sendImportResult(stream, false, fmt.Sprintf("import volume %q: extract: %v", vol, extractErr))
+		return sendImportResult(stream, false, 0, "", fmt.Sprintf("import volume %q: extract: %v", vol, extractErr))
 	}
-	return sendImportResult(stream, true, "")
+	// An empty stream is not a successful copy of nothing, it is a copy that did not
+	// happen — and the caller cannot tell the two apart from `ok` alone.
+	if received == 0 {
+		return sendImportResult(stream, false, 0, "",
+			fmt.Sprintf("import volume %q: the source sent no data", vol))
+	}
+	return sendImportResult(stream, true, received, hex.EncodeToString(digest.Sum(nil)), "")
 }
 
 // newGunzipPump returns a WriteCloser that decompresses everything written to it
@@ -259,6 +320,17 @@ func (g *gunzipPump) Close() error {
 // sendImportResult closes the client-streaming RPC with a terminal StackResult.
 // ImportVolume reports business failures in the body (ok=false + message), matching
 // StopStack/DestroyStack, rather than as a gRPC error.
-func sendImportResult(stream pb.Agent_ImportVolumeServer, ok bool, errMsg string) error {
-	return stream.SendAndClose(&pb.StackResult{Ok: ok, Error: errMsg})
+func sendImportResult(
+	stream pb.Agent_ImportVolumeServer,
+	ok bool,
+	bytesWritten int64,
+	sha256Hex string,
+	errMsg string,
+) error {
+	return stream.SendAndClose(&pb.StackResult{
+		Ok:           ok,
+		Error:        errMsg,
+		BytesWritten: bytesWritten,
+		Sha256:       sha256Hex,
+	})
 }

@@ -2,12 +2,16 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"io"
 	"strings"
 	"testing"
 	"time"
 
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
@@ -194,4 +198,135 @@ func TestE2E_VolumeCopyRoundTrip(t *testing.T) {
 		t.Errorf("wipe-first should have removed leftover.txt: %q", res.Stdout)
 	}
 	t.Log("volume export→import cross-copy OVERWRITE verified")
+}
+
+// TestExportVolume_missingVolumeIsNotFound is the guard that had to exist and did
+// not: `docker run -v <name>:/v` CREATES a missing named volume, so an export of a
+// volume that is not on this host used to exit 0 with a complete EMPTY archive —
+// and the caller wiped a real destination for it. The refusal must be NotFound, and
+// it must leave no volume behind.
+func TestExportVolume_missingVolumeIsNotFound(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
+	defer cancel()
+	if !dockercli.Available(ctx) {
+		t.Skip("docker not available")
+	}
+	svc := New(t.TempDir(), t.TempDir(), "/", "")
+
+	missing := "deplo-e2e-copy-absent"
+	_, _ = dockercli.Run(ctx, 10*time.Second, "volume", "rm", "-f", missing)
+
+	st := &fakeExportStream{ctx: ctx}
+	err := svc.ExportVolume(&pb.ExportVolumeRequest{VolumeName: missing}, st)
+	if err == nil {
+		t.Fatal("exporting a volume that is not on this host must fail")
+	}
+	if status.Code(err) != codes.NotFound {
+		t.Errorf("want NotFound so the caller can say which host was asked, got %v: %v", status.Code(err), err)
+	}
+	if len(st.chunks) != 0 {
+		t.Errorf("a refused export must send no chunks, got %d", len(st.chunks))
+	}
+	// And it must not have CREATED it on the way past.
+	if res, err := dockercli.Run(ctx, 10*time.Second, "volume", "inspect", missing); err == nil && res.Code == 0 {
+		dockercli.Run(context.Background(), 10*time.Second, "volume", "rm", "-f", missing)
+		t.Error("the export created the volume it was supposed to refuse")
+	}
+}
+
+// TestImportVolume_headerOnlyDoesNotWipe pins the other half: a header asking to
+// wipe, followed by no data at all, is exactly what a failed or empty export looks
+// like. The destination must survive it untouched.
+func TestImportVolume_headerOnlyDoesNotWipe(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if !dockercli.Available(ctx) {
+		t.Skip("docker not available")
+	}
+	svc := New(t.TempDir(), t.TempDir(), "/", "")
+
+	dst := "deplo-e2e-copy-keepme"
+	_, _ = dockercli.Run(ctx, 10*time.Second, "volume", "rm", "-f", dst)
+	if res, err := dockercli.Run(ctx, 20*time.Second, "volume", "create", dst); err != nil || res.Code != 0 {
+		t.Skipf("cannot create volume %q (%v / %s)", dst, err, res.Stderr)
+	}
+	defer dockercli.Run(context.Background(), 15*time.Second, "volume", "rm", "-f", dst)
+
+	if res, err := dockercli.Run(ctx, 30*time.Second, "run", "--rm", "-v", dst+":/v", volumeHelperImage,
+		"sh", "-c", "echo precious > /v/data.txt"); err != nil || res.Code != 0 {
+		t.Fatalf("seed dest: %v / %s", err, res.Stderr)
+	}
+
+	im := &fakeImportStream{ctx: ctx, in: []*pb.VolumeChunk{
+		{Frame: &pb.VolumeChunk_Header_{Header: &pb.VolumeChunk_Header{VolumeName: dst, WipeFirst: true}}},
+	}}
+	if err := svc.ImportVolume(im); err != nil {
+		t.Fatalf("ImportVolume transport error: %v", err)
+	}
+	if im.result == nil || im.result.Ok {
+		t.Fatalf("an import that received no data must not report success: %+v", im.result)
+	}
+
+	res, err := dockercli.Run(ctx, 30*time.Second, "run", "--rm", "-v", dst+":/v", volumeHelperImage,
+		"sh", "-c", "cat /v/data.txt 2>/dev/null || echo DESTROYED")
+	if err != nil || res.Code != 0 {
+		t.Fatalf("inspect dest: %v / %s", err, res.Stderr)
+	}
+	if !strings.Contains(res.Stdout, "precious") {
+		t.Errorf("the destination was wiped for a copy that never sent a byte: %q", res.Stdout)
+	}
+}
+
+// TestImportVolume_reportsBytesAndDigest proves the cross-check the control plane
+// makes is actually answerable: a real copy comes back with the compressed byte
+// count and the sha256 of what arrived.
+func TestImportVolume_reportsBytesAndDigest(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if !dockercli.Available(ctx) {
+		t.Skip("docker not available")
+	}
+	svc := New(t.TempDir(), t.TempDir(), "/", "")
+
+	src := "deplo-e2e-copy-digest-src"
+	dst := "deplo-e2e-copy-digest-dst"
+	for _, v := range []string{src, dst} {
+		_, _ = dockercli.Run(ctx, 10*time.Second, "volume", "rm", "-f", v)
+		if res, err := dockercli.Run(ctx, 20*time.Second, "volume", "create", v); err != nil || res.Code != 0 {
+			t.Skipf("cannot create volume %q (%v / %s)", v, err, res.Stderr)
+		}
+		defer dockercli.Run(context.Background(), 15*time.Second, "volume", "rm", "-f", v)
+	}
+	if res, err := dockercli.Run(ctx, 30*time.Second, "run", "--rm", "-v", src+":/v", volumeHelperImage,
+		"sh", "-c", "head -c 100000 /dev/urandom > /v/blob.bin"); err != nil || res.Code != 0 {
+		t.Fatalf("seed source: %v / %s", err, res.Stderr)
+	}
+
+	ex := &fakeExportStream{ctx: ctx}
+	if err := svc.ExportVolume(&pb.ExportVolumeRequest{VolumeName: src}, ex); err != nil {
+		t.Fatalf("ExportVolume: %v", err)
+	}
+	sent := 0
+	relay := sha256.New()
+	in := []*pb.VolumeChunk{
+		{Frame: &pb.VolumeChunk_Header_{Header: &pb.VolumeChunk_Header{VolumeName: dst, WipeFirst: true}}},
+	}
+	for _, c := range ex.chunks {
+		in = append(in, c)
+		sent += len(c.GetData())
+		relay.Write(c.GetData())
+	}
+	im := &fakeImportStream{in: in, ctx: ctx}
+	if err := svc.ImportVolume(im); err != nil {
+		t.Fatalf("ImportVolume transport error: %v", err)
+	}
+	if im.result == nil || !im.result.Ok {
+		t.Fatalf("ImportVolume failed: %+v", im.result)
+	}
+	if im.result.BytesWritten != int64(sent) {
+		t.Errorf("byte count: want %d, got %d", sent, im.result.BytesWritten)
+	}
+	if im.result.Sha256 != hex.EncodeToString(relay.Sum(nil)) {
+		t.Errorf("digest: want %s, got %s", hex.EncodeToString(relay.Sum(nil)), im.result.Sha256)
+	}
 }
