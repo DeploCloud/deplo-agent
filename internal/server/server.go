@@ -514,6 +514,16 @@ func (s *Service) Reroute(ctx context.Context, req *pb.RerouteRequest) (*pb.Stac
 	if err := os.MkdirAll(s.stackDir, 0o755); err != nil {
 		return &pb.StackResult{Ok: false, Error: "create stack dir: " + err.Error()}, nil
 	}
+	// Same opener as Deploy, and for the same reason: every stack joins the shared
+	// `deplo` network, declared `external: true` in the rendered compose, so
+	// `compose up` fails outright if it does not exist yet. Deploy had this and
+	// Reroute did not, which is invisible until a host's FIRST stack arrives
+	// through Reroute - a managed database is provisioned that way, so a database
+	// was the one thing that could not be created on a brand-new server whose
+	// installer skipped Traefik (any host that already runs a reverse proxy).
+	if err := dockercli.EnsureNetwork(ctx, "deplo"); err != nil {
+		return &pb.StackResult{Ok: false, Error: "ensure network: " + err.Error()}, nil
+	}
 
 	stackFile := s.stackPath(slug)
 	// 0600 + Chmod, same as the deploy path writes it: this YAML carries a
