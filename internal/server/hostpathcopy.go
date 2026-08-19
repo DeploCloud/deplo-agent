@@ -144,13 +144,12 @@ func (s *Service) ImportHostPath(stream pb.Agent_ImportHostPathServer) error {
 	if verr != nil {
 		return sendHostPathResult(stream, false, 0, "", verr.Error())
 	}
-	// The PARENT must exist: a target one directory deep is a real destination, a
-	// target ten levels into nothing is a typo, and materialising it would scatter a
-	// tree somewhere nobody meant.
-	if _, serr := os.Stat(filepath.Dir(path)); serr != nil {
-		return sendHostPathResult(stream, false, 0, "",
-			fmt.Sprintf("the parent of %s does not exist on this host", path))
-	}
+	// The whole path is materialised, parents included. It was briefly required to
+	// exist already, and that refused the case this RPC is FOR: a machine migrating
+	// away from another platform does not have that platform's directories, so the
+	// destination host has never heard of the path the source bind-mounts from. The
+	// deny-list above is what keeps a wrong path from being a dangerous one; a
+	// missing parent only ever meant "this host has not run that platform".
 	if mkErr := os.MkdirAll(path, 0o755); mkErr != nil {
 		return sendHostPathResult(stream, false, 0, "",
 			fmt.Sprintf("create %s: %v", path, mkErr))

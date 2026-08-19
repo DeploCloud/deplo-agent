@@ -126,6 +126,51 @@ func TestImportHostPath_headerOnlyDoesNotWipe(t *testing.T) {
 	}
 }
 
+// TestImportHostPath_createsTheWholePath is the case this RPC exists for: the
+// destination has never run the platform being migrated away from, so nothing of
+// that platform's directory tree is there. Requiring the parent to exist refused
+// exactly the migration it was meant to serve.
+func TestImportHostPath_createsTheWholePath(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if !dockercli.Available(ctx) {
+		t.Skip("docker not available")
+	}
+	svc := New(t.TempDir(), t.TempDir(), "/", "")
+
+	src := filepath.Join(t.TempDir(), "src")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "f.txt"), []byte("carried"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Two levels of parent that do not exist on this host.
+	dst := filepath.Join(t.TempDir(), "never", "seen", "before")
+
+	ex := &fakeExportStream{ctx: ctx}
+	if err := svc.ExportHostPath(&pb.ExportHostPathRequest{Path: src}, ex); err != nil {
+		t.Fatalf("ExportHostPath: %v", err)
+	}
+	in := []*pb.HostPathChunk{
+		{Frame: &pb.HostPathChunk_Header_{Header: &pb.HostPathChunk_Header{Path: dst, WipeFirst: true}}},
+	}
+	for _, c := range ex.chunks {
+		in = append(in, &pb.HostPathChunk{Frame: &pb.HostPathChunk_Data{Data: c.GetData()}})
+	}
+	im := &fakeHostPathImportStream{in: in, ctx: ctx}
+	if err := svc.ImportHostPath(im); err != nil {
+		t.Fatalf("ImportHostPath transport error: %v", err)
+	}
+	if im.result == nil || !im.result.Ok {
+		t.Fatalf("a destination whose parents do not exist yet must still be written: %+v", im.result)
+	}
+	got, err := os.ReadFile(filepath.Join(dst, "f.txt"))
+	if err != nil || string(got) != "carried" {
+		t.Errorf("the file did not arrive: %q / %v", got, err)
+	}
+}
+
 // TestE2E_HostPathCopyRoundTrip moves a real directory through both halves.
 func TestE2E_HostPathCopyRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
