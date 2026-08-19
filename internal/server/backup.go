@@ -210,10 +210,33 @@ func execWithSecretEnv(pw, name string, flags ...string) (argv []string, env []s
 // value never touches any argv. mongodump/mongorestore have no password env var,
 // so mongo still passes `-p <pw>` on argv (a documented residual); redactArgs in
 // dockercli masks it out of any error string regardless.
+// mysqlClient names the CLI to exec for a mysql-family engine.
+//
+// MariaDB 11 removed the `mysql*` compatibility symlinks its images used to
+// ship, so `mysqldump` and `mysql` are simply not on PATH there any more - every
+// backup and every restore of a MariaDB 11 database failed with "executable file
+// not found" and nothing in the message pointing at why. The `mariadb-*` names
+// have existed since 10.5, which is older than anything Deplo offers, so routing
+// MariaDB to them is safe in both directions. MySQL keeps its own names; it
+// never had the mariadb ones.
+func mysqlClient(dbType, kind string) string {
+	if dbType == "mariadb" {
+		if kind == "dump" {
+			return "mariadb-dump"
+		}
+		return "mariadb"
+	}
+	if kind == "dump" {
+		return "mysqldump"
+	}
+	return "mysql"
+}
+
 func dumpArgv(d *pb.DatabaseDescriptor) (argv []string, env []string, err error) {
 	c, user, db := d.GetContainer(), d.GetUser(), d.GetDbName()
 	pw := d.GetPassword()
-	switch strings.ToLower(d.GetDbType()) {
+	dbType := strings.ToLower(d.GetDbType())
+	switch dbType {
 	case "postgres":
 		// -Fc = custom (compressed/orderable) format; restored with pg_restore
 		// --clean --if-exists to drop-and-recreate (overwrite, not append).
@@ -223,7 +246,7 @@ func dumpArgv(d *pb.DatabaseDescriptor) (argv []string, env []string, err error)
 	case "mysql", "mariadb":
 		// --add-drop-table makes the restore overwrite each table.
 		a, env := execWithSecretEnv(pw, "MYSQL_PWD")
-		a = append(a, c, "mysqldump", "-u", user, "--add-drop-table", "--databases", db)
+		a = append(a, c, mysqlClient(dbType, "dump"), "-u", user, "--add-drop-table", "--databases", db)
 		return a, env, nil
 	case "mongodb":
 		// --archive writes a single restorable stream to stdout. mongodump has no
@@ -257,7 +280,8 @@ func dumpArgv(d *pb.DatabaseDescriptor) (argv []string, env []string, err error)
 func restoreArgv(d *pb.DatabaseDescriptor) (argv []string, env []string, err error) {
 	c, user, db := d.GetContainer(), d.GetUser(), d.GetDbName()
 	pw := d.GetPassword()
-	switch strings.ToLower(d.GetDbType()) {
+	dbType := strings.ToLower(d.GetDbType())
+	switch dbType {
 	case "postgres":
 		// --clean --if-exists drops existing objects first => overwrite. Password
 		// in PGPASSWORD (env), off argv (see dumpArgv's SECRET HANDLING note).
@@ -265,10 +289,10 @@ func restoreArgv(d *pb.DatabaseDescriptor) (argv []string, env []string, err err
 		a = append(a, c, "pg_restore", "-U", user, "--clean", "--if-exists", "-d", db)
 		return a, env, nil
 	case "mysql", "mariadb":
-		// The --databases dump carries its own USE/CREATE; mysql applies it. The
-		// --add-drop-table in the dump overwrites each table. Password off argv.
+		// The --databases dump carries its own USE/CREATE; the client applies it.
+		// The --add-drop-table in the dump overwrites each table. Password off argv.
 		a, env := execWithSecretEnv(pw, "MYSQL_PWD", "-i")
-		a = append(a, c, "mysql", "-u", user)
+		a = append(a, c, mysqlClient(dbType, "shell"), "-u", user)
 		return a, env, nil
 	case "mongodb":
 		// --drop drops each collection before restoring it => overwrite. mongorestore

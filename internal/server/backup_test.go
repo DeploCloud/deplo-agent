@@ -32,7 +32,10 @@ func TestDumpArgv_perEngine(t *testing.T) {
 	}{
 		{"postgres", "pg_dump", []string{"-Fc", "mydb", "-U", "admin"}, "PGPASSWORD"},
 		{"mysql", "mysqldump", []string{"--add-drop-table", "--databases", "mydb"}, "MYSQL_PWD"},
-		{"mariadb", "mysqldump", []string{"--add-drop-table", "--databases", "mydb"}, "MYSQL_PWD"},
+		// MariaDB 11 dropped the `mysql*` compatibility symlinks, so its own client
+		// name is the only one on PATH there - asking for `mysqldump` failed every
+		// backup of a MariaDB 11 database with "executable file not found".
+		{"mariadb", "mariadb-dump", []string{"--add-drop-table", "--databases", "mydb"}, "MYSQL_PWD"},
 		{"mongodb", "mongodump", []string{"--archive", "--db=mydb"}, ""},
 		{"redis", "redis-cli", []string{"--rdb", "-"}, "REDISCLI_AUTH"},
 	}
@@ -118,6 +121,7 @@ func TestRestoreArgv_overwriteFlags(t *testing.T) {
 	}{
 		{"postgres", "pg_restore", "--clean"},
 		{"mysql", "mysql", ""}, // overwrite comes from the dump's --add-drop-table
+		{"mariadb", "mariadb", ""}, // same, under MariaDB's own client name
 		{"mongodb", "mongorestore", "--drop"},
 	}
 	for _, tc := range cases {
