@@ -295,6 +295,29 @@ service Agent {
   // plane can tell the operator to fall back to re-running the installer.
   rpc SelfUpdate(SelfUpdateRequest) returns (SelfUpdateResponse);
 
+  // Remove the agent's own footprint from this host and stop: the systemd unit,
+  // the binary, and the state dir under --agent-dir (mTLS materials included).
+  // The sibling of SelfUpdate, and the ONLY RPC that ends the agent's own life.
+  //
+  // Exists for the MIGRATION SOURCE: a host of another platform that Deplo is
+  // importing from, where the agent is installed to read volumes and for nothing
+  // else. Sending someone to a shell to undo an install Deplo performed is the
+  // exact thing the product refuses to do.
+  //
+  // Ordering is the whole contract, and the control plane depends on it: the
+  // removals happen BEFORE the reply (so a failure is returnable and the row is
+  // kept), the process then exits 0 shortly after — cleanly, so systemd's
+  // Restart=on-failure does not bring it back. The unit is disabled but never
+  // `stop`ped: KillMode defaults to control-group, so stopping first would kill
+  // this process before it could delete anything.
+  //
+  // OUT OF SCOPE, deliberately: Docker. No container, image, volume or network
+  // is touched — on a migration source they belong to the other platform, and on
+  // an ordinary server that is what uninstall-agent.sh is for. The script also
+  // stays the answer for a host that is unreachable or already de-trusted
+  // (ADR-0011), which is why the control plane always hands it over too.
+  rpc SelfUninstall(SelfUninstallRequest) returns (SelfUninstallResponse);
+
   // ---- BACKUPS: dump/restore a database or project to/from a DESTINATION,
   // plus the affordances the control plane needs (connectivity check + object
   // delete). Routes ALL backup work through the OWNING server's agent
@@ -1346,6 +1369,24 @@ message ArchBinary {
   // update with FAILED_PRECONDITION and the running binary is left untouched —
   // the agent never execs an unverified binary (install-agent.sh P2 parity).
   string sha256 = 2;
+}
+
+// What SelfUninstall removes. Empty: the agent knows every path involved — the
+// binary from os.Executable(), the state dir from its own --agent-dir flag, the
+// unit from the fixed systemd path the installer writes. Taking any of them from
+// the caller would be handing a remote peer an `rm -rf` argument.
+message SelfUninstallRequest {}
+
+message SelfUninstallResponse {
+  // The absolute paths actually removed, for the control plane's activity trail
+  // and for the operator to see what was on the box. A path the agent never
+  // found (no unit file, e.g. an agent run in a container) is simply absent —
+  // that is a skip, not a failure.
+  repeated string removed = 1;
+  // True once every removal has happened and the process is about to exit. The
+  // reply is sent FIRST and the exit follows after a short grace period, so this
+  // is the last thing this agent will ever say.
+  bool stopping = 2;
 }
 
 message SelfUpdateResponse {

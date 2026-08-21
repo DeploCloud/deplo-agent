@@ -77,6 +77,7 @@ const (
 	Agent_ProbeHttp_FullMethodName           = "/deplo.agent.v1.Agent/ProbeHttp"
 	Agent_DockerCleanup_FullMethodName       = "/deplo.agent.v1.Agent/DockerCleanup"
 	Agent_SelfUpdate_FullMethodName          = "/deplo.agent.v1.Agent/SelfUpdate"
+	Agent_SelfUninstall_FullMethodName       = "/deplo.agent.v1.Agent/SelfUninstall"
 	Agent_Backup_FullMethodName              = "/deplo.agent.v1.Agent/Backup"
 	Agent_Restore_FullMethodName             = "/deplo.agent.v1.Agent/Restore"
 	Agent_S3Check_FullMethodName             = "/deplo.agent.v1.Agent/S3Check"
@@ -349,6 +350,28 @@ type AgentClient interface {
 	// locate/replace its own binary (e.g. a read-only install dir), so the control
 	// plane can tell the operator to fall back to re-running the installer.
 	SelfUpdate(ctx context.Context, in *SelfUpdateRequest, opts ...grpc.CallOption) (*SelfUpdateResponse, error)
+	// Remove the agent's own footprint from this host and stop: the systemd unit,
+	// the binary, and the state dir under --agent-dir (mTLS materials included).
+	// The sibling of SelfUpdate, and the ONLY RPC that ends the agent's own life.
+	//
+	// Exists for the MIGRATION SOURCE: a host of another platform that Deplo is
+	// importing from, where the agent is installed to read volumes and for nothing
+	// else. Sending someone to a shell to undo an install Deplo performed is the
+	// exact thing the product refuses to do.
+	//
+	// Ordering is the whole contract, and the control plane depends on it: the
+	// removals happen BEFORE the reply (so a failure is returnable and the row is
+	// kept), the process then exits 0 shortly after — cleanly, so systemd's
+	// Restart=on-failure does not bring it back. The unit is disabled but never
+	// `stop`ped: KillMode defaults to control-group, so stopping first would kill
+	// this process before it could delete anything.
+	//
+	// OUT OF SCOPE, deliberately: Docker. No container, image, volume or network
+	// is touched — on a migration source they belong to the other platform, and on
+	// an ordinary server that is what uninstall-agent.sh is for. The script also
+	// stays the answer for a host that is unreachable or already de-trusted
+	// (ADR-0011), which is why the control plane always hands it over too.
+	SelfUninstall(ctx context.Context, in *SelfUninstallRequest, opts ...grpc.CallOption) (*SelfUninstallResponse, error)
 	// Back up a database or a project to a destination, streaming progress.
 	// DATABASE → the agent `docker exec`s the engine's dump tool (per the format
 	// table in docs/research/dbs-backups/PLAN.md), gzip-compresses the stream, and
@@ -869,6 +892,16 @@ func (c *agentClient) SelfUpdate(ctx context.Context, in *SelfUpdateRequest, opt
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SelfUpdateResponse)
 	err := c.cc.Invoke(ctx, Agent_SelfUpdate_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) SelfUninstall(ctx context.Context, in *SelfUninstallRequest, opts ...grpc.CallOption) (*SelfUninstallResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SelfUninstallResponse)
+	err := c.cc.Invoke(ctx, Agent_SelfUninstall_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1559,6 +1592,28 @@ type AgentServer interface {
 	// locate/replace its own binary (e.g. a read-only install dir), so the control
 	// plane can tell the operator to fall back to re-running the installer.
 	SelfUpdate(context.Context, *SelfUpdateRequest) (*SelfUpdateResponse, error)
+	// Remove the agent's own footprint from this host and stop: the systemd unit,
+	// the binary, and the state dir under --agent-dir (mTLS materials included).
+	// The sibling of SelfUpdate, and the ONLY RPC that ends the agent's own life.
+	//
+	// Exists for the MIGRATION SOURCE: a host of another platform that Deplo is
+	// importing from, where the agent is installed to read volumes and for nothing
+	// else. Sending someone to a shell to undo an install Deplo performed is the
+	// exact thing the product refuses to do.
+	//
+	// Ordering is the whole contract, and the control plane depends on it: the
+	// removals happen BEFORE the reply (so a failure is returnable and the row is
+	// kept), the process then exits 0 shortly after — cleanly, so systemd's
+	// Restart=on-failure does not bring it back. The unit is disabled but never
+	// `stop`ped: KillMode defaults to control-group, so stopping first would kill
+	// this process before it could delete anything.
+	//
+	// OUT OF SCOPE, deliberately: Docker. No container, image, volume or network
+	// is touched — on a migration source they belong to the other platform, and on
+	// an ordinary server that is what uninstall-agent.sh is for. The script also
+	// stays the answer for a host that is unreachable or already de-trusted
+	// (ADR-0011), which is why the control plane always hands it over too.
+	SelfUninstall(context.Context, *SelfUninstallRequest) (*SelfUninstallResponse, error)
 	// Back up a database or a project to a destination, streaming progress.
 	// DATABASE → the agent `docker exec`s the engine's dump tool (per the format
 	// table in docs/research/dbs-backups/PLAN.md), gzip-compresses the stream, and
@@ -1841,6 +1896,9 @@ func (UnimplementedAgentServer) DockerCleanup(context.Context, *DockerCleanupReq
 }
 func (UnimplementedAgentServer) SelfUpdate(context.Context, *SelfUpdateRequest) (*SelfUpdateResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SelfUpdate not implemented")
+}
+func (UnimplementedAgentServer) SelfUninstall(context.Context, *SelfUninstallRequest) (*SelfUninstallResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SelfUninstall not implemented")
 }
 func (UnimplementedAgentServer) Backup(*BackupRequest, grpc.ServerStreamingServer[BackupEvent]) error {
 	return status.Error(codes.Unimplemented, "method Backup not implemented")
@@ -2315,6 +2373,24 @@ func _Agent_SelfUpdate_Handler(srv interface{}, ctx context.Context, dec func(in
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(AgentServer).SelfUpdate(ctx, req.(*SelfUpdateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_SelfUninstall_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SelfUninstallRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).SelfUninstall(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_SelfUninstall_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).SelfUninstall(ctx, req.(*SelfUninstallRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -3004,6 +3080,10 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SelfUpdate",
 			Handler:    _Agent_SelfUpdate_Handler,
+		},
+		{
+			MethodName: "SelfUninstall",
+			Handler:    _Agent_SelfUninstall_Handler,
 		},
 		{
 			MethodName: "S3Check",

@@ -67,6 +67,13 @@ var Capabilities = []string{
 	"ssh-gateway", // the per-host SSH gateway singleton (Ensure/Provision/Deprovision)
 	"tunnel",      // the VS Code remote tunnel (Start/Get/Stop)
 	"self-update", // in-place agent binary update over mTLS (SelfUpdate), certs kept
+	// The agent removes ITSELF from the host (SelfUninstall): unit, binary, state
+	// dir. Its reason to exist is the MIGRATION SOURCE - a host of another platform
+	// we install onto only to read its volumes - where telling someone to open a
+	// shell to undo an install we performed is the thing the product refuses to do.
+	// Docker is never touched; uninstall-agent.sh stays the answer for a host that
+	// is unreachable or already de-trusted.
+	"self-uninstall",
 	"backup",      // dump/restore a DB or project to/from S3 (Backup/Restore/S3Check/S3Delete)
 	"checkport",   // host TCP port availability probe (CheckPort) — gates DB "expose publicly"
 	// One bounded HTTP GET to a container of an app's own stack (ProbeHttp).
