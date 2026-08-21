@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -166,5 +167,51 @@ func TestDestroyStack_sweepsStackFilesOnAnySuccessfulDown(t *testing.T) {
 	}
 	if _, err := os.Stat(envFile); !os.IsNotExist(err) {
 		t.Errorf("and the env file with it, stat err=%v", err)
+	}
+}
+
+// A destroy may reclaim named volumes the control plane lists explicitly, which
+// is the ONLY way to reclaim the data of a stack that was never deployed: with no
+// compose file on the host, `down -v` has nothing to read and the volume is left
+// behind with nothing able to name it (an imported app, deleted before its first
+// deploy). Names outside Deplo's own `deplo-` prefix are refused: a teardown must
+// not be able to name any volume on the host.
+func TestDestroyStack_reclaimsNamedVolumesAndOnlyDeploOnes(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if !dockercli.Available(ctx) {
+		t.Skip("docker not available")
+	}
+	// Unique per run: this suite runs on hosts that also run real workloads.
+	stamp := fmt.Sprintf("%d-%d", os.Getpid(), time.Now().UnixNano())
+	mine := "deplo-agenttest-reclaim-" + stamp
+	foreign := "agenttest-keepme-" + stamp
+	for _, v := range []string{mine, foreign} {
+		if res, err := dockercli.Run(ctx, 20*time.Second, "volume", "create", v); err != nil || res.Code != 0 {
+			t.Skipf("cannot create a scratch volume: %v", err)
+		}
+	}
+	defer dockercli.Run(ctx, 20*time.Second, "volume", "rm", "-f", foreign) //nolint:errcheck
+
+	s := New(t.TempDir(), t.TempDir(), "/", "")
+	res, err := s.DestroyStack(ctx, &pb.StackRef{
+		Slug:           "agenttest-never-deployed-" + stamp,
+		RemoveVolumes:  true,
+		ReclaimVolumes: []string{mine, foreign},
+	})
+	if err != nil {
+		t.Fatalf("DestroyStack rpc error: %v", err)
+	}
+	_ = res
+
+	exists := func(name string) bool {
+		r, err := dockercli.Run(ctx, 20*time.Second, "volume", "inspect", name)
+		return err == nil && r.Code == 0
+	}
+	if exists(mine) {
+		t.Errorf("%s should have been reclaimed", mine)
+	}
+	if !exists(foreign) {
+		t.Errorf("%s is not Deplo's to remove and must survive", foreign)
 	}
 }

@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -442,6 +443,13 @@ func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.Stack
 		downArgs = append(downArgs, "-v")
 	}
 	res, err := dockercli.Run(ctx, 90*time.Second, downArgs...)
+	// Named volumes the control plane asked for BY NAME, reclaimed whatever the
+	// `down` did. `down -v` can only reclaim what the on-disk compose file
+	// declares, so a stack that was never deployed (no file, no containers — the
+	// state a migrated app sits in until somebody deploys it) kept its data
+	// forever, unnamed and unreachable. Best-effort by design: a volume that is
+	// gone, or still in use by something else, must not turn a good destroy bad.
+	reclaimed := s.reclaimVolumes(ctx, ref.GetReclaimVolumes())
 	if err == nil && res.Code == 0 {
 		// The stack files go on ANY successful `down`, not just a `down -v`.
 		//
@@ -458,7 +466,7 @@ func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.Stack
 		// keep them, which is where the "a retry needs it" reasoning actually
 		// applies.
 		s.removeStackFiles(slug)
-		return &pb.StackResult{Ok: true}, nil
+		return &pb.StackResult{Ok: true, Error: reclaimed}, nil
 	}
 	// `rm -f` is idempotent for a missing container (exit 0), so the common
 	// already-gone case still reports Ok. Gate on the exit code — like
@@ -480,6 +488,9 @@ func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.Stack
 		if msg == "" {
 			msg = "down -v failed; container force-removed but the named volume was not reclaimed (stack file kept for retry)"
 		}
+		if reclaimed != "" {
+			msg += "; " + reclaimed
+		}
 		return &pb.StackResult{Ok: false, Error: msg}, nil
 	}
 	return &pb.StackResult{Ok: r2.Code == 0, Error: r2.Stderr}, nil
@@ -492,6 +503,37 @@ func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.Stack
 func (s *Service) removeStackFiles(slug string) {
 	_ = os.Remove(s.stackPath(slug))
 	_ = os.Remove(fmt.Sprintf("%s/%s.env", s.stackDir, slug))
+}
+
+// reclaimVolumes removes named volumes the control plane listed on a destroy.
+//
+// Only names Deplo itself creates are accepted (`deplo-` prefix) — the list
+// arrives over an authenticated channel, but a teardown that can name ANY volume
+// on the host is a bigger verb than it needs to be, and the prefix costs nothing.
+// Returns a summary of what could not be removed, for the caller to report
+// alongside an otherwise-successful destroy; a volume that is simply not there
+// is not a failure, which is the ordinary case once `down -v` did the work.
+func (s *Service) reclaimVolumes(ctx context.Context, names []string) string {
+	var failed []string
+	for _, name := range names {
+		if !strings.HasPrefix(name, "deplo-") || strings.ContainsAny(name, " \t/") {
+			continue
+		}
+		vctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		res, err := dockercli.Run(vctx, 20*time.Second, "volume", "rm", "-f", name)
+		cancel()
+		if err != nil {
+			failed = append(failed, name+": "+err.Error())
+			continue
+		}
+		if res.Code != 0 {
+			failed = append(failed, name+": "+strings.TrimSpace(res.Stderr))
+		}
+	}
+	if len(failed) == 0 {
+		return ""
+	}
+	return "could not reclaim " + strings.Join(failed, "; ")
 }
 
 // Reroute re-renders a running stack in place: the control plane changed the
