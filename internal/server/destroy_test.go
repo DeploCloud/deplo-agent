@@ -154,6 +154,19 @@ func TestDestroyStack_sweepsStackFilesOnAnySuccessfulDown(t *testing.T) {
 	if err := os.WriteFile(envFile, []byte("FOO=bar\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// The app's own config files, and a NEIGHBOUR's - the sweep is scoped to one
+	// slug, and proving that is the whole reason the second directory is here.
+	filesDir := filepath.Join(stackDir, "files", slug)
+	if err := os.MkdirAll(filepath.Join(filesDir, "conf.d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(filesDir, "conf.d", "nginx.conf"), []byte("server {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	neighbour := filepath.Join(stackDir, "files", "app-keepfile-other")
+	if err := os.MkdirAll(neighbour, 0o755); err != nil {
+		t.Fatal(err)
+	}
 
 	res, err := s.DestroyStack(ctx, &pb.StackRef{Slug: slug})
 	if err != nil {
@@ -167,6 +180,14 @@ func TestDestroyStack_sweepsStackFilesOnAnySuccessfulDown(t *testing.T) {
 	}
 	if _, err := os.Stat(envFile); !os.IsNotExist(err) {
 		t.Errorf("and the env file with it, stat err=%v", err)
+	}
+	// The config files go too, subdirectories included: leaving them behind left a
+	// deleted app's configuration on a shared host forever.
+	if _, err := os.Stat(filesDir); !os.IsNotExist(err) {
+		t.Errorf("and the app's files directory, stat err=%v", err)
+	}
+	if _, err := os.Stat(neighbour); err != nil {
+		t.Errorf("another app's files must be untouched, stat err=%v", err)
 	}
 }
 

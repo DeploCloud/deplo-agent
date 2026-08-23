@@ -503,13 +503,25 @@ func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.Stack
 	return &pb.StackResult{Ok: r2.Code == 0, Error: r2.Stderr}, nil
 }
 
-// removeStackFiles deletes the on-disk compose file and its env sidecar for a
-// destroyed stack. Best-effort: a missing file is fine (already gone), and a
-// remove failure must not flip an otherwise-successful destroy to failed — the
-// container/volumes are already down, a stray file is cosmetic.
+// removeStackFiles deletes everything a destroyed stack leaves on disk: the
+// compose file, its env sidecar, and the app's own files directory. Best-effort:
+// a missing path is fine (already gone), and a remove failure must not flip an
+// otherwise-successful destroy to failed — the container/volumes are already
+// down, a stray file is cosmetic.
+//
+// The FILES DIRECTORY is here for the same reason the env sidecar is, and it was
+// missed when that one was added: it holds the app's config files — its
+// nginx.conf, its htpasswd, whatever a compose stack bind-mounts out of
+// `./<name>` — and deleting the App left every one of them on a shared host,
+// permanently, readable by whoever comes next. Nothing needs them afterwards: the
+// control plane owns those rows and writes them again on the next deploy, so the
+// only thing keeping them buys is a copy of a deleted app's configuration.
 func (s *Service) removeStackFiles(slug string) {
 	_ = os.Remove(s.stackPath(slug))
 	_ = os.Remove(fmt.Sprintf("%s/%s.env", s.stackDir, slug))
+	// Safe as a recursive remove: every caller has already run validateSlug, whose
+	// pattern cannot express a dot, a slash or a leading dash.
+	_ = os.RemoveAll(s.filesRoot(slug))
 }
 
 // reclaimVolumes removes named volumes the control plane listed on a destroy.
