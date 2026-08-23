@@ -2275,6 +2275,18 @@ enum CleanupScope {
   // is no registry push anywhere in Deplo, so a removed image is recoverable only
   // by a rebuild: this scope is opt-in and off by default.
   CLEANUP_SCOPE_UNUSED_APP_IMAGES = 4;
+  // `<stack-dir>/files/<slug>` directories belonging to no stack any more: the
+  // config files of Apps and stacks that were DELETED. Nothing on the host says
+  // an app is gone — the directory is simply never read again — so the control
+  // plane sends the slugs it still knows about (live_slugs) and everything else
+  // is leftover. Removed one directory at a time.
+  //
+  // The only scope that removes something a rebuild cannot recreate, which is why
+  // it fails CLOSED: an empty live_slugs is not "nothing is live", it is a caller
+  // that could not tell us, and the scope is SKIPPED rather than guessed at. A
+  // directory younger than the grace period is left alone too, so a stack being
+  // written right now is never a candidate.
+  CLEANUP_SCOPE_LEFTOVER_APP_FILES = 5;
 }
 
 message DockerCleanupRequest {
@@ -2312,6 +2324,15 @@ message DockerCleanupRequest {
   // under-keeping - a rollback still works, it just costs more disk until the
   // agent is updated.
   map<string, int32> keep_per_slug = 5;
+  // LEFTOVER_APP_FILES only: every stack slug the control plane still knows —
+  // Apps, their preview stacks (`<slug>__pr-<n>`) and databases — INSTANCE-WIDE,
+  // not just the ones placed on this host. Instance-wide because a stack that is
+  // moving between hosts exists on both for a moment and on neither in the
+  // records of one; a per-host list would delete the files of an app mid-move.
+  //
+  // Empty (or absent, which is what an older control plane sends) means the scope
+  // is SKIPPED, never "remove everything".
+  repeated string live_slugs = 6;
 }
 
 message CleanupScopeResult {

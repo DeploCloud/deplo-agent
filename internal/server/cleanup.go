@@ -83,6 +83,13 @@ const (
 	// an image whose container has not started yet — and one hour is far beyond any
 	// build→run gap while being far below any real redeploy cadence worth keeping.
 	appImageDeployGrace = time.Hour
+
+	// How recently a files/<slug> directory may have changed and still be spared.
+	// The live-slug list is a snapshot taken before the sweep dialled this host, so
+	// a stack created in between is missing from it while its directory is already
+	// on disk. An hour is far longer than that window and far shorter than the age
+	// of anything genuinely abandoned.
+	leftoverFilesGrace = time.Hour
 )
 
 // removeObject is the ONE host-mutating docker call in this file: every prune and
@@ -121,12 +128,22 @@ type cleanupParams struct {
 	// dataDir is the filesystem the build-cache ceiling is derived from — the
 	// one the cache actually lands on (build_cache_cap.go).
 	dataDir string
+	// stackDir is where the rendered stacks and their files/<slug> directories
+	// live — the only thing LEFTOVER_APP_FILES looks at.
+	stackDir string
+	// liveSlugs is every stack the control plane still knows about, instance-wide.
+	// Nil/empty means it could not tell us, which SKIPS the scope that reads it.
+	liveSlugs map[string]bool
 	// cutoff is the newest a CACHE-type object (build cache, dangling image, orphan
 	// buildkit volume) may be to qualify. ZERO means "no age filter".
 	cutoff time.Time
 	// appImageCutoff is the newest an APP image may be to qualify — always
 	// appImageDeployGrace ago, never the policy cutoff. See the constant's comment.
 	appImageCutoff time.Time
+	// filesCutoff is the newest a files/<slug> directory may be to qualify. Same
+	// shape and the same reason as appImageCutoff: a directory being written right
+	// now belongs to a stack the control plane's list may predate.
+	filesCutoff time.Time
 }
 
 // keepImagesFor is how many of an app's newest images survive: its own entry when
@@ -163,6 +180,13 @@ func (s *Service) DockerCleanup(ctx context.Context, req *pb.DockerCleanupReques
 		minAgeHours:      int(req.GetMinAgeHours()),
 		keepImagesPerApp: int(req.GetKeepImagesPerApp()),
 		dataDir:          s.dataDir,
+		stackDir:         s.stackDir,
+	}
+	if live := req.GetLiveSlugs(); len(live) > 0 {
+		params.liveSlugs = make(map[string]bool, len(live))
+		for _, slug := range live {
+			params.liveSlugs[slug] = true
+		}
 	}
 	if params.minAgeHours < 0 {
 		params.minAgeHours = 0
@@ -188,6 +212,7 @@ func (s *Service) DockerCleanup(ctx context.Context, req *pb.DockerCleanupReques
 		params.cutoff = time.Now().Add(-time.Duration(params.minAgeHours) * time.Hour)
 	}
 	params.appImageCutoff = time.Now().Add(-appImageDeployGrace)
+	params.filesCutoff = time.Now().Add(-leftoverFilesGrace)
 
 	// The reverse index costs one inspect over every container on the host, and two
 	// scopes need it — so build it at most once, and only if a scope actually asks.
@@ -230,6 +255,10 @@ func (s *Service) DockerCleanup(ctx context.Context, req *pb.DockerCleanupReques
 			} else {
 				r = cleanUnusedAppImages(ctx, params, index)
 			}
+		case pb.CleanupScope_CLEANUP_SCOPE_LEFTOVER_APP_FILES:
+			// No container index here: the proof is the control plane's own list of
+			// live stacks, and an absent list skips the scope rather than guessing.
+			r = cleanLeftoverAppFiles(params)
 		default:
 			return nil, status.Errorf(codes.InvalidArgument,
 				"unknown cleanup scope %q (this agent only implements the allow-listed scopes)", scope.String())
@@ -1126,4 +1155,80 @@ func dockerErr(what string, res dockercli.Result) string {
 		return fmt.Sprintf("docker %s exited %d", what, res.Code)
 	}
 	return fmt.Sprintf("docker %s: %s", what, msg)
+}
+
+// cleanLeftoverAppFiles removes `<stack-dir>/files/<slug>` directories that
+// belong to no stack any more — the config files an App leaves behind when it is
+// deleted, and the only thing this file removes that no rebuild can recreate.
+//
+// The proof is not on the host. A directory does not know its App is gone; it is
+// simply never read again. So the proof arrives with the request: `live_slugs`,
+// every stack the control plane still knows about INSTANCE-WIDE, and anything on
+// disk that is not in it is leftover. Two guards keep that honest:
+//
+//   - an EMPTY list skips the scope. It reads as "nothing is live", which is the
+//     one interpretation that would wipe every app on the host, and it is exactly
+//     what an older control plane (and a failed query) sends.
+//   - a directory touched within leftoverFilesGrace is spared, because the list is
+//     a snapshot and a stack created after it was taken is legitimately missing.
+//
+// Removal is one RemoveAll per directory, never a sweep of the parent: the files
+// root also holds directories for stacks this agent has never heard of (a slug
+// only ever appears here because something wrote it), so the loop deletes what it
+// can name and nothing else.
+func cleanLeftoverAppFiles(p cleanupParams) *pb.CleanupScopeResult {
+	r := &pb.CleanupScopeResult{Scope: pb.CleanupScope_CLEANUP_SCOPE_LEFTOVER_APP_FILES}
+	if len(p.liveSlugs) == 0 {
+		return skippedScope(r.Scope, errors.New(
+			"the control plane sent no list of live stacks, and an empty list is not a reason to delete every app's files"))
+	}
+	if p.stackDir == "" {
+		return skippedScope(r.Scope, errors.New("this agent has no stack directory configured"))
+	}
+
+	root := filepath.Join(p.stackDir, "files")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return r // no files root: nothing has ever been written here
+		}
+		r.Error = err.Error()
+		return r
+	}
+	// Deterministic order, like every other scope: ReadDir already sorts by name,
+	// so the only thing left is to skip what is not ours to judge.
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue // a stray file at the root is not a stack's directory
+		}
+		slug := e.Name()
+		if p.liveSlugs[slug] {
+			continue
+		}
+		// Refuse to act on a name the agent would refuse anywhere else: a directory
+		// that cannot be a slug was not written by a deploy, so it is not ours.
+		if validateSlug(slug) != nil {
+			continue
+		}
+		dir := filepath.Join(root, slug)
+		info, err := e.Info()
+		if err != nil || info.ModTime().After(p.filesCutoff) {
+			continue // unknown age fails closed, same rule as the image scopes
+		}
+		size := dirSize(dir)
+		if !p.dryRun {
+			if err := os.RemoveAll(dir); err != nil {
+				if r.Error == "" {
+					r.Error = fmt.Sprintf("remove %s: %v", slug, err)
+				}
+				continue
+			}
+		}
+		r.ItemsRemoved++
+		r.ReclaimedBytes += size
+		if len(r.Items) < cleanupMaxItems {
+			r.Items = append(r.Items, slug)
+		}
+	}
+	return r
 }

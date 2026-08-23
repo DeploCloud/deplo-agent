@@ -141,6 +141,12 @@ var Capabilities = []string{
 	// That over-keeps here rather than under-keeping, because the failure this
 	// exists to prevent is deleting the image a rollback was about to run.
 	"cleanup.keep-per-slug",
+	// CLEANUP_SCOPE_LEFTOVER_APP_FILES is implemented: the files/<slug> directories
+	// of deleted stacks are reclaimed, judged against the live-slug list the
+	// request carries. A HARD gate, unlike keep-per-slug: an unknown scope is an
+	// INVALID_ARGUMENT that fails the WHOLE sweep, so a control plane must not send
+	// this one to an agent that does not advertise it.
+	"cleanup.leftover-files",
 	// mTLS leaf renewal over the existing pinned channel (RenewalCSR +
 	// InstallRenewedCert): the control plane re-signs a fresh CSR before the
 	// ~365d cert expires and the agent hot-reloads it WITHOUT a restart. An agent
