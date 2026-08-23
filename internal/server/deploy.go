@@ -214,14 +214,15 @@ func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitt
 	// compose stack relies on `${VAR}` interpolation, so write a 0600 env-file and
 	// pass it to compose (mirrors the control plane's deployComposeStack).
 	envFile := ""
+	projectDir := ""
 	if isCompose {
-		envFile = filepath.Join(s.stackDir, slug+".env")
-		if err := os.WriteFile(envFile, []byte(renderEnvFile(req.GetEnv())), 0o600); err != nil {
+		var err error
+		if envFile, projectDir, err = s.writeComposeEnv(slug, req.GetEnv()); err != nil {
 			e.result(false, "write env file: "+err.Error(), "")
 			return
 		}
 	}
-	composeArgs := composeUpArgs(name, stackFile, envFile, req.GetForceRecreate(), req.GetComposeUpArgs())
+	composeArgs := composeUpArgs(name, stackFile, envFile, projectDir, req.GetForceRecreate(), req.GetComposeUpArgs())
 	upLog := "docker compose up -d"
 	if req.GetForceRecreate() {
 		upLog += " --force-recreate"
@@ -457,18 +458,57 @@ func dockerfileBuildEnv(dockerfilePath string, req *pb.DeployRequest) []string {
 	return dockerfileEnvKeys(string(body), req.GetEnv())
 }
 
+// writeComposeEnv writes a compose stack's 0600 env-file and returns it together
+// with the project directory to run the stack from.
+//
+// Both live in the stack's OWN directory (`<stackDir>/files/<slug>`), the one
+// the mount files already use. That is the whole point: compose resolves every
+// relative path in a file - `env_file`, `secrets: file:`, `configs: file:`,
+// `build.context` - against the project directory, which defaults to wherever
+// the stack FILE sits. That is `<stackDir>`, shared by every stack on this host,
+// so a `.env` written there would be one file for all of them and one tenant's
+// `env_file: .env` would read another tenant's variables.
+//
+// The file is named `.env` because that is what a compose file written for any
+// other platform expects to find beside it (Dokploy writes exactly that), so a
+// stack that declares `env_file: .env` now finds one - its own.
+func (s *Service) writeComposeEnv(slug string, env map[string]string) (string, string, error) {
+	projectDir := filepath.Join(s.stackDir, "files", slug)
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		return "", "", err
+	}
+	envFile := filepath.Join(projectDir, ".env")
+	if err := os.WriteFile(envFile, []byte(renderEnvFile(env)), 0o600); err != nil {
+		return "", "", err
+	}
+	// The pre-project-directory location. Left behind it would go on being the
+	// file a `--env-file` never points at again, holding decrypted secrets.
+	_ = os.Remove(filepath.Join(s.stackDir, slug+".env"))
+	return envFile, projectDir, nil
+}
+
 // composeUpArgs assembles the `docker compose … up` argv that brings a stack up.
 // envFile is "" for the single-image path (the control plane baked env into the
 // rendered `environment:` map) and a written 0600 file for a compose stack (whose
 // YAML interpolates `${VAR}`).
+//
+// projectDir is the stack's OWN directory, passed for a compose stack so every
+// relative path the author wrote resolves inside it. Compose otherwise resolves
+// them against the directory of the stack file, which is `<stackDir>` and is
+// SHARED by every stack on the host: a `.env` written there would be one file
+// for all of them, and `env_file: .env` in one tenant's compose would read
+// another's variables. See writeComposeEnv.
 //
 // forceRecreate is what makes "Rebuild container" honest: `up -d` compares
 // compose's own config hash and does NOTHING when it matches, so a compose stack
 // or a prebuilt image whose config did not move would report ready with the old
 // container still running. Ordinary deploys leave it false, so an unchanged
 // reroute still causes no restart.
-func composeUpArgs(project, stackFile, envFile string, forceRecreate bool, extra []string) []string {
+func composeUpArgs(project, stackFile, envFile, projectDir string, forceRecreate bool, extra []string) []string {
 	args := []string{"compose", "-p", project, "-f", stackFile}
+	if projectDir != "" {
+		args = append(args, "--project-directory", projectDir)
+	}
 	if envFile != "" {
 		args = append(args, "--env-file", envFile)
 	}

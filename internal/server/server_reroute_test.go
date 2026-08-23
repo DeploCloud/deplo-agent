@@ -105,8 +105,16 @@ func TestReroute_writesStackEnvAndMountFiles(t *testing.T) {
 		t.Errorf("stack file perm = %o, want 0600", perm)
 	}
 
-	// Env file: rendered KEY=VALUE (sorted), 0600.
-	envFile := filepath.Join(stackDir, "deplo-agent-test-reroute.env")
+	// Env file: rendered KEY=VALUE (sorted), 0600, and inside the stack's OWN
+	// directory - the one compose is pointed at with --project-directory, so a
+	// relative path the author wrote (`env_file: .env` above all) resolves to
+	// this stack's file and never to another tenant's.
+	envFile := filepath.Join(
+		stackDir,
+		"files",
+		"deplo-agent-test-reroute",
+		".env",
+	)
 	envGot, err := os.ReadFile(envFile)
 	if err != nil {
 		t.Fatalf("read env file: %v", err)

@@ -55,6 +55,14 @@ var Capabilities = []string{
 	// because an agent without it ignores the field entirely, and a silently
 	// unapplied flag is exactly the kind of lie the control plane warns about.
 	"deploy.compose-args",
+	// A compose stack is brought up with `--project-directory` pointing at its OWN
+	// directory, and its env-file is `.env` inside it. That is what makes a
+	// relative path an author wrote - `env_file: .env`, `secrets: file: ./x`,
+	// `build.context: ./y` - resolve inside the stack instead of against the
+	// shared stack dir (where a `.env` would be one file for every tenant on the
+	// host). Gated because a stack imported from a platform that writes its own
+	// `.env` simply will not start on an agent without it.
+	"deploy.compose.projectdir",
 	"metrics",
 	"container-stats", // per-container `docker stats` snapshot (ContainerStats) — the per-app/per-database Monitoring tab
 	// ONE long-lived host+container telemetry stream (StreamMetrics), sampled on
@@ -525,6 +533,10 @@ func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.Stack
 func (s *Service) removeStackFiles(slug string) {
 	_ = os.Remove(s.stackPath(slug))
 	_ = os.Remove(fmt.Sprintf("%s/%s.env", s.stackDir, slug))
+	// The env-file moved into the stack's own directory (writeComposeEnv); the
+	// whole directory goes with the stack, but remove the file explicitly first
+	// so a failure to remove the tree never leaves decrypted secrets behind.
+	_ = os.Remove(filepath.Join(s.stackDir, "files", slug, ".env"))
 	// Safe as a recursive remove: every caller has already run validateSlug, whose
 	// pattern cannot express a dot, a slash or a leading dash.
 	_ = os.RemoveAll(s.filesRoot(slug))
@@ -617,16 +629,17 @@ func (s *Service) Reroute(ctx context.Context, req *pb.RerouteRequest) (*pb.Stac
 	// compose stacks need a 0600 env-file for ${VAR} interpolation. Mirror Deploy:
 	// write+pass the env-file only when there is env to interpolate.
 	envFile := ""
+	projectDir := ""
 	if len(req.GetEnv()) > 0 {
-		envFile = fmt.Sprintf("%s/%s.env", s.stackDir, slug)
-		if err := os.WriteFile(envFile, []byte(renderEnvFile(req.GetEnv())), 0o600); err != nil {
+		var err error
+		if envFile, projectDir, err = s.writeComposeEnv(slug, req.GetEnv()); err != nil {
 			return &pb.StackResult{Ok: false, Error: "write env file: " + err.Error()}, nil
 		}
 	}
 	// Through the SAME assembler as a deploy: a reroute brings the stack up too,
 	// so the operator's extra flags (and their vetting) must apply identically —
 	// two hand-rolled argvs is how one of them silently stops matching the other.
-	composeArgs := composeUpArgs(name, stackFile, envFile, false, req.GetComposeUpArgs())
+	composeArgs := composeUpArgs(name, stackFile, envFile, projectDir, false, req.GetComposeUpArgs())
 
 	res, err := dockercli.Run(ctx, 120*time.Second, composeArgs...)
 	if err != nil {

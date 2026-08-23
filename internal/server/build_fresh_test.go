@@ -31,12 +31,12 @@ func TestBuildArgvNoCache(t *testing.T) {
 }
 
 func TestComposeUpArgsForceRecreate(t *testing.T) {
-	plain := composeUpArgs("deplo-app", "/stacks/app.yml", "", false, nil)
+	plain := composeUpArgs("deplo-app", "/stacks/app.yml", "", "", false, nil)
 	if strings.Join(plain, " ") != "compose -p deplo-app -f /stacks/app.yml up -d --remove-orphans" {
 		t.Fatalf("argv = %v, want the unchanged single-image bring-up", plain)
 	}
 
-	stack := composeUpArgs("deplo-app", "/stacks/app.yml", "/stacks/app.env", true, nil)
+	stack := composeUpArgs("deplo-app", "/stacks/app.yml", "/stacks/app.env", "", true, nil)
 	if strings.Join(stack, " ") != "compose -p deplo-app -f /stacks/app.yml --env-file /stacks/app.env up -d --remove-orphans --force-recreate" {
 		t.Fatalf("argv = %v, want the env-file stack forced to recreate", stack)
 	}
