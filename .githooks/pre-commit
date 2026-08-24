@@ -1,0 +1,11 @@
+#!/bin/sh
+# Format what is about to be committed: gofmt for the agent, Prettier for the
+# docs and workflows. lint-staged works on the STAGED copy and re-stages the
+# result, so `git add -p` keeps meaning what it says. Set up by `bun install`
+# (the `prepare` script points core.hooksPath here); bypass with --no-verify.
+#
+# A stock Go install lands in /usr/local/go/bin, which is on nobody's PATH by
+# default - without this the hook would fail on a box where `go build` works.
+command -v gofmt >/dev/null 2>&1 || PATH="$PATH:/usr/local/go/bin"
+export PATH
+exec bunx lint-staged

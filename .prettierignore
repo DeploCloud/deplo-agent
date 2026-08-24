@@ -1,0 +1,5 @@
+# Generated protobuf stubs: owned by `make proto`, not by a formatter.
+gen/
+
+bin/
+node_modules/

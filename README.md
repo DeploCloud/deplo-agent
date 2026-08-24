@@ -24,7 +24,7 @@ sync.
 
 ## Status: Parts A–D complete
 
-Part A routed the **localhost** server's *deploy execution* through the agent;
+Part A routed the **localhost** server's _deploy execution_ through the agent;
 **Part B makes a remote agent real** (provisioning, remote routing, the GIT
 source, reconnection); **Part C** moves the per-server observability + files
 surface; **Part D** moves the last per-host singletons (dev containers + SSH
@@ -88,7 +88,8 @@ checkout is present (default `../deplo`, override `DEPLO_REPO`), the TS client i
 `/usr/local/bin/deplo-agent` (`DEPLO_AGENT_BIN`) rather than compiling it.
 
 End-to-end tests live in the control plane repo (they drive a real control plane
-+ Docker):
+
+- Docker):
 
 ```bash
 # Each needs the server-only shim: node --require ./lib/test/server-only-shim.cjs
@@ -106,15 +107,15 @@ npx tsx scripts/agent-part-d-e2e.mts     # Part D: StartDev/StopDev/Teardown +
 
 ## Layout
 
-| Path | Responsibility |
-|---|---|
-| `main.go` | flags, mTLS config (or call-home bootstrap on first run), gRPC server wiring |
-| `internal/server/` | the Agent service impl (`server.go`, `deploy.go`, `git.go`, `inflight.go`) |
-| `internal/bootstrap/` | **(Part B)** call-home: generate key+CSR, fingerprint-pin the control plane, persist the signed materials |
-| `internal/dockercli/` | `docker`/`compose` CLI exec (port of `lib/infra/docker.ts`) |
-| `internal/hostmetrics/` | host metrics from `/proc` + statfs (port of `lib/infra/host.ts`) |
-| `internal/safepath/` | anti-traversal sandbox (port of `lib/deploy/path-safety.ts`) |
-| `gen/` | generated protobuf/gRPC (do not edit; `make proto`) |
+| Path                    | Responsibility                                                                                            |
+| ----------------------- | --------------------------------------------------------------------------------------------------------- |
+| `main.go`               | flags, mTLS config (or call-home bootstrap on first run), gRPC server wiring                              |
+| `internal/server/`      | the Agent service impl (`server.go`, `deploy.go`, `git.go`, `inflight.go`)                                |
+| `internal/bootstrap/`   | **(Part B)** call-home: generate key+CSR, fingerprint-pin the control plane, persist the signed materials |
+| `internal/dockercli/`   | `docker`/`compose` CLI exec (port of `lib/infra/docker.ts`)                                               |
+| `internal/hostmetrics/` | host metrics from `/proc` + statfs (port of `lib/infra/host.ts`)                                          |
+| `internal/safepath/`    | anti-traversal sandbox (port of `lib/deploy/path-safety.ts`)                                              |
+| `gen/`                  | generated protobuf/gRPC (do not edit; `make proto`)                                                       |
 
 ## License
 

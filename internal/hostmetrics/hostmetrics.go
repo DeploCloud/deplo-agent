@@ -16,20 +16,20 @@ import (
 
 // Metrics mirrors the proto HostMetrics / the TS HostMetrics shape.
 type Metrics struct {
-	CPU          float64
-	CPUCores     int
-	MemUsed      int64
-	MemTotal     int64
-	MemPct       float64
-	DiskUsed     int64
-	DiskTotal    int64
-	DiskPct      float64
-	NetRx        int64 // bytes/sec over the sample window
-	NetTx        int64
-	Load1        float64
-	Load5        float64
-	Load15       float64
-	UptimeSec    int64
+	CPU       float64
+	CPUCores  int
+	MemUsed   int64
+	MemTotal  int64
+	MemPct    float64
+	DiskUsed  int64
+	DiskTotal int64
+	DiskPct   float64
+	NetRx     int64 // bytes/sec over the sample window
+	NetTx     int64
+	Load1     float64
+	Load5     float64
+	Load15    float64
+	UptimeSec int64
 }
 
 // Collect takes a point-in-time snapshot. Like the TS version it samples over a

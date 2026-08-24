@@ -5,6 +5,8 @@
 #   make proto     -> regenerate Go + TS stubs from proto/agent.proto
 #   make test      -> go test ./...
 #   make vet       -> go vet ./...
+#   make fmt       -> gofmt the Go, Prettier the docs and workflows
+#   make fmt-check -> the same, as a verdict (what CI runs)
 
 # Stamp the agent version from the git tag — the SINGLE source of truth. A clean
 # release checkout (`make build` at tag v1.2.0) stamps "1.2.0"; a dev checkout
@@ -17,7 +19,7 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null | sed 's/^v//' || echo dev)
 LDFLAGS := -X github.com/DeploCloud/deplo-agent/internal/server.AgentVersion=$(VERSION)
 
-.PHONY: build test vet proto clean
+.PHONY: build test vet fmt fmt-check proto clean
 
 build:
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o bin/deplo-agent .
@@ -34,6 +36,18 @@ vet:
 # into the control-plane repo.
 proto:
 	bash proto/generate.sh
+
+# Two formatters because there are two languages here: gofmt owns the 105 Go
+# files, Prettier owns the Markdown and the workflows. The pre-commit hook runs
+# both on whatever is staged; these targets are for doing the whole tree at once.
+fmt:
+	gofmt -w $(shell git ls-files '*.go')
+	bunx prettier --write .
+
+fmt-check:
+	@out=$$(gofmt -l $(shell git ls-files '*.go')); \
+	if [ -n "$$out" ]; then echo "gofmt wants these files:"; echo "$$out"; exit 1; fi
+	bunx prettier --check .
 
 clean:
 	rm -rf bin

@@ -21,6 +21,18 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      # Formatting is enforced by the pre-commit hook (.githooks/pre-commit); these
+      # two steps are the backstop for a commit made with --no-verify. gofmt owns
+      # the Go, Prettier owns the Markdown and these workflows.
+      - name: gofmt
+        run: |
+          out=$(gofmt -l $(git ls-files '*.go'))
+          [ -z "$out" ] || { echo "gofmt wants these files:"; echo "$out"; exit 1; }
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun run format:check
       - run: go vet ./...
       # The agent's gRPC port is reachable by anyone who can open a socket, and
       # the TLS handshake + client-cert parse happen BEFORE mTLS proves anything

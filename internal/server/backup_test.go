@@ -120,7 +120,7 @@ func TestRestoreArgv_overwriteFlags(t *testing.T) {
 		wantDrop string // a token that proves drop-and-recreate
 	}{
 		{"postgres", "pg_restore", "--clean"},
-		{"mysql", "mysql", ""}, // overwrite comes from the dump's --add-drop-table
+		{"mysql", "mysql", ""},     // overwrite comes from the dump's --add-drop-table
 		{"mariadb", "mariadb", ""}, // same, under MariaDB's own client name
 		{"mongodb", "mongorestore", "--drop"},
 	}

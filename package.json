@@ -1,0 +1,18 @@
+{
+  "name": "deplo-agent-tooling",
+  "private": true,
+  "description": "Formatting only. The agent is Go: gofmt owns the .go files, Prettier owns the docs and workflows.",
+  "scripts": {
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "prepare": "git config core.hooksPath .githooks || true"
+  },
+  "lint-staged": {
+    "*.go": "gofmt -w",
+    "*": "prettier --write --ignore-unknown"
+  },
+  "devDependencies": {
+    "lint-staged": "^17.3.0",
+    "prettier": "^3.9.6"
+  }
+}

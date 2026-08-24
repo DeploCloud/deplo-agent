@@ -8,3 +8,6 @@ coverage.txt
 
 # Editor/OS
 .DS_Store
+
+# Formatting tooling
+/node_modules/
