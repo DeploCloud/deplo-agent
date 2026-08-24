@@ -3,6 +3,7 @@ package server
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -99,13 +100,10 @@ func (s *Service) ImportFiles(stream pb.Agent_ImportFilesServer) error {
 	}
 	root := s.filesRoot(slug)
 
-	// 2. Optionally wipe the target dir so the import overwrites rather than merges.
-	//    RemoveAll of a non-existent dir is a no-op (nil), matching restoreProject.
-	if hdr.GetWipeFirst() {
-		if err := os.RemoveAll(root); err != nil {
-			return sendFilesResult(stream, false, fmt.Sprintf("wipe files dir %q: %v", slug, err))
-		}
-	}
+	// 2. The wipe is DEFERRED to the first data frame (below), like ImportVolume's.
+	//    Emptying on the header alone means a stream that dies before sending
+	//    anything - a relay that never connected, a source that failed to read -
+	//    has already destroyed the destination by the time anyone finds out.
 
 	// 3. Reassemble the data frames, gunzip, and untar each entry (framed as
 	//    files/<rel>) into the dir via extractToDir. Drive the recv loop as the
@@ -120,6 +118,9 @@ func (s *Service) ImportFiles(stream pb.Agent_ImportFilesServer) error {
 	// Consume the client stream into the gunzip pump in a goroutine; the tar reader
 	// below pulls the decompressed bytes out of the pipe.
 	recvDone := make(chan error, 1)
+	// Written only by the goroutine below and read only after `<-recvDone`, which
+	// is what makes the plain bool safe here.
+	wiped := false
 	go func() {
 		var rerr error
 		for {
@@ -132,6 +133,15 @@ func (s *Service) ImportFiles(stream pb.Agent_ImportFilesServer) error {
 				break
 			}
 			if data := msg.GetData(); len(data) > 0 {
+				// The first real byte earns the wipe. RemoveAll of a non-existent
+				// dir is a no-op (nil), matching restoreProject.
+				if hdr.GetWipeFirst() && !wiped {
+					if werr := os.RemoveAll(root); werr != nil {
+						rerr = fmt.Errorf("wipe files dir %q: %w", slug, werr)
+						break
+					}
+					wiped = true
+				}
 				if _, werr := gz.Write(data); werr != nil {
 					rerr = werr
 					break
@@ -179,11 +189,23 @@ func (s *Service) ImportFiles(stream pb.Agent_ImportFilesServer) error {
 	_, _ = io.Copy(io.Discard, pr)
 	recvErr := <-recvDone
 
-	if extractErr != nil {
-		return sendFilesResult(stream, false, fmt.Sprintf("import files %q: extract: %v", slug, extractErr))
+	// One failure path, and it takes the half-written directory with it: a config
+	// file that arrived truncated is read by whatever mounts it, and reads clean.
+	// No helper container here - this extractor runs in-process. See abandonImport.
+	failure := ""
+	switch {
+	case extractErr != nil:
+		failure = fmt.Sprintf("import files %q: extract: %v", slug, extractErr)
+	case recvErr != nil:
+		failure = fmt.Sprintf("import files %q: receive: %v", slug, recvErr)
 	}
-	if recvErr != nil {
-		return sendFilesResult(stream, false, fmt.Sprintf("import files %q: receive: %v", slug, recvErr))
+	if failure != "" {
+		if wiped {
+			failure += abandonImport("", func(context.Context) error {
+				return os.RemoveAll(root)
+			})
+		}
+		return sendFilesResult(stream, false, failure)
 	}
 	return sendFilesResult(stream, true, "")
 }

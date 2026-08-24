@@ -2,6 +2,7 @@ package server
 
 import (
 	"compress/gzip"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -157,9 +158,12 @@ func (s *Service) ImportHostPath(stream pb.Agent_ImportHostPathServer) error {
 
 	pr, pw := io.Pipe()
 	done := make(chan error, 1)
+	// Named so a failure can remove it before emptying the directory it is
+	// writing into - see abandonImport.
+	helper := importHelperName()
 	go func() {
 		code, perr := dockercli.PipeIn(ctx, volumeCopyTimeout, pr, nil,
-			"run", "--rm", "-i", "-v", path+":/v", volumeHelperImage,
+			"run", "--rm", "-i", "--name", helper, "-v", path+":/v", volumeHelperImage,
 			"tar", "-C", "/v", "-xf", "-")
 		if perr == nil && code != 0 {
 			perr = fmt.Errorf("host path extract exited %d", code)
@@ -210,25 +214,29 @@ func (s *Service) ImportHostPath(stream pb.Agent_ImportHostPathServer) error {
 	_ = pw.Close()
 	extractErr := <-done
 
-	if wipeErr != nil {
-		return sendHostPathResult(stream, false, 0, "",
-			fmt.Sprintf("empty target %q: %v", path, wipeErr))
+	// One failure path: whatever this import emptied is emptied again, so a
+	// half-written directory never survives a copy that did not finish. See
+	// abandonImport.
+	failure := ""
+	switch {
+	case wipeErr != nil:
+		failure = fmt.Sprintf("empty target %q: %v", path, wipeErr)
+	case recvErr != nil:
+		failure = fmt.Sprintf("import host path %q: receive: %v", path, recvErr)
+	case gzCloseErr != nil:
+		failure = fmt.Sprintf("import host path %q: decompress: %v", path, gzCloseErr)
+	case extractErr != nil:
+		failure = fmt.Sprintf("import host path %q: extract: %v", path, extractErr)
+	case received == 0:
+		failure = fmt.Sprintf("import host path %q: the source sent no data", path)
 	}
-	if recvErr != nil {
-		return sendHostPathResult(stream, false, 0, "",
-			fmt.Sprintf("import host path %q: receive: %v", path, recvErr))
-	}
-	if gzCloseErr != nil {
-		return sendHostPathResult(stream, false, 0, "",
-			fmt.Sprintf("import host path %q: decompress: %v", path, gzCloseErr))
-	}
-	if extractErr != nil {
-		return sendHostPathResult(stream, false, 0, "",
-			fmt.Sprintf("import host path %q: extract: %v", path, extractErr))
-	}
-	if received == 0 {
-		return sendHostPathResult(stream, false, 0, "",
-			fmt.Sprintf("import host path %q: the source sent no data", path))
+	if failure != "" {
+		if wiped || wipeErr != nil {
+			failure += abandonImport(helper, func(context.Context) error {
+				return wipeHostPath(path)
+			})
+		}
+		return sendHostPathResult(stream, false, 0, "", failure)
 	}
 	return sendHostPathResult(stream, true, received, hex.EncodeToString(digest.Sum(nil)), "")
 }

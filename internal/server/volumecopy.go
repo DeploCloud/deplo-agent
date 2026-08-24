@@ -47,6 +47,49 @@ const chunkBytes = 1 << 20 // 1 MiB
 // than holding the stream open for the copy's own 30 minutes.
 const volumeExistsTimeout = 15 * time.Second
 
+// importCleanupTimeout bounds the tidy-up after a failed import. Its own context,
+// never the stream's: the failure that matters most here is the relay dying, and
+// that cancels the stream's context - a cleanup inheriting it would be dead on
+// arrival, which is precisely when the destination needs emptying.
+const importCleanupTimeout = 6 * time.Minute
+
+// abandonImport re-empties a destination that this import had ALREADY emptied,
+// and reports what it did in the same sentence as the failure.
+//
+// All-or-nothing has to survive a stream that dies halfway, not only a source
+// that turns out to be empty. Every importer here wipes the destination before
+// extracting into it, so from the first byte onward a truncated transfer, a
+// cancelled relay, a full disk or a tar error leaves HALF of something - and half
+// is worse than nothing: a database engine reads a partial data directory as a
+// corrupt one at best, and an app that version-checks a file on disk decides it
+// is a fresh install and writes over the rest. Nothing is a state the caller can
+// see and act on; half is a state that looks like success.
+//
+// `helper` names the extract container, which must go first. `docker run --rm -i`
+// hands the work to the daemon: killing the CLI (which is what a cancelled
+// context does) leaves the container finishing its untar, so wiping without
+// removing it races a live writer.
+//
+// Only ever called when the wipe already happened - an import that never emptied
+// anything must not empty it now, those bytes belong to whoever was there first.
+func abandonImport(helper string, empty func(context.Context) error) string {
+	ctx, cancel := context.WithTimeout(context.Background(), importCleanupTimeout)
+	defer cancel()
+	if helper != "" {
+		_, _ = dockercli.Run(ctx, 30*time.Second, "rm", "-f", helper)
+	}
+	if err := empty(ctx); err != nil {
+		return fmt.Sprintf(" (the destination is INCOMPLETE: it could not be emptied either: %v)", err)
+	}
+	return " (the destination was emptied: nothing of this copy was kept)"
+}
+
+// importHelperName is a unique name for one extract container, so a failed import
+// can take it down before emptying what it was writing into.
+func importHelperName() string {
+	return fmt.Sprintf("deplo-import-%d", time.Now().UnixNano())
+}
+
 // ExportVolume tars a named volume from a read-only helper container, gzips it, and
 // streams it out as raw byte chunks. The caller is expected to have QUIESCED the
 // source first (stopped the owning stack) so the on-disk files can't change under
@@ -192,11 +235,14 @@ func (s *Service) ImportVolume(stream pb.Agent_ImportVolumeServer) error {
 	//    recv loop runs in this goroutine writing into the pipe; PipeIn drains it.
 	pr, pw := io.Pipe()
 	done := make(chan error, 1)
+	// Named so a failure can remove it before emptying the volume it is writing
+	// into - see abandonImport.
+	helper := importHelperName()
 	go func() {
 		// `tar -C /v -xf -` reads the tar we feed on stdin and extracts into the
 		// volume (created on demand if absent). -i for interactive stdin.
 		code, perr := dockercli.PipeIn(ctx, volumeCopyTimeout, pr, nil,
-			"run", "--rm", "-i", "-v", vol+":/v", volumeHelperImage,
+			"run", "--rm", "-i", "--name", helper, "-v", vol+":/v", volumeHelperImage,
 			"tar", "-C", "/v", "-xf", "-")
 		if perr == nil && code != 0 {
 			perr = fmt.Errorf("volume extract exited %d", code)
@@ -254,23 +300,33 @@ func (s *Service) ImportVolume(stream pb.Agent_ImportVolumeServer) error {
 	_ = pw.Close()
 	extractErr := <-done
 
-	if wipeErr != nil {
-		return sendImportResult(stream, false, 0, "", fmt.Sprintf("wipe target volume %q: %v", vol, wipeErr))
+	// One failure path, because every one of them ends the same way: whatever this
+	// import emptied has to be emptied again. An empty stream is not a successful
+	// copy of nothing, it is a copy that did not happen - and the caller cannot
+	// tell the two apart from `ok` alone; it also never reached the wipe, so it
+	// has nothing to clean up.
+	failure := ""
+	switch {
+	case wipeErr != nil:
+		failure = fmt.Sprintf("wipe target volume %q: %v", vol, wipeErr)
+	case recvErr != nil:
+		failure = fmt.Sprintf("import volume %q: receive: %v", vol, recvErr)
+	case gzCloseErr != nil:
+		failure = fmt.Sprintf("import volume %q: decompress: %v", vol, gzCloseErr)
+	case extractErr != nil:
+		failure = fmt.Sprintf("import volume %q: extract: %v", vol, extractErr)
+	case received == 0:
+		failure = fmt.Sprintf("import volume %q: the source sent no data", vol)
 	}
-	if recvErr != nil {
-		return sendImportResult(stream, false, 0, "", fmt.Sprintf("import volume %q: receive: %v", vol, recvErr))
-	}
-	if gzCloseErr != nil {
-		return sendImportResult(stream, false, 0, "", fmt.Sprintf("import volume %q: decompress: %v", vol, gzCloseErr))
-	}
-	if extractErr != nil {
-		return sendImportResult(stream, false, 0, "", fmt.Sprintf("import volume %q: extract: %v", vol, extractErr))
-	}
-	// An empty stream is not a successful copy of nothing, it is a copy that did not
-	// happen — and the caller cannot tell the two apart from `ok` alone.
-	if received == 0 {
-		return sendImportResult(stream, false, 0, "",
-			fmt.Sprintf("import volume %q: the source sent no data", vol))
+	if failure != "" {
+		// A wipe that failed PART WAY through counts as wiped: `rm -rf` is not
+		// transactional, so a non-zero exit means some of it went.
+		if wiped || wipeErr != nil {
+			failure += abandonImport(helper, func(c context.Context) error {
+				return wipeVolume(c, vol)
+			})
+		}
+		return sendImportResult(stream, false, 0, "", failure)
 	}
 	return sendImportResult(stream, true, received, hex.EncodeToString(digest.Sum(nil)), "")
 }

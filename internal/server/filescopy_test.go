@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
 	"io"
 	"os"
 	"path/filepath"
@@ -158,5 +159,101 @@ func assertFile(t *testing.T, path, want string) {
 	}
 	if string(b) != want {
 		t.Errorf("%s = %q, want %q", path, string(b), want)
+	}
+}
+
+// TestImportFiles_headerOnlyDoesNotWipe: a stream that announces itself and then
+// dies without sending a byte must leave the destination exactly as it was.
+//
+// The wipe used to happen on the header alone, so a relay that never delivered
+// anything - a source that failed to read, a connection that dropped between the
+// two calls - destroyed the destination on its way past. Emptying is now earned by
+// the first real byte, the way ImportVolume already earned it.
+func TestImportFiles_headerOnlyDoesNotWipe(t *testing.T) {
+	svc := New(t.TempDir(), t.TempDir(), "/", "")
+	slug := "keep-me"
+	root := svc.filesRoot(slug)
+	mustWrite(t, filepath.Join(root, "config.yml"), "precious\n")
+
+	im := &fakeImportFilesStream{in: []*pb.FilesChunk{
+		{Frame: &pb.FilesChunk_Header_{Header: &pb.FilesChunk_Header{Slug: slug, WipeFirst: true}}},
+	}}
+	if err := svc.ImportFiles(im); err != nil {
+		t.Fatalf("ImportFiles transport error: %v", err)
+	}
+	assertFile(t, filepath.Join(root, "config.yml"), "precious\n")
+}
+
+// TestImportFiles_truncatedStreamLeavesNothing: a copy that dies MID-STREAM leaves
+// nothing behind, not half a config file.
+//
+// This is the case the deferred wipe alone does not cover: by the time the stream
+// breaks, the destination has already been emptied and partly rewritten. Half a
+// config file is worse than none - whatever mounts it reads it clean and starts
+// with a truncated configuration - so the failure takes its own leftovers with it.
+func TestImportFiles_truncatedStreamLeavesNothing(t *testing.T) {
+	svc := New(t.TempDir(), t.TempDir(), "/", "")
+	slug := "half-written"
+
+	// Big and incompressible, so the truncated stream still carries most of the
+	// file: the point is that extraction gets FAR, not that it never starts.
+	big := make([]byte, 256*1024)
+	if _, err := rand.Read(big); err != nil {
+		t.Fatalf("seed bytes: %v", err)
+	}
+	srcRoot := svc.filesRoot(slug)
+	if err := os.MkdirAll(srcRoot, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(srcRoot, "big.bin"), big, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	ex := &fakeExportFilesStream{}
+	if err := svc.ExportFiles(&pb.ExportFilesRequest{Slug: slug}, ex); err != nil {
+		t.Fatalf("ExportFiles: %v", err)
+	}
+
+	// The destination host: seeded, then handed a stream that stops short.
+	destSvc := New(t.TempDir(), t.TempDir(), "/", "")
+	destRoot := destSvc.filesRoot(slug)
+	mustWrite(t, filepath.Join(destRoot, "old.txt"), "was here\n")
+
+	// Everything the export produced, minus its tail: the gzip trailer goes with
+	// it, which is exactly what a relay dying mid-transfer produces.
+	var whole []byte
+	for _, c := range ex.chunks {
+		whole = append(whole, c.GetData()...)
+	}
+	if len(whole) < 2048 {
+		t.Fatalf("export produced too little to truncate meaningfully (%d bytes)", len(whole))
+	}
+	in := []*pb.FilesChunk{
+		{Frame: &pb.FilesChunk_Header_{Header: &pb.FilesChunk_Header{Slug: slug, WipeFirst: true}}},
+		{Frame: &pb.FilesChunk_Data{Data: whole[:len(whole)-1024]}},
+	}
+
+	im := &fakeImportFilesStream{in: in}
+	if err := destSvc.ImportFiles(im); err != nil {
+		t.Fatalf("ImportFiles transport error: %v", err)
+	}
+	if im.result == nil || im.result.Ok {
+		t.Fatalf("a truncated stream must not report success: %+v", im.result)
+	}
+	if !strings.Contains(im.result.Error, "emptied") {
+		t.Errorf("the failure must say what it did with the destination: %q", im.result.Error)
+	}
+	// Nothing at all: not the old file (the wipe was earned), and not a partial
+	// new one (the failure cleaned up after itself).
+	entries, err := os.ReadDir(destRoot)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("read dest: %v", err)
+	}
+	if len(entries) != 0 {
+		names := []string{}
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("a failed import must leave nothing behind, found: %v", names)
 	}
 }

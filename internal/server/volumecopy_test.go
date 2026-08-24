@@ -330,3 +330,80 @@ func TestImportVolume_reportsBytesAndDigest(t *testing.T) {
 		t.Errorf("digest: want %s, got %s", hex.EncodeToString(relay.Sum(nil)), im.result.Sha256)
 	}
 }
+
+// TestImportVolume_truncatedStreamLeavesNothing proves all-or-nothing survives a
+// stream that dies MID-transfer, not only one that never starts.
+//
+// The deferred wipe covers the second case alone: once the first byte lands the
+// destination has already been emptied, and from there a truncated relay, a full
+// disk or a tar error used to leave HALF a volume. Half is worse than empty - an
+// engine reads a partial data directory as a corrupt one, an app that checks a
+// version file on disk decides it is a fresh install - and it is the shape that
+// looks like success from the outside. So a failed import takes its own leftovers
+// with it, and says so.
+func TestImportVolume_truncatedStreamLeavesNothing(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	if !dockercli.Available(ctx) {
+		t.Skip("docker not available")
+	}
+	svc := New(t.TempDir(), t.TempDir(), "/", "")
+
+	src := "deplo-e2e-copy-trunc-src"
+	dst := "deplo-e2e-copy-trunc-dst"
+	for _, v := range []string{src, dst} {
+		_, _ = dockercli.Run(ctx, 10*time.Second, "volume", "rm", "-f", v)
+		if res, err := dockercli.Run(ctx, 20*time.Second, "volume", "create", v); err != nil || res.Code != 0 {
+			t.Skipf("cannot create volume %q (%v / %s)", v, err, res.Stderr)
+		}
+		defer dockercli.Run(context.Background(), 15*time.Second, "volume", "rm", "-f", v)
+	}
+
+	// Big and incompressible, so the truncated stream still carries most of the
+	// file: the point is that the extract gets FAR, not that it never starts.
+	if res, err := dockercli.Run(ctx, 60*time.Second, "run", "--rm", "-v", src+":/v", volumeHelperImage,
+		"sh", "-c", "dd if=/dev/urandom of=/v/big.bin bs=1024 count=4096 2>/dev/null"); err != nil || res.Code != 0 {
+		t.Fatalf("seed source: %v / %s", err, res.Stderr)
+	}
+	if res, err := dockercli.Run(ctx, 30*time.Second, "run", "--rm", "-v", dst+":/v", volumeHelperImage,
+		"sh", "-c", "echo precious > /v/old.txt"); err != nil || res.Code != 0 {
+		t.Fatalf("seed dest: %v / %s", err, res.Stderr)
+	}
+
+	ex := &fakeExportStream{ctx: ctx}
+	if err := svc.ExportVolume(&pb.ExportVolumeRequest{VolumeName: src}, ex); err != nil {
+		t.Fatalf("ExportVolume: %v", err)
+	}
+	var whole []byte
+	for _, c := range ex.chunks {
+		whole = append(whole, c.GetData()...)
+	}
+	if len(whole) < 64*1024 {
+		t.Fatalf("export produced too little to truncate meaningfully (%d bytes)", len(whole))
+	}
+
+	// The relay dies with the last 32 KiB still in flight: the gzip trailer never
+	// arrives, which is how a truncation announces itself.
+	im := &fakeImportStream{ctx: ctx, in: []*pb.VolumeChunk{
+		{Frame: &pb.VolumeChunk_Header_{Header: &pb.VolumeChunk_Header{VolumeName: dst, WipeFirst: true}}},
+		{Frame: &pb.VolumeChunk_Data{Data: whole[:len(whole)-32*1024]}},
+	}}
+	if err := svc.ImportVolume(im); err != nil {
+		t.Fatalf("ImportVolume transport error: %v", err)
+	}
+	if im.result == nil || im.result.Ok {
+		t.Fatalf("a truncated stream must not report success: %+v", im.result)
+	}
+	if !strings.Contains(im.result.Error, "emptied") {
+		t.Errorf("the failure must say what it did with the destination: %q", im.result.Error)
+	}
+
+	res, err := dockercli.Run(ctx, 30*time.Second, "run", "--rm", "-v", dst+":/v", volumeHelperImage,
+		"sh", "-c", "ls -A /v | wc -l")
+	if err != nil || res.Code != 0 {
+		t.Fatalf("inspect dest: %v / %s", err, res.Stderr)
+	}
+	if strings.TrimSpace(res.Stdout) != "0" {
+		t.Errorf("a failed import must leave the destination empty, it holds %s entries", strings.TrimSpace(res.Stdout))
+	}
+}
