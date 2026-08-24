@@ -1834,6 +1834,21 @@ message FollowLogsRequest {
   string container = 2;
   // Seed the stream with the last N lines before following live. 0 => 500.
   int32 tail = 3;
+  // Time window, in Unix SECONDS. 0 means unset on both ends: no lower bound,
+  // and follow live forever. They map straight onto `docker logs --since/--until`.
+  //
+  // Why the agent and not the control plane: the log stream is raw bytes with no
+  // per-line clock, so a control plane holding one end of the pipe cannot filter
+  // by time at all — the only thing that knows when a line was written is the
+  // log file docker is reading. Gated behind the `logs.timerange` capability;
+  // an agent without it ignores these and streams `--tail` as before.
+  int64 since_unix = 4;
+  int64 until_unix = 5;
+  // Prefix every line with its RFC3339Nano write time (`docker logs
+  // --timestamps`). Off by default: the prefix costs ~30 bytes a line and the
+  // viewer strips it back off, so it is only paid for when the timestamp column
+  // is actually shown.
+  bool timestamps = 6;
 }
 
 // One raw chunk of merged stdout+stderr. Bytes, not lines: a multi-byte UTF-8

@@ -63,6 +63,14 @@ var Capabilities = []string{
 	// host). Gated because a stack imported from a platform that writes its own
 	// `.env` simply will not start on an agent without it.
 	"deploy.compose.projectdir",
+	// FollowLogsRequest carries a time window and a timestamp prefix
+	// (`--since`/`--until`/`--timestamps`). It is the agent's job because the log
+	// stream is raw bytes with no per-line clock: only the file docker reads knows
+	// when a line was written, so a control plane cannot filter by time on its
+	// own. A HARD gate for the UI, not for the RPC — an agent without it still
+	// streams, so the control plane keeps the stream and greys out the time-range
+	// control rather than refusing to show logs at all.
+	"logs.timerange",
 	"metrics",
 	"container-stats", // per-container `docker stats` snapshot (ContainerStats) — the per-app/per-database Monitoring tab
 	// ONE long-lived host+container telemetry stream (StreamMetrics), sampled on
@@ -82,8 +90,8 @@ var Capabilities = []string{
 	// Docker is never touched; uninstall-agent.sh stays the answer for a host that
 	// is unreachable or already de-trusted.
 	"self-uninstall",
-	"backup",      // dump/restore a DB or project to/from S3 (Backup/Restore/S3Check/S3Delete)
-	"checkport",   // host TCP port availability probe (CheckPort) — gates DB "expose publicly"
+	"backup",    // dump/restore a DB or project to/from S3 (Backup/Restore/S3Check/S3Delete)
+	"checkport", // host TCP port availability probe (CheckPort) — gates DB "expose publicly"
 	// One bounded HTTP GET to a container of an app's own stack (ProbeHttp).
 	// A compose app runs prebuilt images, so its favicon exists only inside the
 	// image and is only ever served — asking the running app is the only way to

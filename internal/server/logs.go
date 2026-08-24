@@ -23,6 +23,31 @@ import (
 const defaultLogTail = 500
 const maxLogTail = 5000
 
+// logArgs builds the `docker logs` argv for one request.
+//
+// The time window and the timestamp prefix map straight onto docker's own flags.
+// `--since`/`--until` take Unix seconds; 0 means "unset", which is docker's own
+// default, so an older control plane that sends neither produces exactly the argv
+// this function produced before the fields existed. `--until` together with `-f`
+// is legal: the stream simply ends at that instant instead of following forever.
+//
+// Split out of FollowLogs so it can be tested without a docker daemon — it is
+// the only branching in this file, and a wrong flag here is a stream that
+// silently returns the wrong window rather than an error anyone would notice.
+func logArgs(tail int, req *pb.FollowLogsRequest) []string {
+	args := []string{"logs", "-f", "--tail", strconv.Itoa(tail)}
+	if req.GetTimestamps() {
+		args = append(args, "--timestamps")
+	}
+	if since := req.GetSinceUnix(); since > 0 {
+		args = append(args, "--since", strconv.FormatInt(since, 10))
+	}
+	if until := req.GetUntilUnix(); until > 0 {
+		args = append(args, "--until", strconv.FormatInt(until, 10))
+	}
+	return append(args, req.GetContainer())
+}
+
 // FollowLogs streams `docker logs -f` for a project-owned container.
 func (s *Service) FollowLogs(req *pb.FollowLogsRequest, stream pb.Agent_FollowLogsServer) error {
 	ctx := stream.Context()
@@ -41,7 +66,7 @@ func (s *Service) FollowLogs(req *pb.FollowLogsRequest, stream pb.Agent_FollowLo
 	// Bind the child to the STREAM's context: when the browser disconnects the
 	// control plane cancels the RPC, ctx is done, and CommandContext SIGKILLs the
 	// `docker logs` client — the container is untouched (logs -f never signals it).
-	cmd := exec.CommandContext(ctx, "docker", "logs", "-f", "--tail", strconv.Itoa(tail), req.GetContainer())
+	cmd := exec.CommandContext(ctx, "docker", logArgs(tail, req)...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
