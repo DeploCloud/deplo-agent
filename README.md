@@ -9,7 +9,7 @@ This is **platform infrastructure**, not a project and not a frontend — the
 moral sibling of the local Docker socket. The design docs live in the control
 plane repo: ADR-0006 (`docs/adr/0006-server-agent-is-a-per-host-go-binary.md`)
 and the full plan (`docs/research/server-agent/PLAN.md`) in
-[IdraDev/deplo](https://github.com/IdraDev/deplo).
+[DeploCloud/deplo](https://github.com/DeploCloud/deplo).
 
 ## Releases
 
@@ -69,7 +69,7 @@ fingerprint over HTTPS, or by an HMAC over the bootstrap response (keyed by the
 one-time token) over plain HTTP. Provisioning is **call-home, never SSH-in** (P1).
 The agent half of the bootstrap is [`internal/bootstrap`](internal/bootstrap); the
 control-plane half is `lib/agent/bootstrap.ts` + `app/api/agent/bootstrap` in
-[IdraDev/deplo](https://github.com/IdraDev/deplo). The local agent is still
+[DeploCloud/deplo](https://github.com/DeploCloud/deplo). The local agent is still
 supervised by `lib/agent/local-agent.ts` there (explicit cert flags, unchanged).
 
 ## Build & test
@@ -115,3 +115,12 @@ npx tsx scripts/agent-part-d-e2e.mts     # Part D: StartDev/StopDev/Teardown +
 | `internal/hostmetrics/` | host metrics from `/proc` + statfs (port of `lib/infra/host.ts`) |
 | `internal/safepath/` | anti-traversal sandbox (port of `lib/deploy/path-safety.ts`) |
 | `gen/` | generated protobuf/gRPC (do not edit; `make proto`) |
+
+## License
+
+**[AGPL-3.0-only](LICENSE)** © 2026 DeploCloud. Same license as
+[the control plane](https://github.com/DeploCloud/deplo): the agent is the other half of
+the same system, and a closed fork of it would route around the copyleft on both.
+
+The name "deplo" and the logo are not covered by the license. Fork freely, rename your
+fork.
