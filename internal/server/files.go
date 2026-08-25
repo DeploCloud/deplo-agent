@@ -1,5 +1,7 @@
 package server
 
+// https://deplo.build/docs/guides/console-and-files
+
 import (
 	"bytes"
 	"context"

@@ -1,5 +1,7 @@
 package server
 
+// https://deplo.build/docs/guides/monitoring
+
 import (
 	"os"
 	"path/filepath"

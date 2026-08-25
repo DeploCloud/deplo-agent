@@ -1,5 +1,7 @@
 package server
 
+// https://deplo.build/docs/guides/logs
+
 import (
 	"io"
 	"os/exec"

@@ -1,5 +1,7 @@
 package server
 
+// https://deplo.build/docs/operations/upgrade
+
 import (
 	"context"
 	"crypto/sha256"

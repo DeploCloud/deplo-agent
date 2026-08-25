@@ -2,6 +2,8 @@
 // Part B, P1-P4).
 package bootstrap
 
+// https://deplo.build/docs/concepts/servers-and-the-agent
+
 import (
 	"bytes"
 	"crypto/ed25519"

@@ -3,6 +3,8 @@
 // S3-compatible bucket WITHOUT a control-plane round-trip (ADR-0007).
 package s3client
 
+// https://deplo.build/docs/guides/backups-and-restore
+
 import (
 	"context"
 	"crypto/tls"

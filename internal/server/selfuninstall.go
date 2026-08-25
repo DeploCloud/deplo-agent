@@ -1,5 +1,7 @@
 package server
 
+// https://deplo.build/docs/operations/remove-a-server-or-uninstall
+
 import (
 	"context"
 	"errors"

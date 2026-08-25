@@ -1,5 +1,7 @@
 package server
 
+// https://deplo.build/docs/guides/build-settings
+
 import (
 	"context"
 	"encoding/json"

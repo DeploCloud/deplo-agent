@@ -2,6 +2,8 @@
 // (lib/deploy/path-safety.ts safeBuildDir) to Go.
 package safepath
 
+// https://deplo.build/docs/advanced/host-access-and-privileges
+
 import (
 	"os"
 	"path/filepath"

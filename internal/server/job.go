@@ -1,5 +1,7 @@
 package server
 
+// https://deplo.build/docs/guides/cron-jobs
+
 import (
 	"context"
 	"crypto/rand"

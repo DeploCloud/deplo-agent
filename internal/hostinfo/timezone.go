@@ -1,5 +1,7 @@
 package hostinfo
 
+// https://deplo.build/docs/guides/server-settings
+
 import (
 	"context"
 	"fmt"
