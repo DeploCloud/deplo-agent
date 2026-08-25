@@ -69,9 +69,9 @@ func (s *Service) StreamMetrics(req *pb.MetricsStreamRequest, stream pb.Agent_St
 	}
 }
 
-// buildSample takes one tick's measurements. (Coolify's pusher has exactly this bug —
-// no recover, so one bad container takes the process down every 60s and every healthy
-// app on the host renders as unhealthy fleet-wide.)
+// buildSample takes one tick's measurements. It recovers: without one, a single bad
+// container takes the process down every tick and every healthy app on the host
+// renders as unhealthy fleet-wide.
 func buildSample(
 	ctx context.Context,
 	host *hostmetrics.Sampler,
