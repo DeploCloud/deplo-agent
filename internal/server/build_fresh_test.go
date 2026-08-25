@@ -8,10 +8,8 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
-// The two "give me a genuinely fresh one" switches: no_build_cache must put
-// --no-cache on the docker build, force_recreate must put --force-recreate on the
-// compose up. Both default OFF — an ordinary deploy's argv has to stay exactly
-// what it was, or every unchanged reroute starts restarting containers.
+// The two "give me a genuinely fresh one" switches: no_build_cache must put --no-cache
+// on the docker build, force_recreate must put --force-recreate on the compose up.
 
 func TestBuildArgvNoCache(t *testing.T) {
 	plain := buildArgv(&pb.DeployRequest{}, "-f", "Dockerfile")

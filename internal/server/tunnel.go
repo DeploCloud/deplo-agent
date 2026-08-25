@@ -12,15 +12,8 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// tunnel.go ports the VS Code Remote Tunnel half of lib/deploy/dev.ts to the
-// agent (PLAN Part D). `code tunnel` runs INSIDE the dev container and dials OUT
-// to Microsoft's relay over HTTPS — no inbound port, no gateway change — so these
-// RPCs are thin `docker exec` wrappers. The variable bit (the launch script: CLI
-// download URL + tunnel name) is rendered by the control plane and sent on
-// StartTunnel; the in-container tunnel paths below are a fixed convention (the
-// same constants the control plane's tunnelLaunchScript writes to), the Go twin
-// of the gateway container name being a constant. The LOG PARSING (device-login
-// link / connected URL) stays pure in the control plane (parseTunnelLog).
+// tunnel.go ports the VS Code Remote Tunnel half of lib/deploy/dev.ts to the agent
+// (PLAN Part D).
 
 const (
 	// In-container tunnel state paths — mirror lib/deploy/dev.ts TUNNEL_* (under
@@ -49,12 +42,8 @@ func readTunnelStatus(ctx context.Context, slug string) *pb.TunnelStatus {
 	return &pb.TunnelStatus{Running: running, Log: log}
 }
 
-// StartTunnel launches the tunnel (idempotent) using the control-plane-rendered
-// launch script, then returns the current status. Mirrors startVscodeTunnel's
-// launch step; the control plane does its own brief poll loop via GetTunnel.
-// Dev mode (VS Code tunnel) was removed from the control plane, so this handler
-// is dormant. Refuse instead of executing privileged `docker exec` as UID 1000 —
-// no live caller should reach it, and a refusal removes the dead attack surface.
+// StartTunnel launches the tunnel (idempotent) using the control-plane-rendered launch
+// script, then returns the current status.
 func (s *Service) StartTunnel(ctx context.Context, req *pb.TunnelRequest) (*pb.TunnelStatus, error) {
 	return nil, status.Error(codes.Unimplemented, "dev mode has been removed")
 }

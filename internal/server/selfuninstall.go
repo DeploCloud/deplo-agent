@@ -16,16 +16,14 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
-// selfUninstallGrace is how long the handler waits after replying before exiting,
-// so the SelfUninstallResponse is flushed to the control plane (and the gRPC
-// stream torn down) before this process is gone. Same reason — and same order of
-// magnitude — as selfUpdateGrace.
+// selfUninstallGrace is how long the handler waits after replying before exiting, so
+// the SelfUninstallResponse is flushed to the control plane (and the gRPC stream torn
+// down) before this process is gone.
 const selfUninstallGrace = 750 * time.Millisecond
 
-// agentUnitPath is the systemd unit install-agent.sh writes. FIXED, never taken
-// from the request: every path this RPC deletes is one the agent already knows,
-// because handing a remote peer an `rm -rf` argument is the whole class of bug
-// this avoids. A var only so the tests can point it at a temp dir.
+// agentUnitPath is the systemd unit install-agent.sh writes. FIXED, never taken from
+// the request: every path this RPC deletes is one the agent already knows, because
+// handing a remote peer an `rm -rf` argument is the whole class of bug this avoids.
 var agentUnitPath = "/etc/systemd/system/deplo-agent.service"
 
 // runSystemctl runs one systemctl verb. Overridable in tests. A host with no
@@ -52,22 +50,9 @@ var errNoSystemd = errors.New("systemctl not found")
 // the test runner with it).
 var exitProcess = func(code int) { os.Exit(code) }
 
-// SelfUninstall removes the agent's own footprint from this host and stops. See
-// the RPC's contract in proto/agent.proto; the parts that are easy to get wrong:
-//
-//   - The removals are SYNCHRONOUS and only the exit is deferred. The control
-//     plane deletes the server row only when this call succeeds, so a failure has
-//     to be returnable — the inverse of SelfUpdate, which can safely say
-//     "restarting" and finish the job afterwards.
-//   - The unit is `disable`d, never `stop`ped, and never `disable --now`. The unit
-//     file has no KillMode, so the default is control-group: stopping it kills
-//     THIS process (and any child we forked) before a single file is removed. The
-//     process ends instead by exiting 0 on its own, which Restart=on-failure does
-//     not undo.
-//   - Nothing here touches Docker. On a migration source the containers, images
-//     and networks belong to the platform being migrated FROM; on an ordinary
-//     server that cleanup is uninstall-agent.sh's job, and that script remains the
-//     answer for a host that is unreachable or already de-trusted (ADR-0011).
+// SelfUninstall removes the agent's own footprint from this host and stops. The unit
+// file has no KillMode, so the default is control-group: stopping it kills THIS process
+// (and any child we forked) before a single file is removed.
 func (s *Service) SelfUninstall(ctx context.Context, _ *pb.SelfUninstallRequest) (*pb.SelfUninstallResponse, error) {
 	// Where we live. Resolve symlinks so we delete the REAL file, exactly as
 	// SelfUpdate resolves it before swapping it.
@@ -86,10 +71,8 @@ func (s *Service) SelfUninstall(ctx context.Context, _ *pb.SelfUninstallRequest)
 // the exit. Split from the RPC for the same reason applyUpdate is: the tests
 // drive a temp-dir binary instead of the running test runner's own.
 func (s *Service) applyUninstall(ctx context.Context, exe string) (*pb.SelfUninstallResponse, error) {
-	// Pre-flight the one failure that is both likely and awkward: an install dir
-	// we cannot write to. Finding that out AFTER deleting the mTLS materials would
-	// leave a running agent that can never be commanded again and a binary still
-	// on disk — so prove it first, while nothing has been touched.
+	// Pre-flight the one failure that is both likely and awkward: an install dir we cannot
+	// write to.
 	if err := probeWritableDir(filepath.Dir(exe)); err != nil {
 		return nil, status.Errorf(codes.FailedPrecondition,
 			"cannot remove the agent binary at %s: %v (run the uninstall command on the host instead)", exe, err)

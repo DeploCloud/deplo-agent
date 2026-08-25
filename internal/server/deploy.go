@@ -41,13 +41,8 @@ func (e *emitter) result(ready bool, errMsg, commitSha string) {
 	}})
 }
 
-// runDeploy is the agent-side counterpart of the control plane's runDeployment
-// exec body (lib/deploy/build.ts). It materialises the build context (Part A:
-// an uploaded tar, or an image to run as-is), builds the image when the request
-// asks for a Dockerfile build, writes the rendered compose + env-file, brings
-// the stack up, and waits for it to run — streaming logs/phases the whole way.
-// The control plane stays the source of truth: it already rendered the compose
-// (D2) and decrypted the env (D4); the agent never re-implements that logic.
+// runDeploy is the agent-side counterpart of the control plane's runDeployment exec
+// body (lib/deploy/build.ts).
 func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitter) {
 	slug := req.GetSlug()
 	// The slug is written into host paths (stack file, env file, files dir) and
@@ -60,11 +55,8 @@ func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitt
 	name := "deplo-" + slug
 	stackFile := filepath.Join(s.stackDir, slug+".yml")
 
-	// A BUILD-ONLY deploy compiles for a host it is not: it must actually build
-	// something, and that something must be one image the caller can then stream
-	// away. A compose stack has neither (its services come up from their own
-	// images, and there is no single ref), and BUILD_KIND_NONE builds nothing at
-	// all - accepting either would report a success that produced no artifact.
+	// A BUILD-ONLY deploy compiles for a host it is not: it must actually build something,
+	// and that something must be one image the caller can then stream away.
 	if req.GetBuildOnly() {
 		if req.GetSourceKind() == pb.SourceKind_SOURCE_KIND_COMPOSE {
 			e.result(false, "build-only is not supported for a compose stack (no single image to move)", "")
@@ -135,11 +127,9 @@ func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitt
 			return // buildImage already emitted the failure result
 		}
 	case pb.SourceKind_SOURCE_KIND_DEV_WORKSPACE:
-		// Part D: "deploy from dev workspace". The build context is the developer's
-		// live tree already on THIS host (<dataBase>/dev/<slug>). Copy it into a
-		// fresh build dir excluding the non-source entries and rejecting symlinks
-		// (the tree is attacker-controlled), then build like UPLOAD. No bytes cross
-		// the wire — the build stays on the owning host.
+		// Part D: "deploy from dev workspace". The build context is the developer's live tree
+		// already on THIS host (<dataBase>/dev/<slug>). No bytes cross the wire — the build
+		// stays on the owning host.
 		buildDir, cleanup, err := s.materializeDevWorkspace(slug, req.GetDevWorkspaceSubdir(), e)
 		if err != nil {
 			e.result(false, err.Error(), "")
@@ -150,12 +140,7 @@ func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitt
 			return // buildImage already emitted the failure result
 		}
 	case pb.SourceKind_SOURCE_KIND_COMPOSE:
-		// Part C: a multi-service compose stack. There is NO agent build and NO
-		// image to pull — each service's image comes up via `docker compose up`
-		// itself. The only preparation is materialising the template config files
-		// the compose bind-mounts (the rendered YAML already points its bind
-		// sources at <stackDir>/files/<slug>). Env + label-wait differ from the
-		// single-image path below; see isCompose.
+		// Part C: a multi-service compose stack.
 		if err := s.writeMountFiles(slug, req.GetMounts(), e); err != nil {
 			e.result(false, "write mount files: "+err.Error(), "")
 			return
@@ -165,21 +150,19 @@ func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitt
 		return
 	}
 
-	// A BUILD SERVER stops here. The image is built and tagged; nothing is written
-	// to the stack dir and no container of this app runs on this host. The caller
-	// streams the image off with ExportImage and releases it on the target with an
-	// ordinary SOURCE_KIND_IMAGE deploy - which is what a rollback already is.
-	// `ready` means the image exists, the only claim this host can make.
+	// A BUILD SERVER stops here. The image is built and tagged; nothing is written to the
+	// stack dir and no container of this app runs on this host. `ready` means the image
+	// exists, the only claim this host can make.
 	if req.GetBuildOnly() {
 		e.log("info", "Built "+imageRef+" (build server: nothing is started here)")
 		e.result(true, "", commitSha)
 		return
 	}
 
-	// A multi-service compose stack interpolates `${VAR}` from a --env-file (the
-	// control plane did NOT bake env into its YAML, unlike the single-image path),
-	// and its containers are compose-prefixed (deplo-<slug>-<service>-N) rather
-	// than named deplo-<slug> — so the readiness wait is by label, not by name.
+	// A multi-service compose stack interpolates `${VAR}` from a --env-file (the control
+	// plane did NOT bake env into its YAML, unlike the single-image path), and its
+	// containers are compose-prefixed (deplo-<slug>-<service>-N) rather than named
+	// deplo-<slug> — so the readiness wait is by label, not by name.
 	isCompose := req.GetSourceKind() == pb.SourceKind_SOURCE_KIND_COMPOSE
 
 	// --- Phase: write the rendered stack and bring it up. ---
@@ -189,17 +172,6 @@ func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitt
 		return
 	}
 	// 0600, and an explicit Chmod after it, because this file can hold SECRETS.
-	// A single-image stack has its environment baked into the rendered YAML by the
-	// control plane (a compose stack gets a --env-file instead, which was already
-	// 0600) - so at 0644 every API key, auth secret and database password of every
-	// single-image app on this host was readable by any process that is not root.
-	//
-	// The Chmod is not belt-and-braces: os.WriteFile applies its mode ONLY when it
-	// creates the file, so every stack already on disk would have kept 0644
-	// forever, through any number of redeploys.
-	//
-	// Nothing but root reads this: the agent renders it and `docker compose -f`
-	// runs from this process.
 	if err := os.WriteFile(stackFile, []byte(req.GetComposeYaml()), 0o600); err != nil {
 		e.result(false, "write stack file: "+err.Error(), "")
 		return
@@ -209,10 +181,8 @@ func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitt
 		return
 	}
 
-	// The single-image stack already bakes env into its `environment:` map (the
-	// control plane rendered it that way), so no --env-file is needed there. A
-	// compose stack relies on `${VAR}` interpolation, so write a 0600 env-file and
-	// pass it to compose (mirrors the control plane's deployComposeStack).
+	// The single-image stack already bakes env into its `environment:` map (the control
+	// plane rendered it that way), so no --env-file is needed there.
 	envFile := ""
 	projectDir := ""
 	if isCompose {
@@ -233,11 +203,8 @@ func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitt
 		upLog += " " + strings.Join(extra, " ")
 	}
 	e.log("command", upLog)
-	// A multi-service compose stack pulls SEVERAL images here (and an IMAGE deploy
-	// with pullImage=false pulls at up time too). The old 5-minute cap SIGKILLed
-	// `compose up` mid-pull on a modest network and falsely reported the deploy
-	// failed while the stack was left half-up. Give it a budget generous enough for
-	// several large image pulls (the single-image pre-pull already gets 10m).
+	// A multi-service compose stack pulls SEVERAL images here (and an IMAGE deploy with
+	// pullImage=false pulls at up time too).
 	code, err := dockercli.Stream(ctx, 15*time.Minute, func(l string) { e.log("info", l) }, "", composeArgs...)
 	if err != nil {
 		e.result(false, "compose up: "+err.Error(), "")
@@ -272,9 +239,8 @@ func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitt
 }
 
 // renderEnvFile renders a decrypted env map as KEY=VALUE lines for a compose
-// --env-file. Mirrors the control plane's renderEnvFile (build.ts): values are
-// literal and any newline (which would break the env-file format) collapses to a
-// space. Keys are emitted in sorted order for a deterministic file.
+// --env-file. Mirrors the control plane's renderEnvFile (build.ts): values are literal
+// and any newline (which would break the env-file format) collapses to a space.
 func renderEnvFile(env map[string]string) string {
 	keys := make([]string, 0, len(env))
 	for k := range env {
@@ -294,20 +260,16 @@ func renderEnvFile(env map[string]string) string {
 }
 
 // writeMountFiles materialises a compose stack's template config files under
-// <stackDir>/files/<slug>/. Each path is treated as relative to that dir; any
-// `..` segment or absolute path is rejected (the content arrives off the wire —
-// same anti-escape guard as the build context and the file RPCs). Mirrors the
-// control plane's writeMountFiles (build.ts).
+// <stackDir>/files/<slug>/.
 func (s *Service) writeMountFiles(slug string, mounts []*pb.MountFile, e *emitter) error {
 	if len(mounts) == 0 {
 		return nil
 	}
 	filesDir := filepath.Join(s.stackDir, "files", slug)
 	for _, m := range mounts {
-		// safepath.Join strips a leading "./"/"/", rejects any ".." segment, and
-		// returns the bare filesDir for an empty/"." path — all three of which are
-		// "no file to write here", so skip them rather than write outside or onto
-		// the dir itself.
+		// safepath.Join strips a leading "./"/"/", rejects any ".." segment, and returns the
+		// bare filesDir for an empty/"." path — all three of which are "no file to write
+		// here", so skip them rather than write outside or onto the dir itself.
 		target, ok := safepath.Join(filesDir, m.GetPath())
 		if !ok || target == filesDir {
 			e.log("warn", "Skipping unsafe mount path: "+m.GetPath())
@@ -345,11 +307,8 @@ func shortSha(sha string) string {
 	return sha
 }
 
-// buildImage builds req.image_ref from buildDir using the request's BuildKind.
-// Returns false (after emitting a failure result) on any error. The Dockerfile
-// family lives here; the heavy builders (static/nixpacks/buildpacks/railpack) are
-// ported from builders.ts in build_methods.go and dispatched below — each emits
-// the BUILDING phase + its own failure result, so this stays a thin router.
+// buildImage builds req.image_ref from buildDir using the request's BuildKind. Returns
+// false (after emitting a failure result) on any error.
 func (s *Service) buildImage(ctx context.Context, req *pb.DeployRequest, buildDir string, e *emitter) bool {
 	switch req.GetBuildKind() {
 	case pb.BuildKind_BUILD_KIND_DOCKERFILE:
@@ -388,10 +347,8 @@ func (s *Service) buildDockerfile(ctx context.Context, req *pb.DeployRequest, bu
 			}
 			e.log("info", "No Dockerfile found — using one generated from build settings")
 		}
-		// Build-time env (build_env.go): forward every env var the Dockerfile
-		// declares as an ARG. Scan the file ON DISK (a repo's own Dockerfile may
-		// have won over the generated body above). Bare `--build-arg KEY` keeps
-		// values off argv; they ride the docker client's process env instead.
+		// Build-time env (build_env.go): forward every env var the Dockerfile declares as an
+		// ARG.
 		envKeys := dockerfileBuildEnv(dfPath, req)
 		args := appendBuildArgKeys(buildArgv(req), envKeys)
 		args = append(args, imageOutputArgs(ctx, req.GetImageRef())...)
@@ -416,11 +373,9 @@ func (s *Service) buildDockerfile(ctx context.Context, req *pb.DeployRequest, bu
 	if cd, err := safepath.Inside(buildDir, contextDir); err == nil {
 		contextDir = cd
 	}
-	// safepath.Join is lexical only; the Dockerfile lives in a user-controlled git
-	// repo, so its path could be a SYMLINK pointing at any host file, making
-	// `docker build -f` read (and bake into an image the user pulls) e.g.
-	// /root/.ssh/id_rsa. Reject a symlink at the -f target outright, then realpath-
-	// guard it inside the context like contextDir above.
+	// safepath.Join is lexical only; the Dockerfile lives in a user-controlled git repo,
+	// so its path could be a SYMLINK pointing at any host file, making `docker build -f`
+	// read (and bake into an image the user pulls) e.g. /root/.ssh/id_rsa.
 	if li, lerr := os.Lstat(dockerfilePath); lerr == nil && li.Mode()&os.ModeSymlink != 0 {
 		e.result(false, "the Dockerfile path must not be a symlink", "")
 		return false
@@ -458,20 +413,8 @@ func dockerfileBuildEnv(dockerfilePath string, req *pb.DeployRequest) []string {
 	return dockerfileEnvKeys(string(body), req.GetEnv())
 }
 
-// writeComposeEnv writes a compose stack's 0600 env-file and returns it together
-// with the project directory to run the stack from.
-//
-// Both live in the stack's OWN directory (`<stackDir>/files/<slug>`), the one
-// the mount files already use. That is the whole point: compose resolves every
-// relative path in a file - `env_file`, `secrets: file:`, `configs: file:`,
-// `build.context` - against the project directory, which defaults to wherever
-// the stack FILE sits. That is `<stackDir>`, shared by every stack on this host,
-// so a `.env` written there would be one file for all of them and one tenant's
-// `env_file: .env` would read another tenant's variables.
-//
-// The file is named `.env` because that is what a compose file written for any
-// other platform expects to find beside it (Dokploy writes exactly that), so a
-// stack that declares `env_file: .env` now finds one - its own.
+// writeComposeEnv writes a compose stack's 0600 env-file and returns it together with
+// the project directory to run the stack from.
 func (s *Service) writeComposeEnv(slug string, env map[string]string) (string, string, error) {
 	projectDir := filepath.Join(s.stackDir, "files", slug)
 	if err := os.MkdirAll(projectDir, 0o700); err != nil {
@@ -489,21 +432,9 @@ func (s *Service) writeComposeEnv(slug string, env map[string]string) (string, s
 
 // composeUpArgs assembles the `docker compose … up` argv that brings a stack up.
 // envFile is "" for the single-image path (the control plane baked env into the
-// rendered `environment:` map) and a written 0600 file for a compose stack (whose
-// YAML interpolates `${VAR}`).
-//
-// projectDir is the stack's OWN directory, passed for a compose stack so every
-// relative path the author wrote resolves inside it. Compose otherwise resolves
-// them against the directory of the stack file, which is `<stackDir>` and is
-// SHARED by every stack on the host: a `.env` written there would be one file
-// for all of them, and `env_file: .env` in one tenant's compose would read
-// another's variables. See writeComposeEnv.
-//
-// forceRecreate is what makes "Rebuild container" honest: `up -d` compares
-// compose's own config hash and does NOTHING when it matches, so a compose stack
-// or a prebuilt image whose config did not move would report ready with the old
-// container still running. Ordinary deploys leave it false, so an unchanged
-// reroute still causes no restart.
+// rendered `environment:` map) and a written 0600 file for a compose stack (whose YAML
+// interpolates `${VAR}`). projectDir is the stack's OWN directory, passed for a compose
+// stack so every relative path the author wrote resolves inside it.
 func composeUpArgs(project, stackFile, envFile, projectDir string, forceRecreate bool, extra []string) []string {
 	args := []string{"compose", "-p", project, "-f", stackFile}
 	if projectDir != "" {
@@ -519,11 +450,7 @@ func composeUpArgs(project, stackFile, envFile, projectDir string, forceRecreate
 	return append(args, sanitizeComposeArgs(extra)...)
 }
 
-// The `docker compose` flags that decide WHICH stack is being brought up. They
-// are the agent's to choose — the project name keys every container and label,
-// the stack file is what the control plane just rendered, the env-file holds the
-// decrypted secrets — so an operator's extra flags may never set them, whatever
-// the control plane sends.
+// The `docker compose` flags that decide WHICH stack is being brought up.
 const composeArgAlphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:/=,+@-"
 
 var composeArgDenied = map[string]bool{
@@ -535,21 +462,9 @@ var composeArgDenied = map[string]bool{
 	"--project-directory": true,
 }
 
-// sanitizeComposeArgs vets the operator's extra `compose up` flags before they
-// reach the argv. The control plane validates them first and refuses to store a
-// bad set; this is the defence in depth that keeps the agent's own contract
-// (project name / stack file / env-file) true no matter what reaches it.
-//
-// All-or-nothing on purpose: one bad token drops the WHOLE list rather than
-// applying a filtered half of it. `-p` alone would repoint the stack, but
-// dropping `-p` while keeping the name after it would leave a stray positional
-// arg — which `compose up` reads as "bring up only this service". A silently
-// half-applied set is worse than none, and the default bring-up still runs.
-//
-// Nothing is quoted or shelled out: dockercli.Run execs docker with an argv, so
-// these are literal arguments and shell metacharacters have no meaning. They are
-// still rejected — a token carrying one means the operator expected a shell, and
-// running it as a literal would fail in a way that is hard to read.
+// sanitizeComposeArgs vets the operator's extra `compose up` flags before they reach
+// the argv. A silently half-applied set is worse than none, and the default bring-up
+// still runs.
 func sanitizeComposeArgs(extra []string) []string {
 	const maxArgs, maxLen = 24, 128
 	if len(extra) == 0 || len(extra) > maxArgs {
@@ -560,11 +475,11 @@ func sanitizeComposeArgs(extra []string) []string {
 			return nil
 		}
 		for _, r := range a {
-			// An ALLOWLIST, not a ban list: every real `compose up` flag and value
-			// is made of these (`--pull`, `always`, `web=3`, `--timeout=60`,
-			// `--exit-code-from=web`), and anything else — a space, a quote, `;`,
-			// `&`, `|`, `$`, a backtick, a control character — is either a token
-			// the control plane failed to split or someone expecting a shell.
+			// An ALLOWLIST, not a ban list: every real `compose up` flag and value is made of
+			// these (`--pull`, `always`, `web=3`, `--timeout=60`, `--exit-code-from=web`), and
+			// anything else — a space, a quote, `;`, `&`, `|`, `$`, a backtick, a control
+			// character — is either a token the control plane failed to split or someone
+			// expecting a shell.
 			if !strings.ContainsRune(composeArgAlphabet, r) {
 				return nil
 			}
@@ -580,11 +495,9 @@ func sanitizeComposeArgs(extra []string) []string {
 	return extra
 }
 
-// buildArgv starts a `docker build` argv, adding --no-cache when the deploy asked
-// to skip the build cache (the app's Build cache setting is off, or this is the
-// one build that follows a manual "Clear build cache"). Every build method funnels
-// its argv through here so the flag can't be honoured by some methods and silently
-// dropped by others — a half-obeyed "don't cache this" is worse than none.
+// buildArgv starts a `docker build` argv, adding --no-cache when the deploy asked to
+// skip the build cache (the app's Build cache setting is off, or this is the one build
+// that follows a manual "Clear build cache").
 func buildArgv(req *pb.DeployRequest, rest ...string) []string {
 	args := []string{"build"}
 	if req.GetNoBuildCache() {
@@ -596,11 +509,10 @@ func buildArgv(req *pb.DeployRequest, rest ...string) []string {
 // runBuild streams a `docker build`; extraEnv carries build-env VALUES (bare
 // `--build-arg KEY` flags in args resolve from it) and may be nil.
 func (s *Service) runBuild(ctx context.Context, args []string, extraEnv []string, e *emitter) bool {
-	// A containerd image store can only be built into by BuildKit, and the
-	// `--output type=image,…` flag imageOutputArgs adds on those hosts is a
-	// BuildKit-only flag — so force BuildKit on rather than trust whatever
-	// DOCKER_BUILDKIT the agent's unit happened to inherit. On every other host
-	// the daemon's own default decides, exactly as before.
+	// A containerd image store can only be built into by BuildKit, and the `--output
+	// type=image,…` flag imageOutputArgs adds on those hosts is a BuildKit-only flag — so
+	// force BuildKit on rather than trust whatever DOCKER_BUILDKIT the agent's unit
+	// happened to inherit.
 	if dockercli.ImageExportOptsSupported(ctx) {
 		extraEnv = append([]string{"DOCKER_BUILDKIT=1"}, extraEnv...)
 	}
@@ -617,10 +529,9 @@ func (s *Service) runBuild(ctx context.Context, args []string, extraEnv []string
 	return true
 }
 
-// materializeUpload extracts a tar archive (the streamed build context) into a
-// fresh temp dir, rejecting any entry that would escape it (absolute paths,
-// "..", and symlinks — same threat model as the control plane's extractArchive).
-// Returns the build dir and a cleanup func.
+// materializeUpload extracts a tar archive (the streamed build context) into a fresh
+// temp dir, rejecting any entry that would escape it (absolute paths, "..", and
+// symlinks — same threat model as the control plane's extractArchive).
 func (s *Service) materializeUpload(tarBytes []byte, slug string) (string, func(), error) {
 	dir, err := os.MkdirTemp(s.buildTmpDir, "deplo-build-"+slug+"-")
 	if err != nil {

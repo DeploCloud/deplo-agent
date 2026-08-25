@@ -17,23 +17,15 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/hostinfo"
 )
 
-// The four host-level verbs behind the "hostops" capability. Everything here is
-// about the HOST rather than an app, which is why none of it takes a slug — and
-// why each one is a named, closed action rather than a generic "run this". The
-// agent's whole security value is that the control plane can only ask for what
-// the proto enumerates; a RunCommand RPC would throw that away for convenience.
+// The four host-level verbs behind the "hostops" capability. The agent's whole security
+// value is that the control plane can only ask for what the proto enumerates; a
+// RunCommand RPC would throw that away for convenience.
 
 // traefikContainer is the name install-agent.sh gives the Traefik it installs.
-// A Traefik under any OTHER name is somebody else's, and TraefikConfig refuses
-// to touch it — the installer already declines to fight for the box, and a
-// remote rewrite of an operator's own proxy would be far worse than that.
 const traefikContainer = "deplo-traefik"
 
-// SetAgentDir tells the service where the agent's own data lives (the
-// installer's $AGENT_DATA, i.e. --agent-dir) — the parent of the Traefik stack
-// this manages. A setter rather than a New parameter so every existing
-// construction site, tests included, keeps compiling unchanged; empty simply
-// means "no Traefik stack to manage here".
+// SetAgentDir tells the service where the agent's own data lives (the installer's
+// $AGENT_DATA, i.e. --agent-dir) — the parent of the Traefik stack this manages.
 func (s *Service) SetAgentDir(dir string) { s.agentDir = dir }
 
 // traefikDir is where install-agent.sh puts the Traefik it installs:
@@ -113,15 +105,8 @@ func dockerRootDir(ctx context.Context) string {
 	return strings.TrimSpace(res.Stdout)
 }
 
-// resolveContainer turns the caller's self-identifying hint into a container id,
-// or "" if it names nothing running.
-//
-// The hint is the control plane's OWN hostname, which inside a container is its
-// short id. We resolve it rather than searching for a container built from the
-// deplo image on purpose: "a container running the deplo image" and "the
-// container you are talking to me from" are different claims, and restarting
-// something on the strength of the first would let a second, unrelated deplo
-// image on the host become the thing that gets bounced.
+// resolveContainer turns the caller's self-identifying hint into a container id, or ""
+// if it names nothing running.
 func resolveContainer(ctx context.Context, hint string) string {
 	hint = strings.TrimSpace(hint)
 	if hint == "" {
@@ -138,10 +123,7 @@ func resolveContainer(ctx context.Context, hint string) string {
 	return id
 }
 
-// SetTimezone moves the host clock. Validation lives in hostinfo (the name is
-// resolved against /usr/share/zoneinfo rather than pattern-matched) because it
-// ends in a relink of /etc/localtime and must be checked where the I/O happens,
-// not only where the request was composed.
+// SetTimezone moves the host clock.
 func (s *Service) SetTimezone(ctx context.Context, req *pb.SetTimezoneRequest) (*pb.HostInfoResponse, error) {
 	tz := strings.TrimSpace(req.GetTimezone())
 	if !hostinfo.KnownTimezone(tz) {
@@ -193,11 +175,9 @@ func (s *Service) TraefikConfig(ctx context.Context, req *pb.TraefikConfigReques
 				Error: fmt.Sprintf("could not back up the current Traefik config: %v", err),
 			}, nil
 		}
-		// 0600, not 0644: this file can carry the private key of a TLS certificate
-		// the operator installed (an inline compose config), and acme.json beside
-		// it is 0600 for exactly the same reason. Only root reads either. The
-		// backup is tightened too — it is a copy of the same secret, and a file
-		// created before this change keeps its old mode through the rename.
+		// 0600, not 0644: this file can carry the private key of a TLS certificate the
+		// operator installed (an inline compose config), and acme.json beside it is 0600 for
+		// exactly the same reason.
 		if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
 			_ = os.Rename(path+".bak", path) // put it back; nothing has restarted yet
 			return &pb.TraefikConfigResponse{
@@ -229,10 +209,7 @@ func (s *Service) TraefikConfig(ctx context.Context, req *pb.TraefikConfigReques
 	return &pb.TraefikConfigResponse{Ok: true, ComposeYaml: readFileOrEmpty(path)}, nil
 }
 
-// applyTraefik is the seam over bringUpTraefik. It exists so the rollback path
-// can be tested WITHOUT running `docker compose up` on the machine running the
-// tests — which, the one time it was not a seam, started a real Traefik on the
-// test runner from a fixture in /tmp.
+// applyTraefik is the seam over bringUpTraefik.
 func (s *Service) applyTraefik(ctx context.Context, path string, restartOnly bool) error {
 	if s.traefikApply != nil {
 		return s.traefikApply(ctx, path, restartOnly)
@@ -240,10 +217,7 @@ func (s *Service) applyTraefik(ctx context.Context, path string, restartOnly boo
 	return s.bringUpTraefik(ctx, path, restartOnly)
 }
 
-// bringUpTraefik applies the stack file. A restart-only request goes through
-// `docker restart` (cheapest, and it must NOT pick up an edited file the caller
-// did not ask to apply); a config change goes through `compose up -d`, which is
-// what actually recreates the container with new flags.
+// bringUpTraefik applies the stack file.
 func (s *Service) bringUpTraefik(ctx context.Context, path string, restartOnly bool) error {
 	if restartOnly {
 		res, err := dockercli.Run(ctx, 90*time.Second, "restart", traefikContainer)
@@ -269,11 +243,6 @@ func (s *Service) bringUpTraefik(ctx context.Context, path string, restartOnly b
 }
 
 // RestartControlPlane bounces the container the Deplo panel runs in on this host.
-//
-// The restart is detached and delayed because it kills the process waiting on
-// this RPC: the reply must win the race, or the operator sees a transport error
-// for an action that in fact succeeded — the single most confusing outcome
-// available here.
 func (s *Service) RestartControlPlane(ctx context.Context, req *pb.RestartControlPlaneRequest) (*pb.RestartControlPlaneResponse, error) {
 	id := resolveContainer(ctx, req.GetControlPlaneHint())
 	if id == "" {

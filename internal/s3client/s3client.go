@@ -1,13 +1,6 @@
-// Package s3client is the agent's S3 client — a thin wrapper over minio-go that
-// the backup/restore + S3Check/S3Delete RPCs use to move dump bytes to and from
-// an S3-compatible bucket WITHOUT a control-plane round-trip (ADR-0007). The
-// agent runs on the owning host, has the dump's bytes locally, and uploads them
-// itself; the control plane only ever decrypts the creds and builds the object
-// key, then hands them over mTLS.
-//
-// minio-go talks to AWS S3 and every S3-compatible store (MinIO, R2, B2, Wasabi,
-// DigitalOcean Spaces, …) the same way. The control plane decides path-style vs
-// virtual-host addressing from the destination's provider and passes it in.
+// Package s3client is the agent's S3 client — a thin wrapper over minio-go that the
+// backup/restore + S3Check/S3Delete RPCs use to move dump bytes to and from an
+// S3-compatible bucket WITHOUT a control-plane round-trip (ADR-0007).
 package s3client
 
 import (
@@ -34,11 +27,8 @@ type Config struct {
 	// PathStyle forces bucket-in-path addressing (MinIO + many S3-compatibles).
 	// AWS uses virtual-host style (PathStyle=false).
 	PathStyle bool
-	// AllowPrivateEndpoint opts OUT of the SSRF guard that rejects an endpoint
-	// resolving to a loopback / link-local / private (RFC1918 / ULA) address.
-	// Defaults to false (reject): the endpoint arrives off the wire and the agent
-	// dials it as root, so a value like 169.254.169.254 (cloud metadata) or
-	// 127.0.0.1 must not be reachable unless the destination explicitly opted in.
+	// AllowPrivateEndpoint opts OUT of the SSRF guard that rejects an endpoint resolving
+	// to a loopback / link-local / private (RFC1918 / ULA) address.
 	AllowPrivateEndpoint bool
 	// ExtraArgs are the destination's advanced quirk flags (`--flag=value`), as
 	// the operator typed them. See parseExtraArgs: anything not on the allowlist
@@ -63,19 +53,7 @@ type extraOptions struct {
 	disableContentSha256 bool
 }
 
-/*
-parseExtraArgs reads the flags this agent knows out of a destination's tokens.
-
-It is an ALLOWLIST, and unknown tokens are dropped rather than refused. Both
-sides validate — the control plane refuses an unknown flag at the form, so one
-arriving here means the two versions disagree, which happens on every fleet
-mid-rollout. Failing the backup would make the same destination work on one host
-and refuse on the next, for a flag whose entire purpose is a workaround; the
-honest behaviour is to apply what this version understands and log the rest.
-
-Accepted shape is `--flag=value` with a boolean value, matching the vocabulary of
-the tools operators already reach for when a gateway misbehaves.
-*/
+// parseExtraArgs reads the flags this agent knows out of a destination's tokens.
 func parseExtraArgs(args []string) (extraOptions, []string) {
 	var opts extraOptions
 	var unknown []string
@@ -168,13 +146,9 @@ func bucketLookup(pathStyle bool) minio.BucketLookupType {
 	return minio.BucketLookupDNS
 }
 
-// validateEndpointHost is the SSRF guard for the S3 endpoint, which arrives off
-// the wire (user-controlled) and is dialed by the root agent. It resolves the
-// endpoint host and rejects any address in a loopback, unspecified, link-local
-// (incl. the cloud metadata address 169.254.169.254), or private (RFC1918 / ULA)
-// range — unless the destination explicitly opted in. A public IP, or a hostname
-// that resolves only to public addresses, passes (legitimate AWS S3 / R2 / public
-// MinIO endpoints keep working). `endpoint` is scheme-stripped host[:port].
+// validateEndpointHost is the SSRF guard for the S3 endpoint, which arrives off the
+// wire (user-controlled) and is dialed by the root agent. `endpoint` is scheme-stripped
+// host[:port].
 func validateEndpointHost(endpoint string, allowPrivate bool) error {
 	if allowPrivate {
 		return nil
@@ -243,16 +217,10 @@ func Upload(ctx context.Context, cfg Config, key string, r io.Reader) (int64, er
 		DisableContentSha256: extra.disableContentSha256,
 	})
 	if err != nil {
-		// A multipart upload that dies mid-flight leaves its uploaded parts in the
-		// bucket. minio-go tries to abort them, but it does so on the SAME context
-		// that just failed, so the abort itself fails whenever the cause was a
-		// cancellation - which is exactly the case a canceled backup produces. The
-		// parts then sit there: invisible to an object listing, billed all the
-		// same, and for a backup that is gigabytes of an artifact nobody wanted.
-		//
-		// So sweep them on a context of our own. Best effort by construction: the
-		// upload's error is the one worth reporting, and a bucket that will not
-		// answer this cannot be made to.
+		// A multipart upload that dies mid-flight leaves its uploaded parts in the bucket.
+		// minio-go tries to abort them, but it does so on the SAME context that just failed,
+		// so the abort itself fails whenever the cause was a cancellation - which is exactly
+		// the case a canceled backup produces.
 		if cerr := ctx.Err(); cerr != nil {
 			// context.Background(), not `ctx`: `ctx` is the cancellation we are
 			// cleaning up after, and reusing it is precisely the bug this exists to
@@ -281,10 +249,9 @@ func Download(ctx context.Context, cfg Config, key string) (io.ReadCloser, error
 	return obj, nil
 }
 
-// Check verifies the bucket is reachable AND writable with these creds: it
-// confirms the bucket exists, then round-trips a tiny probe object (put +
-// remove) so a read-only key is reported as not-writable rather than passing a
-// HEAD-only probe. Returns a human message on failure.
+// Check verifies the bucket is reachable AND writable with these creds: it confirms the
+// bucket exists, then round-trips a tiny probe object (put + remove) so a read-only key
+// is reported as not-writable rather than passing a HEAD-only probe.
 func Check(ctx context.Context, cfg Config) error {
 	cl, err := New(cfg)
 	if err != nil {
@@ -325,10 +292,8 @@ func DeleteOne(ctx context.Context, cfg Config, key string) (int64, error) {
 	return existed, nil
 }
 
-// DeletePrefix removes every object whose key starts with `prefix` (a target's
-// whole folder, for retention + delete-with-artifacts). Returns the count
-// removed. Idempotent: an empty prefix listing deletes nothing and is not an
-// error.
+// DeletePrefix removes every object whose key starts with `prefix` (a target's whole
+// folder, for retention + delete-with-artifacts).
 func DeletePrefix(ctx context.Context, cfg Config, prefix string) (int64, error) {
 	cl, err := New(cfg)
 	if err != nil {

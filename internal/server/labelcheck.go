@@ -12,18 +12,8 @@ import (
 )
 
 // assertOwned confirms that `container` carries the label deplo.project=<projectID>
-// before any console RPC (FollowLogs/Attach/Exec/ShellLabel) acts on it.
-//
-// The control plane is the PRIMARY authorization gate — it resolves the instance
-// from its own store (ListInstances filtered by deplo.project) before ever naming
-// a container on the wire. This is defence in depth: even though the agent is dumb
-// about Deplo's tenancy, it must never let a container NAME that arrived off the
-// wire reach a container that does not belong to the stated project — so a bug or
-// a forged name in the control plane can't be leveraged into cross-project access
-// on the agent's daemon. PLAN D9's principle ("validate where the I/O runs, never
-// trust a path/name off the wire") applied to container names.
-//
-// An empty projectID is rejected: a console RPC must always identify its project.
+// before any console RPC (FollowLogs/Attach/Exec/ShellLabel) acts on it. An empty
+// projectID is rejected: a console RPC must always identify its project.
 func assertOwned(ctx context.Context, container, projectID string) error {
 	if container == "" {
 		return status.Error(codes.InvalidArgument, "container is required")

@@ -11,13 +11,9 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// End-to-end (real docker): a deploy's env must reach the BUILD, not just the
-// runtime stack — the whole point of build-time env parity (NEXT_PUBLIC_* is
-// inlined while the build command runs). Builds a generated Dockerfile that
-// bakes the var into the image AT BUILD TIME, runs it, and asserts the value
-// came through — while never appearing on a logged command line.
-//
-// Run with: go test ./internal/server/ -run E2E -v  (with docker available).
+// End-to-end (real docker): a deploy's env must reach the BUILD, not just the runtime
+// stack — the whole point of build-time env parity (NEXT_PUBLIC_* is inlined while the
+// build command runs).
 func TestE2E_BuildEnvReachesDockerfileBuild(t *testing.T) {
 	ctx := context.Background()
 	if !dockercli.Available(ctx) {

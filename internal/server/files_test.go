@@ -210,10 +210,8 @@ func TestFiles_RejectBadSlug(t *testing.T) {
 	}
 }
 
-// A DEPLOY KEY may carry one `__<suffix>`, which is how one app owns more than
-// one stack on a host (a pull request preview is `<slug>__pr-<n>`). The point of
-// this test is that widening the pattern for it did not open the containment
-// hole the pattern exists to close.
+// A DEPLOY KEY may carry one `__<suffix>`, which is how one app owns more than one
+// stack on a host (a pull request preview is `<slug>__pr-<n>`).
 func TestValidateSlug_DeployKeySuffix(t *testing.T) {
 	good := []string{
 		"app",            // production: the bare slug, unchanged

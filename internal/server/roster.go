@@ -17,78 +17,27 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// roster.go keeps `docker ps` OFF the hot path of the metrics stream.
-//
-// THE COST BEING AVOIDED, measured on a real host: one
-// `docker ps --filter label=... --format '{{json .}}'` burns ~190ms of DOCKERD
-// CPU per call. StreamMetrics samples every 5s, so re-listing the containers on
-// every tick spends ~3.6% of a core doing nothing but re-discovering a set that
-// changes a handful of times a DAY — more than the container metrics the tick
-// actually exists to collect. Multiply by a fleet and the telemetry costs more
-// than the workload it reports on.
-//
-// THE CHEAP SUBSTITUTE: `docker events` is an idle PUSH stream whose measured
-// marginal cost is ~0 — the daemon already computes these events, it just has
-// nobody listening. So the roster is rebuilt on actual container CHURN (a start,
-// a die, a destroy), never on a tick. Between two deploys the 5s loop does zero
-// discovery work: it reads a slice out of memory.
-//
-// Three failure modes are designed against explicitly:
-//
-//   - A rebuild STORM. A compose stack coming up fires 8 start events in a
-//     fraction of a second; a naive listener would pay the 190ms eight times.
-//     Rebuilds are debounced into a fixed ~500ms window, which caps the cost at
-//     one rebuild per window no matter how hard the host churns — including on a
-//     host running non-Deplo containers in a loop, which is why foreign events
-//     are dropped before they can even mark the roster dirty.
-//
-//   - A MISSED event stranding the roster. If dockerd restarts, or an event is
-//     lost, an events-only design would serve a stale roster forever. A 60s
-//     backstop rebuild bounds that staleness, and the events child is supervised
-//     and restarted with backoff so "the daemon bounced" is a 1s outage, not a
-//     permanent blindness.
-//
-//   - A LEAKED docker child per subscription. Close() cancels the context, which
-//     SIGKILLs the events client and drains both goroutines. Without it every
-//     control-plane reconnect would strand a `docker events` process forever.
-//
-// SCOPING IS BY LABEL, ALWAYS. Every listing carries
-// `--filter label=deplo.managed=true`. It deliberately does NOT reuse
-// listProjectContainers("") — that helper drops its filter when handed an empty
-// project id and would enumerate EVERY container on the host, including ones
-// Deplo does not own (which is why both of its callers hard-reject ""). The
-// per-container deplo.project label comes back with the roster so the host-wide
-// stream is demuxable without a second lookup.
+// roster.go keeps `docker ps` OFF the hot path of the metrics stream. THE COST BEING
+// AVOIDED, measured on a real host: one `docker ps --filter label=... --format '{{json
+// .}}'` burns ~190ms of DOCKERD CPU per call. SCOPING IS BY LABEL, ALWAYS.
 
 const (
 	// One rebuild per window, measured from the FIRST event in it. Deliberately
 	// not a sliding/resetting debounce: a host churning continuously would keep
 	// resetting the window and never rebuild at all.
 	rosterDebounce = 500 * time.Millisecond
-	// Backstop so a dropped event cannot strand the roster indefinitely. Also
-	// what bounds drift in the fields no watched event reports — a healthcheck
-	// flipping to unhealthy does not start/die/destroy anything, so Health can
-	// lag by up to one backstop period.
+	// Backstop so a dropped event cannot strand the roster indefinitely.
 	rosterBackstop = 60 * time.Second
 	// The label the control plane stamps on everything it creates.
 	rosterManagedFilter = "label=deplo.managed=true"
 	// cgroup v2 unified hierarchy mount point. Joined with the RELATIVE path read
 	// out of /proc/<pid>/cgroup — never string-built from a container id.
 	rosterCgroupRoot = "/sys/fs/cgroup"
-	// Ceiling on the SYNCHRONOUS first rebuild only. Without it newRoster inherits
-	// the two dockercli deadlines back to back (15s ps + 20s inspect) and blocks
-	// its caller for up to 35s against a wedged daemon — and if the roster is
-	// built per StreamMetrics subscription, that is 35s of dead air before the
-	// control plane's first frame. Timing out here costs at most one debounce
-	// window: the watcher is already running and the backstop is already armed,
-	// so the roster fills itself in without the caller waiting.
+	// Ceiling on the SYNCHRONOUS first rebuild only.
 	rosterInitialRebuild = 10 * time.Second
 )
 
-// rosterEntry is one Deplo-managed container as the sampler sees it. Everything
-// here is either read from docker or read from /proc; nothing is inferred from a
-// container NAME, which is how sibling compose containers of one App get
-// collapsed into a single bogus series.
+// rosterEntry is one Deplo-managed container as the sampler sees it.
 type rosterEntry struct {
 	ID           string // full 64-hex docker id
 	Name         string
@@ -104,16 +53,9 @@ type rosterEntry struct {
 type roster struct {
 	mu      sync.RWMutex
 	entries []rosterEntry
-	// ids mirrors entries as a set, maintained under the same lock. It exists
-	// purely for relevant(): on a host that also runs CI, EVERY foreign event
-	// reaches that lookup, and a linear scan of the entries slice would put an
-	// O(n) walk on the busiest path in the file.
+	// ids mirrors entries as a set, maintained under the same lock.
 	ids map[string]struct{}
-	// cgroups caches container id -> absolute cgroup path. A container's cgroup
-	// path is fixed for its lifetime, so the /proc read happens once per
-	// container rather than once per tick. Pruned to the live set on every
-	// rebuild: an agent runs for months and a redeploy mints a NEW container id
-	// every time, so an unpruned cache grows without bound.
+	// cgroups caches container id -> absolute cgroup path.
 	cgroups map[string]string
 
 	// dirty is a coalescing signal, not a queue: capacity 1, non-blocking send.
@@ -121,9 +63,6 @@ type roster struct {
 	dirty chan struct{}
 
 	// debounce / backstop are rosterDebounce and rosterBackstop in production.
-	// Fields so a test can compress them to milliseconds: the backstop is the one
-	// guarantee that a MISSED event cannot strand the roster forever, and a
-	// 60s-only version of it is a guarantee nothing ever asserts.
 	debounce time.Duration
 	backstop time.Duration
 
@@ -133,32 +72,18 @@ type roster struct {
 	procRoot   string
 	cgroupRoot string
 
-	// SEAMS. Everything below is a function field with a real default assigned in
-	// newRosterDefaults, so the concurrent half of this file — debounce
-	// coalescing, the backstop, Close() draining both goroutines — can be tested
-	// without a docker daemon. That half is where the failure modes are (a lost
-	// dirty token, a leaked child, a rebuild storm), and a test that needs a live
-	// dockerd to exercise it would never run on the machine where it broke.
+	// SEAMS. That half is where the failure modes are (a lost dirty token, a leaked child,
+	// a rebuild storm), and a test that needs a live dockerd to exercise it would never
+	// run on the machine where it broke.
 	listFn      func(context.Context) ([]rosterPsRow, error)
 	inspectFn   func(context.Context, []string) (map[string]rosterDetail, error)
 	hostCountFn func(context.Context) (int, bool)
 	rebuildFn   func(context.Context)
 	watchFn     func(context.Context)
 
-	// hostRunning is EVERY running container on the host, not just the
-	// deplo.managed ones in `entries`.
-	//
-	// It exists because HostMetrics.running_containers must not change meaning
-	// depending on which RPC served it. The unary Metrics RPC reports an
-	// unfiltered `docker ps -q`; if the stream reported the label-scoped count
-	// instead, updating an agent would silently drop Traefik and every
-	// unmanaged container out of the host gauge — a number falling on the
-	// dashboard for no reason the operator could see. Caught by running the
-	// stream against a real host: unary said 3, the stream said 2.
-	//
-	// Refreshed on the same churn-driven rebuild as everything else, so it costs
-	// one extra `docker ps` per container event rather than one per tick — and
-	// container start/stop IS a rebuild trigger, so it cannot go stale.
+	// hostRunning is EVERY running container on the host, not just the deplo.managed ones
+	// in `entries`. It exists because HostMetrics.running_containers must not change
+	// meaning depending on which RPC served it.
 	hostRunning int
 
 	cancel    context.CancelFunc
@@ -166,12 +91,8 @@ type roster struct {
 	closeOnce sync.Once
 }
 
-// newRoster starts the docker events watcher bound to ctx and performs one
-// synchronous initial rebuild so the first Entries() call is already populated.
-//
-// Order is load-bearing: the watcher starts BEFORE the initial rebuild, so a
-// container that starts while that first `docker ps` is in flight leaves a dirty
-// token behind rather than being missed until the backstop fires.
+// newRoster starts the docker events watcher bound to ctx and performs one synchronous
+// initial rebuild so the first Entries() call is already populated.
 func newRoster(ctx context.Context) *roster {
 	r := newRosterDefaults()
 	r.start(ctx)
@@ -211,10 +132,8 @@ func (r *roster) start(ctx context.Context) {
 		r.watchFn(cctx)
 	}()
 
-	// First population, synchronous: the caller's next Entries() must not come
-	// back empty just because the stream opened a millisecond ago. Bounded by its
-	// OWN deadline (see rosterInitialRebuild) — the caller must not inherit two
-	// stacked dockercli timeouts from a daemon that is not answering.
+	// First population, synchronous: the caller's next Entries() must not come back empty
+	// just because the stream opened a millisecond ago.
 	ictx, icancel := context.WithTimeout(cctx, rosterInitialRebuild)
 	r.rebuildFn(ictx)
 	icancel()
@@ -239,12 +158,6 @@ func (r *roster) Entries() []rosterEntry {
 }
 
 // Snapshot returns the entries AND the running count read under a single lock.
-//
-// Use this, not Entries()+RunningCount(), whenever both are reported in the same
-// frame: taken separately a rebuild can land between the two calls, and the
-// stream would then publish a gauge that disagrees with the rows printed beside
-// it — a host that reads as "3 running" next to 4 running containers, blamed on
-// the sampler rather than on the read.
 func (r *roster) Snapshot() ([]rosterEntry, int) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -262,10 +175,8 @@ func (r *roster) RunningCount() int {
 	return countRunning(r.entries)
 }
 
-// HostRunningCount reports EVERY running container on the host, matching what
-// the unary Metrics RPC puts in the same field. Use this — not RunningCount —
-// for HostMetrics.running_containers; see the hostRunning field for why the two
-// must not be confused.
+// HostRunningCount reports EVERY running container on the host, matching what the unary
+// Metrics RPC puts in the same field.
 func (r *roster) HostRunningCount() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -305,10 +216,8 @@ func (r *roster) Close() {
 // events watcher
 // ---------------------------------------------------------------------------
 
-// watchEvents supervises the `docker events` child, restarting it with backoff
-// until ctx is done. Without the restart loop a single dockerd bounce (a daemon
-// reload, an apt upgrade) would leave the roster event-blind for the rest of the
-// agent's life, silently degraded to the 60s backstop.
+// watchEvents supervises the `docker events` child, restarting it with backoff until
+// ctx is done.
 func (r *roster) watchEvents(ctx context.Context) {
 	backoff := time.Second
 	for ctx.Err() == nil {
@@ -337,13 +246,9 @@ func (r *roster) watchEvents(ctx context.Context) {
 	}
 }
 
-// streamEvents runs one `docker events` child to completion.
-//
-// It deliberately does NOT go through internal/dockercli: every entry point
-// there forces a context.WithTimeout (there is no long-lived variant, by
-// design), which would guillotine this stream. Same bypass FollowLogs uses —
-// exec.CommandContext with the caller's context and no deadline, so the child
-// dies exactly when the context is cancelled and not a moment before.
+// streamEvents runs one `docker events` child to completion. It deliberately does NOT
+// go through internal/dockercli: every entry point there forces a context.WithTimeout
+// (there is no long-lived variant, by design), which would guillotine this stream.
 func (r *roster) streamEvents(ctx context.Context) error {
 	cmd := exec.CommandContext(ctx, "docker", "events",
 		"--filter", "type=container",
@@ -375,14 +280,10 @@ func (r *roster) streamEvents(ctx context.Context) error {
 		r.markDirty()
 	}
 
-	// A scanner error (a token past the 1MiB limit, a read error on the pipe)
-	// ends the loop with the child still RUNNING and its stdout no longer
-	// drained — cmd.Wait() would then block forever on a `docker events` that
-	// never exits, and watchEvents would never get to log, markDirty or restart.
-	// The roster would silently degrade to the 60s backstop for the life of the
-	// agent, with no log line. Kill the child first so Wait cannot wedge, and
-	// return the error so the supervisor treats it as the failure it is rather
-	// than as a clean EOF.
+	// A scanner error (a token past the 1MiB limit, a read error on the pipe) ends the
+	// loop with the child still RUNNING and its stdout no longer drained — cmd.Wait()
+	// would then block forever on a `docker events` that never exits, and watchEvents
+	// would never get to log, markDirty or restart.
 	serr := sc.Err()
 	if serr != nil && cmd.Process != nil {
 		_ = cmd.Process.Kill()
@@ -397,21 +298,9 @@ func (r *roster) streamEvents(ctx context.Context) error {
 	return werr
 }
 
-// relevant decides whether an event should cost us a rebuild.
-//
-// Foreign containers are ignored: on a host that also runs CI, unfiltered churn
-// would trigger a rebuild every debounce window (~190ms of dockerd CPU each) —
-// WORSE than the per-tick `docker ps` this file exists to eliminate.
-//
-// The second clause is a NARROW safety net, and its limit is worth stating
-// plainly. Identity normally comes from the event's own deplo.managed attribute;
-// an event for an id already in the roster counts regardless, so a `destroy` on
-// a daemon that does not echo labels cannot strand a dead container. It covers
-// REMOVALS ONLY. On such a daemon the start of a brand-new managed container is
-// still dropped — it carries no label and is not yet tracked — so it stays
-// invisible until the 60s backstop rebuild picks it up. That lag is the price of
-// not rebuilding on foreign churn, which would cost more than the per-tick
-// `docker ps` this file replaces.
+// relevant decides whether an event should cost us a rebuild. It covers REMOVALS ONLY.
+// That lag is the price of not rebuilding on foreign churn, which would cost more than
+// the per-tick `docker ps` this file replaces.
 func (r *roster) relevant(ev dockerEvent) bool {
 	if ev.Managed {
 		return true
@@ -467,25 +356,9 @@ func (r *roster) rebuildLoop(ctx context.Context) {
 // rebuild
 // ---------------------------------------------------------------------------
 
-// rebuild re-lists the managed containers and swaps in a fresh snapshot.
-//
-// NEVER fatal, and — just as important — never PARTIAL. A rebuild that fails
-// (daemon restarting, docker socket briefly gone) logs and returns, leaving the
-// last good roster in place. The containers did not stop existing because we
-// could not ask about them, and reporting an empty roster would read on the
-// control plane's charts as "everything went down" — a fabricated outage.
-//
-// The inspect gets the SAME discipline as the listing, and that is not
-// symmetry for its own sake. ProjectID comes only from the inspect, and it is
-// the demux key the host-wide stream is keyed on: publishing a snapshot built
-// from a failed inspect blanks ProjectID for every container at once, the
-// control plane cannot attribute a single sample to an App, and every chart on
-// the host goes empty until the next successful rebuild — up to a full backstop
-// period on a quiet host. (RestartCount collapsing to 0 and back would likewise
-// read as a counter reset to any delta consumer.) A PARTIAL inspect is still
-// accepted: ids destroyed between the ps and the inspect make docker exit
-// non-zero while the found rows are on stdout, and dropping those rows would
-// throw away a good answer.
+// rebuild re-lists the managed containers and swaps in a fresh snapshot. NEVER fatal,
+// and — just as important — never PARTIAL. (RestartCount collapsing to 0 and back would
+// likewise read as a counter reset to any delta consumer.)
 func (r *roster) rebuild(ctx context.Context) {
 	rows, err := r.listFn(ctx)
 	if err != nil {
@@ -525,12 +398,7 @@ func (r *roster) rebuild(ctx context.Context) {
 			cgroups[row.ID] = p // fixed for the container's lifetime
 			continue
 		}
-		// Resolve ONLY for a container the inspect reports as running. A pid on a
-		// non-running container (whether left behind by the daemon or simply
-		// stale in our hands) resolves to the cgroup of whatever process reused
-		// that pid, and the cache never re-resolves a hit — so one bad
-		// resolution would keep feeding another workload's counters into this
-		// container's series for its whole lifetime.
+		// Resolve ONLY for a container the inspect reports as running.
 		d := details[row.ID]
 		if d.State != "running" {
 			continue
@@ -556,11 +424,9 @@ func (r *roster) rebuild(ctx context.Context) {
 	r.entries = entries
 	r.ids = ids2
 	r.cgroups = cgroups // rebuilt from the live set, so destroyed ids drop out
-	// Only publish a figure we actually READ. A failed `docker ps -q` (ok=false)
-	// means the count is UNKNOWN, and fabricating a 0 on a host that plainly has
-	// containers is worse than reporting the last known figure — keep the previous
-	// value. A genuine 0 (ok=true) is real and MUST land, so a host that emptied
-	// out reports 0 instead of a stale count that never falls.
+	// Only publish a figure we actually READ. A failed `docker ps -q` (ok=false) means the
+	// count is UNKNOWN, and fabricating a 0 on a host that plainly has containers is worse
+	// than reporting the last known figure — keep the previous value.
 	if ok {
 		r.hostRunning = hostRunning
 	}
@@ -574,21 +440,18 @@ type rosterPsRow struct {
 	State string
 }
 
-// listManagedContainers runs the ONE listing this file is allowed to run:
-// label-scoped to deplo.managed=true, `-a` so stopped containers still appear
-// (a stopped App must report "stopped", not vanish), and `--no-trunc` because
-// the 12-hex short id docker prints by default is not the stable 64-hex identity
-// the rate calculator keys on.
+// listManagedContainers runs the ONE listing this file is allowed to run: label-scoped
+// to deplo.managed=true, `-a` so stopped containers still appear (a stopped App must
+// report "stopped", not vanish), and `--no-trunc` because the 12-hex short id docker
+// prints by default is not the stable 64-hex identity the rate calculator keys on.
 func listManagedContainers(ctx context.Context) ([]rosterPsRow, error) {
 	res, err := dockercli.Run(ctx, 15*time.Second,
 		"ps", "-a", "--no-trunc", "--filter", rosterManagedFilter, "--format", "{{json .}}")
 	if err != nil {
 		return nil, err
 	}
-	// A non-zero exit means docker ran but could not answer (daemon starting,
-	// permission denied). Its stdout is empty or partial, and treating that as
-	// "no containers" would wipe a live roster — surface it as the failure it is
-	// so the caller keeps the last good snapshot.
+	// A non-zero exit means docker ran but could not answer (daemon starting, permission
+	// denied).
 	if res.Code != 0 {
 		return nil, &rosterCmdError{what: "docker ps", code: res.Code, stderr: strings.TrimSpace(res.Stderr)}
 	}
@@ -601,15 +464,8 @@ func listManagedContainers(ctx context.Context) ([]rosterPsRow, error) {
 	return rows, nil
 }
 
-// hostRunningCount counts EVERY running container on the host — the unfiltered
-// `docker ps -q` the host gauge is built from — returning ok=false when the read
-// itself failed.
-//
-// It exists instead of dockercli.RunningContainers because that helper collapses
-// a failure and a genuinely empty host to the same 0, and rebuild MUST tell them
-// apart: a real 0 has to update the gauge (a host that emptied out should report
-// 0, not a stale count that never falls), while a failed read has to keep the
-// last known value rather than fabricate a 0 on a host that plainly has some.
+// hostRunningCount counts EVERY running container on the host — the unfiltered `docker
+// ps -q` the host gauge is built from — returning ok=false when the read itself failed.
 func hostRunningCount(ctx context.Context) (int, bool) {
 	res, err := dockercli.Run(ctx, 10*time.Second, "ps", "-q")
 	if err != nil || res.Code != 0 {
@@ -648,21 +504,8 @@ type rosterDetail struct {
 	PID          int    `json:"pid"`
 }
 
-// The inspect template emits one JSON object per container, keyed by the FULL
-// id so answers match back even when a container disappears mid-call. Mirrors
-// instances.go's inspectTemplate field-for-field, plus the project label and the
-// pid the cgroup backend needs. .State.Health is guarded because it is nil for
-// an image with no healthcheck — a bare {{json .State.Health.Status}} would fail
-// the whole template, taking every OTHER container's row down with it.
-//
-// `.ID`, NOT `.Id` — and the difference is not cosmetic. Docker executes an
-// inspect template against the typed Go struct first and silently falls back to
-// the RAW JSON MAP if any accessor does not resolve. `.Id` is the json TAG, so
-// it only resolves on the map path — and on the map path `{{if .State.Health}}`
-// stops protecting anything, because a container with no healthcheck simply has
-// no "Health" KEY and the lookup errors out ("map has no entry for key Health")
-// instead of yielding nil. Verified on docker 29.6.1: one wrong letter turned
-// the whole batched inspect into an error for every container on the host.
+// The inspect template emits one JSON object per container, keyed by the FULL id so
+// answers match back even when a container disappears mid-call.
 const rosterInspectTemplate = `{"id":{{json .ID}},` +
 	`"name":{{json .Name}},` +
 	`"project":{{json (index .Config.Labels "deplo.project")}},` +
@@ -671,19 +514,7 @@ const rosterInspectTemplate = `{"id":{{json .ID}},` +
 	`"restartCount":{{json .RestartCount}},` +
 	`"pid":{{json .State.Pid}}}`
 
-// inspectRosterContainers inspects the whole managed set in ONE call, keyed by
-// full id.
-//
-// One call regardless of container count is the invariant that matters here — a
-// per-container inspect would reintroduce exactly the per-tick dockerd cost this
-// file was written to remove.
-//
-// It reports an error rather than an empty map for a WHOLESALE failure (spawn
-// error, 20s timeout, or a non-zero exit that produced no parsable row at all),
-// because the caller cannot tell those apart from "the host has no containers"
-// and would publish a roster with ProjectID blanked on every entry — see
-// rebuild. A PARTIAL answer is not an error: docker exits non-zero when any id
-// is gone, and the rows it did print are good data.
+// inspectRosterContainers inspects the whole managed set in ONE call, keyed by full id.
 func inspectRosterContainers(ctx context.Context, ids []string) (map[string]rosterDetail, error) {
 	if len(ids) == 0 {
 		return map[string]rosterDetail{}, nil
@@ -824,15 +655,9 @@ func isChurnAction(action string) bool {
 	return false
 }
 
-// buildRosterEntries merges the ps rows, the inspect details and the cgroup
-// cache into the snapshot, in a deterministic order.
-//
-// The ps row is the SOURCE OF TRUTH for existence: a container docker listed is
-// in the roster even if the inspect could not describe it (it was destroyed
-// mid-call, or the inspect failed outright). In that case the fields we could
-// not measure stay at their zero value — an unmeasurable FIELD is 0 — but the
-// entry itself is real, seen in a real listing. The reverse, synthesising an
-// entry for a container nothing listed, is never done.
+// buildRosterEntries merges the ps rows, the inspect details and the cgroup cache into
+// the snapshot, in a deterministic order. The reverse, synthesising an entry for a
+// container nothing listed, is never done.
 func buildRosterEntries(rows []rosterPsRow, details map[string]rosterDetail, cgroups map[string]string) []rosterEntry {
 	entries := make([]rosterEntry, 0, len(rows))
 	for _, row := range rows {
@@ -857,15 +682,8 @@ func buildRosterEntries(rows []rosterPsRow, details map[string]rosterDetail, cgr
 				e.Name = d.Name
 			}
 		}
-		// A pid and a cgroup are only meaningful while the container RUNS, and
-		// they are cleared together on purpose. Docker 29 reports pid 0 for an
-		// exited container, but nothing in the API promises that across versions
-		// or drivers, and a stale pid would send the cgroup backend reading
-		// whatever process reused it. The cgroup path matters more: cgroupstats
-		// samples any entry with a non-empty CgroupPath regardless of state, so
-		// carrying a resolved path onto a stopped container would emit a
-		// real-looking sample built from another workload's counters — a
-		// fabricated reading, which is worse than a missing one.
+		// A pid and a cgroup are only meaningful while the container RUNS, and they are
+		// cleared together on purpose.
 		if e.State != "running" {
 			e.PID = 0
 			e.CgroupPath = ""
@@ -908,22 +726,8 @@ func cgroupPathForPID(procRoot, cgroupRoot string, pid int) string {
 	return path
 }
 
-// parseCgroupV2Path extracts the container's cgroup path RELATIVE to the unified
-// mount from /proc/<pid>/cgroup, where cgroup v2 writes a single `0::<relpath>`
-// line.
-//
-// READING the path is the entire point. The obvious shortcut — building
-// /sys/fs/cgroup/system.slice/docker-<id>.scope from the container id — is wrong
-// on any host that does not happen to match the author's setup: the systemd and
-// cgroupfs drivers lay out different trees, and rootless docker nests everything
-// under a user slice. Reading the relpath is driver-agnostic by construction,
-// because the kernel is telling us where the process actually lives.
-//
-// Returns "" for cgroup v1 (no 0:: line — the caller falls back to docker stats)
-// and, importantly, for the ROOT cgroup "/": that path resolves to
-// /sys/fs/cgroup itself, whose counters describe the WHOLE HOST. Reporting the
-// host's memory as one container's would not be a missing field, it would be a
-// fabricated sample.
+// parseCgroupV2Path extracts the container's cgroup path RELATIVE to the unified mount
+// from /proc/<pid>/cgroup, where cgroup v2 writes a single `0::<relpath>` line.
 func parseCgroupV2Path(content string) string {
 	for _, line := range strings.Split(content, "\n") {
 		line = strings.TrimSpace(line)

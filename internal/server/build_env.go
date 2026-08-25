@@ -6,21 +6,9 @@ import (
 )
 
 // Build-time env, in parity with the runtime env: every build method makes the
-// request's decrypted env (req.env — the same map the runtime stack gets)
-// available to the BUILD, so build-time-inlined configuration (Next.js
-// NEXT_PUBLIC_*, Vite VITE_*, CRA REACT_APP_*) works without the user knowing
-// what a build arg is. The value-handling rule is uniform across methods:
-//
-//   - NAMES ride argv as bare flags (`--build-arg KEY` / `-e KEY` / `--env KEY`
-//     — each tool resolves a bare name from its caller's process env), because
-//     the deploy log echoes command lines and a value must never appear there.
-//   - VALUES ride the spawned client's process env (StreamEnv/SpawnEnv), so
-//     they never touch argv, the deploy log, or a shell string.
-//
-// Keys arrive off the wire (the control plane resolved them), so — same threat
-// model as the railpack plan secrets — only identifier-shaped names are used;
-// anything else is dropped rather than quoted (a legitimate env var name is
-// always an identifier).
+// request's decrypted env (req.env — the same map the runtime stack gets) available to
+// the BUILD, so build-time-inlined configuration (Next.js NEXT_PUBLIC_*, Vite VITE_*,
+// CRA REACT_APP_*) works without the user knowing what a build arg is.
 
 // buildEnvKeys returns the request env's identifier-shaped names, sorted for
 // deterministic argv (and therefore deterministic docker layer caching).
@@ -56,10 +44,9 @@ func filterKeys(keys []string, keep func(string) bool) []string {
 	return out
 }
 
-// declaredArgNames scans a Dockerfile body for the ARG names it declares —
-// single-name (`ARG FOO`, `ARG FOO=default`) and BuildKit's multi-name
-// (`ARG FOO BAR=x`) forms, in any stage. Line continuations are followed the
-// way docker's parser does (a trailing `\` joins the next line).
+// declaredArgNames scans a Dockerfile body for the ARG names it declares — single-name
+// (`ARG FOO`, `ARG FOO=default`) and BuildKit's multi-name (`ARG FOO BAR=x`) forms, in
+// any stage.
 func declaredArgNames(dockerfile string) map[string]struct{} {
 	names := map[string]struct{}{}
 	lines := strings.Split(dockerfile, "\n")
@@ -87,11 +74,8 @@ func declaredArgNames(dockerfile string) map[string]struct{} {
 	return names
 }
 
-// dockerfileEnvKeys returns the env keys this Dockerfile declares as ARGs — the
-// set that becomes bare `--build-arg KEY` flags. Passing only DECLARED names
-// keeps builds warning-free (docker flags unconsumed build args) and means a
-// custom Dockerfile opts into a variable simply by declaring `ARG NAME`, while
-// the generated Dockerfile (which declares every resolved var) gets them all.
+// dockerfileEnvKeys returns the env keys this Dockerfile declares as ARGs — the set
+// that becomes bare `--build-arg KEY` flags.
 func dockerfileEnvKeys(dockerfile string, env map[string]string) []string {
 	declared := declaredArgNames(dockerfile)
 	return filterKeys(buildEnvKeys(env), func(k string) bool {

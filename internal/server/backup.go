@@ -19,21 +19,8 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/s3client"
 )
 
-// backup.go implements the BACKUPS half of the contract (ADR-0007): dump a
-// database or project to S3, restore one in place, and the S3 affordances
-// (S3Check / S3Delete). Everything routes through the OWNING server's agent
-// because the agent has the Docker socket + host fs the dump needs and an S3
-// client (minio-go) so the bytes never round-trip through the control plane.
-//
-// The control plane stays the source of truth: it decrypts the S3 creds + DB
-// password, resolves the container name + engine, parses the project's volume
-// names out of the rendered compose, and builds the object key — then sends all
-// of it here over mTLS. The agent stays dumb about Deplo's store; it just runs
-// the right tool and moves bytes.
-//
-// FORMAT (docs/research/dbs-backups/PLAN.md, gzip variant): the dump tool's
-// output is gzip-compressed in-process (Go stdlib) on the way to S3, and
-// gunzipped on the way back. Object extension is `.gz` (e.g. `.dump.gz`).
+// backup.go implements the BACKUPS half of the contract (ADR-0007): dump a database or
+// project to S3, restore one in place, and the S3 affordances (S3Check / S3Delete).
 
 const (
 	// A dump/restore can be long for a large DB or a volume-heavy project; the
@@ -42,26 +29,17 @@ const (
 	// The helper image used to tar a project's named volumes. A tiny, ubiquitous
 	// image already present on most hosts; pulled on first use otherwise.
 	volumeHelperImage = "busybox:1.36"
-	// maxSnapshotBytes caps a single snapshot/ entry (compose.yml, env, a mount
-	// file) read fully into memory during restore. Snapshots are small config, not
-	// bulk data, so a larger entry means a corrupt/hostile archive — reject it
-	// rather than let an unbounded io.ReadAll OOM the agent.
+	// maxSnapshotBytes caps a single snapshot/ entry (compose.yml, env, a mount file) read
+	// fully into memory during restore.
 	maxSnapshotBytes = 16 << 20 // 16 MiB
-	// maxProjectRestoreBytes caps the TOTAL decompressed bytes the agent will read
-	// out of a project archive during restore, so a small "zip-bomb"-style object
-	// can't fill the host disk. Generous for real projects (volumes + files); an
-	// archive that blows past it aborts the restore instead of writing on.
+	// maxProjectRestoreBytes caps the TOTAL decompressed bytes the agent will read out of
+	// a project archive during restore, so a small "zip-bomb"-style object can't fill the
+	// host disk.
 	maxProjectRestoreBytes = 64 << 30 // 64 GiB
 )
 
 // bkEmitter funnels BackupEvents over the stream (mirrors deploy.go's emitter).
-//
-// SERIALISED, unlike deploy.go's, because this one has two writers. Under
-// `stream_out` the artifact's data frames are sent from the RPC goroutine while
-// the producer goroutine is still emitting log lines ("Archiving volume …") from
-// inside the pipe — and grpc-go forbids concurrent Send on one stream: it
-// mutates per-stream state with no lock of its own, so the race is data
-// corruption on the wire rather than an error anyone would see.
+// SERIALISED, unlike deploy.go's, because this one has two writers.
 type bkEmitter struct {
 	mu   sync.Mutex
 	send func(*pb.BackupEvent) error
@@ -126,10 +104,7 @@ func s3cfg(t *pb.S3Target) s3client.Config {
 	}
 }
 
-// Backup dumps a database or project to S3, streaming progress. The whole RPC
-// runs on the stream's context so a control-plane disconnect cancels the dump
-// (unlike Deploy, a half-finished backup is not worth keeping alive — the
-// control plane re-runs it).
+// Backup dumps a database or project to S3, streaming progress.
 func (s *Service) Backup(req *pb.BackupRequest, stream pb.Agent_BackupServer) error {
 	e := &bkEmitter{send: stream.Send}
 	ctx := stream.Context()
@@ -150,10 +125,8 @@ func (s *Service) Backup(req *pb.BackupRequest, stream pb.Agent_BackupServer) er
 	return nil
 }
 
-// Restore restores a database or project from an artifact this host can reach
-// (an S3 object or a local store), in place. The cross-host case — the artifact
-// lives on another server's disk — is RestoreFrom, which streams the bytes in
-// and then joins these exact same paths.
+// Restore restores a database or project from an artifact this host can reach (an S3
+// object or a local store), in place.
 func (s *Service) Restore(req *pb.RestoreRequest, stream pb.Agent_RestoreServer) error {
 	e := &rsEmitter{send: stream.Send}
 	ctx := stream.Context()
@@ -179,14 +152,10 @@ func (s *Service) Restore(req *pb.RestoreRequest, stream pb.Agent_RestoreServer)
 // ---------------------------------------------------------------------------
 
 // execWithSecretEnv builds a `docker exec [flags...]` argv prefix that forwards a
-// password env var INTO the container WITHOUT putting the value on argv: when
-// `pw` is non-empty it adds the bare `-e <name>` flag (no `=value`), and returns
-// the `<name>=<pw>` entry for the HOST docker-client process env (PipeOut/PipeIn
-// set it via cmd.Env). `docker exec -e <name>` (valueless) copies the host
-// process's env var into the container, so the in-container tool reads the
-// password from its env and the secret never appears on any command line. When
-// `pw` is empty no env is forwarded. Extra `flags` (e.g. "-i") are appended after
-// `exec`. The caller appends the container + tool argv after the returned prefix.
+// password env var INTO the container WITHOUT putting the value on argv: when `pw` is
+// non-empty it adds the bare `-e <name>` flag (no `=value`), and returns the
+// `<name>=<pw>` entry for the HOST docker-client process env (PipeOut/PipeIn set it via
+// cmd.Env).
 func execWithSecretEnv(pw, name string, flags ...string) (argv []string, env []string) {
 	a := append([]string{"exec"}, flags...)
 	if pw != "" {
@@ -196,29 +165,9 @@ func execWithSecretEnv(pw, name string, flags ...string) (argv []string, env []s
 	return a, env
 }
 
-// dumpArgv returns the `docker exec` argv that dumps the database to stdout, and
-// the extra HOST-PROCESS env the docker client needs, for an engine. `container`
-// is the DB container; the tool runs INSIDE it. Mirrors the format table in the
-// PLAN. Returns an error for an unsupported engine.
-//
-// SECRET HANDLING: the password is kept OFF the host docker-client's argv (which
-// is world-readable via `ps`/`/proc/<pid>/cmdline`). For engines whose tool reads
-// a password ENV VAR (postgres PGPASSWORD, mysql MYSQL_PWD, redis REDISCLI_AUTH),
-// the VALUE is returned in `env` (set on the host docker process via PipeOut's
-// cmd.Env) and only the bare `-e NAME` flag goes on argv — `docker exec -e NAME`
-// (no value) forwards the host process's env var into the container, so the
-// value never touches any argv. mongodump/mongorestore have no password env var,
-// so mongo still passes `-p <pw>` on argv (a documented residual); redactArgs in
-// dockercli masks it out of any error string regardless.
-// mysqlClient names the CLI to exec for a mysql-family engine.
-//
-// MariaDB 11 removed the `mysql*` compatibility symlinks its images used to
-// ship, so `mysqldump` and `mysql` are simply not on PATH there any more - every
-// backup and every restore of a MariaDB 11 database failed with "executable file
-// not found" and nothing in the message pointing at why. The `mariadb-*` names
-// have existed since 10.5, which is older than anything Deplo offers, so routing
-// MariaDB to them is safe in both directions. MySQL keeps its own names; it
-// never had the mariadb ones.
+// dumpArgv returns the `docker exec` argv that dumps the database to stdout, and the
+// extra HOST-PROCESS env the docker client needs, for an engine. MySQL keeps its own
+// names; it never had the mariadb ones.
 func mysqlClient(dbType, kind string) string {
 	if dbType == "mariadb" {
 		if kind == "dump" {
@@ -306,11 +255,9 @@ func restoreArgv(d *pb.DatabaseDescriptor) (argv []string, env []string, err err
 		}
 		return a, nil, nil
 	case "redis":
-		// Redis does NOT restore over a single stdin pipe: the dump is an RDB file
-		// (redis-cli --rdb), and `redis-cli --pipe` speaks RESP, not RDB — feeding
-		// it an RDB fails ("unknown command 'REDIS0014'"). A correct RDB restore is
-		// a multi-step dance (disable save → flush → write /data/dump.rdb → SHUTDOWN
-		// NOSAVE → reload), so it has its own path (restoreRedis), not this argv.
+		// Redis does NOT restore over a single stdin pipe: the dump is an RDB file (redis-cli
+		// --rdb), and `redis-cli --pipe` speaks RESP, not RDB — feeding it an RDB fails
+		// ("unknown command 'REDIS0014'").
 		return nil, nil, errRedisRestoreSeparate
 	case "clickhouse":
 		// Clickhouse restores the SQL script via `clickhouse-client --multiquery`,
@@ -328,10 +275,8 @@ func (s *Service) backupDatabase(ctx context.Context, d *pb.DatabaseDescriptor, 
 	}
 	e.log("info", fmt.Sprintf("Dumping %s database %q from container %q", d.GetDbType(), d.GetDbName(), d.GetContainer()))
 
-	// The dump PRODUCER writes the raw dump bytes into `w` (the head of the
-	// gzip → age → destination chain). Most engines are a single `docker exec`
-	// piped to stdout; clickhouse is a multi-statement SQL script the agent
-	// assembles per table. Both shapes funnel through the same pipeline.
+	// The dump PRODUCER writes the raw dump bytes into `w` (the head of the gzip → age →
+	// destination chain).
 	var produce func(w io.Writer) error
 	switch strings.ToLower(d.GetDbType()) {
 	case "clickhouse":
@@ -354,10 +299,7 @@ func (s *Service) backupDatabase(ctx context.Context, d *pb.DatabaseDescriptor, 
 		}
 	}
 
-	// Pipeline: producer → gzip → (age) → destination. A pipe couples the producer
-	// to the writer so there is no temp file; the destination reads as the dump
-	// writes, whether that destination is a bucket, this host's disk, or the
-	// relay stream back to the control plane.
+	// Pipeline: producer → gzip → (age) → destination.
 	written, werr := s.writeArtifact(ctx, dest, produce)
 	if werr != nil {
 		e.result(false, statusMessage(werr), "", 0)
@@ -406,11 +348,9 @@ func (s *Service) restoreDatabase(ctx context.Context, d *pb.DatabaseDescriptor,
 		e.result(false, fmt.Sprintf("restore tool exited %d", code))
 		return
 	}
-	// A dump is applied AS it streams, so for a streaming source this verdict
-	// arrives after the fact. Saying so is still the only honest option: the
-	// operator has to know the data they just restored came from an artifact that
-	// is not the one Deplo wrote. (A store artifact was proven before any of this
-	// ran, which is the shape the default destination uses.)
+	// A dump is applied AS it streams, so for a streaming source this verdict arrives
+	// after the fact. (A store artifact was proven before any of this ran, which is the
+	// shape the default destination uses.)
 	if verr := src.verify(); verr != nil {
 		e.result(false, statusMessage(verr))
 		return
@@ -423,17 +363,9 @@ func (s *Service) restoreDatabase(ctx context.Context, d *pb.DatabaseDescriptor,
 // RDB file-swap dance) rather than the uniform stdin-pipe restore path.
 var errRedisRestoreSeparate = fmt.Errorf("redis restore uses the dedicated file-swap path")
 
-// restoreRedis restores a redis RDB dump IN PLACE. Redis only loads its RDB at
-// startup and a graceful shutdown would SAVE the live (about-to-be-replaced)
-// dataset over our file — so the sequence is: disable save rules (so shutdown
-// won't overwrite), FLUSHALL (overwrite, not merge), stream the decompressed RDB
-// to <dir>/<dbfilename>, then SHUTDOWN NOSAVE and wait for the supervisor
-// (Docker restart policy / compose) to bring the container back, which loads the
-// restored RDB. Verified end-to-end against redis:alpine.
-//
-// This requires the container to be restarted by its supervisor; if it isn't
-// (no restart policy), the stream reports the failure clearly rather than
-// leaving redis down silently.
+// restoreRedis restores a redis RDB dump IN PLACE. This requires the container to be
+// restarted by its supervisor; if it isn't (no restart policy), the stream reports the
+// failure clearly rather than leaving redis down silently.
 func (s *Service) restoreRedis(ctx context.Context, d *pb.DatabaseDescriptor, src *artifactSource, e *rsEmitter) {
 	c, pw := d.GetContainer(), d.GetPassword()
 	e.log("info", fmt.Sprintf("Restoring redis %q into container %q from %s", d.GetDbName(), c, src.label))
@@ -501,12 +433,11 @@ func (s *Service) restoreRedis(ctx context.Context, d *pb.DatabaseDescriptor, sr
 	e.result(true, "")
 }
 
-// redisConfig reads a single CONFIG GET value from a redis container ("" on any
-// failure — the caller falls back to the documented default).
-// redisCliPrefix builds the `docker exec [-e REDISCLI_AUTH] <container> redis-cli`
-// argv prefix + the host-process env carrying the password value, so redis-cli
-// auth never lands on argv (the value rides in REDISCLI_AUTH, forwarded by the
-// valueless `-e` flag). Used by every redis control call in the restore dance.
+// redisConfig reads a single CONFIG GET value from a redis container ("" on any failure
+// — the caller falls back to the documented default). redisCliPrefix builds the `docker
+// exec [-e REDISCLI_AUTH] <container> redis-cli` argv prefix + the host-process env
+// carrying the password value, so redis-cli auth never lands on argv (the value rides
+// in REDISCLI_AUTH, forwarded by the valueless `-e` flag).
 func redisCliPrefix(container, pw string) (argv []string, env []string) {
 	a := []string{"exec"}
 	if pw != "" {
@@ -574,21 +505,9 @@ func shellQuote(s string) string {
 // Project backup / restore — tar volumes + files + snapshot, gzip → S3
 // ---------------------------------------------------------------------------
 
-// backupProject tars a project's named + compose-stack volumes (via a throwaway
-// helper container that mounts each), the project files dir, and the rendered
-// compose/env snapshot, gzip-compresses, and uploads. Host bind mounts are NOT
-// in volume_names (the control plane excluded them), so they are never touched.
-//
-// The archive layout (a single gzipped tar) is:
-//
-//	volumes/<volumeName>/...   — each named volume's contents
-//	files/...                  — the project files dir (<stack-dir>/files/<slug>)
-//	snapshot/compose.yml       — the rendered compose at backup time
-//	snapshot/env               — the decrypted env snapshot (KEY=VALUE lines)
-//	snapshot/mounts/<path>     — compose mount files (template config)
-//
-// Restore reverses it: wipe + repopulate the volumes + files, then re-Reroute
-// the snapshot so the stack restarts on the EXACT backed-up config.
+// backupProject tars a project's named + compose-stack volumes (via a throwaway helper
+// container that mounts each), the project files dir, and the rendered compose/env
+// snapshot, gzip-compresses, and uploads.
 func (s *Service) backupProject(ctx context.Context, p *pb.ProjectDescriptor, dest *artifactDestination, e *bkEmitter) {
 	if p == nil || p.GetSlug() == "" {
 		e.result(false, "project backup request missing descriptor / slug", "", 0)
@@ -670,19 +589,10 @@ func (s *Service) writeProjectArchive(ctx context.Context, p *pb.ProjectDescript
 	return nil
 }
 
-// archiveVolume runs a helper container that mounts the named volume read-only
-// at /v and tars its contents to stdout; we read that tar and re-emit every
-// entry under volumes/<vol>/ into our own tar, so one restore-time pass can
-// route each entry back to the right volume.
-//
-// Producer exit handling balances two failure modes. A tar.Reader returns io.EOF
-// at the in-band trailer, NOT when the pipe closes, so a non-zero helper exit can
-// hide behind a "clean" EOF. But busybox `tar -cf -` legitimately exits 1 for a
-// benign "file changed as we read it" on a LIVE volume while STILL emitting a
-// complete, valid archive — failing the whole backup on that would make any
-// live-volume backup impossible. So: a reader-side error mid-stream (truncation)
-// is fatal, but a non-zero producer exit AFTER a clean EOF (complete archive) is
-// surfaced as a WARNING, not a failure — the archive is whole.
+// archiveVolume runs a helper container that mounts the named volume read-only at /v
+// and tars its contents to stdout; we read that tar and re-emit every entry under
+// volumes/<vol>/ into our own tar, so one restore-time pass can route each entry back
+// to the right volume.
 func (s *Service) archiveVolume(ctx context.Context, vol string, tw *tar.Writer, e *bkEmitter) error {
 	if err := validateVolumeName(vol); err != nil {
 		return err
@@ -705,10 +615,10 @@ func (s *Service) archiveVolume(ctx context.Context, vol string, tw *tar.Writer,
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {
-			// Drain any trailing bytes so the producer's PipeOut write completes and
-			// reports its exit, then WARN (not fail) on a non-zero exit — the reader
-			// reached a clean trailer, so the archive is complete (busybox's benign
-			// "file changed" exit 1 on a live volume is the common cause).
+			// Drain any trailing bytes so the producer's PipeOut write completes and reports its
+			// exit, then WARN (not fail) on a non-zero exit — the reader reached a clean
+			// trailer, so the archive is complete (busybox's benign "file changed" exit 1 on a
+			// live volume is the common cause).
 			_, _ = io.Copy(io.Discard, pr)
 			if perr := <-done; perr != nil {
 				e.log("warn", fmt.Sprintf("volume %q: %v (archive completed; a file likely changed during read)", vol, perr))
@@ -742,11 +652,9 @@ func (s *Service) archiveVolume(ctx context.Context, vol string, tw *tar.Writer,
 	}
 }
 
-// restoreProject reverses backupProject: stop the stack, wipe + repopulate each
-// volume + the files dir, then re-Reroute the snapshot compose/env (which
-// restarts the stack on the EXACT backed-up config). A restart failure (e.g. a
-// snapshot image that no longer exists) is reported clearly rather than leaving
-// the stack silently down.
+// restoreProject reverses backupProject: stop the stack, wipe + repopulate each volume
+// + the files dir, then re-Reroute the snapshot compose/env (which restarts the stack
+// on the EXACT backed-up config).
 func (s *Service) restoreProject(ctx context.Context, p *pb.ProjectDescriptor, src *artifactSource, e *rsEmitter) {
 	if p == nil || p.GetSlug() == "" {
 		e.result(false, "project restore request missing descriptor / slug")
@@ -778,10 +686,7 @@ func (s *Service) restoreProject(ctx context.Context, p *pb.ProjectDescriptor, s
 		return
 	}
 
-	// The last point this can still refuse. A streaming source (an S3 object, a
-	// relayed artifact) is only provably the right one once it has all gone past,
-	// and that moment is HERE: the archive is unpacked, nothing has been executed,
-	// and re-applying the stack configuration is the next thing that would.
+	// The last point this can still refuse.
 	if verr := src.verify(); verr != nil {
 		e.result(false, statusMessage(verr))
 		return
@@ -807,31 +712,9 @@ func (s *Service) restoreProject(ctx context.Context, p *pb.ProjectDescriptor, s
 	e.result(true, "")
 }
 
-// restoreConfig picks the stack configuration a restore brings back up, and it
-// is the one place in this file where "which of two sources do we trust" is
-// decided - so it is its own function, with its own test.
-//
-// A backup is meant to restore DATA AND CONFIG: the archive carries the compose
-// and env the app was actually running, so a restore puts back the state the
-// operator remembers, not today's config wrapped around last month's volumes.
-// That is what `proven` gates, and nothing else.
-//
-// PROVEN means the control plane recorded a sha256 when it wrote this artifact
-// and the agent has just re-checked it - up front for a store artifact, at the
-// end of the stream for the others. Then the archive is exactly the bytes deplo
-// produced and its snapshot is as trustworthy as the descriptor.
-//
-// UNPROVEN is a run taken before integrity checking shipped, and there the
-// descriptor wins. It has to: this YAML is written to the stack file and handed
-// to `docker compose up`, so an artifact declaring a bind mount of `/`, or
-// `privileged: true`, or the docker socket, is root on this host. An artifact is
-// not trusted bytes - an S3 object can be replaced by anyone with write access
-// to the bucket, and a store artifact can be FORGED by a compromised storage
-// host, because age gives confidentiality and not authenticity: the recipient is
-// a public key that host is handed on every single backup.
-//
-// The descriptor is also the fallback whenever the archive carries nothing,
-// which is what keeps a restore working for a config that no longer exists.
+// restoreConfig picks the stack configuration a restore brings back up, and it is the
+// one place in this file where "which of two sources do we trust" is decided - so it is
+// its own function, with its own test.
 func restoreConfig(
 	slug string,
 	p *pb.ProjectDescriptor,
@@ -840,13 +723,8 @@ func restoreConfig(
 	untrusted bool,
 ) *pb.RerouteRequest {
 	// `first` is whichever source this restore trusts; the other is the fallback.
-	//
-	// UNTRUSTED removes the fallback entirely, and it has to: "prefer the control
-	// plane's" is not a guard when the control plane has none to prefer. An app
-	// never deployed on this host has no stack file and an app with no variables
-	// has no env, and in both cases the archive would win by default. For a file
-	// somebody uploaded that means the uploader picks what `docker compose up`
-	// runs and what environment it runs with, which is root on this machine.
+	// UNTRUSTED removes the fallback entirely, and it has to: "prefer the control plane's"
+	// is not a guard when the control plane has none to prefer.
 	pick := func(fromArchive, fromControlPlane string) string {
 		if proven && fromArchive != "" {
 			return fromArchive
@@ -899,10 +777,9 @@ func readSnapshotEntry(tr io.Reader, name string) ([]byte, error) {
 	return b, nil
 }
 
-// budgetReader wraps a reader and fails once cumulative bytes read exceed a
-// budget, so an over-large (or maliciously inflating) archive aborts partway
-// instead of filling the host disk. The error surfaces through whatever is
-// reading (here, the restore's tar.Reader).
+// budgetReader wraps a reader and fails once cumulative bytes read exceed a budget, so
+// an over-large (or maliciously inflating) archive aborts partway instead of filling
+// the host disk.
 type budgetReader struct {
 	r      io.Reader
 	n      int64
@@ -918,11 +795,9 @@ func (b *budgetReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// unpackProjectArchive reads the gzipped tar, routing each entry: volumes/<vol>/*
-// back into a freshly-wiped volume (via a helper container), files/* into a
-// freshly-wiped files dir, and snapshot/* into the returned projectSnapshot. The
-// volumes are wiped first (only the ones present in volumeNames) so the restore
-// overwrites rather than merges.
+// unpackProjectArchive reads the gzipped tar, routing each entry: volumes/<vol>/* back
+// into a freshly-wiped volume (via a helper container), files/* into a freshly-wiped
+// files dir, and snapshot/* into the returned projectSnapshot.
 func (s *Service) unpackProjectArchive(ctx context.Context, slug string, volumeNames []string, r io.Reader, e *rsEmitter) (projectSnapshot, error) {
 	snap := projectSnapshot{env: map[string]string{}}
 
@@ -982,11 +857,7 @@ func (s *Service) unpackProjectArchive(ctx context.Context, slug string, volumeN
 			if !ok {
 				continue // a volume not in our target set (defensive)
 			}
-			// The entry name + type come from an S3 object — never trusted. The
-			// helper's `tar -x` would honour a `..` path or a symlink, which could
-			// escape the volume mount inside the container; reject traversal and
-			// restore only dirs + regular files (skip symlinks/hardlinks/devices),
-			// mirroring extractToDir's guard for the files/ arm.
+			// The entry name + type come from an S3 object — never trusted.
 			if hasDotDot(inner) {
 				return snap, fmt.Errorf("archive volume entry %q contains a path traversal", inner)
 			}

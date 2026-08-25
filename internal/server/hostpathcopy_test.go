@@ -49,10 +49,10 @@ func (f *fakeHostPathImportStream) SetTrailer(metadata.MD)       {}
 func (f *fakeHostPathImportStream) SendMsg(any) error            { return nil }
 func (f *fakeHostPathImportStream) RecvMsg(any) error            { return nil }
 
-// TestValidateHostPath_refusesTheSystem pins the guardrail: the roots a migration
-// never legitimately names are refused, while a real service directory UNDER one of
-// them is allowed - the other platform keeps its data at /etc/<platform>/..., so a
-// blanket subtree ban would refuse the actual use case.
+// TestValidateHostPath_refusesTheSystem pins the guardrail: the roots a migration never
+// legitimately names are refused, while a real service directory UNDER one of them is
+// allowed - the other platform keeps its data at /etc/<platform>/..., so a blanket
+// subtree ban would refuse the actual use case.
 func TestValidateHostPath_refusesTheSystem(t *testing.T) {
 	for _, bad := range []string{
 		"", "relative/path", "/", "/etc", "/root", "/var/lib/docker",
@@ -127,9 +127,8 @@ func TestImportHostPath_headerOnlyDoesNotWipe(t *testing.T) {
 }
 
 // TestImportHostPath_createsTheWholePath is the case this RPC exists for: the
-// destination has never run the platform being migrated away from, so nothing of
-// that platform's directory tree is there. Requiring the parent to exist refused
-// exactly the migration it was meant to serve.
+// destination has never run the platform being migrated away from, so nothing of that
+// platform's directory tree is there.
 func TestImportHostPath_createsTheWholePath(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()

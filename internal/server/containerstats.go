@@ -14,18 +14,9 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// containerstats.go implements the ContainerStats RPC: a one-shot
-// `docker stats --no-stream` snapshot for the named containers of ONE project —
-// the agent-side data source for the per-app / per-database Monitoring tab.
-//
-// It is a sibling of instances.go and reuses listProjectContainers for the
-// label scoping: only containers carrying deplo.project=<project_id> are ever
-// stat'd, so a container name off the wire can never reach a sibling project's
-// container (defence in depth, mirroring the Part C container RPCs).
-//
-// net_* / block_* come back as CUMULATIVE totals (that is all `docker stats`
-// reports); the control plane derives bytes/sec from the delta between
-// consecutive samples, which also survives a counter reset on restart.
+// containerstats.go implements the ContainerStats RPC: a one-shot `docker stats
+// --no-stream` snapshot for the named containers of ONE project — the agent-side data
+// source for the per-app / per-database Monitoring tab.
 
 // ContainerStats returns live resource usage for a project's containers.
 func (s *Service) ContainerStats(ctx context.Context, req *pb.ContainerStatsRequest) (*pb.ContainerStatsResponse, error) {
@@ -158,10 +149,9 @@ func parseStatsLine(line string) (*pb.ContainerStat, bool) {
 	}, true
 }
 
-// splitSizes parses a `docker stats` "A / B" pair (e.g. "10.5MiB / 1.944GiB",
-// "1.2kB / 3.4kB", "0B / 8.19kB") into two byte counts, reusing cleanup.go's
-// parseHumanSize (which already handles docker's SI + binary units and rounds).
-// A missing side is 0.
+// splitSizes parses a `docker stats` "A / B" pair (e.g. "10.5MiB / 1.944GiB", "1.2kB /
+// 3.4kB", "0B / 8.19kB") into two byte counts, reusing cleanup.go's parseHumanSize
+// (which already handles docker's SI + binary units and rounds).
 func splitSizes(s string) (int64, int64) {
 	parts := strings.SplitN(s, "/", 2)
 	if len(parts) != 2 {

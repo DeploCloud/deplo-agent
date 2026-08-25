@@ -13,20 +13,9 @@ import (
 )
 
 // backup_clickhouse.go implements clickhouse backup/restore, which — unlike the
-// single-`docker exec`-pipe engines — needs multi-statement orchestration: a
-// clickhouse database is a SET of tables, each with its own DDL + data, and
-// there is no single command that streams a restorable whole-database dump.
-//
-// DUMP: assemble a SQL SCRIPT into the backup stream — for every (non-view,
-// non-temporary) table in the database, emit `DROP TABLE IF EXISTS` +
-// `CREATE TABLE IF NOT EXISTS <ddl>` (from system.tables.create_table_query) +
-// the rows as `INSERT … VALUES` (FORMAT SQLInsert, with the real qualified table
-// name). The DROP+CREATE makes the restore drop-and-recreate (overwrite, not
-// merge), matching every other engine's locked guarantee.
-//
-// RESTORE: stream the script back through `clickhouse-client --multiquery`,
-// which replays the DROP/CREATE/INSERT statements in order. Verified end-to-end
-// against clickhouse-server:24-alpine.
+// single-`docker exec`-pipe engines — needs multi-statement orchestration: a clickhouse
+// database is a SET of tables, each with its own DDL + data, and there is no single
+// command that streams a restorable whole-database dump.
 
 // errClickhouseSeparate flags that clickhouse uses the dedicated dump/restore
 // path (dumpClickhouse / restoreClickhouse) rather than the single-pipe argv.
@@ -35,9 +24,6 @@ var errClickhouseSeparate = fmt.Errorf("clickhouse uses the dedicated multi-stat
 const clickhouseQueryTimeout = 5 * time.Minute
 
 // chClient builds the `docker exec <c> clickhouse-client [--user U] …` prefix.
-// The password rides in CLICKHOUSE_PASSWORD on the host docker-client process
-// env (forwarded via the valueless `-e`), never on argv — same discipline as the
-// other engines (see execWithSecretEnv).
 func chClientPrefix(d *pb.DatabaseDescriptor, stdin bool) (argv []string, env []string) {
 	a := []string{"exec"}
 	if stdin {
@@ -172,12 +158,9 @@ func chEscape(s string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), `'`, `\'`)
 }
 
-// chQuoteIdent escapes a name for a backtick-quoted clickhouse identifier
-// (`name`), doubling any backtick it contains (clickhouse's escape for a literal
-// backtick inside a quoted identifier). The db/table names are control-plane-
-// derived, but they are interpolated into backtick-quoted positions in the DDL
-// and queries, so escape defensively — a name carrying a backtick must not be
-// able to break out of the identifier and inject SQL.
+// chQuoteIdent escapes a name for a backtick-quoted clickhouse identifier (`name`),
+// doubling any backtick it contains (clickhouse's escape for a literal backtick inside
+// a quoted identifier).
 func chQuoteIdent(s string) string {
 	return strings.ReplaceAll(s, "`", "``")
 }

@@ -13,14 +13,10 @@ import (
 
 // exec.go ports the container-exec half of lib/infra/docker.ts to the agent:
 // resolveShellPlan / shellLabel / splitArgv / execInContainer / isDockerLevelStderr.
-// The logic mirrors the TS exactly so a remote console behaves identically to the
-// local one — same shell detection, same raw-argv fallback on distroless, same
-// docker-vs-guest error classification.
 
-// dockerLevelStderr matches stderr emitted by docker / the OCI runtime (never by
-// an in-container shell), used to tell a docker-level failure (container gone,
-// no shell) from a guest command exiting non-zero. Ported verbatim from
-// lib/infra/docker.ts DOCKER_LEVEL_STDERR.
+// dockerLevelStderr matches stderr emitted by docker / the OCI runtime (never by an
+// in-container shell), used to tell a docker-level failure (container gone, no shell)
+// from a guest command exiting non-zero.
 var dockerLevelStderr = regexp.MustCompile(
 	`(?m)(?:OCI runtime|unable to start container process|executable file not found in \$PATH|Error response from daemon|No such container|is not running|is paused|Cannot connect to the Docker daemon|cannot exec in a stopped|container .* is (?:not running|paused|restarting)|chdir to cwd .* set in config\.json failed)`,
 )
@@ -69,10 +65,7 @@ type shellCacheEntry struct {
 
 var (
 	shellCacheMu sync.Mutex
-	// Keyed by container name. A redeploy yields a new name, so the cache
-	// self-expires; the image is also compared so a same-name re-pull re-probes.
-	// (Container names are globally unique on one daemon, so name alone is a safe
-	// key — no need to compound with the project.)
+	// Keyed by container name.
 	shellCache = map[string]shellCacheEntry{}
 )
 
@@ -102,10 +95,8 @@ func evictShellCacheLocked(now time.Time) {
 }
 
 // resolveShellPlan determines how to run commands in a container — via a detected
-// shell, or raw argv when none exists — probed once per container and cached
-// (keyed by name; re-probes on image change or TTL lapse). Mirrors the TS
-// resolveShellPlan, including the "don't cache a transient/ docker-level failure"
-// discipline so a stopped-then-restarted container re-probes.
+// shell, or raw argv when none exists — probed once per container and cached (keyed by
+// name; re-probes on image change or TTL lapse).
 func resolveShellPlan(ctx context.Context, name, image string) shellPlan {
 	shellCacheMu.Lock()
 	hit, ok := shellCache[name]
@@ -191,11 +182,8 @@ func splitArgv(s string) []string {
 	return out
 }
 
-// Exec runs a command in a container (docker exec), mirroring
-// lib/infra/docker.ts execInContainer + lib/data/console.ts execInContainer's
-// shell/raw dispatch. A guest non-zero exit is returned in ExecResponse.code (NOT
-// an RPC error) so the console renders it; a docker/OCI-level failure (no such
-// container, no shell, stopped) is a gRPC error.
+// Exec runs a command in a container (docker exec), mirroring lib/infra/docker.ts
+// execInContainer + lib/data/console.ts execInContainer's shell/raw dispatch.
 func (s *Service) Exec(ctx context.Context, req *pb.ExecRequest) (*pb.ExecResponse, error) {
 	if err := assertOwned(ctx, req.GetContainer(), req.GetProjectId()); err != nil {
 		return nil, err

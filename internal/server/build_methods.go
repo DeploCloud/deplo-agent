@@ -16,16 +16,7 @@ import (
 
 // This file ports the control plane's old in-process heavy builders
 // (lib/deploy/builders.ts) to the agent: static (nginx), nixpacks, Cloud Native
-// Buildpacks (heroku/paketo) and railpack. Each builds req.image_ref from a
-// materialised buildDir and ends with the image present in the local Docker store
-// carrying the three deplo.* labels, listening on BuildSpec.port — byte-identical
-// to the old local path so a project deploys the same image wherever it runs.
-//
-// The agent runs ON the bare host (ADR-0006), so — unlike the control plane, which
-// ran inside a container and had to stage the build dir onto a host-visible volume
-// to bind-mount it (builders.ts stageOnHostVolume / dataVolumeHostMountpoint) — the
-// builders here bind-mount buildDir DIRECTLY. The whole host-mountpoint dance is
-// dropped: the agent's own filesystem IS the host's.
+// Buildpacks (heroku/paketo) and railpack.
 
 // labelArgs is the three image labels every build method stamps, as repeated
 // `--label` argv (mirrors builders.ts labelArgs).
@@ -70,9 +61,7 @@ func nginxConf(port int32, spa bool) string {
 
 // relabel re-stamps the three deplo labels onto an already-built image via a
 // metadata-only `docker build` fed through stdin (`docker build -`). Used after
-// builders (pack, railpack) that do not apply our labels themselves. Mirrors
-// builders.ts relabel — piping real bytes to docker's stdin avoids both the
-// /dev/null-context BuildKit error and the literal-\n FROM-parse error.
+// builders (pack, railpack) that do not apply our labels themselves.
 func (s *Service) relabel(ctx context.Context, req *pb.DeployRequest, e *emitter) bool {
 	dockerfile := fmt.Sprintf(
 		"FROM %s\nLABEL deplo.managed=true deplo.project=%s deplo.slug=%s\n",
@@ -92,17 +81,9 @@ func (s *Service) relabel(ctx context.Context, req *pb.DeployRequest, e *emitter
 	return true
 }
 
-// reservedBuildEnvKeys names a user build-arg must NEVER supply: each one, once
-// present in the build process's environment, redirects or hijacks the ROOT-
-// PRIVILEGED build tooling instead of configuring the app being built. DOCKER_HOST
-// / BUILDKIT_HOST point docker / buildkit at an attacker's daemon;
-// DOCKER_CONFIG / DOCKER_CONTEXT / DOCKER_CERT_PATH / DOCKER_TLS_VERIFY swap its
-// endpoint or credentials; PATH / LD_PRELOAD / LD_LIBRARY_PATH hijack the dynamic
-// linker to run attacker code inside the agent's build. Build-env VALUES ride the
-// spawned client's process env (envKV → StreamEnv / SpawnEnv / StreamOut), so a
-// user var named like one of these would otherwise land there verbatim. Matched
-// case-sensitively — these tools read the exact uppercase names, so an ordinary
-// lowercase app var is unaffected.
+// reservedBuildEnvKeys names a user build-arg must NEVER supply: each one, once present
+// in the build process's environment, redirects or hijacks the ROOT- PRIVILEGED build
+// tooling instead of configuring the app being built.
 var reservedBuildEnvKeys = map[string]bool{
 	"DOCKER_HOST":       true,
 	"DOCKER_CONFIG":     true,
@@ -116,9 +97,8 @@ var reservedBuildEnvKeys = map[string]bool{
 }
 
 // dropReservedBuildEnv removes reservedBuildEnvKeys from a build-env key list so a
-// user-supplied var can never reach the privileged build process's environment
-// (envKV → cmd.Env) and hijack the build. Ordinary app build-args are untouched;
-// order is preserved. Every heavy builder funnels buildEnvKeys through this.
+// user-supplied var can never reach the privileged build process's environment (envKV →
+// cmd.Env) and hijack the build.
 func dropReservedBuildEnv(keys []string) []string {
 	return filterKeys(keys, func(k string) bool { return !reservedBuildEnvKeys[k] })
 }
@@ -150,10 +130,9 @@ func (s *Service) buildStatic(ctx context.Context, req *pb.DeployRequest, buildD
 	}
 
 	buildCmd := strings.TrimSpace(spec.GetBuildCommand())
-	// Build-time env (build_env.go): the builder stage declares every resolved
-	// var as ARG+ENV so the install/build commands see them (a static site's env
-	// is build-time by definition — there is no runtime to inject into). Values
-	// arrive via bare `--build-arg KEY` + the docker client's process env.
+	// Build-time env (build_env.go): the builder stage declares every resolved var as
+	// ARG+ENV so the install/build commands see them (a static site's env is build-time by
+	// definition — there is no runtime to inject into).
 	envKeys := dropReservedBuildEnv(buildEnvKeys(req.GetEnv()))
 	var dockerfile string
 	if buildCmd != "" {
@@ -235,10 +214,9 @@ func majorVersion(v, def string) string {
 // nixpacks — host binary generates a Dockerfile, then docker build
 // ---------------------------------------------------------------------------
 
-// buildNixpacks runs the nixpacks binary to generate a Dockerfile from the build
-// dir, then `docker build`s it (BuildKit). With a publish dir it builds a staging
-// image and nginx-wraps its output (static site). Mirrors builders.ts buildNixpacks.
-// The nixpacks binary is lazily installed on first use (ensureNixpacks).
+// buildNixpacks runs the nixpacks binary to generate a Dockerfile from the build dir,
+// then `docker build`s it (BuildKit). The nixpacks binary is lazily installed on first
+// use (ensureNixpacks).
 func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buildDir string, e *emitter) bool {
 	spec := req.GetBuildSpec()
 	e.log("info", "Building with Nixpacks")
@@ -257,18 +235,8 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 	envKeys := filterKeys(dropReservedBuildEnv(buildEnvKeys(req.GetEnv())), func(k string) bool {
 		return k != "PORT" && !strings.HasPrefix(k, "NIXPACKS_")
 	})
-	// Phase 1: generate .nixpacks/Dockerfile WITHOUT the daemon (host binary).
-	//
-	// --cache-key pins the id of every BuildKit cache mount nixpacks emits. Its
-	// default is the build DIRECTORY, which is a fresh path per deploy, so the
-	// package manager's cache and the framework's incremental-build cache were
-	// brand new — and empty — on every single build. Keying on the app instead is
-	// what nixpacks provides the flag for.
-	// A no-cache build deliberately DROPS --cache-key: nixpacks then falls back to
-	// keying on the build directory, a fresh path per deploy, so the cache mounts
-	// come up empty. `docker build --no-cache` alone would not do it — a
-	// type=cache mount survives it, and the package-manager + framework
-	// incremental caches live in exactly those mounts.
+	// Phase 1: generate .nixpacks/Dockerfile WITHOUT the daemon (host binary). --cache-key
+	// pins the id of every BuildKit cache mount nixpacks emits.
 	prepArgs := []string{"build", buildDir, "--out", buildDir, "--no-error-without-start",
 		"--env", fmt.Sprintf("PORT=%d", port)}
 	if !req.GetNoBuildCache() {
@@ -298,10 +266,6 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 		prepArgs = append(prepArgs, "-s", c)
 	}
 	// Pin the runtime via nixpacks' per-language env var when the user set one.
-	// Node is the runtime Deplo lets you pin, so an empty/none language defaults to
-	// node (a control plane that dropped framework detection may send it blank).
-	// nixpacks' `--env NIXPACKS_NODE_VERSION` is the highest-precedence node signal
-	// (it beats a repo's engines.node / .nvmrc); node wants a bare major ("22").
 	if version := strings.TrimSpace(spec.GetRuntimeVersion()); version != "" {
 		lang := strings.ToLower(strings.TrimSpace(spec.GetRuntimeLanguage()))
 		if lang == "" || lang == "none" {
@@ -313,10 +277,10 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 		prepArgs = append(prepArgs, "--env",
 			fmt.Sprintf("NIXPACKS_%s_VERSION=%s", strings.ToUpper(lang), version))
 	}
-	// Each user var as a BARE `--env KEY` (nixpacks os.LookupEnvs bare names from
-	// its process env — SpawnEnv below): the generated Dockerfile then declares
-	// `ARG KEY` + `ENV KEY=$KEY`, so the value is consumed at docker-build time
-	// (Phase 2's --build-arg), never baked into the Dockerfile text or the log.
+	// Each user var as a BARE `--env KEY` (nixpacks os.LookupEnvs bare names from its
+	// process env — SpawnEnv below): the generated Dockerfile then declares `ARG KEY` +
+	// `ENV KEY=$KEY`, so the value is consumed at docker-build time (Phase 2's
+	// --build-arg), never baked into the Dockerfile text or the log.
 	for _, k := range envKeys {
 		prepArgs = append(prepArgs, "--env", k)
 	}
@@ -333,26 +297,17 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 		return false
 	}
 
-	// nixpacks also drops a convenience `build.sh` next to the Dockerfile, holding
-	// the `docker build … -t <FRESH RANDOM UUID>` it would have run itself. We never
-	// use it — but it lands INSIDE the build context, so its new UUID changed the
-	// context's content on every single deploy, which changed the cache key of the
-	// generated Dockerfile's first `COPY . /app/.`, which re-ran and re-EXPORTED
-	// every layer after it. One unused 235-byte file was defeating the entire layer
-	// cache; deleting it is what lets an unchanged commit rebuild from cache.
+	// nixpacks also drops a convenience `build.sh` next to the Dockerfile, holding the
+	// `docker build … -t <FRESH RANDOM UUID>` it would have run itself.
 	if err := os.Remove(filepath.Join(buildDir, ".nixpacks", "build.sh")); err != nil && !os.IsNotExist(err) {
 		e.log("warn", "could not remove the generated build.sh: "+err.Error())
 	}
 
 	generated := filepath.Join(buildDir, ".nixpacks", "Dockerfile")
 
-	// Nixpacks declares the whole build environment ABOVE the install step, so a
-	// RUN whose only input is the lockfile still had every app variable in its
-	// cache key: editing a runtime-only secret re-installed and re-exported the
-	// whole dependency layer. Move the app's own variables below the install,
-	// where the build still sees them. Only where the install is a pure
-	// dependency install — the same gate as the scoping above; a repo that runs
-	// its own install scripts may legitimately read any of them.
+	// Nixpacks declares the whole build environment ABOVE the install step, so a RUN whose
+	// only input is the lockfile still had every app variable in its cache key: editing a
+	// runtime-only secret re-installed and re-exported the whole dependency layer.
 	if pureInstall {
 		moved, dErr := deferAppEnvBelowInstall(generated, envKeys, buildDir, spec.GetInstallCommand())
 		switch {
@@ -435,11 +390,10 @@ var herokuBuilders = map[string]string{
 	"26": "heroku/builder:26",
 }
 
-// buildBuildpacks builds with Cloud Native Buildpacks via the buildpacksio/pack
-// image, bind-mounting the build dir (the agent is on the host, so buildDir is
-// directly mountable — no host-volume staging needed). pack does not stamp our
-// labels, so we relabel after. Mirrors builders.ts buildBuildpacks; the flavor
-// (heroku|paketo) is the spec's method.
+// buildBuildpacks builds with Cloud Native Buildpacks via the buildpacksio/pack image,
+// bind-mounting the build dir (the agent is on the host, so buildDir is directly
+// mountable — no host-volume staging needed). pack does not stamp our labels, so we
+// relabel after.
 func (s *Service) buildBuildpacks(ctx context.Context, req *pb.DeployRequest, buildDir string, e *emitter) bool {
 	spec := req.GetBuildSpec()
 	flavor := spec.GetMethod()
@@ -460,10 +414,9 @@ func (s *Service) buildBuildpacks(ctx context.Context, req *pb.DeployRequest, bu
 	e.log("info", "Building with "+label)
 	e.phase(pb.DeployPhase_DEPLOY_PHASE_BUILDING)
 
-	// Build-time env: pack resolves a bare `--env KEY` from ITS process env — the
-	// pack container's — so each key rides in twice: `-e KEY` on the docker run
-	// (docker copies the value from the client's process env, via StreamEnv) and
-	// `--env KEY` on pack. Values never touch argv (this command line is logged).
+	// Build-time env: pack resolves a bare `--env KEY` from ITS process env — the pack
+	// container's — so each key rides in twice: `-e KEY` on the docker run (docker copies
+	// the value from the client's process env, via StreamEnv) and `--env KEY` on pack.
 	envKeys := filterKeys(dropReservedBuildEnv(buildEnvKeys(req.GetEnv())), func(k string) bool { return k != "PORT" })
 	args := []string{
 		"run", "--rm",
@@ -502,36 +455,16 @@ func (s *Service) buildBuildpacks(ctx context.Context, req *pb.DeployRequest, bu
 // railpack — host binary generates a plan, then docker build via its frontend
 // ---------------------------------------------------------------------------
 
-// buildRailpack generates a railpack plan with the host railpack binary, then
-// hands the plan to `docker build` as its Dockerfile with the railpack BuildKit
-// frontend selected by BUILDKIT_SYNTAX. That is railpack's own documented Docker
-// integration, and it replaces a pipeline that was costing more than the build:
-//
-//   - a debian:bookworm-slim container running `apt-get update && apt-get install
-//     curl ca-certificates tar` and re-downloading the railpack installer on EVERY
-//     build, purely to emit a JSON plan — 21.4 s measured, against 1.2 s for the
-//     cached host binary (see ensureRailpack);
-//   - a freshly started privileged `moby/buildkit` container per build (~6.6 s to
-//     boot and answer) whose cache lived in an ANONYMOUS volume that the build's
-//     own cleanup then deleted, so no railpack build ever reused a single layer
-//     from the one before it — a rebuild of an unchanged app cost the same as the
-//     first ever build;
-//   - the image serialised to a tar on disk, `docker load`ed back in, and then
-//     rebuilt once more to stamp the deplo labels the frontend does not apply.
-//
-// Going through the daemon's own BuildKit deletes the first two outright — the
-// layer cache is the shared, persistent one every other build method already
-// uses (a warm rebuild measured 2.7 s against 35.3 s) and the image is written
-// straight to the image store — and reduces the third to the relabel alone.
+// buildRailpack generates a railpack plan with the host railpack binary, then hands the
+// plan to `docker build` as its Dockerfile with the railpack BuildKit frontend selected
+// by BUILDKIT_SYNTAX.
 func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buildDir string, e *emitter) bool {
 	spec := req.GetBuildSpec()
 	e.log("info", "Building with Railpack")
 	e.phase(pb.DeployPhase_DEPLOY_PHASE_BUILDING)
 
-	// One version drives both halves: the CLI that writes the plan and the frontend
-	// image that executes it. "latest" (the UI default) resolves to the release this
-	// agent ships — see railpackVersion for why that beats resolving each half to
-	// upstream-latest independently.
+	// One version drives both halves: the CLI that writes the plan and the frontend image
+	// that executes it.
 	version := railpackVersion
 	if v := strings.ToLower(strings.TrimSpace(spec.GetRailpackVersion())); v != "" && v != "latest" {
 		version = strings.TrimPrefix(v, "v")
@@ -553,26 +486,17 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 	defer func() { _ = os.RemoveAll(planDir) }()
 	planPath := filepath.Join(planDir, "railpack-plan.json")
 
-	// Phase A: generate the plan. Node version + build/start overrides reach
-	// railpack through the process ENVIRONMENT (SpawnEnv), read back by a BARE
-	// `--env KEY` (railpack does os.LookupEnv on bare keys) — so a user-supplied
-	// command is never a token on a command line we log. Bare refs for an unset key
-	// are harmless no-ops, so they stay constant in the prepare argv.
-	// RAILPACK_NODE_VERSION is railpack's highest-precedence node signal; node wants
-	// a bare major. RAILPACK_BUILD_CMD / RAILPACK_START_CMD override the detected
-	// build + start commands. They are lifted to function scope because prepare
-	// bakes them into the plan as secrets (see Phase B) and Phase B must hand the
-	// same values back to satisfy those secret mounts.
+	// Phase A: generate the plan. They are lifted to function scope because prepare bakes
+	// them into the plan as secrets (see Phase B) and Phase B must hand the same values
+	// back to satisfy those secret mounts.
 	nodeVer := majorVersion(strings.TrimSpace(spec.GetRuntimeVersion()), "")
 	buildCmd := strings.TrimSpace(spec.GetBuildCommand())
 	startCmd := strings.TrimSpace(spec.GetStartCommand())
-	// Build-time env (build_env.go): each user var reaches `railpack prepare` the
-	// same way the overrides do — its VALUE in the process env, its NAME as a bare
-	// `--env KEY`. railpack declares each one a plan SECRET, which its frontend
-	// mounts as env on every build step, so the var is present while `npm run build`
-	// inlines it without being baked into the image. RAILPACK_* names stay excluded:
-	// those are spec-derived above and a user var must not silently fight the
-	// explicit build settings.
+	// Build-time env (build_env.go): each user var reaches `railpack prepare` the same way
+	// the overrides do — its VALUE in the process env, its NAME as a bare `--env KEY`.
+	// railpack declares each one a plan SECRET, which its frontend mounts as env on every
+	// build step, so the var is present while `npm run build` inlines it without being
+	// baked into the image.
 	envKeys := filterKeys(dropReservedBuildEnv(buildEnvKeys(req.GetEnv())), func(k string) bool {
 		return !strings.HasPrefix(k, "RAILPACK_")
 	})
@@ -586,10 +510,8 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 		"--info-out", filepath.Join(planDir, "railpack-info.json"))
 
 	// Only EXPORT an override that was actually set. railpack reads these with
-	// os.LookupEnv, so an empty-but-present var still counts as supplied: it
-	// declares the name a plan secret and mounts it on every build step for no
-	// reason. Verified by diffing two plans — set-to-empty and unset produce
-	// identical build steps, differing only by three pointless secrets.
+	// os.LookupEnv, so an empty-but-present var still counts as supplied: it declares the
+	// name a plan secret and mounts it on every build step for no reason.
 	prepareEnv := envKV(req.GetEnv(), envKeys)
 	for _, kv := range [][2]string{
 		{"RAILPACK_NODE_VERSION", nodeVer},
@@ -613,19 +535,10 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 		return false
 	}
 
-	// Phase B: build the plan with the railpack frontend.
-	//
-	// railpack declared each name we passed to `prepare` as a BuildKit SECRET in the
-	// plan, and its frontend mounts every plan secret as a REQUIRED env secret on
-	// EVERY build step — so the build must hand each one back or it fails "secret
-	// <name>: not found". VALUES ride the docker client's process env and are
-	// referenced by name only (`--secret id=NAME,env=NAME`), so they never touch
-	// argv or the deploy log. The secret NAMES come from a plan generated out of an
-	// UNTRUSTED user repo (a railpack config may declare arbitrary `secrets:`), so
-	// they are emitted as discrete argv tokens through a shell-free exec: a crafted
-	// name like `x; rm -rf /` stays one inert argument on a root-privileged host.
-	// User build env first, the spec-derived overrides second (overrides win a
-	// collision — same authority order as `prepare` above).
+	// Phase B: build the plan with the railpack frontend. railpack declared each name we
+	// passed to `prepare` as a BuildKit SECRET in the plan, and its frontend mounts every
+	// plan secret as a REQUIRED env secret on EVERY build step — so the build must hand
+	// each one back or it fails "secret <name>: not found".
 	known := map[string]string{}
 	for _, k := range envKeys {
 		known[k] = req.GetEnv()[k]
@@ -635,17 +548,15 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 	known["RAILPACK_START_CMD"] = startCmd
 	secretNames, ok := readPlanSecrets(planPath)
 	if !ok {
-		// Plan unreadable: fall back to every name `prepare` referenced — the three
-		// overrides plus each user env key — so a still-required secret is never
-		// left unprovided (empty value is fine — a provided-but-empty secret
-		// resolves, an absent one is "not found").
+		// Plan unreadable: fall back to every name `prepare` referenced — the three overrides
+		// plus each user env key — so a still-required secret is never left unprovided (empty
+		// value is fine — a provided-but-empty secret resolves, an absent one is "not
+		// found").
 		secretNames = append([]string{"RAILPACK_NODE_VERSION", "RAILPACK_BUILD_CMD", "RAILPACK_START_CMD"}, envKeys...)
 	}
-	// Defence in depth: the plan is untrusted, so drop any name that isn't a plain
-	// env identifier before it reaches the `--secret id=…,env=…` CSV (a comma or
-	// space in a name could otherwise smuggle extra CSV attributes). A real railpack
-	// secret is always an identifier; a dropped hostile name simply fails its own
-	// build with "secret not found".
+	// Defence in depth: the plan is untrusted, so drop any name that isn't a plain env
+	// identifier before it reaches the `--secret id=…,env=…` CSV (a comma or space in a
+	// name could otherwise smuggle extra CSV attributes).
 	secretNames = sanitizeSecretNames(secretNames)
 	secretEnv := make([]string, 0, len(secretNames)) // the ONLY place secret VALUES live
 	for _, name := range secretNames {
@@ -657,22 +568,15 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 	if !s.runBuildKit(ctx, 20*time.Minute, args, secretEnv, e) {
 		return false
 	}
-	// The railpack frontend builds the image config itself and DROPS the
-	// `--label` flags buildx forwards — verified against a real build, where the
-	// Dockerfile frontend kept all three deplo labels and railpack's kept none.
-	// So the labels every Deplo image is identified by (cleanup, roster, image
-	// retention all filter on deplo.slug) still need their own metadata-only pass.
-	// It costs ~1 s: no layer is rebuilt, only a new config referencing blobs the
-	// build just wrote.
+	// The railpack frontend builds the image config itself and DROPS the `--label` flags
+	// buildx forwards — verified against a real build, where the Dockerfile frontend kept
+	// all three deplo labels and railpack's kept none.
 	return s.relabel(ctx, req, e)
 }
 
-// railpackBuildArgs assembles the `docker build` argv that runs a railpack plan:
-// the plan file stands in for the Dockerfile and BUILDKIT_SYNTAX selects the
-// railpack frontend to interpret it. Split out from buildRailpack so the argv —
-// in particular that every untrusted secret NAME stays a discrete token — is
-// testable without a daemon. Labels are deliberately absent: the frontend
-// ignores them (see the relabel pass in buildRailpack).
+// railpackBuildArgs assembles the `docker build` argv that runs a railpack plan: the
+// plan file stands in for the Dockerfile and BUILDKIT_SYNTAX selects the railpack
+// frontend to interpret it.
 func railpackBuildArgs(frontend, planPath, contextDir string, secretNames, output []string, noCache bool) []string {
 	args := []string{"build"}
 	if noCache {
@@ -688,10 +592,10 @@ func railpackBuildArgs(frontend, planPath, contextDir string, secretNames, outpu
 
 // runBuildKit streams a `docker build` with BuildKit forced on (DOCKER_BUILDKIT=1),
 // needed by the nixpacks generated Dockerfile and the railpack plan (both use
-// BuildKit-only syntax). extraEnv carries build-env VALUES for bare `--build-arg
-// KEY` flags, or a railpack plan's `--secret env=NAME` values (may be nil).
-// timeout is explicit because the methods deserve different budgets: railpack
-// kept the 20 minutes its old buildctl path had, nixpacks the 15 it always had.
+// BuildKit-only syntax). extraEnv carries build-env VALUES for bare `--build-arg KEY`
+// flags, or a railpack plan's `--secret env=NAME` values (may be nil). timeout is
+// explicit because the methods deserve different budgets: railpack kept the 20 minutes
+// its old buildctl path had, nixpacks the 15 it always had.
 func (s *Service) runBuildKit(ctx context.Context, timeout time.Duration, args []string, extraEnv []string, e *emitter) bool {
 	e.log("command", "docker "+strings.Join(args, " "))
 	code, err := dockercli.StreamEnv(ctx, timeout, func(l string) { e.log("info", l) },
@@ -735,9 +639,7 @@ func sanitizeSecretNames(names []string) []string {
 
 // readPlanSecrets returns the `secrets` a railpack plan declares — the RAILPACK_*
 // overrides we passed to `prepare`, which railpack mounts as REQUIRED BuildKit env
-// secrets on every build step. The bool is false only when the plan can't be read
-// or parsed (so the caller falls back); a valid plan that declares no secrets
-// returns (nil, true) and the caller correctly passes none.
+// secrets on every build step.
 func readPlanSecrets(planPath string) ([]string, bool) {
 	b, err := os.ReadFile(planPath)
 	if err != nil {

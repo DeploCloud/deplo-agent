@@ -1,18 +1,7 @@
-// Command deplo-agent is the per-server agent: a single static Go binary that
-// owns the host-coupled half of the Deplo platform (Docker, the build pipeline,
-// host metrics) on the machine it runs on, exposed to the control plane over a
-// typed, mTLS-secured gRPC contract (proto/agent.proto, ADR-0006). No Node, no
-// Deplo app on the target — one scp-able artifact runnable on a bare Linux host
-// with Docker installed.
-//
-// PART A: it serves a LOCAL agent on the Deplo host (the control plane dials its
-// own machine). Remote provisioning + the call-home bootstrap are Part B.
-//
-// mTLS from day one (decided with the user): the agent presents a CA-signed
-// server cert, requires a CA-signed client cert from the control plane, and
-// pins the same CA — the CA being the control plane, whose key is derived from
-// DEPLO_SECRET. The control plane writes the agent's cert/key + the CA cert to
-// the paths below before dialing.
+// Command deplo-agent is the per-server agent: a single static Go binary that owns the
+// host-coupled half of the Deplo platform (Docker, the build pipeline, host metrics) on
+// the machine it runs on, exposed to the control plane over a typed, mTLS-secured gRPC
+// contract (proto/agent.proto, ADR-0006).
 package main
 
 import (
@@ -107,20 +96,8 @@ func main() {
 	// receive cap so an uploaded archive rides inside the Deploy request.
 	opts = append(opts, grpc.MaxRecvMsgSize(256*1024*1024))
 
-	// Keepalive, sized for the LONG-LIVED streams (StreamMetrics runs for the
-	// whole life of a control-plane process; FollowLogs and Attach for hours).
-	//
-	// EnforcementPolicy is the one that bites if you omit it: grpc-go's server
-	// default MinTime is FIVE MINUTES, and it answers anything more frequent with
-	// GOAWAY/ENHANCE_YOUR_CALM. The control plane pings every 30s, so without this
-	// the metrics stream would be torn down by our own server and present as
-	// mysterious network flakiness. 15s leaves headroom under that 30s.
-	//
-	// ServerParameters make the agent detect a control plane that died without
-	// closing (a hard kill, a severed NAT mapping). Without them a half-open
-	// connection would hold its stream — and the `docker events` child that
-	// StreamMetrics spawns — open until the OS eventually noticed, leaking a
-	// process per dead peer.
+	// Keepalive, sized for the LONG-LIVED streams (StreamMetrics runs for the whole life
+	// of a control-plane process; FollowLogs and Attach for hours).
 	opts = append(opts,
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
 			MinTime: 15 * time.Second,
@@ -152,10 +129,9 @@ func main() {
 	}
 	log.Printf("deplo-agent %s listening on %s (mtls=%v)", server.AgentVersion, *addr, !*insecure)
 
-	// Graceful shutdown: on SIGTERM/SIGINT (service restart, host reboot) let
-	// in-flight unary RPCs finish and open streams receive a clean GOAWAY instead
-	// of a hard process kill that could leave a stack half-deployed (image built,
-	// `compose up` not run). Fall back to a hard Stop if the drain overruns.
+	// Graceful shutdown: on SIGTERM/SIGINT (service restart, host reboot) let in-flight
+	// unary RPCs finish and open streams receive a clean GOAWAY instead of a hard process
+	// kill that could leave a stack half-deployed (image built, `compose up` not run).
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	serveErr := make(chan error, 1)
@@ -179,11 +155,9 @@ func main() {
 	}
 }
 
-// mTLS transport credentials are built from a server.CertManager (see the
-// serve block above), which reads the CURRENT materials on every handshake so a
-// renewed leaf hot-swaps without a restart. It still REQUIRES a CA-signed client
-// cert (the control plane); a peer that cannot present one never completes the
-// handshake.
+// mTLS transport credentials are built from a server.CertManager (see the serve block
+// above), which reads the CURRENT materials on every handshake so a renewed leaf
+// hot-swaps without a restart.
 
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {

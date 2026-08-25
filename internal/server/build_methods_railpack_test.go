@@ -64,11 +64,10 @@ func TestSanitizeSecretNames(t *testing.T) {
 	}
 }
 
-// railpackBuildArgs must select the railpack frontend via BUILDKIT_SYNTAX, feed
-// the plan as the Dockerfile, forward every plan secret as `--secret
-// id=NAME,env=NAME`, and carry the caller's image output — all as discrete argv
-// tokens, so a hostile name from an untrusted plan can never be word-split or
-// shell-interpreted.
+// railpackBuildArgs must select the railpack frontend via BUILDKIT_SYNTAX, feed the
+// plan as the Dockerfile, forward every plan secret as `--secret id=NAME,env=NAME`, and
+// carry the caller's image output — all as discrete argv tokens, so a hostile name from
+// an untrusted plan can never be word-split or shell-interpreted.
 func TestRailpackBuildArgs(t *testing.T) {
 	names := []string{"RAILPACK_NODE_VERSION", "RAILPACK_BUILD_CMD"}
 	args := railpackBuildArgs(

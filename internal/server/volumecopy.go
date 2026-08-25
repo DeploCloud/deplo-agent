@@ -17,20 +17,8 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// volumecopy.go implements the cross-host named-volume copy that backs a server
-// MOVE (a database or project relocating to another server). Docker named volumes
-// are host-local and the agent trust model is strictly star — an agent can neither
-// dial nor trust a peer agent — so the volume can't travel host-to-host directly.
-// The control plane RELAYS it: ExportVolume streams the source volume's gzipped tar
-// out of the OLD host, and the control plane feeds those chunks into ImportVolume on
-// the NEW host, which untars them into the target volume. No S3 hop, no agent↔agent
-// link.
-//
-// Both directions reuse the exact volume plumbing Backup/Restore already trust: a
-// throwaway busybox helper container that mounts the named volume and tar's it
-// in/out (see archiveVolume / newVolumeStreams in backup.go / backup_tar.go), the
-// volumeHelperImage constant, and validateVolumeName (which rejects a wire-supplied
-// path masquerading as a volume name before it reaches a `-v <name>:/v` mount).
+// volumecopy.go implements the cross-host named-volume copy that backs a server MOVE (a
+// database or project relocating to another server).
 
 // volumeCopyTimeout bounds a single export/import. A move of a large DB volume can
 // take a while; this matches the generous per-step budget the project backup path
@@ -47,31 +35,12 @@ const chunkBytes = 1 << 20 // 1 MiB
 // than holding the stream open for the copy's own 30 minutes.
 const volumeExistsTimeout = 15 * time.Second
 
-// importCleanupTimeout bounds the tidy-up after a failed import. Its own context,
-// never the stream's: the failure that matters most here is the relay dying, and
-// that cancels the stream's context - a cleanup inheriting it would be dead on
-// arrival, which is precisely when the destination needs emptying.
+// importCleanupTimeout bounds the tidy-up after a failed import.
 const importCleanupTimeout = 6 * time.Minute
 
-// abandonImport re-empties a destination that this import had ALREADY emptied,
-// and reports what it did in the same sentence as the failure.
-//
-// All-or-nothing has to survive a stream that dies halfway, not only a source
-// that turns out to be empty. Every importer here wipes the destination before
-// extracting into it, so from the first byte onward a truncated transfer, a
-// cancelled relay, a full disk or a tar error leaves HALF of something - and half
-// is worse than nothing: a database engine reads a partial data directory as a
-// corrupt one at best, and an app that version-checks a file on disk decides it
-// is a fresh install and writes over the rest. Nothing is a state the caller can
-// see and act on; half is a state that looks like success.
-//
-// `helper` names the extract container, which must go first. `docker run --rm -i`
-// hands the work to the daemon: killing the CLI (which is what a cancelled
-// context does) leaves the container finishing its untar, so wiping without
-// removing it races a live writer.
-//
-// Only ever called when the wipe already happened - an import that never emptied
-// anything must not empty it now, those bytes belong to whoever was there first.
+// abandonImport re-empties a destination that this import had ALREADY emptied, and
+// reports what it did in the same sentence as the failure. `helper` names the extract
+// container, which must go first.
 func abandonImport(helper string, empty func(context.Context) error) string {
 	ctx, cancel := context.WithTimeout(context.Background(), importCleanupTimeout)
 	defer cancel()
@@ -91,11 +60,7 @@ func importHelperName() string {
 }
 
 // ExportVolume tars a named volume from a read-only helper container, gzips it, and
-// streams it out as raw byte chunks. The caller is expected to have QUIESCED the
-// source first (stopped the owning stack) so the on-disk files can't change under
-// the read — this handler only reads, never stops anything, so it stays a pure,
-// reusable primitive. Mirrors archiveVolume's producer, but the sink is the gRPC
-// stream instead of the backup tar.
+// streams it out as raw byte chunks.
 func (s *Service) ExportVolume(req *pb.ExportVolumeRequest, stream pb.Agent_ExportVolumeServer) error {
 	vol := req.GetVolumeName()
 	// Re-validate off-the-wire (defence in depth behind the control plane's naming):
@@ -105,12 +70,8 @@ func (s *Service) ExportVolume(req *pb.ExportVolumeRequest, stream pb.Agent_Expo
 	}
 	ctx := stream.Context()
 
-	// The volume must ALREADY be here. `docker run -v <name>:/v` creates a missing
-	// named volume instead of failing, so without this an export of a volume that is
-	// not on this host succeeds, emits a complete EMPTY archive, and leaves a stray
-	// volume behind — and the destination has already been wiped by the time the
-	// caller could tell. Every Dokploy import lost all of its data exactly this way.
-	// NotFound, so the caller can say which host was asked and for what.
+	// The volume must ALREADY be here. NotFound, so the caller can say which host was
+	// asked and for what.
 	if err := assertVolumeExists(ctx, vol); err != nil {
 		return err
 	}
@@ -137,11 +98,9 @@ func (s *Service) ExportVolume(req *pb.ExportVolumeRequest, stream pb.Agent_Expo
 		return cw.err
 	}
 	if err != nil {
-		// busybox `tar -cf -` legitimately exits 1 for a benign "file changed as we
-		// read it" on a LIVE volume while STILL emitting a complete archive (same case
-		// archiveVolume tolerates). But ExportVolume's caller stops the source stack
-		// FIRST, so the volume is quiesced and a non-zero exit here is a real failure —
-		// surface it rather than shipping a possibly-truncated archive.
+		// busybox `tar -cf -` legitimately exits 1 for a benign "file changed as we read it"
+		// on a LIVE volume while STILL emitting a complete archive (same case archiveVolume
+		// tolerates).
 		return fmt.Errorf("export volume %q: %w", vol, err)
 	}
 	if code != 0 {
@@ -151,9 +110,6 @@ func (s *Service) ExportVolume(req *pb.ExportVolumeRequest, stream pb.Agent_Expo
 }
 
 // assertVolumeExists answers NotFound when the named volume is not on this host.
-// One `docker volume inspect`, before anything is mounted: the check exists because
-// the MOUNT is what creates it, so by the time the tar runs it is too late to tell
-// a real volume from one Docker made up on the spot.
 func assertVolumeExists(ctx context.Context, vol string) error {
 	res, err := dockercli.Run(ctx, volumeExistsTimeout, "volume", "inspect", vol)
 	if err != nil {
@@ -169,10 +125,10 @@ func assertVolumeExists(ctx context.Context, vol string) error {
 	return nil
 }
 
-// chunkWriter is an io.Writer that frames whatever is written to it into ~1 MiB
-// `data` messages on an export stream via `send`. gzip writes here; the concrete
-// stream (VolumeChunk vs FilesChunk) is captured by the send closure, so this is
-// shared by ExportVolume and ExportFiles.
+// chunkWriter is an io.Writer that frames whatever is written to it into ~1 MiB `data`
+// messages on an export stream via `send`. gzip writes here; the concrete stream
+// (VolumeChunk vs FilesChunk) is captured by the send closure, so this is shared by
+// ExportVolume and ExportFiles.
 type chunkWriter struct {
 	send func([]byte) error
 	err  error
@@ -203,11 +159,7 @@ func (w *chunkWriter) Write(p []byte) (int, error) {
 }
 
 // ImportVolume is the destination half: the FIRST client message carries the target
-// volume name + wipe flag; every following message carries a slice of the gzipped
-// tar. The agent (optionally) wipes the target volume, then gunzips + untars the
-// reassembled stream into it via a helper container. The caller MUST have stopped
-// the destination stack first so nothing writes the volume under the untar. Reuses
-// the same `tar -C /v -xf -` extract that Restore's newVolumeStreams runs.
+// volume name + wipe flag; every following message carries a slice of the gzipped tar.
 func (s *Service) ImportVolume(stream pb.Agent_ImportVolumeServer) error {
 	ctx := stream.Context()
 
@@ -225,10 +177,7 @@ func (s *Service) ImportVolume(stream pb.Agent_ImportVolumeServer) error {
 		return sendImportResult(stream, false, 0, "", fmt.Sprintf("import volume: %v", err))
 	}
 
-	// 2. The wipe is DEFERRED to the first data frame (below). Emptying the target
-	//    here, on the header alone, is what turned a failed or empty export into
-	//    data loss: the source may still send nothing at all, and by then the
-	//    destination is already gone. See the header's own comment in the proto.
+	// 2. The wipe is DEFERRED to the first data frame (below).
 
 	// 3. Reassemble the data frames into a byte stream (a pipe the untar reads),
 	//    gunzip it, and feed it to `tar -C /v -xf -` in a helper container. The
@@ -300,11 +249,8 @@ func (s *Service) ImportVolume(stream pb.Agent_ImportVolumeServer) error {
 	_ = pw.Close()
 	extractErr := <-done
 
-	// One failure path, because every one of them ends the same way: whatever this
-	// import emptied has to be emptied again. An empty stream is not a successful
-	// copy of nothing, it is a copy that did not happen - and the caller cannot
-	// tell the two apart from `ok` alone; it also never reached the wipe, so it
-	// has nothing to clean up.
+	// One failure path, because every one of them ends the same way: whatever this import
+	// emptied has to be emptied again.
 	failure := ""
 	switch {
 	case wipeErr != nil:
@@ -331,11 +277,10 @@ func (s *Service) ImportVolume(stream pb.Agent_ImportVolumeServer) error {
 	return sendImportResult(stream, true, received, hex.EncodeToString(digest.Sum(nil)), "")
 }
 
-// newGunzipPump returns a WriteCloser that decompresses everything written to it
-// and forwards the plaintext to `dst`. gzip.NewReader needs a Reader, but our data
-// arrives as Writes off the gRPC stream, so we bridge with an internal pipe: caller
-// Writes compressed bytes → gzip.Reader pulls from the pipe → decompressed bytes go
-// to dst. Close flushes and tears the bridge down.
+// newGunzipPump returns a WriteCloser that decompresses everything written to it and
+// forwards the plaintext to `dst`. gzip.NewReader needs a Reader, but our data arrives
+// as Writes off the gRPC stream, so we bridge with an internal pipe: caller Writes
+// compressed bytes → gzip.Reader pulls from the pipe → decompressed bytes go to dst.
 func newGunzipPump(dst io.Writer) (io.WriteCloser, error) {
 	pr, pw := io.Pipe()
 	gp := &gunzipPump{pw: pw, done: make(chan error, 1)}

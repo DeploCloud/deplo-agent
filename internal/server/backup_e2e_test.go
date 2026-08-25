@@ -16,14 +16,8 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/s3client"
 )
 
-// backup_e2e_test.go is the END-TO-END proof that a real dump → gzip → S3 →
-// download → restore round-trip overwrites data, against REAL containers (a
-// MinIO bucket + a DB). It is heavy and Docker-dependent, so it skips when
-// docker / the required images are absent. It is the regression guard the unit
-// tests (argv-only) can't be: it proves the chosen commands actually move bytes
-// and that a restore OVERWRITES (the locked decision), engine by engine.
-//
-// Run with: go test ./internal/server/ -run E2E -v  (with docker available).
+// backup_e2e_test.go is the END-TO-END proof that a real dump → gzip → S3 → download →
+// restore round-trip overwrites data, against REAL containers (a MinIO bucket + a DB).
 
 const (
 	e2eMinioImage      = "minio/minio:latest"
@@ -446,12 +440,10 @@ func TestE2E_ClickhouseBackupRestoreOverwrites(t *testing.T) {
 	t.Log("clickhouse backup→mutate→restore OVERWRITE verified")
 }
 
-// TestE2E_VolumeArchiveRoundTrip exercises the project-backup volume machinery
-// directly (archiveVolume → tar → gzip; gunzip → volumeStreams demux → extract)
-// against a REAL docker named volume, proving the round-trip restores the bytes
-// AND that the archiveVolume exit-code fix doesn't break the happy path. It does
-// not drive a full project Reroute (that needs a real stack) — it isolates the
-// volume tar/untar that the review flagged.
+// TestE2E_VolumeArchiveRoundTrip exercises the project-backup volume machinery directly
+// (archiveVolume → tar → gzip; gunzip → volumeStreams demux → extract) against a REAL
+// docker named volume, proving the round-trip restores the bytes AND that the
+// archiveVolume exit-code fix doesn't break the happy path.
 func TestE2E_VolumeArchiveRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()

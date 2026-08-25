@@ -12,21 +12,8 @@ import (
 	"time"
 )
 
-// roster_test.go covers BOTH halves of roster.go.
-//
-// The pure half: the three line formats it parses off docker/procfs, and the
-// merge that turns them into a snapshot. The parsers are exactly where a format
-// assumption rots silently (a truncated id, a nil label map, a cgroup v1 host).
-//
-// The concurrent half — debounce coalescing, the backstop, the last-good-roster
-// discipline, Close() draining both goroutines — is where the real failure modes
-// live: a lost dirty token, a leaked `docker events` child, a snapshot published
-// with ProjectID blanked on every container. It is driven through the seams on
-// the roster struct (listFn/inspectFn/rebuildFn/watchFn, plus compressed
-// debounce/backstop), so none of it needs a daemon either.
-//
-// No test here needs a docker daemon, on purpose: a test that needs a live
-// dockerd would never run on the machine where the thing it guards broke.
+// roster_test.go covers BOTH halves of roster.go. The parsers are exactly where a
+// format assumption rots silently (a truncated id, a nil label map, a cgroup v1 host).
 
 func TestParseCgroupV2Path(t *testing.T) {
 	cases := []struct {
@@ -364,10 +351,8 @@ func TestBuildRosterEntries(t *testing.T) {
 func TestBuildRosterEntriesSurvivesMissingInspect(t *testing.T) {
 	const id = "cccc1c9e5b2d4a7c8e1f0b6d9a2c5e8f1b4d7a0c3e6f9b2d5a8c1e4f7b0d3a6c"
 
-	// The inspect failed outright (empty map). The container was still LISTED, so
-	// it stays in the roster with the state ps reported; the fields we could not
-	// measure are zero. Dropping it would read on the charts as a container that
-	// disappeared.
+	// The inspect failed outright (empty map). Dropping it would read on the charts as a
+	// container that disappeared.
 	got := buildRosterEntries(
 		[]rosterPsRow{{ID: id, Name: "deplo-web-app-1", State: "running"}},
 		map[string]rosterDetail{},
@@ -426,12 +411,8 @@ func TestBuildRosterEntriesPrefersInspectState(t *testing.T) {
 func TestBuildRosterEntriesClearsTheCgroupOfAStoppedContainer(t *testing.T) {
 	const id = "ffff1c9e5b2d4a7c8e1f0b6d9a2c5e8f1b4d7a0c3e6f9b2d5a8c1e4f7b0d3a6c"
 
-	// The cgroup cache holds a path for this container from when it WAS running
-	// (the cache is keyed by id and never re-resolves a hit). Now it is exited.
-	// cgroupstats.Sample reads any entry whose CgroupPath is non-empty, so
-	// carrying the path through would emit a real-looking sample for a stopped
-	// container, built from whatever the kernel still has — or from another
-	// workload entirely if the pid got reused. A missing field beats a made-up one.
+	// The cgroup cache holds a path for this container from when it WAS running (the cache
+	// is keyed by id and never re-resolves a hit).
 	got := buildRosterEntries(
 		[]rosterPsRow{{ID: id, Name: "deplo-web-app-1", State: "exited"}},
 		map[string]rosterDetail{id: {ID: id, Name: "deplo-web-app-1", State: "exited", PID: 4242}},
@@ -693,10 +674,8 @@ func TestRosterEventDuringARebuildTriggersAnother(t *testing.T) {
 
 	r.markDirty()
 	<-started
-	// An event landing WHILE a rebuild is in flight describes a state that
-	// rebuild has already read past. Draining the dirty channel before the
-	// rebuild rather than after is what keeps this token alive; drain-after
-	// would swallow it and strand the roster until the backstop.
+	// An event landing WHILE a rebuild is in flight describes a state that rebuild has
+	// already read past.
 	r.markDirty()
 	close(release)
 
@@ -744,11 +723,8 @@ func TestRosterKeepsTheLastGoodRosterWhenTheInspectFails(t *testing.T) {
 	r.start(context.Background())
 	defer r.Close()
 
-	// THE headline failure. ProjectID exists only in the inspect, and it is the
-	// demux key the host-wide stream is keyed on. Publishing a snapshot built
-	// from a failed inspect blanks it on EVERY container at once: the control
-	// plane can attribute nothing, and every chart on the host empties out until
-	// the next good rebuild — up to a full backstop period on a quiet host.
+	// THE headline failure. ProjectID exists only in the inspect, and it is the demux key
+	// the host-wide stream is keyed on.
 	f.set(func(f *fakeDocker) { f.inspErr = context.DeadlineExceeded })
 	r.rebuild(context.Background())
 
@@ -820,10 +796,7 @@ func TestRosterSwapsInAFreshSnapshotAndPrunesTheCgroupCache(t *testing.T) {
 func TestRosterDoesNotResolveACgroupForANonRunningContainer(t *testing.T) {
 	r, f := newFakeRoster(t)
 
-	// A pid that WOULD resolve, on a container docker says is exited. Resolving
-	// it would cache the cgroup of whatever process reused that pid — and the
-	// cache never re-resolves a hit, so the wrong counters would feed this
-	// container's series for its whole lifetime.
+	// A pid that WOULD resolve, on a container docker says is exited.
 	procRoot, cgroupRoot := t.TempDir(), t.TempDir()
 	writeFakeProcCgroup(t, procRoot, 4242, "0::/system.slice/docker-aaaa.scope\n")
 	if err := os.MkdirAll(filepath.Join(cgroupRoot, "system.slice", "docker-aaaa.scope"), 0o755); err != nil {
@@ -882,10 +855,9 @@ func TestRosterCloseIsIdempotentAndDrainsBothGoroutines(t *testing.T) {
 
 	r.start(context.Background())
 
-	// Close cancels the context that owns the `docker events` child; without it
-	// every control-plane reconnect strands one forever. Double Close (a stream
-	// teardown racing an explicit close) must not panic or hang on a second
-	// wg.Wait.
+	// Close cancels the context that owns the `docker events` child; without it every
+	// control-plane reconnect strands one forever. Double Close (a stream teardown racing
+	// an explicit close) must not panic or hang on a second wg.Wait.
 	done := make(chan struct{})
 	go func() {
 		r.Close()
@@ -952,15 +924,8 @@ func TestMarkDirtyCoalescesWithoutBlocking(t *testing.T) {
 	}
 }
 
-// The host gauge must count EVERY running container on the host, while the
-// roster's own RunningCount stays scoped to deplo.managed ones. They are
-// different numbers on any host running Traefik or anything the platform did not
-// create, and HostMetrics.running_containers is the unfiltered one — the unary
-// Metrics RPC has always reported it that way.
-//
-// This was found by running the stream against a live host: the unary RPC said 3
-// and the stream said 2, so updating an agent would have made the dashboard's
-// container count drop with no explanation an operator could act on.
+// The host gauge must count EVERY running container on the host, while the roster's own
+// RunningCount stays scoped to deplo.managed ones.
 func TestRosterHostCountIsUnfilteredWhileRunningCountIsScoped(t *testing.T) {
 	r, f := newFakeRoster(t)
 	seedOneApp(f)
@@ -977,11 +942,9 @@ func TestRosterHostCountIsUnfilteredWhileRunningCountIsScoped(t *testing.T) {
 	}
 }
 
-// A FAILED `docker ps -q` yields no count. Publishing a fabricated 0 would show
-// "0 containers" on a machine plainly running some, so the last known figure is
-// kept instead — the same discipline the rest of the rebuild applies to a failed
-// listing. The failure is signalled distinctly from a count of 0 (see
-// hostRunningCount's ok return), which is what the genuine-zero test relies on.
+// A FAILED `docker ps -q` yields no count. Publishing a fabricated 0 would show "0
+// containers" on a machine plainly running some, so the last known figure is kept
+// instead — the same discipline the rest of the rebuild applies to a failed listing.
 func TestRosterHostCountKeepsLastKnownOnFailure(t *testing.T) {
 	r, f := newFakeRoster(t)
 	seedOneApp(f)
@@ -1009,9 +972,7 @@ func TestRosterHostCountKeepsLastKnownOnFailure(t *testing.T) {
 }
 
 // The counterpart to the failure test: a host that legitimately has 0 running
-// containers must report 0, not a stale figure. A genuine 0 (ok=true) is a real
-// reading and has to land — the old code conflated it with a failed read and
-// pinned the gauge at its last non-zero value forever.
+// containers must report 0, not a stale figure.
 func TestRosterHostCountPublishesGenuineZero(t *testing.T) {
 	r, f := newFakeRoster(t)
 	seedOneApp(f)
@@ -1027,12 +988,9 @@ func TestRosterHostCountPublishesGenuineZero(t *testing.T) {
 	// The host genuinely empties out: a real 0, not a failed read.
 	f.set(func(f *fakeDocker) { f.hostRunning = 0 })
 	r.markDirty()
-	// Wait on the COUNT, not on listHits. rebuild() calls list() first and
-	// publishes the count last, so "a second listing started" says nothing about
-	// whether the new figure has landed — the wait would return mid-rebuild and
-	// read the stale 4. It is not a weaker assertion: the regression this guards
-	// (a genuine 0 discarded as if the read had failed) leaves the count at 4
-	// forever, so waitFor times out and fails.
+	// Wait on the COUNT, not on listHits. rebuild() calls list() first and publishes the
+	// count last, so "a second listing started" says nothing about whether the new figure
+	// has landed — the wait would return mid-rebuild and read the stale 4.
 	waitFor(t, "the host count to fall to a genuine 0", func() bool {
 		return r.HostRunningCount() == 0
 	})

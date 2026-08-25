@@ -12,27 +12,12 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/safepath"
 )
 
-// setMu serialises the write. Two admins can press Save at the same moment, and
-// both requests land in THIS process, the only writer of /etc/localtime on the
-// box. Without it they race on one fixed temp path: whichever creates the
-// symlink second fails with EEXIST, and the operator is told the host refused a
-// perfectly good zone.
+// setMu serialises the write. Without it they race on one fixed temp path: whichever
+// creates the symlink second fails with EEXIST, and the operator is told the host
+// refused a perfectly good zone.
 var setMu sync.Mutex
 
 // SetTimezone points the host's clock at an IANA zone.
-//
-// The name arrives off the wire, and what it ultimately does is relink
-// /etc/localtime — so it is validated HERE, not only by the control plane, and
-// validated by resolution rather than by pattern: the candidate is joined onto
-// the zoneinfo dir and confirmed by realpath to still be inside it. A
-// "../../etc/shadow" or an absolute path is rejected by construction, and so is
-// a symlink inside the zoneinfo tree that points out of it. (safepath.Inside is
-// the same guard the file RPCs use to contain an off-the-wire path.)
-//
-// timedatectl is preferred where it exists: on a systemd host it is what owns
-// /etc/localtime, and relinking behind its back leaves systemd-timedated
-// reporting the old zone. The manual relink is the fallback for the hosts
-// without it (Alpine, minimal containers).
 func SetTimezone(ctx context.Context, tz string) error {
 	zonePath, err := resolveZone(tz)
 	if err != nil {
@@ -94,9 +79,7 @@ func resolveZone(tz string) (string, error) {
 }
 
 // relink replaces /etc/localtime with a symlink to the zone file and writes
-// /etc/timezone, the two places readTimezone looks. The symlink is created
-// alongside and renamed over the target so a reader never sees a host with no
-// /etc/localtime at all.
+// /etc/timezone, the two places readTimezone looks.
 func relink(zonePath, tz string) error {
 	tmp := filepath.Join(filepath.Dir("/etc/localtime"), ".deplo-localtime.tmp")
 	_ = os.Remove(tmp)

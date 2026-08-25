@@ -7,15 +7,8 @@ import (
 	"time"
 )
 
-// When the caller's context is cancelled mid-run, CommandContext SIGKILLs the
-// child and Wait() returns an *exec.ExitError with ExitCode()==-1. Stream must
-// classify this as a clear "canceled" error (the context check winning over the
-// ExitError branch), NOT a generic exit-code result — otherwise a control-plane
-// disconnect mid-build is mislabelled as a build failure (exit -1).
-//
-// Deterministic: we cancel the context ourselves rather than racing a timeout.
-// `docker version` is just a present subcommand; if docker can't spawn at all
-// the test still exercises the non-ExitError error path and we skip.
+// When the caller's context is cancelled mid-run, CommandContext SIGKILLs the child and
+// Wait() returns an *exec.ExitError with ExitCode()==-1.
 func TestStream_cancellationReportsClearError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	// Cancel almost immediately so the child is killed during/just after spawn.
@@ -30,11 +23,8 @@ func TestStream_cancellationReportsClearError(t *testing.T) {
 	if err == nil {
 		t.Skip("command completed before cancellation (no docker / fast error path)")
 	}
-	// Accept either the explicit cancellation message OR a docker spawn/daemon
-	// error (docker absent) — both are non-"-1"-exit error paths. The bug would
-	// instead return (code=-1, err=nil), which the caller can't see here, so the
-	// meaningful assertion is simply that an error IS surfaced, and when it is a
-	// context cancellation it carries the clear label.
+	// Accept either the explicit cancellation message OR a docker spawn/daemon error
+	// (docker absent) — both are non-"-1"-exit error paths.
 	if ctx.Err() == context.Canceled && !strings.Contains(err.Error(), "canceled") &&
 		!strings.Contains(err.Error(), "Cannot connect") && !strings.Contains(err.Error(), "docker") {
 		t.Fatalf("cancellation should surface a clear error, got: %v", err)
@@ -76,12 +66,9 @@ func TestTraefikRunning(t *testing.T) {
 	}
 }
 
-// ImageExportOptsSupported decides whether builds may pass
-// `--output type=image,…` — a flag the containerd image store accepts and the
-// classic graphdriver store rejects outright, so a wrong answer breaks every
-// build rather than merely slowing one. Verified against what the live daemon
-// actually reports, and asserted to be sticky (the probe costs two docker
-// round-trips and must not run per build).
+// ImageExportOptsSupported decides whether builds may pass `--output type=image,…` — a
+// flag the containerd image store accepts and the classic graphdriver store rejects
+// outright, so a wrong answer breaks every build rather than merely slowing one.
 func TestImageExportOptsSupported(t *testing.T) {
 	ctx := context.Background()
 	if !Available(ctx) {
@@ -137,11 +124,9 @@ func TestImageExportProbeDoesNotCacheInconclusive(t *testing.T) {
 	}
 }
 
-// BuildCachePruneCap must name a flag family the local CLI ACTUALLY accepts:
-// buildx renamed `--keep-storage` to `--max-used-space`/`--min-free-space`, and
-// Docker 29 dropped the old name, so guessing turns a routine cleanup sweep into
-// a hard error. Asserted by running the flags the probe chose, with a ceiling far
-// above current usage so the prune is a no-op.
+// BuildCachePruneCap must name a flag family the local CLI ACTUALLY accepts: buildx
+// renamed `--keep-storage` to `--max-used-space`/`--min-free-space`, and Docker 29
+// dropped the old name, so guessing turns a routine cleanup sweep into a hard error.
 func TestBuildCachePruneCap(t *testing.T) {
 	ctx := context.Background()
 	if !Available(ctx) {

@@ -27,10 +27,8 @@ func TestIsExposed(t *testing.T) {
 }
 
 func TestParseInspectLines(t *testing.T) {
-	// Line 1 is the bug that broke the console: Config.User is empty (the image
-	// declares no USER) while WorkingDir is /app. The old tab-separated parse
-	// TrimSpace'd away the leading tab and read the workdir AS the user, so the
-	// console exec'd `docker exec -u /app`.
+	// Line 1 is the bug that broke the console: Config.User is empty (the image declares
+	// no USER) while WorkingDir is /app.
 	stdout := `{"name":"/deplo-core-neur1","user":"","workdir":"/app","openStdin":false,"tty":false,"state":"restarting","restartCount":88,"health":""}
 {"name":"/deplo-shop-db-1","user":"postgres","workdir":"/var/lib/postgresql","openStdin":true,"tty":true,"state":"running","restartCount":0,"health":"healthy"}
 {"name":"/deplo-shop-api-1","user":"","workdir":"","openStdin":false,"tty":false,"state":"exited","restartCount":3,"health":"unhealthy"}`

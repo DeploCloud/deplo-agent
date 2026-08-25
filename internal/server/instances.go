@@ -15,30 +15,13 @@ import (
 )
 
 // instances.go ports lib/data/console.ts listInstances (+ the inspectRuntime /
-// inspectStdio / serviceOf helpers from lib/infra/docker.ts) to the agent. It
-// lists every attachable container in a project's stack with the runtime/stdio
-// metadata the console needs, ordered exposed -> running -> service.
-//
-// It also reports each container's RAW docker state (running / restarting /
-// exited / …), its healthcheck verdict and its restart count. The bool `running`
-// alone cannot distinguish a container docker is crash-looping from one that is
-// cleanly stopped — both are simply "not running" — which is how the control
-// plane came to show an app in a restart loop as "Online".
-//
-// DELIBERATELY no synthetic fallback entry: when a project has no containers the
-// response is empty. The TS listInstances returns ONE fabricated entry so the
-// console still renders a name — that is a control-plane UI affordance and stays
-// control-plane-side, LOCALHOST-ONLY. Fabricating a container for a remote would
-// be the "stored status that lies" the plan forbids; a remote with no containers
-// truthfully reports none.
+// inspectStdio / serviceOf helpers from lib/infra/docker.ts) to the agent.
 
 // ListInstances enumerates a project's attachable containers.
 func (s *Service) ListInstances(ctx context.Context, req *pb.ListInstancesRequest) (*pb.ListInstancesResponse, error) {
 	projectID := req.GetProjectId()
-	// An empty project_id would drop the label filter and list EVERY container on
-	// the host (cross-tenant enumeration). Reject it: ListInstances is always
-	// scoped to one project, mirroring assertOwned's empty-projectID refusal on
-	// the other container RPCs.
+	// An empty project_id would drop the label filter and list EVERY container on the host
+	// (cross-tenant enumeration).
 	if projectID == "" {
 		return nil, status.Error(codes.InvalidArgument, "project_id is required")
 	}
@@ -97,12 +80,6 @@ func (s *Service) ListInstances(ctx context.Context, req *pb.ListInstancesReques
 }
 
 // isExposed reports whether a container's service is the Traefik-exposed one.
-//
-// It compares the SERVICE, not the container name. The old test asked whether the
-// name contained "-<exposeService>-", which is true of every container in the
-// stack: a compose project is named deplo-<slug>, so "deplo-activepieces-postgres-1"
-// contains "-activepieces-" exactly as the app's own container does — and the
-// whole stack came back flagged as exposed, taking the instance ordering with it.
 func isExposed(service, exposeService string) bool {
 	return exposeService != "" && service == exposeService
 }
@@ -155,10 +132,7 @@ type containerDetail struct {
 	RestartCount int32  `json:"restartCount"`
 }
 
-// The inspect template emits one JSON object per container. It carries the name
-// so the answers can be matched back even when a container disappears mid-call,
-// and guards .State.Health, which is nil for an image with no healthcheck (a bare
-// {{json .State.Health.Status}} would fail the whole template).
+// The inspect template emits one JSON object per container.
 const inspectTemplate = `{"name":{{json .Name}},` +
 	`"user":{{json .Config.User}},` +
 	`"workdir":{{json .Config.WorkingDir}},` +
@@ -169,12 +143,8 @@ const inspectTemplate = `{"name":{{json .Name}},` +
 	`"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}""{{end}}}`
 
 // inspectContainers inspects every named container in ONE call, keyed by name.
-// Best-effort: a container that cannot be inspected is simply missing from the
-// map, and the caller falls back to the `docker ps` row. Replaces the old pair of
-// per-container calls (inspectRuntime + inspectStdio), whose tab-separated format
-// dropped a field whenever Config.User was empty: TrimSpace ate the LEADING tab,
-// so the split shifted and the WORKDIR was returned as the user — the console
-// then exec'd as `-u /app`.
+// Best-effort: a container that cannot be inspected is simply missing from the map, and
+// the caller falls back to the `docker ps` row.
 func inspectContainers(ctx context.Context, names []string) map[string]containerDetail {
 	out := map[string]containerDetail{}
 	if len(names) == 0 {

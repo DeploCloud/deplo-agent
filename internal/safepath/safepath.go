@@ -1,9 +1,5 @@
 // Package safepath re-ports the control plane's path-containment guard
-// (lib/deploy/path-safety.ts safeBuildDir) to Go. Path validation must run where
-// the I/O runs and must never trust a path that arrived off the wire (PLAN D9):
-// a Dockerfile/context path in a DeployRequest, or (Part C) a file RPC path, is
-// resolved against the build/files root and confirmed to stay inside it via
-// realpath — defeating symlink escapes a string-prefix check would miss.
+// (lib/deploy/path-safety.ts safeBuildDir) to Go.
 package safepath
 
 import (
@@ -13,11 +9,8 @@ import (
 )
 
 // Inside canonicalises `candidate` (a path formed by joining an off-the-wire,
-// user-controlled relative segment onto a trusted `base`) and returns it only
-// if it is `base` itself or a real descendant. On any escape, missing target,
-// or error it returns the canonical `base` — so a caller can detect a fallback
-// by comparing the result to Inside(base, ".") (a typo'd path resolves to root).
-// A path-separator boundary stops a sibling like `<base>-evil` from matching.
+// user-controlled relative segment onto a trusted `base`) and returns it only if it is
+// `base` itself or a real descendant.
 func Inside(base, candidate string) (string, error) {
 	realBase, err := filepath.EvalSymlinks(base)
 	if err != nil {
@@ -35,11 +28,9 @@ func Inside(base, candidate string) (string, error) {
 	return realBase, nil
 }
 
-// Join cleans a user-supplied relative path and joins it under base WITHOUT
-// touching the filesystem, rejecting absolute paths and any ".." segment. Used
-// to resolve a Dockerfile/context path before the target necessarily exists
-// (the file may be created by the build). The lexical guard here is backed by
-// the realpath guard in Inside once the parent exists.
+// Join cleans a user-supplied relative path and joins it under base WITHOUT touching
+// the filesystem, rejecting absolute paths and any ".." segment. The lexical guard here
+// is backed by the realpath guard in Inside once the parent exists.
 func Join(base, rel string) (string, bool) {
 	rel = strings.ReplaceAll(rel, "\\", "/")
 	rel = strings.TrimPrefix(rel, "./")

@@ -6,41 +6,13 @@ import (
 	"path/filepath"
 )
 
-// Why a Nixpacks build re-installs every dependency on every deploy, and when it
-// is safe not to.
-//
-// The Dockerfile Nixpacks generates copies the WHOLE repository before the
-// install step:
-//
-//	COPY . /app/.
-//	RUN bun i --no-save        <- 1.88 GB layer on a real app here
-//	COPY . /app/.
-//	RUN bun run build
-//
-// So editing one line of application code changes the context, which changes the
-// cache key of that first COPY, which re-runs the install AND forces its
-// dependency layer to be rebuilt and re-EXPORTED — measured at 24 s of install
-// plus ~29 s of compression, on a deploy where not a single dependency moved.
-// Copying the manifests first instead is the oldest optimisation in the Node
-// Dockerfile playbook, and Nixpacks supports it natively through the install
-// phase's `onlyIncludeFiles`.
-//
-// It is not unconditionally correct, which is why this is a gate rather than a
-// default. If the install step needs more than the manifests — a monorepo whose
-// workspace packages carry their own package.json, a `postinstall` that compiles
-// something out of the source tree, patch-package applying `patches/` — then
-// hiding the rest of the repo from it breaks the build. So this only fires for a
-// repository where none of those can apply, and anything it is unsure about
-// keeps the old copy-everything behaviour.
-//
-// The escape hatch costs Deplo no setting: a repo that ships its own
-// `nixpacks.toml` is left completely alone, so a user who needs the full context
-// during install declares it the ordinary Nixpacks way.
+// Why a Nixpacks build re-installs every dependency on every deploy, and when it is
+// safe not to. The Dockerfile Nixpacks generates copies the WHOLE repository before the
+// install step: COPY . /app/.
 
-// installManifestCandidates are the files an install step legitimately reads:
-// the manifest, the lockfiles of every supported package manager, and the
-// registry/runtime config that changes how install resolves. Only those that
-// actually exist are listed.
+// installManifestCandidates are the files an install step legitimately reads: the
+// manifest, the lockfiles of every supported package manager, and the registry/runtime
+// config that changes how install resolves.
 var installManifestCandidates = []string{
 	"package.json",
 	"package-lock.json",

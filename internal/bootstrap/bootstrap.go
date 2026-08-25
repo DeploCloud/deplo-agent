@@ -1,19 +1,5 @@
-// Package bootstrap is the agent side of the call-home provisioning handshake
-// (PLAN Part B, P1-P4). On first run the agent has no mTLS identity: it
-// generates its OWN Ed25519 key (which never leaves this host), builds a PKCS#10
-// CSR, and POSTs it with the one-time token to the control plane's
-// /api/agent/bootstrap. The control plane (the CA) signs the CSR and returns the
-// agent's cert + the CA cert; the agent persists them and then serves gRPC with
-// that cert.
-//
-// THE AGENT AUTHENTICATES THE CONTROL PLANE BEFORE SENDING THE TOKEN (P2/P3):
-//   - over HTTPS, it PINS the control-plane cert fingerprint carried in the
-//     install command (works for Let's-Encrypt-signed or self-signed-on-IP
-//     alike — one trust model);
-//   - over plain HTTP (the bare-IP case with no TLS), there is no cert to pin,
-//     so it verifies the response HMAC: the control plane signs the response
-//     body with the token, and a network attacker who never had the token cannot
-//     forge the CA it hands back.
+// Package bootstrap is the agent side of the call-home provisioning handshake (PLAN
+// Part B, P1-P4).
 package bootstrap
 
 import (
@@ -141,12 +127,9 @@ func Run(cfg Config) (Materials, error) {
 		}
 	}
 
-	// 4. Persist the materials ATOMICALLY. The single-use token is already spent
-	// by now, so a partial write here would wedge the agent: a restart re-runs
-	// bootstrap (materials incomplete → Provisioned=false) with a token the
-	// control plane will reject. Stage all three to sibling temp files first and
-	// os.Rename each into place only after ALL are written, so a mid-write
-	// failure (e.g. disk full) never leaves a half-provisioned dir.
+	// 4. The single-use token is already spent by now, so a partial write here would wedge
+	// the agent: a restart re-runs bootstrap (materials incomplete → Provisioned=false)
+	// with a token the control plane will reject.
 	keyDER, err := x509.MarshalPKCS8PrivateKey(priv)
 	if err != nil {
 		return mats, fmt.Errorf("marshal key: %w", err)
@@ -231,11 +214,8 @@ func callHome(cfg Config, csrPem string) (callHomeResponse, []byte, string, erro
 }
 
 // pinnedTransport builds an http.Transport that trusts the control plane IFF the
-// presented leaf cert's sha256 matches the expected fingerprint — Let's-Encrypt
-// or self-signed alike (P3). InsecureSkipVerify disables the default CA-chain +
-// hostname check precisely BECAUSE the pin is the trust anchor (a self-signed
-// cert on a bare IP has no chain to verify); the VerifyConnection callback then
-// enforces the exact pin, which is strictly stronger than chain trust here.
+// presented leaf cert's sha256 matches the expected fingerprint — Let's-Encrypt or
+// self-signed alike (P3).
 func pinnedTransport(expected string) *http.Transport {
 	want := strings.ToLower(strings.ReplaceAll(expected, ":", ""))
 	return &http.Transport{

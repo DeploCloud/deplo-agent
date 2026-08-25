@@ -16,14 +16,7 @@ import (
 )
 
 // attach.go ports lib/infra/docker.ts attachContainer + attachContainerPty to the
-// agent: interactive `docker attach` over one bidi gRPC stream. The pty backing
-// (creack/pty) lives in Go now (was Node node-pty), so a tty:true container gets
-// a real pseudo-terminal regardless of which host the agent runs on.
-//
-// `--sig-proxy=false` is the shared guard: killing the agent's local attach
-// client (client disconnect / detach) never forwards a signal to the container,
-// so the app keeps running. A literal \x03 the caller writes still reaches a tty
-// container as SIGINT — the genuine, opt-in interactive behaviour.
+// agent: interactive `docker attach` over one bidi gRPC stream.
 
 // attachClient abstracts the two backings (piped child / pty) the way the TS
 // AttachHandle did, but with a direct read([]byte) model — gRPC pumps bytes, it
@@ -105,22 +98,17 @@ func (s *Service) Attach(stream pb.Agent_AttachServer) error {
 		}
 	}()
 
-	// Input pump: client -> container. Recv() blocks, so it runs in its own
-	// goroutine feeding a channel; the select below can then react to a container
-	// exit (outDone) or ctx cancel EVEN WHILE a Recv() is parked waiting for the
-	// next keystroke. Without this, an idle attach to a container that exits would
-	// stay blocked in Recv() and defer client.close() would not run until the
+	// Input pump: client -> container. Without this, an idle attach to a container that
+	// exits would stay blocked in Recv() and defer client.close() would not run until the
 	// client eventually tore the stream down — leaking the docker attach child.
 	type frameOrErr struct {
 		in  *pb.AttachInput
 		err error
 	}
 	recvCh := make(chan frameOrErr, 1)
-	// recvDone lets the recv goroutine terminate even when the handler returns
-	// while a frame is parked on the buffered send below (buffer full, main loop
-	// gone via outDone/ctx.Done and no longer draining recvCh). Without it, that
-	// blocked `recvCh <- fe` would leak the goroutine — client.close() only
-	// unblocks a Recv(), not a channel send.
+	// recvDone lets the recv goroutine terminate even when the handler returns while a
+	// frame is parked on the buffered send below (buffer full, main loop gone via
+	// outDone/ctx.Done and no longer draining recvCh).
 	recvDone := make(chan struct{})
 	defer close(recvDone)
 	go func() {
@@ -238,10 +226,8 @@ func newAttachPipes(name string) (*attachPipes, error) {
 	}
 	go pump(stdout)
 	go pump(stderr)
-	// Once both pipes drain (process exited, or close() killed it), reap the
-	// child and close merged so the reader sees io.EOF. The wait goroutine is the
-	// SOLE closer of merged — close() never touches it (which would risk a
-	// double-close panic or a send-on-closed-channel from a still-running pump).
+	// Once both pipes drain (process exited, or close() killed it), reap the child and
+	// close merged so the reader sees io.EOF.
 	go func() {
 		wg.Wait()
 		werr := a.cmd.Wait()

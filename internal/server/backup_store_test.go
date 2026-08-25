@@ -103,15 +103,11 @@ func TestResolveStoreRoot_refusesRelative(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// THE regression that justifies living in internal/server: deleting a prefix
-// that does not exist must delete NOTHING.
-//
-// safepath.Inside returns the BASE on every failure path, so the obvious
-// implementation — join, resolve, RemoveAll — resolves a missing prefix to the
-// root and wipes every backup on the server. Retention hits this exact case any
-// night a target has nothing left to prune.
-// ---------------------------------------------------------------------------
+// --------------------------------------------------------------------------- THE
+// regression that justifies living in internal/server: deleting a prefix that does not
+// exist must delete NOTHING. safepath.Inside returns the BASE on every failure path, so
+// the obvious implementation — join, resolve, RemoveAll — resolves a missing prefix to
+// the root and wipes every backup on the server.
 
 func TestStoreDeletePrefix_missingPrefixDeletesNothing(t *testing.T) {
 	_, root := newStoreService(t)
@@ -200,10 +196,8 @@ func TestStoreWrite_refusesTraversalKey(t *testing.T) {
 			t.Errorf("key %q must be refused", key)
 		}
 	}
-	// An ABSOLUTE key is not an error — normalizeRel strips the leading slash, the
-	// same way it does for the file RPCs — but it must stay CONTAINED. That is the
-	// property worth pinning: what matters is that nothing lands outside the root,
-	// not which of the two guards catches it.
+	// An ABSOLUTE key is not an error — normalizeRel strips the leading slash, the same
+	// way it does for the file RPCs — but it must stay CONTAINED.
 	if _, _, err := storeWrite(root, "/etc/cron.d/evil", strings.NewReader("x"), false); err != nil {
 		t.Fatalf("an absolute key should be relativised, not fail: %v", err)
 	}
@@ -264,12 +258,9 @@ func TestStoreWrite_partialWriteLeavesNoArtifact(t *testing.T) {
 	}
 }
 
-// The sweep must not touch a write that is STILL HAPPENING.
-//
-// The root is shared by every destination and every team on the host, and a
-// check is fired by something as ordinary as opening the destination dropdown.
-// Without an age guard, one person opening a picker deletes the temp file of
-// another team's twenty-minute backup, which then dies on its final rename.
+// The sweep must not touch a write that is STILL HAPPENING. The root is shared by every
+// destination and every team on the host, and a check is fired by something as ordinary
+// as opening the destination dropdown.
 func TestSweepPartials_leavesAnInFlightWriteAlone(t *testing.T) {
 	s, root := newStoreService(t)
 	dir := filepath.Join(root, "deplo", "team_b", "app", "x")
@@ -371,11 +362,11 @@ func TestArtifactWriter_roundTrip(t *testing.T) {
 	}
 }
 
-// Pins the close-ordering bug. age's STREAM writer only emits its final-chunk
-// marker on Close: skip it and the artifact decrypts perfectly until the last
-// chunk and then fails — silent corruption discovered at restore time, months
-// later. artifactWriter.Close is what prevents it, so assert that NOT calling it
-// really does break the artifact.
+// Pins the close-ordering bug. age's STREAM writer only emits its final-chunk marker on
+// Close: skip it and the artifact decrypts perfectly until the last chunk and then
+// fails — silent corruption discovered at restore time, months later.
+// artifactWriter.Close is what prevents it, so assert that NOT calling it really does
+// break the artifact.
 func TestArtifactWriter_skippingCloseCorruptsTheArtifact(t *testing.T) {
 	recipient, identity := testKeypair(t)
 	payload := bytes.Repeat([]byte("x"), 200_000)
@@ -429,9 +420,9 @@ func TestNewArtifactWriter_rejectsBadRecipient(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// The full store pipeline: write an artifact, read it back through the same
-// artifactSource a restore uses.
+// --------------------------------------------------------------------------- The full
+// store pipeline: write an artifact, read it back through the same artifactSource a
+// restore uses.
 // ---------------------------------------------------------------------------
 
 func TestWriteArtifact_storeRoundTripThroughSource(t *testing.T) {
@@ -543,10 +534,7 @@ func TestWriteArtifact_streamOutEmitsCiphertext(t *testing.T) {
 // The managed root is the agent's own, so every path may create it
 // ---------------------------------------------------------------------------
 
-// A write path must bring the MANAGED root into being on its own. Gating that
-// behind a check made the platform's default destination fail its very first
-// backup with "test the destination first" - and the only thing that ran a check
-// needed a capability the person taking the backup was deliberately not given.
+// A write path must bring the MANAGED root into being on its own.
 func TestResolveStoreRoot_managedRootIsCreatedByAWritePath(t *testing.T) {
 	base := t.TempDir()
 	s := New(filepath.Join(base, "stacks"), t.TempDir(), "/", base)
@@ -644,10 +632,7 @@ func TestSourceFromRestore_s3CarriesTheIdentity(t *testing.T) {
 // A restore trusts the control plane, not the artifact
 // ---------------------------------------------------------------------------
 
-// The artifact's own compose is what a restore used to execute. It is attacker-
-// reachable - a bucket object anyone with write access replaces, or a store
-// artifact a compromised storage host forges with the public recipient it is
-// handed on every backup - and it ends up at `docker compose up` as root.
+// The artifact's own compose is what a restore used to execute.
 func TestRestoreConfig_aProvenArchiveRestoresItsOwnConfig(t *testing.T) {
 	// The whole point of the snapshot: a restore puts back the config the app was
 	// running, not today's config wrapped around last month's volumes.
@@ -673,12 +658,7 @@ func TestRestoreConfig_aProvenArchiveRestoresItsOwnConfig(t *testing.T) {
 	}
 }
 
-// The artifact's own compose is what a restore executes. It is attacker-
-// reachable - a bucket object anyone with write access replaces, or a store
-// artifact a compromised storage host forges with the public recipient it is
-// handed on every backup - and it ends up at `docker compose up` as root. With
-// no digest to check it against, the control plane's descriptor is the only
-// thing here that came from a party this agent trusts.
+// The artifact's own compose is what a restore executes.
 func TestRestoreConfig_anUnprovenArchiveNeverWins(t *testing.T) {
 	trusted := "services:\n  web:\n    image: app:1\n"
 	hostile := "services:\n  web:\n    image: alpine\n    privileged: true\n    volumes: ['/:/host']\n"
@@ -969,10 +949,8 @@ func TestReadStoreFile_s3WithoutIdentityStaysCiphertext(t *testing.T) {
 	}
 }
 
-// The asymmetry, pinned in both directions. A bucket object cannot be hashed
-// before it is fetched, so its verdict lands at the END — after bytes have
-// already gone. That is the honest outcome, not a bug, and the caller must not
-// mistake it for the guarantee the store shape gives.
+// The asymmetry, pinned in both directions. A bucket object cannot be hashed before it
+// is fetched, so its verdict lands at the END — after bytes have already gone.
 func TestReadStoreFile_s3DigestFailsOnlyAfterTheBytesAreGone(t *testing.T) {
 	s, _ := newStoreService(t)
 	recipient, identity := testKeypair(t)
@@ -1029,12 +1007,7 @@ func TestReadStoreFile_namingNoArtifactIsRefused(t *testing.T) {
 	}
 }
 
-// An UPLOADED artifact contributes data and nothing else. This is the case the
-// two tests above do not cover: "prefer the control plane's" is not a guard when
-// the control plane has none to prefer, and an app never deployed on this host
-// has no stack file, an app with no variables has no env. Without the flag the
-// archive wins both by default - and for a file somebody uploaded that means the
-// uploader chooses what `docker compose up` runs, which is root on this machine.
+// An UPLOADED artifact contributes data and nothing else.
 func TestRestoreConfig_anUntrustedArchiveNeverConfiguresAnything(t *testing.T) {
 	hostile := "services:\n  x:\n    image: alpine\n    privileged: true\n    volumes: ['/:/host']\n"
 
@@ -1069,14 +1042,8 @@ func TestRestoreConfig_anUntrustedArchiveNeverConfiguresAnything(t *testing.T) {
 	}
 }
 
-// TestWriteArtifact_decryptedSizeIsWhatADownloadDelivers pins the number the
-// download's Content-Length is built from.
-//
-// It is the ONE thing that must not be approximately right: a Content-Length one
-// byte off a stream the browser then reads to EOF is a download the browser
-// calls corrupt, or one it waits forever for. So this decrypts the artifact
-// exactly as ReadStoreFile does (age layer off, gzip layer left ON — the .gz IS
-// the file the user asked for) and counts what comes out.
+// TestWriteArtifact_decryptedSizeIsWhatADownloadDelivers pins the number the download's
+// Content-Length is built from.
 func TestWriteArtifact_decryptedSizeIsWhatADownloadDelivers(t *testing.T) {
 	for _, tc := range []struct {
 		name    string

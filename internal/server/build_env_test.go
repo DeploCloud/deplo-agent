@@ -89,10 +89,8 @@ func TestAppendBuildArgKeysBareNames(t *testing.T) {
 	}
 }
 
-// The static builder's generated Dockerfile must declare each env var as
-// ARG+ENV in the BUILDER stage (so the build command sees it) and leave the
-// nginx stage untouched. Asserted via the written Dockerfile side effect — the
-// docker build itself needs a daemon and is covered by the repo-root e2e.
+// The static builder's generated Dockerfile must declare each env var as ARG+ENV in the
+// BUILDER stage (so the build command sees it) and leave the nginx stage untouched.
 func TestBuildStatic_declaresBuildEnvInBuilderStage(t *testing.T) {
 	s := New(t.TempDir(), t.TempDir(), "/", "")
 	buildDir := t.TempDir()

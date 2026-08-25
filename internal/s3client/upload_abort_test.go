@@ -12,17 +12,8 @@ import (
 	"time"
 )
 
-// A canceled upload must not leave its parts in the bucket.
-//
-// This is the guarantee a canceled BACKUP rests on. minio-go does try to abort a
-// multipart upload that failed, but it issues that abort on the SAME context
-// that just failed - so when the cause was a cancellation, the abort is
-// cancelled too and the parts stay: invisible to an object listing, billed all
-// the same, and for a backup that is gigabytes of an artifact nobody wanted.
-//
-// The fake bucket below answers the three calls a multipart upload makes and
-// records whether the abort ever arrived. Without the sweep in Upload it never
-// does, and this test fails.
+// A canceled upload must not leave its parts in the bucket. Without the sweep in Upload
+// it never does, and this test fails.
 func TestUpload_abortsTheMultipartWhenCanceled(t *testing.T) {
 	var (
 		created  atomic.Bool

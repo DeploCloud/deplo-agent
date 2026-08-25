@@ -18,21 +18,8 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// imagecopy.go implements the cross-host BUILT IMAGE copy that backs a build
-// server: a host that compiles for machines it does not run on. It is the third
-// sibling of the volume (volumecopy.go) and files-dir relays and shares their
-// reasoning exactly - the agent trust model is strictly star, so an agent can
-// neither dial nor trust a peer, and the control plane RELAYS the bytes: it calls
-// ExportImage on the BUILDER and feeds the chunks into ImportImage on the host
-// that will run the container. No registry, no agent↔agent link.
-//
-// The two halves are deliberately asymmetric about compression. ExportImage gzips
-// at BestSpeed, which is a real win on a classic-graphdriver daemon (`docker save`
-// writes UNCOMPRESSED layer tars there) and close to a no-op on a containerd store
-// (whose blobs are already compressed). ImportImage does NOT gunzip: `docker load`
-// detects and decompresses gzip itself, so pumping the stream straight at it is one
-// less moving part than the volume path needs - and a truncated or corrupt stream
-// still fails loudly, on the gzip CRC and the tar structure, inside the load.
+// imagecopy.go implements the cross-host BUILT IMAGE copy that backs a build server: a
+// host that compiles for machines it does not run on.
 
 // imageCopyTimeout bounds a single export/import. A multi-GB image over a slow
 // link is the case to survive; this matches the volume relay's budget.
@@ -41,16 +28,9 @@ const imageCopyTimeout = 30 * time.Minute
 // imageRemoveTimeout bounds the `docker rmi` that follows a successful export.
 const imageRemoveTimeout = 2 * time.Minute
 
-// imageRefPattern is the shape of every ref this relay handles: the control plane's
-// own `deplo/<deploy key>:<deployment id[:12]>`, where a deploy key is a slug or a
+// imageRefPattern is the shape of every ref this relay handles: the control plane's own
+// `deplo/<deploy key>:<deployment id[:12]>`, where a deploy key is a slug or a
 // preview's `<slug>__pr-<n>`.
-//
-// The `deplo/` prefix is REQUIRED, not merely expected. This RPC deletes images
-// (`remove_after`) and streams them out, so the namespace is the whole blast
-// radius: without it a malformed request could `docker rmi node:20` out from under
-// every app on the host, or export an image that is not ours to send. Re-enforcing
-// the control plane's naming agent-side is the house rule anyway - `validateSlug`
-// does exactly this at nineteen call sites, for the same reason.
 var imageRefPattern = regexp.MustCompile(`^deplo/[a-zA-Z0-9][a-zA-Z0-9._-]*:[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
 
 // validateImageRef rejects anything that is not one of OUR local image tags.
@@ -64,9 +44,7 @@ func validateImageRef(ref string) error {
 }
 
 // ExportImage streams a locally built image out as a gzipped `docker save` archive,
-// then optionally deletes it here. The image is a COURIER on a build server, not an
-// artifact: what is worth keeping across builds is the BuildKit cache, which this
-// never touches. Mirrors ExportVolume's producer, reusing the same chunkWriter.
+// then optionally deletes it here.
 func (s *Service) ExportImage(req *pb.ExportImageRequest, stream pb.Agent_ExportImageServer) error {
 	ref := req.GetImageRef()
 	if err := validateImageRef(ref); err != nil {
@@ -103,10 +81,8 @@ func (s *Service) ExportImage(req *pb.ExportImageRequest, stream pb.Agent_Export
 	}
 
 	if req.GetRemoveAfter() {
-		// Best-effort on PURPOSE. The bytes are already on the destination, so a
-		// failure to reclaim disk here must not turn a completed transfer into a
-		// failed deploy. An image this leaves behind is labelled like any other and
-		// the existing Docker cleanup sweep reaps it on its next pass.
+		// Best-effort on PURPOSE. The bytes are already on the destination, so a failure to
+		// reclaim disk here must not turn a completed transfer into a failed deploy.
 		_, _ = dockercli.Run(ctx, imageRemoveTimeout, "rmi", ref)
 	}
 	return nil
@@ -114,21 +90,7 @@ func (s *Service) ExportImage(req *pb.ExportImageRequest, stream pb.Agent_Export
 
 // ImportImage is the destination half: the FIRST client message carries the ref the
 // stream is expected to hold, every following message a slice of the gzipped `docker
-// save` archive. The reassembled stream is piped into `docker image load`, which
-// decompresses it itself.
-//
-// THE ARCHIVE IS NOT TRUSTED TO NAME ITSELF. `docker load` restores whatever
-// RepoTags the archive declares, not the tag the caller announced - so an archive
-// could carry a second image and quietly replace `deplo/<other-app>:<tag>`, or a
-// base image, on a host that merely accepted a build. Confirming the declared tag
-// exists afterwards proves nothing about what ELSE arrived. So the tag list is
-// snapshotted either side of the load and anything unexpected is removed and
-// reported, which turns a build server from a host that can rewrite its targets'
-// images into one that can only deliver the image it was asked for.
-//
-// Serialized per agent: the diff is only exact if no other load interleaves, and a
-// load is disk-bound anyway, so a mutex costs nothing a concurrent pair would not
-// have paid in I/O.
+// save` archive.
 func (s *Service) ImportImage(stream pb.Agent_ImportImageServer) error {
 	ctx := stream.Context()
 
@@ -148,10 +110,9 @@ func (s *Service) ImportImage(stream pb.Agent_ImportImageServer) error {
 		return sendImageResult(stream, false, fmt.Sprintf("import image: %v", err), 0, "")
 	}
 
-	// The tag list BEFORE the load. A failure to read it is fatal rather than
-	// degraded: without the baseline there is no way to tell what the archive
-	// added, and silently skipping the check is precisely the outcome it exists to
-	// prevent.
+	// The tag list BEFORE the load. A failure to read it is fatal rather than degraded:
+	// without the baseline there is no way to tell what the archive added, and silently
+	// skipping the check is precisely the outcome it exists to prevent.
 	before, err := listImageTags(ctx)
 	if err != nil {
 		return sendImageResult(stream, false, fmt.Sprintf("import image %q: %v", ref, err), 0, "")
@@ -295,11 +256,8 @@ func listImageTags(ctx context.Context) (map[string]bool, error) {
 	return tags, nil
 }
 
-// countingHasher tallies the bytes and sha256 of a relayed stream as it passes
-// through. Diagnostic, not a verification protocol: the export half reports no
-// digest to compare against, and corruption is already fatal inside `docker load`
-// (gzip CRC, then tar structure). This is what "bytes_written" honestly means for
-// a load - what this host consumed.
+// countingHasher tallies the bytes and sha256 of a relayed stream as it passes through.
+// This is what "bytes_written" honestly means for a load - what this host consumed.
 type countingHasher struct {
 	h hash.Hash
 	n int64
@@ -317,10 +275,6 @@ func (c *countingHasher) WriteTo(w io.Writer, p []byte) (int, error) {
 func (c *countingHasher) sum() string { return hex.EncodeToString(c.h.Sum(nil)) }
 
 // sendImageResult closes the client-streaming RPC with a terminal StoreResult.
-// ImportImage reports business failures in the body (ok=false + message) rather than
-// as a gRPC error, matching ImportVolume and WriteStoreFile - a gRPC error code is
-// reserved for "this agent cannot do that at all", which is what an older binary's
-// UNIMPLEMENTED means and what the control plane turns into "update the agent".
 func sendImageResult(stream pb.Agent_ImportImageServer, ok bool, errMsg string, n int64, sum string) error {
 	return stream.SendAndClose(&pb.StoreResult{Ok: ok, Error: errMsg, BytesWritten: n, Sha256: sum})
 }

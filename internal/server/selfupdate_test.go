@@ -58,9 +58,7 @@ func sha256Hex(b []byte) string {
 }
 
 // A successful update replaces the on-disk binary with the downloaded bytes and
-// schedules a re-exec of that same path. The mTLS materials are out of scope — we
-// assert nothing about them precisely because the handler never reads or writes
-// them (that IS the cert-preserving guarantee).
+// schedules a re-exec of that same path.
 func TestSelfUpdate_swapsBinaryAndReexecs(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

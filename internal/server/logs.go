@@ -9,31 +9,13 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
-// logs.go ports lib/infra/docker.ts followLogs to the agent: stream a container's
-// live runtime logs (`docker logs -f --tail N`) as raw byte chunks. Output-only
-// — there is no stdin. The control plane proxies these chunks straight into the
-// unchanged SSE log route.
-//
-// RAW BYTES, not lines: a multi-byte UTF-8 glyph or ANSI sequence split across
-// reads is reassembled by the control plane's StringDecoder, exactly as the local
-// `docker logs` pipe path does (the deploy log path line-scans because it writes
-// discrete log lines; the live viewer must NOT, or it would buffer a partial last
-// line forever and mangle interactive output).
+// logs.go ports lib/infra/docker.ts followLogs to the agent: stream a container's live
+// runtime logs (`docker logs -f --tail N`) as raw byte chunks.
 
 const defaultLogTail = 500
 const maxLogTail = 5000
 
 // logArgs builds the `docker logs` argv for one request.
-//
-// The time window and the timestamp prefix map straight onto docker's own flags.
-// `--since`/`--until` take Unix seconds; 0 means "unset", which is docker's own
-// default, so an older control plane that sends neither produces exactly the argv
-// this function produced before the fields existed. `--until` together with `-f`
-// is legal: the stream simply ends at that instant instead of following forever.
-//
-// Split out of FollowLogs so it can be tested without a docker daemon — it is
-// the only branching in this file, and a wrong flag here is a stream that
-// silently returns the wrong window rather than an error anyone would notice.
 func logArgs(tail int, req *pb.FollowLogsRequest) []string {
 	args := []string{"logs", "-f", "--tail", strconv.Itoa(tail)}
 	if req.GetTimestamps() {

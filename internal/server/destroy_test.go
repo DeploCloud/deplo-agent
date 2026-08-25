@@ -12,10 +12,9 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// DestroyStack's `rm -f` fallback must report Ok based on the docker EXIT CODE,
-// not merely the spawn error — otherwise a genuine non-zero removal failure is
-// reported as a successful destroy. The common already-gone case (`rm -f` of a
-// missing container) is idempotent (exit 0) and must still report Ok:true.
+// DestroyStack's `rm -f` fallback must report Ok based on the docker EXIT CODE, not
+// merely the spawn error — otherwise a genuine non-zero removal failure is reported as
+// a successful destroy.
 func TestDestroyStack_missingContainerReportsOk(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -96,12 +95,11 @@ func TestDestroyStack_removeVolumesSweepsStackFile(t *testing.T) {
 	}
 }
 
-// When a removeVolumes destroy can't run a clean `down -v` (here: a malformed
-// compose file makes `compose down` fail), it must fall through to rm -f and
-// report Ok:false WITHOUT sweeping the stack file — `rm -f` can't reclaim a named
-// volume, so the volume survived and the only on-disk record of its name (the
-// compose file) must be kept for a retry. Reporting Ok:true here would have the
-// control plane believe a still-present volume was reclaimed.
+// When a removeVolumes destroy can't run a clean `down -v` (here: a malformed compose
+// file makes `compose down` fail), it must fall through to rm -f and report Ok:false
+// WITHOUT sweeping the stack file — `rm -f` can't reclaim a named volume, so the volume
+// survived and the only on-disk record of its name (the compose file) must be kept for
+// a retry.
 func TestDestroyStack_removeVolumesDownFailKeepsFileAndReportsNotOk(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -131,11 +129,7 @@ func TestDestroyStack_removeVolumesDownFailKeepsFileAndReportsNotOk(t *testing.T
 	}
 }
 
-// A successful teardown sweeps the stack files whether or not volumes went with
-// them. Deleting an App deliberately KEEPS its volumes, so pinning the sweep to
-// removeVolumes meant every deleted app left its rendered compose and its env
-// file on the host permanently - dozens of files nothing would read again, each
-// holding the environment that app ran with.
+// A successful teardown sweeps the stack files whether or not volumes went with them.
 func TestDestroyStack_sweepsStackFilesOnAnySuccessfulDown(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -191,12 +185,10 @@ func TestDestroyStack_sweepsStackFilesOnAnySuccessfulDown(t *testing.T) {
 	}
 }
 
-// A destroy may reclaim named volumes the control plane lists explicitly, which
-// is the ONLY way to reclaim the data of a stack that was never deployed: with no
-// compose file on the host, `down -v` has nothing to read and the volume is left
-// behind with nothing able to name it (an imported app, deleted before its first
-// deploy). Names outside Deplo's own `deplo-` prefix are refused: a teardown must
-// not be able to name any volume on the host.
+// A destroy may reclaim named volumes the control plane lists explicitly, which is the
+// ONLY way to reclaim the data of a stack that was never deployed: with no compose file
+// on the host, `down -v` has nothing to read and the volume is left behind with nothing
+// able to name it (an imported app, deleted before its first deploy).
 func TestDestroyStack_reclaimsNamedVolumesAndOnlyDeploOnes(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()

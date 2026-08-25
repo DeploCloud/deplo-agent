@@ -16,43 +16,20 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// job.go implements the cron-job half of the contract: StartJob / PollJob /
-// KillJob. A cron job is a `docker exec` the AGENT owns for its whole lifetime,
-// on a JOB-scoped context - never the RPC's - so a control-plane restart does
-// not kill it, exactly like a Deploy (D5). The control plane holds no connection
-// between the start and the terminal poll; it comes back a minute later and
-// asks.
-//
-// This is deliberately not built on Exec. Exec is a console REPL's synchronous
-// "type a command, wait for it", capped at 30 seconds; a cron job runs for
-// minutes or hours. Sharing the code would mean giving the REPL an unbounded
-// deadline, which is exactly the thing that ceiling is there to prevent.
-//
-// The one thing this file owes the control plane is honesty about its own
-// memory: the job handle lives as long as this PROCESS. An agent restart loses
-// every in-flight job, and PollJob says so with `found: false` instead of
-// inventing an exit code.
+// job.go implements the cron-job half of the contract: StartJob / PollJob / KillJob.
+// Sharing the code would mean giving the REPL an unbounded deadline, which is exactly
+// the thing that ceiling is there to prevent.
 
 const (
-	// Retained output per stream, per job. Attacker-controlled (`yes | head -c
-	// 2G` is a legal cron command) and this agent is a root process shared by
-	// every app on the host, so the buffer is a fixed-size ring - it never grows
-	// with the command's output. Same reasoning as inflight.go's log budget.
-	// Kept in step with CRON_OUTPUT_TAIL_BYTES in the control plane's
-	// lib/data/crons.ts; the number is declared on the contract (agent.proto).
+	// Retained output per stream, per job. Attacker-controlled (`yes | head -c 2G` is a
+	// legal cron command) and this agent is a root process shared by every app on the
+	// host, so the buffer is a fixed-size ring - it never grows with the command's output.
 	cronOutputTailBytes = 16 << 10
 
-	// How long a FINISHED job is kept so the control plane can still collect its
-	// result. The scheduler polls once a minute, so this is ~30 missed ticks of
-	// slack - enough to survive a control-plane restart, a lease handover, or a
-	// network partition, without holding results for a host's whole uptime.
+	// How long a FINISHED job is kept so the control plane can still collect its result.
 	cronRetainFinished = 30 * time.Minute
 
-	// Concurrent LIVE jobs one agent will accept. Each is a `docker exec` plus a
-	// goroutine plus two 16 KiB rings, so the memory is trivial; the cap exists
-	// because a control-plane bug that starts a job per tick would otherwise
-	// fork-bomb a shared host. Beyond it, StartJob answers ResourceExhausted,
-	// which the control plane records as a failed attempt (and retries).
+	// Concurrent LIVE jobs one agent will accept.
 	maxLiveJobs = 64
 
 	// Default when the caller names no timeout. Matches the control plane's own
@@ -60,10 +37,7 @@ const (
 	cronDefaultTimeout = time.Hour
 )
 
-// tailBuf keeps the LAST n bytes written to it and nothing else. The tail, not
-// the head: a job's value is its ending - the error, the summary line - while
-// the head is startup boilerplate. Writes past the ceiling are free (no
-// allocation, no growth), which is what makes an unbounded producer harmless.
+// tailBuf keeps the LAST n bytes written to it and nothing else.
 type tailBuf struct {
 	buf  []byte
 	max  int
@@ -91,10 +65,7 @@ func (t *tailBuf) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-// String returns the retained tail, prefixed with a note when anything was
-// dropped. Slicing to a byte offset can cut a multi-byte rune in half, which
-// would render as a replacement character in the middle of every truncated log,
-// so leading bytes are dropped until what remains is valid UTF-8.
+// String returns the retained tail, prefixed with a note when anything was dropped.
 func (t *tailBuf) String() string {
 	b := t.buf
 	for len(b) > 0 && !utf8.Valid(b) {
@@ -134,15 +105,7 @@ func newJobID() string {
 	return hex.EncodeToString(b)
 }
 
-// StartJob spawns the command and returns its handle. It is a map insert and a
-// `go` - nothing that can block. `assertOwned` (a 5s docker inspect) and
-// `resolveShellPlan` (up to four 5s shell probes on a cold cache) run INSIDE the
-// goroutine: in front of the spawn they would make this RPC take up to ~25
-// seconds, and the control plane's scheduler fires every job in one tick.
-//
-// A pre-spawn failure is therefore not an RPC error. It surfaces on the next
-// PollJob as {running: false, exit_code: -1, stderr: "<why>"}, which is the same
-// shape the control plane already handles for "the command could not run".
+// StartJob spawns the command and returns its handle.
 func (s *Service) StartJob(ctx context.Context, req *pb.StartJobRequest) (*pb.StartJobResponse, error) {
 	if req.GetContainer() == "" {
 		return nil, status.Error(codes.InvalidArgument, "container is required")
@@ -221,12 +184,7 @@ func (s *Service) runJob(ctx context.Context, req *pb.StartJobRequest, j *job) {
 		return
 	}
 
-	// The shell prefix. An empty request shell means "whatever this image has",
-	// which is what Exec does; a NAMED shell that the image lacks is a hard
-	// failure rather than a silent substitution - `set -o pipefail`, `[[` and
-	// arrays all change meaning between bash and sh, so quietly running a bash
-	// script under sh produces a wrong result that looks like a bug in the user's
-	// command.
+	// The shell prefix.
 	var prefix []string
 	switch req.GetShell() {
 	case "bash":
@@ -290,11 +248,7 @@ func (s *Service) runJob(ctx context.Context, req *pb.StartJobRequest, j *job) {
 	}, extraEnv, args...)
 
 	if err != nil {
-		// docker never produced an exit status. Three different things, and the
-		// user needs them apart: we killed it (Stop), it outlived its timeout, or
-		// docker itself could not run. Classified on the CONTEXT and the elapsed
-		// time rather than on the error text, which is a diagnostic string and
-		// not a contract.
+		// docker never produced an exit status.
 		switch {
 		case ctx.Err() != nil:
 			s.finishJob(j, -1, false, "", "The job was stopped.")
@@ -345,10 +299,9 @@ func (s *Service) PollJob(_ context.Context, req *pb.PollJobRequest) (*pb.PollJo
 	defer s.mu.Unlock()
 	j := s.jobs[req.GetJobId()]
 	if j == nil {
-		// Not an error: "I have no record of this" is a legitimate answer that
-		// the control plane turns into a `lost` run. An RPC error here would be
-		// indistinguishable from the host being unreachable, which means the
-		// opposite (keep waiting).
+		// Not an error: "I have no record of this" is a legitimate answer that the control
+		// plane turns into a `lost` run. An RPC error here would be indistinguishable from
+		// the host being unreachable, which means the opposite (keep waiting).
 		return &pb.PollJobResponse{Found: false}, nil
 	}
 	resp := &pb.PollJobResponse{

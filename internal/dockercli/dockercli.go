@@ -1,10 +1,6 @@
-// Package dockercli is the agent's Docker client: it shells out to the `docker`
-// CLI against the host's daemon, exactly as the control plane's
-// lib/infra/docker.ts does today. No DOCKER_HOST/tcp:// indirection — the agent
-// runs ON the target host, so the local socket IS the right daemon. This is the
-// host-coupled half of the platform moved server-side (ADR-0006).
-//
-// Every helper uses exec without a shell, so arguments are injection-safe.
+// Package dockercli is the agent's Docker client: it shells out to the `docker` CLI
+// against the host's daemon, exactly as the control plane's lib/infra/docker.ts does
+// today. This is the host-coupled half of the platform moved server-side (ADR-0006).
 package dockercli
 
 import (
@@ -31,10 +27,7 @@ type Result struct {
 	Code   int
 }
 
-// Run runs `docker <args>` with a timeout, capturing output. It returns an
-// error only when the process never produced an exit status (spawn failure,
-// timeout) — a non-zero exit is reported via Result.Code, mirroring the TS
-// client's noThrow discipline so callers decide how to surface failures.
+// Run runs `docker <args>` with a timeout, capturing output.
 func Run(ctx context.Context, timeout time.Duration, args ...string) (Result, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -55,10 +48,9 @@ func Run(ctx context.Context, timeout time.Duration, args ...string) (Result, er
 	return res, nil
 }
 
-// RunEnv is Run with extra "KEY=VALUE" host-process env layered on (e.g. so a
-// `docker exec -e REDISCLI_AUTH <c> redis-cli …` can forward the password from
-// the docker client's env into the container without the value touching argv).
-// Same exit-code/error discipline as Run; the argv is redacted in the error.
+// RunEnv is Run with extra "KEY=VALUE" host-process env layered on (e.g. so a `docker
+// exec -e REDISCLI_AUTH <c> redis-cli …` can forward the password from the docker
+// client's env into the container without the value touching argv).
 func RunEnv(ctx context.Context, timeout time.Duration, extraEnv []string, args ...string) (Result, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -81,10 +73,8 @@ func RunEnv(ctx context.Context, timeout time.Duration, extraEnv []string, args 
 	return res, nil
 }
 
-// Stream runs `docker <args>` and forwards each line of merged stdout+stderr to
-// onLine as it is produced (the live build/clone log), returning the exit code.
-// Mirrors lib/infra/exec.ts spawnStream. `input`, when non-empty, is written to
-// the child's stdin and the stream is closed (e.g. a Dockerfile for `build -`).
+// Stream runs `docker <args>` and forwards each line of merged stdout+stderr to onLine
+// as it is produced (the live build/clone log), returning the exit code.
 func Stream(ctx context.Context, timeout time.Duration, onLine LineFn, input string, args ...string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -111,10 +101,9 @@ func Spawn(ctx context.Context, timeout time.Duration, onLine LineFn, input, nam
 	return streamCmd(cctx, timeout, onLine, input, exec.CommandContext(cctx, name, args...))
 }
 
-// SpawnEnv is Spawn with extra "KEY=VALUE" env entries layered on top of the
-// agent's own env — e.g. the nixpacks binary resolving bare `--env KEY` refs
-// from its process env, so a build-env VALUE never rides argv (which the
-// deploy log echoes).
+// SpawnEnv is Spawn with extra "KEY=VALUE" env entries layered on top of the agent's
+// own env — e.g. the nixpacks binary resolving bare `--env KEY` refs from its process
+// env, so a build-env VALUE never rides argv (which the deploy log echoes).
 func SpawnEnv(ctx context.Context, timeout time.Duration, onLine LineFn, extraEnv []string, name string, args ...string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -126,14 +115,9 @@ func SpawnEnv(ctx context.Context, timeout time.Duration, onLine LineFn, extraEn
 }
 
 // StreamOut runs `docker <args>` (no shell — argv is injection-safe) with extra
-// "KEY=VALUE" env layered on, streaming the child's RAW stdout into dst (e.g. a
-// build image tar written straight to disk) while forwarding each stderr line to
-// onLine (the live progress log). It exists for railpack's buildctl, which writes
-// a docker-format tar to stdout and reports BuildKit progress on stderr — so a
-// shell `>` redirect is unneeded, and unwanted, since the secret ids on the
-// command line come from an untrusted repo's railpack plan. Same exit/timeout
-// discipline as streamCmd; extraEnv rides in via the docker client's env (bare
-// `docker exec -e NAME`) so a secret VALUE never touches argv.
+// "KEY=VALUE" env layered on, streaming the child's RAW stdout into dst (e.g. a build
+// image tar written straight to disk) while forwarding each stderr line to onLine (the
+// live progress log).
 func StreamOut(ctx context.Context, timeout time.Duration, dst io.Writer, onLine LineFn, extraEnv []string, args ...string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -219,11 +203,9 @@ func streamCmd(cctx context.Context, timeout time.Duration, onLine LineFn, input
 
 	err = cmd.Wait()
 	if err != nil {
-		// Check the context FIRST: when CommandContext kills the child on timeout
-		// or cancellation, Wait() returns an *exec.ExitError with ExitCode()==-1
-		// (SIGKILL, ProcessState.Exited()==false). Matching the ExitError branch
-		// before this would misreport a real timeout as a generic "exit -1"
-		// failure and leave this clear message unreachable.
+		// Check the context FIRST: when CommandContext kills the child on timeout or
+		// cancellation, Wait() returns an *exec.ExitError with ExitCode()==-1 (SIGKILL,
+		// ProcessState.Exited()==false).
 		if cctx.Err() == context.DeadlineExceeded {
 			return -1, fmt.Errorf("%s timed out after %s", label, timeout)
 		}
@@ -239,15 +221,9 @@ func streamCmd(cctx context.Context, timeout time.Duration, onLine LineFn, input
 	return 0, nil
 }
 
-// PipeOut runs `docker <args>` and copies the child's RAW stdout into `dst`
-// (bytes, not lines) while collecting stderr for diagnostics — for piping a
-// dump tool's output (`docker exec <c> pg_dump …`) straight into the gzip→S3
-// pipeline with no temp file. Returns the exit code; an error only when docker
-// never produced an exit status (spawn/timeout). A non-zero exit returns the
-// collected stderr in the error so the caller can surface why the dump failed.
-//
-// extraEnv layers "KEY=VALUE" entries on top of the agent's env (e.g. so a
-// password can ride in the docker-exec invocation's env rather than argv).
+// PipeOut runs `docker <args>` and copies the child's RAW stdout into `dst` (bytes, not
+// lines) while collecting stderr for diagnostics — for piping a dump tool's output
+// (`docker exec <c> pg_dump …`) straight into the gzip→S3 pipeline with no temp file.
 func PipeOut(ctx context.Context, timeout time.Duration, dst io.Writer, extraEnv []string, args ...string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -299,13 +275,9 @@ func PipeIn(ctx context.Context, timeout time.Duration, src io.Reader, extraEnv 
 	return 0, nil
 }
 
-// redactArgs renders an argv for an error message with any secret-bearing token
-// masked, so a failed dump/restore (e.g. on bad credentials) never echoes a
-// cleartext password into an error string that the control plane logs. Two
-// shapes are masked: an inline `KEY=VALUE` env assignment (the value is hidden,
-// the KEY kept) and the VALUE following a known secret flag (`-a`, `-p`,
-// `--password`). Defence in depth: the backup paths also keep secrets OFF argv
-// entirely, but a stray future caller shouldn't be able to leak one through here.
+// redactArgs renders an argv for an error message with any secret-bearing token masked,
+// so a failed dump/restore (e.g. on bad credentials) never echoes a cleartext password
+// into an error string that the control plane logs.
 func redactArgs(args []string) string {
 	out := make([]string, len(args))
 	maskNext := false
@@ -355,37 +327,18 @@ func ServerVersion(ctx context.Context) string {
 
 // --- build-export capability -----------------------------------------------
 
-// Daemons that keep their images in containerd pay a heavy, invisible tax on
-// every build: BuildKit's `image` exporter GZIPs each new layer into the content
-// store before unpacking it back into the snapshotter. On a ~900 MB
-// node_modules layer that measured 25 s of pure CPU — a third of a Nixpacks
-// deploy spent compressing an image that is only ever run on this host and is
-// never pushed anywhere. `--output type=image,…,compression=zstd` cuts the same
-// export to ~8 s at the same on-disk size, which is what ImageExportOptsSupported
-// gates.
-//
-// The classic (overlay2 / graphdriver) image store needs none of this: it uses
-// the `moby` exporter, which hands BuildKit's layers to the daemon UNCOMPRESSED,
-// and it rejects `--output type=image` outright. So the probe is also a
-// correctness gate, not only an optimisation one — get it wrong on a classic
-// daemon and every build fails.
+// Daemons that keep their images in containerd pay a heavy, invisible tax on every
+// build: BuildKit's `image` exporter GZIPs each new layer into the content store before
+// unpacking it back into the snapshotter.
 var (
 	imageExportMu    sync.Mutex
 	imageExportKnown bool
 	imageExportOK    bool
 )
 
-// ImageExportOptsSupported reports whether `docker build --output type=image,…`
-// is available on this host — i.e. the daemon keeps images in containerd AND the
-// CLI has the buildx plugin that accepts the flag. False for every other host,
-// where callers must fall back to plain `-t` (which is already the fast path
-// there).
-//
-// The answer is cached for the life of the agent: neither the daemon's image
-// store nor the CLI's plugin set changes under a running agent, and the probe
-// costs two docker round-trips. Only a CONCLUSIVE probe is cached — a daemon
-// that was momentarily unreachable is asked again next build rather than being
-// written off as slow forever.
+// ImageExportOptsSupported reports whether `docker build --output type=image,…` is
+// available on this host — i.e. the daemon keeps images in containerd AND the CLI has
+// the buildx plugin that accepts the flag.
 func ImageExportOptsSupported(ctx context.Context) bool {
 	imageExportMu.Lock()
 	defer imageExportMu.Unlock()
@@ -417,12 +370,9 @@ func resetImageExportProbe() {
 	imageExportKnown, imageExportOK = false, false
 }
 
-// Build-cache size caps. `docker builder prune` grew a size ceiling long before
-// it settled on a name: buildx ≤0.16 called it `--keep-storage`, 0.17+ split it
-// into `--max-used-space` (a ceiling on the cache) and `--min-free-space` (a
-// floor under the DISK). Docker 29 has dropped the old name entirely, so the
-// flag a host accepts has to be asked for rather than assumed — passing the
-// wrong one turns a routine sweep into a hard error.
+// Build-cache size caps. Docker 29 has dropped the old name entirely, so the flag a
+// host accepts has to be asked for rather than assumed — passing the wrong one turns a
+// routine sweep into a hard error.
 const (
 	// PruneCapModern accepts --max-used-space / --min-free-space.
 	PruneCapModern = "modern"
@@ -501,12 +451,8 @@ func RunningContainers(ctx context.Context) int {
 	return n
 }
 
-// TraefikRunning reports whether a Traefik reverse proxy container is running on
-// this host. Traefik is what reads the `traefik.*` labels Deplo's deploys emit
-// and routes traffic to them; without it a deployed app runs but is unreachable
-// on its domain. Detected by image name (traefik*) among running containers — the
-// installer names its instance `deplo-traefik`, but an operator's own Traefik
-// counts too (the routing works either way). Best-effort: false on any failure.
+// TraefikRunning reports whether a Traefik reverse proxy container is running on this
+// host.
 func TraefikRunning(ctx context.Context) bool {
 	res, err := Run(ctx, 5*time.Second, "ps", "--filter", "status=running",
 		"--format", "{{.Image}}\t{{.Names}}")
@@ -545,12 +491,8 @@ func State(ctx context.Context, name string) (bool, string) {
 	return true, strings.TrimSpace(res.Stdout)
 }
 
-// StackRunning reports whether ANY container of a Deplo stack is running, keyed
-// by the deplo.slug label rather than a container name. A multi-service compose
-// stack has compose-prefixed container names (deplo-<slug>-<service>-N), so the
-// name-based IsRunning would never see it; every service carries deplo.slug, so
-// the label query finds the whole stack. Mirrors the control plane's
-// waitStackRunning (build.ts). Best-effort: false on any failure.
+// StackRunning reports whether ANY container of a Deplo stack is running, keyed by the
+// deplo.slug label rather than a container name.
 func StackRunning(ctx context.Context, slug string) bool {
 	res, err := Run(ctx, 5*time.Second, "ps", "-q",
 		"--filter", "label=deplo.slug="+slug,

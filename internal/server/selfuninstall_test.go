@@ -30,11 +30,8 @@ func stubSystemctl(t *testing.T, err error) func() []string {
 	return func() []string { mu.Lock(); defer mu.Unlock(); return append([]string(nil), calls...) }
 }
 
-// captureExit swaps exitProcess for one that records the call instead of ending
-// the test runner. Restoring it on cleanup is only safe if the test WAITS for the
-// deferred exit first — otherwise the goroutine lands on the real os.Exit after
-// the test returned, which the runtime turns into a panic. waitExit below is that
-// wait, and every test that reaches the reply has to use it.
+// captureExit swaps exitProcess for one that records the call instead of ending the
+// test runner.
 func captureExit(t *testing.T) func() bool {
 	t.Helper()
 	var mu sync.Mutex

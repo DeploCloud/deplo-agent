@@ -16,13 +16,9 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/safepath"
 )
 
-// materializeGit clones a git source (PLAN Part B, D3): the agent clones the
-// repo ITSELF with a short-lived token the control plane minted, so a remote
-// build never ships the whole repo over the wire. It returns the build dir
-// (the clone root, or a sub-directory of it), the resolved commit sha, and a
-// cleanup func. The token NEVER rides the clone URL on argv (that would land in
-// the world-readable /proc/<pid>/cmdline); it is carried as an out-of-band
-// http.extraHeader, and is NEVER logged — the emitted command line is sanitised.
+// materializeGit clones a git source (PLAN Part B, D3): the agent clones the repo
+// ITSELF with a short-lived token the control plane minted, so a remote build never
+// ships the whole repo over the wire.
 func (s *Service) materializeGit(
 	ctx context.Context,
 	g *pb.GitSource,
@@ -91,33 +87,14 @@ func (s *Service) materializeGit(
 	return buildDir, commitSha, cleanup, nil
 }
 
-// volatileGitPaths are the entries a fresh `git clone` rewrites on every run even
-// when it lands on the exact same commit: the index records each worktree file's
-// mtime and inode, and the reflogs record WHEN the clone happened. Everything
-// else git writes — objects, refs, packed-refs, config, HEAD — is a pure function
-// of the commit.
+// volatileGitPaths are the entries a fresh `git clone` rewrites on every run even when
+// it lands on the exact same commit: the index records each worktree file's mtime and
+// inode, and the reflogs record WHEN the clone happened.
 var volatileGitPaths = []string{"index", "logs"}
 
-// stripVolatileGitMetadata deletes those entries from the clone at root.
-//
-// Why this is worth doing: the whole clone is the build context, and BuildKit
-// keys a COPY layer on the CONTENT of what it copies. Those two entries differ
-// between two clones of the SAME commit, so every deploy produced a fresh cache
-// key for the first `COPY . /app/.` — and with it re-ran, and re-exported, every
-// layer after it. On a real app here that meant a 1.88 GB node_modules layer
-// rebuilt and recompressed on a redeploy that changed nothing at all.
-//
-// Verified: two shallow clones of one commit are byte-identical once these are
-// gone. Removing them does NOT break git in the build — `rev-parse`, `log` and
-// `describe` all read refs and objects, which stay; only `status`/`diff` pay to
-// rebuild the index, which they do automatically.
-//
-// This is the property a platform that keeps a long-lived checkout and pulls
-// into it gets for free. Deplo clones fresh every deploy (it never leaves an app
-// tree lying on a host), so it has to establish the same determinism itself.
-//
-// Best-effort by design: a failure here costs a cache miss — the exact behaviour
-// we had before — never a failed deploy.
+// stripVolatileGitMetadata deletes those entries from the clone at root. Deplo clones
+// fresh every deploy (it never leaves an app tree lying on a host), so it has to
+// establish the same determinism itself.
 func stripVolatileGitMetadata(root string) {
 	gitDir := filepath.Join(root, ".git")
 	// A worktree/submodule checkout has `.git` as a FILE pointing elsewhere; there
@@ -131,14 +108,9 @@ func stripVolatileGitMetadata(root string) {
 	}
 }
 
-// authenticatedURL returns (cloneURL, display, authHeader). Credentials are
-// NEVER placed on the clone URL — a URL on argv lands in /proc/<pid>/cmdline,
-// which is world-readable, so the token would leak. Instead, when the URL
-// carries userinfo (a GitHub-App x-access-token URL from the control plane) or a
-// bare token is supplied, the credential is returned as an
-// "Authorization: Basic <b64>" header value the caller injects out-of-band (git
-// http.extraHeader via env), and the clone URL is stripped of any userinfo. The
-// display URL likewise never carries credentials.
+// authenticatedURL returns (cloneURL, display, authHeader). Credentials are NEVER
+// placed on the clone URL — a URL on argv lands in /proc/<pid>/cmdline, which is
+// world-readable, so the token would leak.
 func authenticatedURL(raw, token string) (cloneURL, display, authHeader string) {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -170,11 +142,8 @@ func basicAuthHeader(user, pass string) string {
 	return "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass))
 }
 
-// runGit runs a git command, streaming combined output line-by-line as info
-// logs (so the operator sees clone progress). Any credential is supplied via
-// authHeader (an http.extraHeader line) through git's env-based config, so it
-// never appears on argv. dir="" runs in the process cwd (used for the clone
-// itself, whose target is an arg).
+// runGit runs a git command, streaming combined output line-by-line as info logs (so
+// the operator sees clone progress).
 func runGit(ctx context.Context, e *emitter, dir, authHeader string, args ...string) error {
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()

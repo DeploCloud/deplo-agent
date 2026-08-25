@@ -11,17 +11,9 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
-// metricsstream_test.go covers the StreamMetrics handler over the real in-process
-// gRPC harness (dialLocal — actual TCP on 127.0.0.1:0, not bufconn), so the
+// metricsstream_test.go covers the StreamMetrics handler over the real in-process gRPC
+// harness (dialLocal — actual TCP on 127.0.0.1:0, not bufconn), so the
 // context-cancellation semantics under test are the ones gRPC really delivers.
-//
-// Every test runs with include_containers:false, which keeps the whole file
-// Docker-free: the container half is the roster's and the two backends' to prove,
-// and CI has no daemon. What is left is exactly what belongs to the handler —
-// cadence, clamping, and lifetime.
-//
-// Bounds are generous and no test asserts an exact tick count: CI runners are
-// shared and a ticker that slips a beat under load is not a bug.
 
 // The handler must actually emit on the cadence it was asked for. Two frames is
 // the minimum that proves a TICKER rather than a single reply.
@@ -68,10 +60,8 @@ func TestStreamMetrics_emitsSamplesAtInterval(t *testing.T) {
 	}
 }
 
-// A cadence is a HINT. A control plane asking for 1ms must not be able to pin the
-// host, and one asking for an hour must not be able to stall the charts. The
-// clamp is asserted through observable timing, since the handler's clamped value
-// is not on the wire.
+// A cadence is a HINT. A control plane asking for 1ms must not be able to pin the host,
+// and one asking for an hour must not be able to stall the charts.
 func TestStreamMetrics_clampsIntervalAtBothEnds(t *testing.T) {
 	t.Run("below the floor", func(t *testing.T) {
 		client, done := dialLocal(t)
@@ -115,10 +105,8 @@ func TestStreamMetrics_clampsIntervalAtBothEnds(t *testing.T) {
 	})
 }
 
-// THE LEAK TEST. A handler that ignores stream.Context() keeps its ticker — and,
-// with containers enabled, a `docker events` child process — alive for every
-// client that ever disconnected. Cancellation must propagate and the RPC must
-// terminate as Canceled rather than hanging or reporting a spurious error.
+// THE LEAK TEST. Cancellation must propagate and the RPC must terminate as Canceled
+// rather than hanging or reporting a spurious error.
 func TestStreamMetrics_clientCancelEndsTheStream(t *testing.T) {
 	client, done := dialLocal(t)
 	defer done()
@@ -155,14 +143,9 @@ func TestStreamMetrics_clientCancelEndsTheStream(t *testing.T) {
 	}
 }
 
-// buildSample must survive a panic by losing ONE FRAME, never the stream. A
-// handler that propagates the panic kills telemetry for the whole host, and the
-// control plane then reconnects straight back into it every few seconds.
-//
-// Driven directly rather than through gRPC because the panic has to be injected:
-// a nil *containerSampler with a non-nil interface would be the realistic
-// trigger, and here a deliberately nil host sampler stands in for any nil
-// dereference inside the tick.
+// buildSample must survive a panic by losing ONE FRAME, never the stream. A handler
+// that propagates the panic kills telemetry for the whole host, and the control plane
+// then reconnects straight back into it every few seconds.
 func TestBuildSample_panicCostsOneFrameNotTheStream(t *testing.T) {
 	defer func() {
 		if r := recover(); r != nil {

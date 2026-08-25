@@ -5,24 +5,13 @@ import (
 	"time"
 )
 
-// These tests read real /proc on the test host, so they assert SHAPE and
-// INVARIANTS rather than pinning values — CI runners are shared and noisy, and a
-// test that expects a particular CPU or byte count would fail for reasons that
-// have nothing to do with this package. The exception is the failure-path tests
-// below, which feed the sampler synthetic counters through its reader seam:
-// those CAN pin numbers, because nothing about them depends on the host.
+// These tests read real /proc on the test host, so they assert SHAPE and INVARIANTS
+// rather than pinning values — CI runners are shared and noisy, and a test that expects
+// a particular CPU or byte count would fail for reasons that have nothing to do with
+// this package.
 
-// The regression guard this whole file exists for: Sampler's reason to live is
-// that it does NOT buy its delta window with a sleep the way Collect does. If
-// someone "fixes" an edge case by reintroducing a sleep, the streaming loop
-// silently goes back to paying a second per tick — this test fails instead.
-//
-// It deliberately times a Sample() that CROSSES a usable window, so the rate
-// branch is the thing on the clock. Timing back-to-back calls instead would
-// return early at the minWindow guard and measure a branch nobody is worried
-// about — a sleep added after that guard would sail straight through. The
-// baseline assertion is what keeps it honest: it fails if the call under the
-// stopwatch ever silently degenerates back into the early return.
+// The regression guard this whole file exists for: Sampler's reason to live is that it
+// does NOT buy its delta window with a sleep the way Collect does.
 func TestSampler_Sample_doesNotSleep(t *testing.T) {
 	s := NewSampler("/")
 	primed := s.prevAt
@@ -78,12 +67,10 @@ func TestSampler_Sample_returnsSaneShape(t *testing.T) {
 	}
 }
 
-// A counter reset between samples must clamp to 0, not wrap negative, AND the
-// sampler must recover on the next window: adopting the post-reset counter as
-// the new baseline is what makes the tick after a bounce report a real rate
-// instead of a since-boot total. Forced deterministically by rewinding the
-// stored baseline above any plausible live counter — waiting for a real
-// interface to bounce is not a test.
+// A counter reset between samples must clamp to 0, not wrap negative, AND the sampler
+// must recover on the next window: adopting the post-reset counter as the new baseline
+// is what makes the tick after a bounce report a real rate instead of a since-boot
+// total.
 func TestSampler_counterResetClampsToZero(t *testing.T) {
 	s := NewSampler("/")
 	s.prevAt = time.Now().Add(-time.Second)
@@ -106,10 +93,9 @@ func TestSampler_counterResetClampsToZero(t *testing.T) {
 	}
 }
 
-// A window too short to measure must report rates of 0 and leave the baseline
-// ALONE, so the next call measures across the full span instead of being reset
-// back to zero-width forever. Forced with a future baseline rather than by
-// calling Sample twice quickly, which would depend on how loaded the runner is.
+// A window too short to measure must report rates of 0 and leave the baseline ALONE, so
+// the next call measures across the full span instead of being reset back to zero-width
+// forever.
 func TestSampler_degenerateWindowKeepsBaseline(t *testing.T) {
 	s := NewSampler("/")
 	baseline := time.Now().Add(time.Hour)
@@ -151,13 +137,11 @@ func TestSampler_goodWindowAdvancesBaseline(t *testing.T) {
 // minWindow with a known elapsed of ~1s, without the test sleeping for it.
 func windowed(s *Sampler) { s.prevAt = time.Now().Add(-time.Second) }
 
-// THE failure path: /proc/net/dev fails to read (fd exhaustion under load, a
-// restricted /proc in a container, a hostile ulimit). readNetCounters reports
-// that as 0/0, indistinguishable from a real reading, so a sampler that adopted
-// it as its baseline would diff the entire since-boot counter against 0 on the
-// very next tick — measured at 11.4 GB/s before this was fixed. Driven through
-// the reader seam because a healthy host never drops a /proc read on demand,
-// and the whole point is that this shipped with only the happy path covered.
+// THE failure path: /proc/net/dev fails to read (fd exhaustion under load, a restricted
+// /proc in a container, a hostile ulimit). readNetCounters reports that as 0/0,
+// indistinguishable from a real reading, so a sampler that adopted it as its baseline
+// would diff the entire since-boot counter against 0 on the very next tick — measured
+// at 11.4 GB/s before this was fixed.
 func TestSampler_failedNetReadDoesNotPoisonBaseline(t *testing.T) {
 	const sinceBoot = int64(1) << 40 // ~1.1 TB, an ordinary long-lived host
 	counter, ok := sinceBoot, true

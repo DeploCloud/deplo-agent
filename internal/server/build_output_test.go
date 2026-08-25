@@ -27,10 +27,9 @@ func TestImageOutputArgsUsesFastExport(t *testing.T) {
 	}
 }
 
-// `--output` takes a CSV, so a ref carrying a comma (or space, or quote) could
-// smuggle a second attribute — `push=true` being the one that would ship a
-// private image to a registry. Such a ref must never reach the CSV; `-t` then
-// rejects it as the malformed ref it is.
+// `--output` takes a CSV, so a ref carrying a comma (or space, or quote) could smuggle
+// a second attribute — `push=true` being the one that would ship a private image to a
+// registry.
 func TestImageOutputArgsRefusesCSVSmuggling(t *testing.T) {
 	for _, ref := range []string{
 		"deplo/x:tag,push=true",

@@ -5,10 +5,8 @@ import (
 	"testing"
 )
 
-// New derives the endpoint host + TLS flag from the scheme the control plane
-// sends: https:// (or no scheme) => TLS; http:// => plaintext (a local MinIO).
-// The SSRF guard is bypassed here (AllowPrivateEndpoint) so this case exercises
-// only that endpoint parsing accepted the input; an empty endpoint is rejected.
+// New derives the endpoint host + TLS flag from the scheme the control plane sends:
+// https:// (or no scheme) => TLS; http:// => plaintext (a local MinIO).
 func TestNew_endpointSchemeParsing(t *testing.T) {
 	cases := []struct {
 		endpoint string
@@ -47,10 +45,9 @@ func TestNew_pathStyle(t *testing.T) {
 	}
 }
 
-// TestNew_ssrfGuard proves the default (AllowPrivateEndpoint=false) rejects
-// endpoints that resolve to loopback / link-local (incl. the cloud metadata
-// address) / private / unspecified addresses, while a public IP passes. IP
-// literals keep this hermetic (no DNS lookups).
+// TestNew_ssrfGuard proves the default (AllowPrivateEndpoint=false) rejects endpoints
+// that resolve to loopback / link-local (incl. the cloud metadata address) / private /
+// unspecified addresses, while a public IP passes.
 func TestNew_ssrfGuard(t *testing.T) {
 	blocked := []string{
 		"http://127.0.0.1:9000",    // loopback v4

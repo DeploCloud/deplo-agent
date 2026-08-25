@@ -2,10 +2,10 @@ package server
 
 import "testing"
 
-// Every ref the image relay handles is the control plane's own
-// `deplo/<deploy key>:<deployment id[:12]>`, and a deploy key is a slug or a
-// preview's `<slug>__pr-<n>` - so the underscore and the double underscore have
-// to pass, or previews could never build on a build server.
+// Every ref the image relay handles is the control plane's own `deplo/<deploy
+// key>:<deployment id[:12]>`, and a deploy key is a slug or a preview's
+// `<slug>__pr-<n>` - so the underscore and the double underscore have to pass, or
+// previews could never build on a build server.
 func TestValidateImageRefAcceptsWhatTheControlPlaneMints(t *testing.T) {
 	for _, ref := range []string{
 		"deplo/hub:6f2c91ab4d3e",
@@ -19,9 +19,7 @@ func TestValidateImageRefAcceptsWhatTheControlPlaneMints(t *testing.T) {
 }
 
 // The ref reaches `docker save <ref>` / `docker image inspect <ref>` as an argv
-// element. There is no shell, so the danger is not injection but a ref that reads
-// as a FLAG, or one carrying path traversal on its way into a name. Both are
-// rejected here rather than relied on being impossible upstream.
+// element.
 func TestValidateImageRefRefusesFlagsAndTraversal(t *testing.T) {
 	for _, ref := range []string{
 		"",
@@ -34,10 +32,7 @@ func TestValidateImageRefRefusesFlagsAndTraversal(t *testing.T) {
 		"deplo/x:tag extra",    // a second argv token smuggled in
 		"deplo/x:tag\nrm",      // newline
 		"deplo/x:tag;rm -rf /", // shell metacharacters, harmless here but not a ref
-		// Outside our namespace. This RPC DELETES images and streams them out, so
-		// the prefix is the blast radius: without it a malformed request could
-		// `docker rmi` a base image out from under every app on the host, or
-		// export an image that was never ours to send.
+		// Outside our namespace.
 		"node:20",
 		"ubuntu:latest",
 		"registry.example.com/private/app:v1",
@@ -51,10 +46,8 @@ func TestValidateImageRefRefusesFlagsAndTraversal(t *testing.T) {
 	}
 }
 
-// The security decision of ImportImage: `docker load` restores whatever RepoTags
-// the ARCHIVE declares, not the tag the caller announced. Confirming the declared
-// tag exists afterwards proves nothing about what else arrived, so the tag list is
-// diffed either side of the load.
+// The security decision of ImportImage: `docker load` restores whatever RepoTags the
+// ARCHIVE declares, not the tag the caller announced.
 func TestUnexpectedTagsCatchesWhatTheArchiveSmuggled(t *testing.T) {
 	set := func(tags ...string) map[string]bool {
 		m := make(map[string]bool)
@@ -111,11 +104,10 @@ func TestUnexpectedTagsCatchesWhatTheArchiveSmuggled(t *testing.T) {
 	}
 }
 
-// Outside `deplo/` the agent stays out of it, and that is a deliberate trade, not
-// an oversight: `docker image ls` sees the whole host, so a `docker-image` source
-// pulling a base image on this box WHILE an import runs would otherwise be read as
-// smuggled and deleted - breaking a deploy that did nothing wrong. Base images are
-// re-pulled by any build that needs them; a neighbour's `deplo/` image is not.
+// Outside `deplo/` the agent stays out of it, and that is a deliberate trade, not an
+// oversight: `docker image ls` sees the whole host, so a `docker-image` source pulling
+// a base image on this box WHILE an import runs would otherwise be read as smuggled and
+// deleted - breaking a deploy that did nothing wrong.
 func TestUnexpectedTagsLeavesForeignNamespacesAlone(t *testing.T) {
 	set := func(tags ...string) map[string]bool {
 		m := make(map[string]bool)

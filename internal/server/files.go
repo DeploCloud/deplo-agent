@@ -22,11 +22,8 @@ import (
 )
 
 // files.go ports lib/data/project-files.ts to the agent: browse/edit a project's
-// <stack-dir>/files/<slug> tree, the on-disk backing for the "./" project-files
-// volume convention. The anti-traversal sandbox is RE-ENFORCED here (not trusted
-// from the control plane) because the path arrives off the wire — PLAN D9. The
-// root is derived agent-side from the slug; a root path is never taken off the
-// wire.
+// <stack-dir>/files/<slug> tree, the on-disk backing for the "./" project-files volume
+// convention.
 
 const (
 	// Files larger than this are never streamed to the editor as text.
@@ -35,24 +32,9 @@ const (
 	maxWriteBytes = 1024 * 1024 // 1 MiB
 )
 
-// slugPattern is the shape a Deplo DEPLOY KEY always has. It arrives off the
-// wire and is JOINED INTO the files root, so — exactly like the relative `path`
-// — it must be validated where the I/O runs and never trusted: a slug like
-// "../../etc" would otherwise escape <stack-dir>/files entirely. Defence in
-// depth behind the control plane's own sanitisation.
-//
-// The optional `__<suffix>` is what lets ONE app own more than one stack on a
-// host: the control plane names a pull request preview `<slug>__pr-<n>` and
-// every host-side artifact after it — container, stack file, files dir, named
-// volumes, Traefik router key. A production deploy's key is the bare app slug,
-// byte for byte, so nothing already running is affected. An app slug is
-// `[a-z0-9-]` and can never contain `__`, which is what makes the split
-// unambiguous in both directions.
-//
-// Widening this does NOT weaken the containment it exists for: both halves stay
-// `[a-z0-9-]`, so a dot, a slash and a leading dash remain unrepresentable and
-// "../../etc" is refused exactly as before. Underscore is an ordinary filename
-// character that means nothing to the path resolver.
+// slugPattern is the shape a Deplo DEPLOY KEY always has. An app slug is `[a-z0-9-]`
+// and can never contain `__`, which is what makes the split unambiguous in both
+// directions.
 var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*(__[a-z0-9][a-z0-9-]*)?$`)
 
 func validateSlug(slug string) error {
@@ -91,14 +73,6 @@ func normalizeRel(rel string) (string, error) {
 
 // resolveInside resolves a (user-supplied) relative path to an absolute host path
 // PROVABLY inside `root`, with symlinks resolved — mirroring resolveWithinRoot.
-//
-// Two layered guards, matching the TS: (1) normalizeRel already rejected any ".."
-// segment lexically, so the joined path can't escape by traversal; (2) the
-// realpath check defeats a PLANTED SYMLINK among the path's existing components.
-// Because the leaf may not exist yet (a new file/folder), we canonicalise the
-// nearest EXISTING ancestor with safepath.Inside (which returns root on an escape,
-// detected by comparing to the canonical root) and re-append the not-yet-created
-// tail lexically.
 func resolveInside(root, rel string) (string, error) {
 	norm, err := normalizeRel(rel)
 	if err != nil {
@@ -139,10 +113,9 @@ func resolveInside(root, rel string) (string, error) {
 	return base, nil
 }
 
-// resolveParentInside mirrors resolveParentInsideRoot: for a target that may not
-// exist yet (a new file/folder), the LEAF need not exist but its PARENT must
-// resolve inside the root. Returns the absolute (non-canonical) leaf path + the
-// normalised relative path.
+// resolveParentInside mirrors resolveParentInsideRoot: for a target that may not exist
+// yet (a new file/folder), the LEAF need not exist but its PARENT must resolve inside
+// the root.
 func resolveParentInside(root, rel string) (abs, norm string, err error) {
 	norm, err = normalizeRel(rel)
 	if err != nil {
@@ -263,9 +236,8 @@ func (s *Service) ReadFile(ctx context.Context, req *pb.ReadFileRequest) (*pb.Re
 		return &pb.ReadFileResponse{Path: rel, Size: st.Size(), Reason: "too-large"}, nil
 	}
 	// Read through a LimitReader (cap+1): the files dir is bind-mounted rw into the
-	// container, so a file just under the cap at Stat time can be grown before/
-	// during the read — os.ReadFile would then pull the whole (now-huge) file into
-	// the agent heap. The fstat'd fd + bounded read close that TOCTOU.
+	// container, so a file just under the cap at Stat time can be grown before/ during the
+	// read — os.ReadFile would then pull the whole (now-huge) file into the agent heap.
 	buf, err := io.ReadAll(io.LimitReader(f, maxViewBytes+1))
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "read %s: %v", rel, err)
@@ -309,13 +281,7 @@ func (s *Service) writeBytes(slug, p string, data []byte) (*pb.FileEntryResult, 
 	if err != nil {
 		return nil, err
 	}
-	// resolveParentInside canonicalises only the PARENT; the leaf is appended
-	// lexically. Since the files dir is bind-mounted read-write into the app
-	// container (user code), a leaf could be a symlink the user planted pointing
-	// OUTSIDE the sandbox — os.WriteFile would follow it and write anywhere on the
-	// shared host as root. Lstat (no-follow) gives a clear error for a symlink or
-	// an existing dir; O_NOFOLLOW on the open is the race-free enforcement (rejects
-	// a symlink swapped in after the Lstat).
+	// resolveParentInside canonicalises only the PARENT; the leaf is appended lexically.
 	if li, e := os.Lstat(abs); e == nil {
 		if li.Mode()&os.ModeSymlink != 0 {
 			return nil, status.Error(codes.InvalidArgument, "refusing to write through a symlink")

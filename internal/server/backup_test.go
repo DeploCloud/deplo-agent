@@ -17,12 +17,8 @@ import (
 
 // ---- dumpArgv / restoreArgv: the per-engine command + overwrite contract ----
 
-// The dump argv must name the right tool per engine, dump to stdout (no -f /
-// file), and carry the OVERWRITE-guaranteeing flags the restore relies on. The
-// password must NEVER appear anywhere on argv (which is world-readable on the
-// host via ps/proc): for env-capable engines it rides in the returned env (the
-// `-e NAME` flag only forwards it), and even the inline `NAME=value` form must
-// not appear on argv.
+// The dump argv must name the right tool per engine, dump to stdout (no -f / file), and
+// carry the OVERWRITE-guaranteeing flags the restore relies on.
 func TestDumpArgv_perEngine(t *testing.T) {
 	cases := []struct {
 		dbType     string
@@ -79,11 +75,9 @@ func TestDumpArgv_perEngine(t *testing.T) {
 					t.Errorf("%s password must ride in env %q, got env=%v", tc.dbType, wantEnv, env)
 				}
 			} else if tc.dbType == "mongodb" {
-				// DOCUMENTED RESIDUAL: mongodump/mongorestore have no password env
-				// var, so the password stays on argv as `-p <pw>`. This is a known,
-				// bounded exposure (host-local; masked out of any error string by
-				// dockercli.redactArgs). If mongo ever gains an env/stdin password
-				// path, move it off argv and into the env-capable branch above.
+				// DOCUMENTED RESIDUAL: mongodump/mongorestore have no password env var, so the
+				// password stays on argv as `-p <pw>`. This is a known, bounded exposure
+				// (host-local; masked out of any error string by dockercli.redactArgs).
 				if !containsToken(argv, "-p") || !containsToken(argv, "s3cret") {
 					t.Errorf("mongodb is expected to pass -p <pw> on argv (documented residual), got %v", argv)
 				}
@@ -154,11 +148,10 @@ func TestRestoreArgv_postgresIfExists(t *testing.T) {
 	}
 }
 
-// Redis restore must NOT go through the uniform stdin-pipe argv path: an RDB
-// dump can't be fed to a restore tool's stdin (redis-cli --pipe speaks RESP, not
-// RDB). restoreArgv signals this with errRedisRestoreSeparate so restoreDatabase
-// dispatches to the dedicated file-swap path. Guards against a regression that
-// re-introduces the broken `redis-cli --pipe` restore.
+// Redis restore must NOT go through the uniform stdin-pipe argv path: an RDB dump can't
+// be fed to a restore tool's stdin (redis-cli --pipe speaks RESP, not RDB). restoreArgv
+// signals this with errRedisRestoreSeparate so restoreDatabase dispatches to the
+// dedicated file-swap path.
 func TestRestoreArgv_redisUsesSeparatePath(t *testing.T) {
 	_, _, err := restoreArgv(&pb.DatabaseDescriptor{Container: "c", DbType: "redis", DbName: "d"})
 	if err != errRedisRestoreSeparate {
@@ -396,9 +389,7 @@ func TestBackup_missingKeyResultsInFailure(t *testing.T) {
 }
 
 // A store backup with no encryption key must FAIL rather than quietly writing a
-// plaintext artifact. Store artifacts are always encrypted, and "the recipient
-// was missing so we wrote it in the clear" is the one outcome that has to be
-// impossible: nothing downstream would ever notice.
+// plaintext artifact.
 func TestBackup_storeWithoutRecipientRefuses(t *testing.T) {
 	s := New(t.TempDir(), t.TempDir(), "/", t.TempDir())
 	st := &fakeBackupStream{}
@@ -525,10 +516,8 @@ func containsToken(argv []string, tok string) bool {
 	return false
 }
 
-// fakeBackupStream / fakeRestoreStream satisfy grpc.ServerStreamingServer[T] for
-// the validation tests: they capture every Send and hand back the terminal
-// result. Only Send + Context are exercised; the rest satisfy the embedded
-// ServerStream interface.
+// fakeBackupStream / fakeRestoreStream satisfy grpc.ServerStreamingServer[T] for the
+// validation tests: they capture every Send and hand back the terminal result.
 type fakeBackupStream struct {
 	events []*pb.BackupEvent
 }
@@ -581,10 +570,7 @@ func (f *fakeRestoreStream) lastResult(t *testing.T) *pb.RestoreResult {
 	return nil
 }
 
-// TestHasDotDot covers the VOLUME arm's traversal guard, the sibling of
-// extractToDir's. It matters more than it looks: a volume entry is re-emitted
-// into a helper container's `tar -x`, which honours "../" happily, and an
-// UPLOADED artifact is a file a person picked off their own disk.
+// TestHasDotDot covers the VOLUME arm's traversal guard, the sibling of extractToDir's.
 func TestHasDotDot(t *testing.T) {
 	for _, bad := range []string{
 		"..",
@@ -604,10 +590,9 @@ func TestHasDotDot(t *testing.T) {
 		"...",
 		"data/..file",
 		"",
-		// A backslash is an ORDINARY character in a POSIX filename, and both the
-		// agent and the helper container's `tar -x` are Linux. This is one weird
-		// file name, not a traversal, and treating it as one would refuse a
-		// legitimate restore.
+		// A backslash is an ORDINARY character in a POSIX filename, and both the agent and
+		// the helper container's `tar -x` are Linux. This is one weird file name, not a
+		// traversal, and treating it as one would refuse a legitimate restore.
 		`..\..\x`,
 	} {
 		if hasDotDot(ok) {

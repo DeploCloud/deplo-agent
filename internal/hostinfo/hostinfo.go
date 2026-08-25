@@ -1,17 +1,6 @@
-// Package hostinfo answers "what IS this host?" — the neofetch question, as
-// opposed to the gauge question hostmetrics answers.
-//
-// The split matters: hostmetrics samples what the box is DOING right now (cpu %,
-// memory used, net rates) and blocks ~1s doing it. This reads what the box IS
-// (which CPU, which distro, which kernel, what time it thinks it is), which is
-// static between reboots and costs a few file reads. Putting them in one package
-// would mean every "show me the hardware" click paid for a 1s CPU sample.
-//
-// Everything is best-effort and read from /proc and /etc — no exec, no Docker.
-// A field the agent cannot read comes back zero rather than failing the call: a
-// container image with no /etc/os-release must not cost the operator their CPU
-// model too. Docker's version and data root are stitched in by the caller, since
-// they come from the daemon rather than the filesystem.
+// Package hostinfo answers "what IS this host?" — the neofetch question, as opposed to
+// the gauge question hostmetrics answers. Putting them in one package would mean every
+// "show me the hardware" click paid for a 1s CPU sample.
 package hostinfo
 
 import (
@@ -76,13 +65,7 @@ func cpuInfo() (model string, physical, logical int) {
 	return parseCPUInfo(f)
 }
 
-// parseCPUInfo reads /proc/cpuinfo's key : value blocks, one per LOGICAL
-// processor. Physical cores are the distinct (physical id, core id) pairs — on a
-// 6-core/12-thread chip the file has 12 blocks but only 6 such pairs, and
-// reporting 12 as "cores" is the classic way a spec sheet lies. Kernels that omit
-// those keys (many ARM boards, some VMs) leave the set empty; we then report
-// physical == logical rather than 0, because "6 cores" beats "unknown" and the
-// two are genuinely equal on a machine with no SMT to report.
+// parseCPUInfo reads /proc/cpuinfo's key : value blocks, one per LOGICAL processor.
 func parseCPUInfo(r io.Reader) (model string, physical, logical int) {
 	seen := map[string]bool{}
 	var pkg, core string
@@ -190,14 +173,8 @@ func charsToString[T int8 | uint8](chars []T) string {
 
 // ---- Clock ----------------------------------------------------------------
 
-// clock reports the host's IANA zone, its current wall time, and its offset from
-// UTC in MINUTES — not hours, because Kathmandu is +345 and Kolkata +330.
-//
-// The offset is computed from the zone NAME via LoadLocation rather than from
-// time.Local: Go resolves time.Local once per process and caches it, so a
-// long-running agent that just changed the host's timezone would keep reporting
-// the old offset until it restarted. Reading the name and loading it fresh is
-// what makes SetTimezone's answer honest.
+// clock reports the host's IANA zone, its current wall time, and its offset from UTC in
+// MINUTES — not hours, because Kathmandu is +345 and Kolkata +330.
 func clock() (tz string, unixMs int64, offsetMinutes int32) {
 	now := time.Now()
 	tz = readTimezone()

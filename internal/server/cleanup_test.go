@@ -17,10 +17,8 @@ import (
 )
 
 // These tests drive DockerCleanup against a SYNTHETIC host: the read-only seam
-// (dockerQuery) answers from a fixture and the mutating seam (removeObject) records
-// the argv instead of running it. Nothing is ever deleted, no Docker daemon is
-// needed, and the safety properties — which objects the handler would touch, and
-// which verbs it can never emit — are asserted on the exact command line.
+// (dockerQuery) answers from a fixture and the mutating seam (removeObject) records the
+// argv instead of running it.
 
 // ---------------------------------------------------------------------------
 // The synthetic host
@@ -45,9 +43,7 @@ type hostFixture struct {
 	// build-cache enumeration times out while the prune itself would still work.
 	dfFails bool
 	// ceilingFrees is what the SIZE-capped builder prune (the one carrying
-	// --max-used-space / --keep-storage, no --filter) reports. Empty means the
-	// production default: the cache is already under the ceiling, so the call is a
-	// no-op. Set it to make the ceiling actually reclaim.
+	// --max-used-space / --keep-storage, no --filter) reports.
 	ceilingFrees string
 
 	mu       sync.Mutex
@@ -156,15 +152,12 @@ func (h *hostFixture) argv() []string {
 	return out
 }
 
-// newFixture builds a host with something to reclaim in every scope:
-//
-//   - a running container pinning image sha256:aaa… and volume `app-data`;
-//   - an exited container pinning image sha256:bbb… — the case a naive `container
-//     prune` / label test gets wrong;
-//   - build cache: one idle record, one in use;
-//   - two dangling volumes, only ONE of which carries the buildkitd.lock sentinel;
-//   - three deplo.managed images of slug "web": the newest (in use), an older idle
-//     one, and an oldest idle one.
+// newFixture builds a host with something to reclaim in every scope: - a running
+// container pinning image sha256:aaa… and volume `app-data`; - an exited container
+// pinning image sha256:bbb… — the case a naive `container prune` / label test gets
+// wrong; - build cache: one idle record, one in use; - two dangling volumes, only ONE
+// of which carries the buildkitd.lock sentinel; - three deplo.managed images of slug
+// "web": the newest (in use), an older idle one, and an oldest idle one.
 func newFixture(t *testing.T) *hostFixture {
 	t.Helper()
 	now := time.Now()
@@ -275,11 +268,10 @@ func TestDockerCleanup_buildCacheArgv(t *testing.T) {
 			if len(got) == 0 || got[0] != tc.want {
 				t.Fatalf("argv = %q, want the first command to be %q", got, tc.want)
 			}
-			// The size ceiling is a SEPARATE prune, never flags on the age-filtered
-			// one: `--filter until=` picks the candidate set first, so a ceiling
-			// bolted onto it reclaims nothing on the very host it exists for — one
-			// whose apps all deploy daily, leaving no cache idle long enough to
-			// qualify. Verified against a real daemon.
+			// The size ceiling is a SEPARATE prune, never flags on the age-filtered one:
+			// `--filter until=` picks the candidate set first, so a ceiling bolted onto it
+			// reclaims nothing on the very host it exists for — one whose apps all deploy daily,
+			// leaving no cache idle long enough to qualify.
 			for _, a := range got {
 				if strings.Contains(a, "--filter") &&
 					(strings.Contains(a, "--max-used-space") || strings.Contains(a, "--keep-storage")) {
@@ -389,8 +381,7 @@ func TestDockerCleanup_orphanBuildkit_skipsIndexedVolume(t *testing.T) {
 
 // The unused-app-images allow-list: delete BY ID, one rmi each, keeping the newest
 // keep_images_per_app of the slug and anything a container (running or exited) still
-// references. The id on the wire is the FULL sha256 the index is keyed by, never the
-// short id `image ls` printed.
+// references.
 func TestDockerCleanup_unusedAppImages_allowList(t *testing.T) {
 	h := newFixture(t)
 	h.install(t)
@@ -466,11 +457,10 @@ func TestDockerCleanup_unusedAppImages_skipsUnslugged(t *testing.T) {
 	}
 }
 
-// THE REGRESSION that saturated real hosts: an app redeployed many times a day
-// piles up superseded-but-tagged images, all younger than min_age_hours — and the
-// old age gate meant none was EVER a candidate, so every sweep "succeeded" with 0
-// bytes while the disk filled. App images are count-based now: min_age must not
-// shield them, and only the fixed one-hour deploy grace does.
+// THE REGRESSION that saturated real hosts: an app redeployed many times a day piles up
+// superseded-but-tagged images, all younger than min_age_hours — and the old age gate
+// meant none was EVER a candidate, so every sweep "succeeded" with 0 bytes while the
+// disk filled.
 func TestDockerCleanup_unusedAppImages_minAgeDoesNotShield(t *testing.T) {
 	h := newFixture(t)
 	now := time.Now()
@@ -531,9 +521,8 @@ func TestDockerCleanup_unusedAppImages_composeServicesRankApart(t *testing.T) {
 }
 
 // keep_per_slug is what carries an app's ROLLBACK DEPTH: two apps on one host keep
-// different numbers of generations, and an app the map does not name falls back to
-// the host-wide scalar. One number for the whole box could only starve the deep app
-// or make the shallow one pay for it.
+// different numbers of generations, and an app the map does not name falls back to the
+// host-wide scalar.
 func TestDockerCleanup_unusedAppImages_keepPerSlug(t *testing.T) {
 	h := newFixture(t)
 	now := time.Now()
@@ -602,11 +591,8 @@ func TestDockerCleanup_unusedAppImages_keepPerSlugFloorsAtOne(t *testing.T) {
 	}
 }
 
-// The prune scopes must PRUNE even when their own enumeration finds no candidate:
-// the enumeration is the preview, docker's own `until=` filter is the decision.
-// Gating on the pre-count is how a host kept 20GB docker itself called reclaimable
-// while every sweep reported success — our parse and docker's filter disagree, and
-// the short-circuit let ours win.
+// The prune scopes must PRUNE even when their own enumeration finds no candidate: the
+// enumeration is the preview, docker's own `until=` filter is the decision.
 func TestDockerCleanup_pruneScopes_runEvenWithZeroCandidates(t *testing.T) {
 	h := newFixture(t)
 	h.buildCacheJSON = `[]` // nothing our enumeration would pick
@@ -695,11 +681,10 @@ func TestDockerCleanup_pruneScopes_zeroTotalZeroesTheLine(t *testing.T) {
 	}
 }
 
-// items_removed for dangling images is a post-prune OBSERVATION, not our
-// pre-flight guess: an image whose timestamp we cannot parse is never a
-// CANDIDATE of ours (olderThan refuses it), but once docker's own filter removes
-// it the diff counts it anyway. The count follows what happened, not what we
-// predicted.
+// items_removed for dangling images is a post-prune OBSERVATION, not our pre-flight
+// guess: an image whose timestamp we cannot parse is never a CANDIDATE of ours
+// (olderThan refuses it), but once docker's own filter removes it the diff counts it
+// anyway.
 func TestDockerCleanup_danglingCount_isPostPruneDiff(t *testing.T) {
 	h := newFixture(t)
 	h.danglingImages = []string{"ddd1111", "xxx2222"}
@@ -840,12 +825,9 @@ func TestDockerCleanup_dryRun_removesNothing(t *testing.T) {
 // The regression fence
 // ---------------------------------------------------------------------------
 
-// THE FENCE. No argv this handler can emit — under any scope, any age filter, any
-// keep count — may be a container/volume/network/system prune. Each of those would
-// turn disk reclaim into data loss on a Deplo host: a stopped app is a live app
-// (StopStack is `compose stop`), its networks are not recreated by `compose start`,
-// and a dangling volume may hold a database's files. If a future scope makes this
-// test fail, the scope is wrong — not the test.
+// THE FENCE. Each of those would turn disk reclaim into data loss on a Deplo host: a
+// stopped app is a live app (StopStack is `compose stop`), its networks are not
+// recreated by `compose start`, and a dangling volume may hold a database's files.
 func TestDockerCleanup_neverEmitsAForbiddenPrune(t *testing.T) {
 	forbidden := []string{"system prune", "container prune", "volume prune", "network prune"}
 
@@ -1036,10 +1018,9 @@ func TestParseHumanSize(t *testing.T) {
 	}
 }
 
-// Docker's own printed total is authoritative INCLUDING ZERO: "Total reclaimed
-// space: 0B" means the prune freed nothing, and falling back to the pre-flight
-// estimate there is how the history once recorded a gigabyte that was never freed.
-// The estimate is only for output shapes with no recognisable total at all.
+// Docker's own printed total is authoritative INCLUDING ZERO: "Total reclaimed space:
+// 0B" means the prune freed nothing, and falling back to the pre-flight estimate there
+// is how the history once recorded a gigabyte that was never freed.
 func TestPickReclaimed_zeroTotalIsAuthoritative(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -1099,12 +1080,9 @@ func hasSubstringIn(haystack []string, needle string) bool {
 	return false
 }
 
-// The size ceiling is what stops "builds are fast" from becoming "the disk
-// filled up": the age filter drops nothing on a host whose apps all deploy
-// daily, because no cache is ever idle long enough to qualify. So the ceiling
-// must run as its OWN unfiltered prune — verified against a real daemon, where a
-// 28 GB ceiling on a 29.55 GB cache freed 0 B with `--filter until=24h` present
-// and 1.9 GB without it — and whatever it frees must land on the scope's line.
+// The size ceiling is what stops "builds are fast" from becoming "the disk filled up":
+// the age filter drops nothing on a host whose apps all deploy daily, because no cache
+// is ever idle long enough to qualify.
 func TestDockerCleanup_buildCacheCeiling_prunesWhatTheAgeFilterCannot(t *testing.T) {
 	if dockercli.BuildCachePruneCap(context.Background()) == dockercli.PruneCapNone {
 		t.Skip("this CLI takes no size cap")
@@ -1156,10 +1134,9 @@ func TestDockerCleanup_buildCacheCeiling_prunesWhatTheAgeFilterCannot(t *testing
 	}
 }
 
-// A compose stack builds one image per SERVICE under one deplo.slug, and the map
-// is keyed by slug alone - so an app's number has to apply to each of its services
-// independently, exactly as the scalar always did. Ranking them together would
-// keep one service's newest N and eat every other service's.
+// A compose stack builds one image per SERVICE under one deplo.slug, and the map is
+// keyed by slug alone - so an app's number has to apply to each of its services
+// independently, exactly as the scalar always did.
 func TestDockerCleanup_unusedAppImages_keepPerSlugAppliesPerService(t *testing.T) {
 	h := newFixture(t)
 	now := time.Now()

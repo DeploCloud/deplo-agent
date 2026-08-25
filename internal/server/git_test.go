@@ -71,11 +71,9 @@ func TestSanitizeGitLine_scrubsToken(t *testing.T) {
 	}
 }
 
-// Two clones of the SAME commit must leave a byte-identical build context, or
-// Docker's layer cache can never be hit: BuildKit keys a COPY on the content it
-// copies, and git rewrites its index and reflogs on every clone. This is the
-// difference between a redeploy that reuses a 1.88 GB dependency layer and one
-// that rebuilds and recompresses it.
+// Two clones of the SAME commit must leave a byte-identical build context, or Docker's
+// layer cache can never be hit: BuildKit keys a COPY on the content it copies, and git
+// rewrites its index and reflogs on every clone.
 func TestStripVolatileGitMetadataMakesClonesIdentical(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")

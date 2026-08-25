@@ -67,11 +67,8 @@ func TestSanitizeComposeArgsKeepsOrdinaryFlags(t *testing.T) {
 	}
 }
 
-// A compose stack runs from its OWN directory. Compose resolves every relative
-// path in the file - `env_file`, `secrets: file:`, `configs: file:`,
-// `build.context` - against the project directory, which otherwise defaults to
-// wherever the stack file sits: `<stackDir>`, shared by every stack on the host.
-// A `.env` there would be ONE file for all of them.
+// A compose stack runs from its OWN directory. A `.env` there would be ONE file for all
+// of them.
 func TestComposeUpArgsPassesProjectDirectory(t *testing.T) {
 	args := composeUpArgs(
 		"deplo-app",

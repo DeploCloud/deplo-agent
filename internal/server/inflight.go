@@ -9,13 +9,7 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
-// Retention budget for buffered LOG events. A single deploy can emit an
-// unbounded, attacker-controlled log stream (e.g. `RUN yes | head -c 2G`), and
-// this agent is a root-privileged process shared by every app on the host, so
-// the in-flight buffer MUST NOT grow with the build's output. Phase and terminal
-// result events are always retained (they are few and structural); only the LOG
-// events are capped — by total bytes AND by count — after which the oldest log
-// lines are coalesced into a single truncation note.
+// Retention budget for buffered LOG events.
 const (
 	maxRetainedLogBytes  = 4 << 20 // ~4 MiB of retained log text
 	maxRetainedLogEvents = 20000   // guards against a flood of tiny lines
@@ -24,21 +18,9 @@ const (
 	logEventOverhead = 64
 )
 
-// inflight tracks one deploy the agent is running (or recently finished), keyed
-// by its stable deploy id. It is the heart of reconnection/replay (PLAN D5,
-// Part-B half): the deploy runs in a background goroutine on a DEPLOY-scoped
-// context (not the gRPC stream's), so a control-plane disconnect does NOT kill
-// the build. Every event the deploy emits is stamped with a monotonic seq
-// (`lastSeq`) and appended to `events`; a connecting (Deploy) or reconnecting
-// (ReattachDeploy) stream replays retained events past a cursor, then receives
-// live events until the terminal result. Finished deploys are retained briefly
-// so a control plane that dropped right before the result can still fetch it.
-//
-// `events` is a BOUNDED buffer: log events are capped by byte + count budget and
-// the oldest are coalesced into a single truncation note, so a verbose or
-// malicious build cannot OOM the shared host. Because trimming breaks any
-// seq==index+1 relationship, seq is assigned from `lastSeq` (never the slice
-// length) and subscribers advance their cursor by seq, not by index.
+// inflight tracks one deploy the agent is running (or recently finished), keyed by its
+// stable deploy id. Finished deploys are retained briefly so a control plane that
+// dropped right before the result can still fetch it.
 type inflight struct {
 	startedAt time.Time
 
@@ -90,10 +72,8 @@ func (f *inflight) append(ev *pb.DeployEvent) *pb.DeployEvent {
 	return ev
 }
 
-// enforceLogBudget evicts the oldest retained LOG events until the byte and
-// count budgets are satisfied, coalescing what it drops into a single note.
-// Phase/result events are never touched, and the single most recent log line is
-// always kept (so `logCount` never falls below 1 here). Must hold f.mu.
+// enforceLogBudget evicts the oldest retained LOG events until the byte and count
+// budgets are satisfied, coalescing what it drops into a single note.
 func (f *inflight) enforceLogBudget() {
 	for (f.logBytes > maxRetainedLogBytes || f.logCount > maxRetainedLogEvents) && f.logCount > 1 {
 		idx := f.oldestEvictableLogIndex()
@@ -162,15 +142,10 @@ func logEventSize(ev *pb.DeployEvent) int {
 	return len(l.GetLevel()) + len(l.GetText()) + logEventOverhead
 }
 
-// subscribe replays buffered events with seq > fromSeq, then streams live events
-// until the deploy is done or ctx is cancelled (the SUBSCRIBER's context — i.e.
-// the gRPC stream; cancelling it detaches this reader without affecting the
-// deploy or other readers). send is the per-event sink; a send error detaches.
-//
-// The cursor advances by seq (not slice index): each pass drains every retained
-// event with seq > cursor, then advances the cursor to the highest seq seen so
-// far. Events that were trimmed from the buffer are simply skipped (their gap is
-// summarized by the truncation note), never re-scanned or blocked on.
+// subscribe replays buffered events with seq > fromSeq, then streams live events until
+// the deploy is done or ctx is cancelled (the SUBSCRIBER's context — i.e. the gRPC
+// stream; cancelling it detaches this reader without affecting the deploy or other
+// readers). send is the per-event sink; a send error detaches.
 func (f *inflight) subscribe(ctx context.Context, fromSeq uint64, send func(*pb.DeployEvent) error) error {
 	// A goroutine to wake the cond when the subscriber's context is cancelled,
 	// so a detached reader doesn't block forever on cond.Wait().
@@ -198,10 +173,8 @@ func (f *inflight) subscribe(ctx context.Context, fromSeq uint64, send func(*pb.
 			f.mu.Unlock()
 			return ctx.Err()
 		}
-		// Collect every retained event newer than the cursor, in order, then send
-		// outside the lock (send may block on the network). Advance the cursor to
-		// the latest seq: anything in (cursor, lastSeq] not retained was trimmed
-		// and must not be waited on again.
+		// Collect every retained event newer than the cursor, in order, then send outside the
+		// lock (send may block on the network).
 		var batch []*pb.DeployEvent
 		for _, ev := range f.events {
 			if ev.GetSeq() > cursor {

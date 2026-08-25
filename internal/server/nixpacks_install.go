@@ -14,22 +14,12 @@ import (
 	"time"
 )
 
-// nixpacksVersion is the nixpacks release the agent installs on first use. Pinned
-// (not "latest") so a build is reproducible and a surprise upstream release can't
-// change build output under a running agent. Bump deliberately.
-//
-// Held at >=1.41.0: nixpacks 1.21.0 silently ignored EVERY Node-version signal
-// (NIXPACKS_NODE_VERSION, .nvmrc, package.json engines) and always built on
-// nodejs_18 — so pinning a Node version did nothing. 1.41.0 honours all three.
+// nixpacksVersion is the nixpacks release the agent installs on first use.
 const nixpacksVersion = "1.41.0"
 
-// ensureNixpacks returns the path to a usable nixpacks binary, installing it
-// lazily on first use (the "lazy: fetch on first use" tooling policy). Resolution
-// order: a nixpacks already on PATH (operator-provided) → a previously-installed
-// copy under <dataBase>/tools → a fresh download of the pinned release for this
-// host's arch. The binary is cached so only the first heavy nixpacks build pays
-// the download. Mirrors the old builders.ts assumption that `nixpacks` is present,
-// but provisions it itself rather than erroring when it is absent.
+// ensureNixpacks returns the path to a usable nixpacks binary, installing it lazily on
+// first use (the "lazy: fetch on first use" tooling policy). The binary is cached so
+// only the first heavy nixpacks build pays the download.
 func (s *Service) ensureNixpacks(ctx context.Context, e *emitter) (string, error) {
 	// 1. An operator-installed nixpacks on PATH wins (lets a host pin its own).
 	if p, err := exec.LookPath("nixpacks"); err == nil {
@@ -37,10 +27,10 @@ func (s *Service) ensureNixpacks(ctx context.Context, e *emitter) (string, error
 	}
 
 	toolsDir := filepath.Join(s.dataBase, "tools")
-	// Version-scope the cached binary so bumping nixpacksVersion re-downloads the
-	// new release instead of silently reusing a stale cached copy (an unversioned
-	// path would pin every server to whatever it first downloaded — the exact trap
-	// that kept broken 1.21.0 around after a bump).
+	// Version-scope the cached binary so bumping nixpacksVersion re-downloads the new
+	// release instead of silently reusing a stale cached copy (an unversioned path would
+	// pin every server to whatever it first downloaded — the exact trap that kept broken
+	// 1.21.0 around after a bump).
 	dest := filepath.Join(toolsDir, "nixpacks-"+nixpacksVersion)
 
 	// 2. A previously-installed copy of THIS version under <dataBase>/tools.
@@ -70,8 +60,7 @@ func usableBinary(path string) bool {
 
 // nixpacksDownloadURL builds the GitHub release asset URL for this host's OS/arch.
 // nixpacks publishes per-target gzipped tarballs (e.g.
-// nixpacks-v1.21.0-x86_64-unknown-linux-musl.tar.gz). Only Linux is supported (the
-// agent runs on Linux servers).
+// nixpacks-v1.21.0-x86_64-unknown-linux-musl.tar.gz).
 func nixpacksDownloadURL() (string, error) {
 	if runtime.GOOS != "linux" {
 		return "", fmt.Errorf("nixpacks auto-install supports linux only (host is %s)", runtime.GOOS)
@@ -91,16 +80,7 @@ func nixpacksDownloadURL() (string, error) {
 }
 
 // installTarBinary fetches the gzipped tarball at url and extracts the single
-// executable named `binary` to dest (0755), atomically. Used for both build
-// tools the agent provisions itself (nixpacks, railpack), which publish exactly
-// this asset shape.
-//
-// The temp file gets a UNIQUE name rather than dest+".tmp": two builds of
-// different projects can reach for the same tool on the same host at the same
-// instant, and a shared temp path would have them writing one file's bytes over
-// the other's before either rename. With a unique temp each writes its own copy
-// and the rename — atomic on the same filesystem — makes whichever finishes last
-// the one that stands. Both are the same release, so either wins correctly.
+// executable named `binary` to dest (0755), atomically.
 func installTarBinary(ctx context.Context, url, binary, dest string) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return fmt.Errorf("create tools dir: %w", err)

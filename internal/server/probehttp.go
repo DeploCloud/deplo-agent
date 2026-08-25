@@ -19,29 +19,11 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// probehttp.go answers ProbeHttp: ONE bounded HTTP GET to a container of an
-// app's own stack, from the host, over Docker's network.
-//
-// It exists because a compose app's icon is not a file. Such an app runs
-// prebuilt images — its favicon lives inside the image and is only ever SERVED,
-// so the only honest way to read it is to ask the running app, exactly as a
-// browser does. Everything ABOVE that read (which path to ask for, how to rank
-// what comes back) stays in the control plane; this file is the host-coupled
-// half and nothing more.
-//
-// The security property is the address: the CALLER never supplies one. It names
-// an app (a `deplo.project` label it must own) and a compose service; the agent
-// resolves that to a container and takes the IP from Docker itself. There is no
-// DNS lookup, no scheme, no caller-chosen host — so this cannot be turned into a
-// general outbound fetch from the host, and it can never reach a container
-// belonging to another app. Redirects are reported, never followed, for the same
-// reason: following one is a decision about where to go, which belongs to the
-// control plane.
+// probehttp.go answers ProbeHttp: ONE bounded HTTP GET to a container of an app's own
+// stack, from the host, over Docker's network. It exists because a compose app's icon
+// is not a file. The security property is the address: the CALLER never supplies one.
 
-// The network Deplo attaches routed services to. A container is reachable on
-// every network it joins, but this one is preferred: it is the network Traefik
-// itself reaches the app on, so it is the address whose behaviour matches what
-// the outside world sees.
+// The network Deplo attaches routed services to.
 const deploNetwork = "deplo"
 
 const (
@@ -103,11 +85,7 @@ func (s *Service) ProbeHttp(ctx context.Context, req *pb.ProbeHttpRequest) (*pb.
 	return probeOnce(ctx, net.JoinHostPort(ip, strconv.Itoa(int(port))), path, host, int(req.GetMaxBytes()))
 }
 
-// probeOnce is the request itself, against an address the caller has already
-// resolved. Split from the handler so the wire behaviour that actually matters —
-// the Host header override, the body cap, not following a redirect — is testable
-// without a Docker daemon. It owns the cap (0 => the default, over the ceiling =>
-// the ceiling), so there is exactly one place a body bound can be got wrong.
+// probeOnce is the request itself, against an address the caller has already resolved.
 func probeOnce(ctx context.Context, addr, path, host string, maxBytes int) (*pb.ProbeHttpResponse, error) {
 	if maxBytes <= 0 {
 		maxBytes = probeDefaultMaxBytes
@@ -173,13 +151,8 @@ func validateProbePath(path string) error {
 	return nil
 }
 
-// resolveStackContainerIP finds the container serving `service` in the app's
-// stack and returns the IP to talk to it on.
-//
-// Only RUNNING containers qualify: a stopped one has no address, and reporting
-// "no icon" is the truthful answer for an app that is not up. An empty service
-// takes the app's single running container — the single-image shape, where the
-// stack has exactly one and naming it would be ceremony.
+// resolveStackContainerIP finds the container serving `service` in the app's stack and
+// returns the IP to talk to it on.
 func resolveStackContainerIP(ctx context.Context, projectID, slug, service string) (string, error) {
 	rows, err := listProjectContainers(ctx, projectID)
 	if err != nil {
@@ -209,10 +182,10 @@ func resolveStackContainerIP(ctx context.Context, projectID, slug, service strin
 	return ip, nil
 }
 
-// containerIP reads a container's address from Docker, preferring the `deplo`
-// network (the one Traefik reaches it on) and falling back to any other network
-// it joined — a container that is only on its own compose network is still
-// perfectly reachable from the host.
+// containerIP reads a container's address from Docker, preferring the `deplo` network
+// (the one Traefik reaches it on) and falling back to any other network it joined — a
+// container that is only on its own compose network is still perfectly reachable from
+// the host.
 func containerIP(ctx context.Context, container string) (string, error) {
 	res, err := dockercli.Run(ctx, 10*time.Second,
 		"inspect", "-f", "{{json .NetworkSettings.Networks}}", container)
@@ -229,11 +202,8 @@ func containerIP(ctx context.Context, container string) (string, error) {
 	return ip, nil
 }
 
-// pickContainerIP parses `docker inspect`'s network map and picks the address to
-// use. Split out from the docker call so the preference order is directly
-// testable. Networks are a map, so iteration order is random — the fallback picks
-// the alphabetically first name rather than whichever the runtime handed over, so
-// the same container always yields the same address.
+// pickContainerIP parses `docker inspect`'s network map and picks the address to use.
+// Split out from the docker call so the preference order is directly testable.
 func pickContainerIP(stdout string) (string, error) {
 	var nets map[string]struct {
 		IPAddress         string `json:"IPAddress"`

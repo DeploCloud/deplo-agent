@@ -7,10 +7,7 @@ import (
 	"testing"
 )
 
-// The parsers are the whole risk surface of this package: everything else is a
-// syscall. They run against fixture text rather than the runner's own /proc, so
-// the expectations are stable on any machine (and the SMT case is testable at
-// all, which it would not be on a single-core CI box).
+// The parsers are the whole risk surface of this package: everything else is a syscall.
 
 func TestParseCPUInfo(t *testing.T) {
 	tests := []struct {

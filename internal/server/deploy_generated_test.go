@@ -10,11 +10,7 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
-// The generated-Dockerfile path (legacy/auto: no Dockerfile in the repo). The
-// control plane sends BUILD_KIND_DOCKERFILE with generated=true + the rendered
-// Dockerfile body; the context tar has NO Dockerfile, and the agent must write
-// the provided body into the context before building. We assert that side
-// effect (the build itself needs a daemon and is covered by the repo-root e2e).
+// The generated-Dockerfile path (legacy/auto: no Dockerfile in the repo).
 func TestBuildImage_generatedWritesDockerfileIntoContext(t *testing.T) {
 	s := New(t.TempDir(), t.TempDir(), "/", "")
 

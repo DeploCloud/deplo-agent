@@ -10,17 +10,9 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// End-to-end (real docker): what "Rebuild container" is worth.
-//
-// `docker compose up -d` compares compose's own config hash and does NOTHING
-// when it matches. So for the two source kinds whose rendered stack does not
-// move between deploys — a prebuilt image, and a compose stack of prebuilt
-// images — a redeploy left the SAME container running while the deployment went
-// green. This test pins both halves: unchanged deploy keeps the container (that
-// is the desirable default: an unchanged reroute must not restart anything), and
-// force_recreate replaces it.
-//
-// Run with: go test ./internal/server/ -run E2E_ForceRecreate -v  (needs docker).
+// End-to-end (real docker): what "Rebuild container" is worth. This test pins both
+// halves: unchanged deploy keeps the container (that is the desirable default: an
+// unchanged reroute must not restart anything), and force_recreate replaces it.
 func TestE2E_ForceRecreateReplacesAnUnchangedContainer(t *testing.T) {
 	ctx := context.Background()
 	if !dockercli.Available(ctx) {

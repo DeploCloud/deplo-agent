@@ -162,13 +162,9 @@ func assertFile(t *testing.T, path, want string) {
 	}
 }
 
-// TestImportFiles_headerOnlyDoesNotWipe: a stream that announces itself and then
-// dies without sending a byte must leave the destination exactly as it was.
-//
-// The wipe used to happen on the header alone, so a relay that never delivered
-// anything - a source that failed to read, a connection that dropped between the
-// two calls - destroyed the destination on its way past. Emptying is now earned by
-// the first real byte, the way ImportVolume already earned it.
+// TestImportFiles_headerOnlyDoesNotWipe: a stream that announces itself and then dies
+// without sending a byte must leave the destination exactly as it was. Emptying is now
+// earned by the first real byte, the way ImportVolume already earned it.
 func TestImportFiles_headerOnlyDoesNotWipe(t *testing.T) {
 	svc := New(t.TempDir(), t.TempDir(), "/", "")
 	slug := "keep-me"
@@ -186,11 +182,6 @@ func TestImportFiles_headerOnlyDoesNotWipe(t *testing.T) {
 
 // TestImportFiles_truncatedStreamLeavesNothing: a copy that dies MID-STREAM leaves
 // nothing behind, not half a config file.
-//
-// This is the case the deferred wipe alone does not cover: by the time the stream
-// breaks, the destination has already been emptied and partly rewritten. Half a
-// config file is worse than none - whatever mounts it reads it clean and starts
-// with a truncated configuration - so the failure takes its own leftovers with it.
 func TestImportFiles_truncatedStreamLeavesNothing(t *testing.T) {
 	svc := New(t.TempDir(), t.TempDir(), "/", "")
 	slug := "half-written"

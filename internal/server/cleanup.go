@@ -24,28 +24,9 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// cleanup.go implements DockerCleanup — reclaiming Docker disk on the host. It is
-// the most dangerous surface the agent has, so it is built as a strict ALLOW-LIST:
-// nothing is removed unless the agent can PROVE nothing references it.
-//
-// THE PROOF IS NEVER A LABEL. A real app container can carry no `deplo.*` label at
-// all (`deplo-myapp-web-1`, a compose-stack app, carries only the compose labels),
-// so "keep what is labelled ours" would delete other people's objects and "delete
-// what is labelled ours" would miss ours. The proof is a container-reference
-// REVERSE INDEX over `docker ps -aq` — RUNNING AND EXITED — plus, for buildkit
-// volumes, an on-disk sentinel file. If the index cannot be built, the scopes that
-// rest on it are SKIPPED, never guessed at.
-//
-// And that is why `docker system prune`, `container prune`, `volume prune` and
-// `network prune` appear nowhere in this file and must never be added. On a Deplo
-// host a STOPPED app is a LIVE app: StopStack is `docker compose stop` and
-// StartStack is `docker compose start`, so the container, its volumes and its
-// networks all have to survive a stop. `container prune` makes every stopped app
-// permanently unstartable; `volume prune` deletes dangling anonymous volumes that
-// hold live database files; `network prune` deletes the networks of stopped stacks
-// that `compose start` will not recreate. Each of those verbs turns a disk-reclaim
-// button into a data-loss button. cleanup_test.go fences the argv this file can
-// emit against exactly those four.
+// cleanup.go implements DockerCleanup — reclaiming Docker disk on the host. THE PROOF
+// IS NEVER A LABEL. If the index cannot be built, the scopes that rest on it are
+// SKIPPED, never guessed at.
 
 const (
 	// The whole sweep's budget. Generous: a full host can hold tens of GB across
@@ -68,39 +49,21 @@ const (
 	cleanupMaxItems = 200
 
 	// The file moby/buildkit's daemon holds open in its state dir (/var/lib/buildkit,
-	// which the image declares as a VOLUME). Its presence at a volume's mountpoint is
-	// the ONLY thing that proves a dangling volume is an orphaned buildkit store and
-	// not, say, a database's data volume — which is exactly what several dangling
-	// volumes on a real host turn out to be.
+	// which the image declares as a VOLUME).
 	buildkitSentinel = "buildkitd.lock"
 
-	// How fresh an app image must be to be untouchable by UNUSED_APP_IMAGES,
-	// REGARDLESS of the policy's min_age_hours. App-image retention is count-based
-	// (keep_images_per_app), NOT age-based: gating it on min_age let a host that
-	// redeploys many times a day fill its disk with superseded-but-tagged images
-	// none of which ever aged into eligibility (min_age defaults to a day and can be
-	// set to a year). The grace window only shields a build racing its own deploy —
-	// an image whose container has not started yet — and one hour is far beyond any
-	// build→run gap while being far below any real redeploy cadence worth keeping.
+	// How fresh an app image must be to be untouchable by UNUSED_APP_IMAGES, REGARDLESS of
+	// the policy's min_age_hours.
 	appImageDeployGrace = time.Hour
 
-	// How recently a files/<slug> directory may have changed and still be spared.
-	// The live-slug list is a snapshot taken before the sweep dialled this host, so
-	// a stack created in between is missing from it while its directory is already
-	// on disk. An hour is far longer than that window and far shorter than the age
-	// of anything genuinely abandoned.
+	// How recently a files/<slug> directory may have changed and still be spared. The
+	// live-slug list is a snapshot taken before the sweep dialled this host, so a stack
+	// created in between is missing from it while its directory is already on disk.
 	leftoverFilesGrace = time.Hour
 )
 
-// removeObject is the ONE host-mutating docker call in this file: every prune and
-// every `rm` goes through it, and nothing else in here can delete anything. It is
-// a package-level var so cleanup_test.go can swap it, assert the EXACT argv the
-// handler would run, and delete nothing — and so the regression fence can prove no
-// argv this file emits is ever a container/volume/network/system prune. Same seam
-// discipline as selfupdate.go's `downloadFile` / `reexec`.
-//
-// The per-call budget rides in on ctx (each caller wraps it with the scope's
-// timeout); cleanupTimeout is the ceiling dockercli enforces if one ever forgot.
+// removeObject is the ONE host-mutating docker call in this file: every prune and every
+// `rm` goes through it, and nothing else in here can delete anything.
 var removeObject = func(ctx context.Context, args ...string) (dockercli.Result, error) {
 	return dockercli.Run(ctx, cleanupTimeout, args...)
 }
@@ -146,10 +109,8 @@ type cleanupParams struct {
 	filesCutoff time.Time
 }
 
-// keepImagesFor is how many of an app's newest images survive: its own entry when
-// the control plane sent one, the host-wide scalar otherwise. Both are already
-// floored at 1 by the normalisation in DockerCleanup, so this can only answer a
-// number that keeps at least the current tag.
+// keepImagesFor is how many of an app's newest images survive: its own entry when the
+// control plane sent one, the host-wide scalar otherwise.
 func (p cleanupParams) keepImagesFor(slug string) int {
 	if n, ok := p.keepPerSlug[slug]; ok {
 		return n
@@ -157,16 +118,8 @@ func (p cleanupParams) keepImagesFor(slug string) int {
 	return p.keepImagesPerApp
 }
 
-// DockerCleanup reclaims Docker disk on this host within the allow-listed scopes
-// (see the RPC contract in proto/agent.proto and the file comment above).
-//
-// Per-scope failures are non-fatal — they land in CleanupScopeResult.error and the
-// sweep carries on, because a host with a broken image store should still get its
-// build cache back. A gRPC error is reserved for the two things that are not a
-// result at all: Docker being unreachable (the sweep cannot start — UNAVAILABLE,
-// the same split labelcheck.go draws) and a scope this agent does not define (a
-// contract violation — INVALID_ARGUMENT; a control plane must never be told "done"
-// about a scope we silently ignored).
+// DockerCleanup reclaims Docker disk on this host within the allow-listed scopes (see
+// the RPC contract in proto/agent.proto and the file comment above).
 func (s *Service) DockerCleanup(ctx context.Context, req *pb.DockerCleanupRequest) (*pb.DockerCleanupResponse, error) {
 	if !dockerAvailable(ctx) {
 		return nil, status.Error(codes.Unavailable, "docker is not reachable on this host")
@@ -306,13 +259,9 @@ type containerIndex struct {
 	volumes map[string]bool // volume names, from each container's volume mounts
 }
 
-// buildContainerIndex reads the whole host in two calls. `docker ps -aq` is what
-// makes it safe: -a includes EXITED containers, and a stopped Deplo app is a live
-// app whose image and volumes must survive.
-//
-// A PARTIAL index is a DANGEROUS index — a row we failed to read makes a live
-// object look orphaned — so any failure is an error, and the caller skips the
-// scopes that depend on it rather than deleting on incomplete evidence.
+// buildContainerIndex reads the whole host in two calls. `docker ps -aq` is what makes
+// it safe: -a includes EXITED containers, and a stopped Deplo app is a live app whose
+// image and volumes must survive.
 func buildContainerIndex(ctx context.Context) (*containerIndex, error) {
 	res, err := dockerQuery(ctx, cleanupQueryTimeout, "ps", "-aq")
 	if err != nil {
@@ -369,16 +318,7 @@ type buildCacheRecord struct {
 	LastUsedAt string `json:"LastUsedAt"`
 }
 
-// cleanBuildCache reclaims the daemon's own BuildKit cache. This is the one scope
-// that touches no Deplo object whatsoever — a cache record is pure derived data,
-// and the worst a wrong answer here can do is make the next build slower.
-//
-// It enumerates first because dry_run has to report what a prune WOULD take and
-// docker offers no --dry-run of its own — but on a REAL run the enumeration is
-// only the preview, never the gate: the prune always runs and docker's own
-// `until=` filter decides. Gating the prune on our own candidate count is exactly
-// what let a loaded host keep its cache forever (its `system df -v` timed out, or
-// our timestamp parse disagreed with docker's), reported as a clean success.
+// cleanBuildCache reclaims the daemon's own BuildKit cache.
 func cleanBuildCache(ctx context.Context, p cleanupParams) *pb.CleanupScopeResult {
 	r := &pb.CleanupScopeResult{Scope: pb.CleanupScope_CLEANUP_SCOPE_BUILD_CACHE}
 
@@ -486,21 +426,8 @@ func cleanBuildCache(ctx context.Context, p cleanupParams) *pb.CleanupScopeResul
 }
 
 // enforceBuildCacheCeiling caps the total size of the BuildKit cache, on top of
-// whatever the age filter just took (build_cache_cap.go explains why an age
-// filter alone is not a bound).
-//
-// It has to be its OWN prune call. `--filter until=` selects the candidate set
-// FIRST and the size ceiling only ever applies within it, so bolting the flags
-// onto the age-filtered command does nothing on the very host the ceiling exists
-// for — every app deploying daily, so nothing is ever idle long enough to
-// qualify. Measured against a real daemon: a 28 GB ceiling on a 29.55 GB cache
-// freed 0 B with `--filter until=24h` present, and 1.9 GB with the identical
-// ceiling and no filter.
-//
-// Whatever it frees is ADDED to the scope's line: the bytes come from docker's
-// own printed total, so the history stays an observation rather than a claim. A
-// failure here is not the scope's failure — the age prune already succeeded and
-// its bytes are real — so it is logged and dropped.
+// whatever the age filter just took (build_cache_cap.go explains why an age filter
+// alone is not a bound).
 func enforceBuildCacheCeiling(ctx context.Context, p cleanupParams, r *pb.CleanupScopeResult) {
 	// A dry run must not mutate, and the `--all` branch already took everything.
 	if p.dryRun || p.minAgeHours <= 0 {
@@ -536,19 +463,9 @@ func enforceBuildCacheCeiling(ctx context.Context, p cleanupParams, r *pb.Cleanu
 // Scope: dangling images — `docker image prune` (NEVER -a)
 // ---------------------------------------------------------------------------
 
-// cleanDanglingImages removes untagged layers. Safe because a container — running
-// or STOPPED — still pins its image, so docker will not prune an image any app
-// could come back to.
-//
-// It never passes `-a`/`--all`. `image prune -a` removes every image no container
-// currently references, which on a Deplo host includes an app image the user has
-// never started and every base image kept for an offline rebuild — and nothing in
-// Deplo pushes to a registry, so a wrongly-removed app image is recoverable only by
-// a full rebuild from source. Removing app images is a separate, opt-in, allow-listed
-// scope (UNUSED_APP_IMAGES) that decides image by image, never `-a`.
-//
-// Like the build-cache scope, the enumeration is the dry run's answer and the wet
-// run's preview — never the gate. The prune always runs; docker's filter decides.
+// cleanDanglingImages removes untagged layers. Safe because a container — running or
+// STOPPED — still pins its image, so docker will not prune an image any app could come
+// back to. It never passes `-a`/`--all`.
 func cleanDanglingImages(ctx context.Context, p cleanupParams) *pb.CleanupScopeResult {
 	r := &pb.CleanupScopeResult{Scope: pb.CleanupScope_CLEANUP_SCOPE_DANGLING_IMAGES}
 
@@ -621,10 +538,7 @@ func cleanDanglingImages(ctx context.Context, p cleanupParams) *pb.CleanupScopeR
 		r.ReclaimedBytes = estimate
 	}
 	// items_removed as an OBSERVATION: re-list the dangling set and count what
-	// disappeared. Docker's filter — not our timestamp parse — decided what went, so
-	// the diff is the honest count (an image whose age we couldn't read still gets
-	// counted once docker removes it). Best effort: if either list failed, the
-	// enumeration's candidate count stands.
+	// disappeared.
 	if rawBefore >= 0 {
 		if res, err := dockerQuery(ctx, cleanupQueryTimeout, "image", "ls", "--filter", "dangling=true", "--quiet"); err == nil && res.Code == 0 {
 			removed := rawBefore - len(uniqueLines(res.Stdout))
@@ -644,22 +558,10 @@ func cleanDanglingImages(ctx context.Context, p cleanupParams) *pb.CleanupScopeR
 // Scope: orphaned buildkit caches — dangling volumes carrying the sentinel
 // ---------------------------------------------------------------------------
 
-// cleanOrphanBuildkitCache removes the anonymous volumes the railpack builder
-// leaks: moby/buildkit declares VOLUME /var/lib/buildkit, so every buildkitd the
-// build path starts gets an anonymous volume, and (before the `docker rm -f -v` fix
-// in build_methods.go) it was orphaned when the container was removed. On a busy
-// host these are the single biggest reclaim — gigabytes each.
-//
-// TWO independent proofs are required before a volume is touched, because a
-// dangling volume on a Deplo host may well hold a live database's data files:
-//
-//  1. no container — running or EXITED — references it (the reverse index, checked
-//     ourselves rather than trusted from docker's `dangling=true` filter), and
-//  2. `<mountpoint>/buildkitd.lock` EXISTS.
-//
-// The sentinel is the load-bearing half. It is what a buildkit state dir has and a
-// database volume does not, and it is checked on the host's filesystem, which is
-// the agent's job and no one else's (ADR-0006). Name and label are irrelevant.
+// cleanOrphanBuildkitCache removes the anonymous volumes the railpack builder leaks:
+// moby/buildkit declares VOLUME /var/lib/buildkit, so every buildkitd the build path
+// starts gets an anonymous volume, and (before the `docker rm -f -v` fix in
+// build_methods.go) it was orphaned when the container was removed.
 func cleanOrphanBuildkitCache(ctx context.Context, p cleanupParams, idx *containerIndex) *pb.CleanupScopeResult {
 	r := &pb.CleanupScopeResult{Scope: pb.CleanupScope_CLEANUP_SCOPE_ORPHAN_BUILDKIT_CACHE}
 
@@ -723,32 +625,9 @@ func cleanOrphanBuildkitCache(ctx context.Context, p cleanupParams, idx *contain
 // Scope: unused app images — an explicit `docker rmi` per image, never a prune
 // ---------------------------------------------------------------------------
 
-// cleanUnusedAppImages removes old `deplo/<slug>:<deployment>` images. This is the
-// only scope that can destroy something a rebuild is the sole recovery for (Deplo
-// pushes to no registry), so every image must clear FOUR independent tests:
-//
-//	a. no container — running or EXITED — references it (the reverse index);
-//	b. it carries deplo.managed=true (the `--filter label=` below);
-//	c. it is older than the fixed appImageDeployGrace — NOT min_age_hours. App
-//	   retention is count-based; the policy age floor is a cache knob. Gating on
-//	   min_age let a host that redeploys many times a day pile up superseded
-//	   1-2GB images that never aged into eligibility and saturate its disk while
-//	   every sweep reported success/0.
-//	d. it is not among the newest N images of its group - the deplo.slug,
-//	   subdivided by the deplo.service image label when present (a compose stack
-//	   builds one image per service under the same slug; ranking them together
-//	   would keep one service's image and eat the rest's). N is the app's own
-//	   keep_per_slug entry when the control plane sent one - that is the app's
-//	   rollback depth - and keep_images_per_app otherwise.
-//
-// (b) is the one label test in this file, and it is not an ownership test: it only
-// NARROWS what we will even consider, so a mislabelled object is left alone rather
-// than deleted. The keep/delete decision is (a), the index.
-//
-// Removal is one explicit `docker rmi <id>` per image — never `image prune -a`,
-// which would let docker decide. A single failure is recorded and skipped; it never
-// aborts the run. No `-f`: forcing would untag an image under some other repo name
-// we never reasoned about.
+// cleanUnusedAppImages removes old `deplo/<slug>:<deployment>` images. N is the app's
+// own keep_per_slug entry when the control plane sent one - that is the app's rollback
+// depth - and keep_images_per_app otherwise.
 func cleanUnusedAppImages(ctx context.Context, p cleanupParams, idx *containerIndex) *pb.CleanupScopeResult {
 	r := &pb.CleanupScopeResult{Scope: pb.CleanupScope_CLEANUP_SCOPE_UNUSED_APP_IMAGES}
 
@@ -768,11 +647,9 @@ func cleanUnusedAppImages(ctx context.Context, p cleanupParams, idx *containerIn
 		return r
 	}
 
-	// Rank within the group's WHOLE image set, in-use ones included: "keep the newest
-	// N of this app" has to mean the newest N that exist, or a redeploy that leaves
-	// the previous image running would let us delete every older generation at once.
-	// The group is the slug, split by the deplo.service image label when present —
-	// each built service of a compose stack keeps its own newest N.
+	// Rank within the group's WHOLE image set, in-use ones included: "keep the newest N of
+	// this app" has to mean the newest N that exist, or a redeploy that leaves the
+	// previous image running would let us delete every older generation at once.
 	byGroup := map[string][]imageInfo{}
 	for _, im := range images {
 		if im.slug == "" {
@@ -796,10 +673,8 @@ func cleanUnusedAppImages(ctx context.Context, p cleanupParams, idx *containerIn
 			return group[i].id < group[j].id // stable, deterministic tiebreak
 		})
 
-		// How deep this app keeps its history. Read off the group rather than the
-		// map key: every member carries the same slug, and the key also holds the
-		// service. A compose stack's services each keep the APP's number, which is
-		// what the scalar did before there was a per-app one.
+		// How deep this app keeps its history. A compose stack's services each keep the APP's
+		// number, which is what the scalar did before there was a per-app one.
 		keep := p.keepImagesFor(group[0].slug)
 
 		for rank, im := range group {
@@ -852,14 +727,9 @@ type imageInfo struct {
 	size    int64 // bytes
 }
 
-// inspectImages reads those five fields for a batch of ids in ONE docker call.
-// `image ls` cannot give us any of them properly: it prints the SHORT id, no
-// labels, and a human-rounded size.
-//
-// Unlike the container index, a PARTIAL read here is SAFE: an image we failed to
-// read simply is not a candidate, so the failure mode is "delete less". We
-// therefore parse whatever docker printed and only fail when it printed nothing —
-// which keeps an image removed by a concurrent deploy from failing the whole scope.
+// inspectImages reads those five fields for a batch of ids in ONE docker call. `image
+// ls` cannot give us any of them properly: it prints the SHORT id, no labels, and a
+// human-rounded size.
 func inspectImages(ctx context.Context, ids []string) ([]imageInfo, error) {
 	if len(ids) == 0 {
 		return nil, nil
@@ -946,9 +816,8 @@ func addItem(r *pb.CleanupScopeResult, id string) {
 }
 
 // olderThan reports whether a docker timestamp is strictly before the cutoff. A
-// ZERO cutoff means "no age filter" — everything qualifies. A timestamp we cannot
-// parse NEVER qualifies while a filter is set: better to leave an object behind
-// than to delete one whose age we do not know.
+// timestamp we cannot parse NEVER qualifies while a filter is set: better to leave an
+// object behind than to delete one whose age we do not know.
 func olderThan(ts string, cutoff time.Time) bool {
 	if cutoff.IsZero() {
 		return true
@@ -1025,14 +894,8 @@ var sizeUnits = map[string]float64{
 }
 
 // parsePrunedTotal reads the total docker itself reports after a prune ("Total
-// reclaimed space: 449.4MB" from `image prune`, "Total:  449.4MB" from the buildx
-// `builder prune`). The second return is whether a total was recognised at all.
-//
-// A parsed total of ZERO is AUTHORITATIVE, not a parse failure: docker printing
-// "Total reclaimed space: 0B" means the prune freed nothing, and reporting an
-// estimate instead is how a sweep that reclaimed nothing was once recorded as
-// having reclaimed a gigabyte (the history's phantom bytes). The digit check is
-// what separates "docker said 0" from "docker said something we cannot read".
+// reclaimed space: 449.4MB" from `image prune`, "Total: 449.4MB" from the buildx
+// `builder prune`).
 func parsePrunedTotal(out string) (int64, bool) {
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
@@ -1064,11 +927,10 @@ func pickReclaimed(out string, estimate int64) int64 {
 // Headers ("ID  RECLAIMABLE …"), totals and warnings never match.
 var cacheRecordID = regexp.MustCompile(`^[a-z0-9]{12,}$`)
 
-// prunedCacheRecordIDs recovers the record ids a `builder prune` printed —
-// classic docker prints one bare id per line, buildx one table row per record —
-// so a sweep whose own enumeration failed (or found nothing) can still report
-// what was actually pruned. Best effort: unrecognisable output yields nothing;
-// this is a report, never a gate.
+// prunedCacheRecordIDs recovers the record ids a `builder prune` printed — classic
+// docker prints one bare id per line, buildx one table row per record — so a sweep
+// whose own enumeration failed (or found nothing) can still report what was actually
+// pruned.
 func prunedCacheRecordIDs(out string) []string {
 	var ids []string
 	for _, line := range splitLines(out) {
@@ -1085,8 +947,7 @@ func prunedCacheRecordIDs(out string) []string {
 
 // dirSize sums the disk a directory tree actually occupies, the way `du` does —
 // ALLOCATED BLOCKS, not apparent size — so a sparse buildkit store reports what
-// removing it really gives back. Unreadable entries are skipped: this number is a
-// report, never a gate on whether we delete.
+// removing it really gives back.
 func dirSize(root string) int64 {
 	var total int64
 	_ = filepath.WalkDir(root, func(_ string, d fs.DirEntry, err error) error {
@@ -1157,25 +1018,9 @@ func dockerErr(what string, res dockercli.Result) string {
 	return fmt.Sprintf("docker %s: %s", what, msg)
 }
 
-// cleanLeftoverAppFiles removes `<stack-dir>/files/<slug>` directories that
-// belong to no stack any more — the config files an App leaves behind when it is
-// deleted, and the only thing this file removes that no rebuild can recreate.
-//
-// The proof is not on the host. A directory does not know its App is gone; it is
-// simply never read again. So the proof arrives with the request: `live_slugs`,
-// every stack the control plane still knows about INSTANCE-WIDE, and anything on
-// disk that is not in it is leftover. Two guards keep that honest:
-//
-//   - an EMPTY list skips the scope. It reads as "nothing is live", which is the
-//     one interpretation that would wipe every app on the host, and it is exactly
-//     what an older control plane (and a failed query) sends.
-//   - a directory touched within leftoverFilesGrace is spared, because the list is
-//     a snapshot and a stack created after it was taken is legitimately missing.
-//
-// Removal is one RemoveAll per directory, never a sweep of the parent: the files
-// root also holds directories for stacks this agent has never heard of (a slug
-// only ever appears here because something wrote it), so the loop deletes what it
-// can name and nothing else.
+// cleanLeftoverAppFiles removes `<stack-dir>/files/<slug>` directories that belong to
+// no stack any more — the config files an App leaves behind when it is deleted, and the
+// only thing this file removes that no rebuild can recreate.
 func cleanLeftoverAppFiles(p cleanupParams) *pb.CleanupScopeResult {
 	r := &pb.CleanupScopeResult{Scope: pb.CleanupScope_CLEANUP_SCOPE_LEFTOVER_APP_FILES}
 	if len(p.liveSlugs) == 0 {

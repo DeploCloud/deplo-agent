@@ -13,19 +13,9 @@ import (
 
 // filescopy.go is the files-dir sibling of volumecopy.go: it copies a service's
 // host-side files dir (<stack_dir>/files/<slug>) across hosts for a server move.
-// The files dir is a plain host DIRECTORY (not a Docker volume), so it can't ride
-// ExportVolume/ImportVolume — but the mechanism is identical: ExportFiles tars the
-// dir out (gzipped, streamed as FilesChunk{data}), the control plane relays the
-// chunks, and ImportFiles wipes + untars them into the target dir. It reuses the
-// exact tar plumbing project backup/restore trust: addDirToTar (skips symlinks) and
-// extractToDir (anti-traversal, skips links), so nothing new about the on-disk
-// format. validateSlug gates the wire-supplied slug before it's joined into a path.
 
-// ExportFiles tars a service's files dir out as a gzipped stream. A missing dir
-// streams a valid EMPTY archive rather than erroring — a service with no files dir
-// (e.g. a plain single-image project) is a normal case, and the destination's
-// wipe-then-untar of an empty archive just clears the dir. The caller is expected to
-// have quiesced the source (stopped the stack) first.
+// ExportFiles tars a service's files dir out as a gzipped stream. The caller is
+// expected to have quiesced the source (stopped the stack) first.
 func (s *Service) ExportFiles(req *pb.ExportFilesRequest, stream pb.Agent_ExportFilesServer) error {
 	slug := req.GetSlug()
 	if err := validateSlug(slug); err != nil {
@@ -39,13 +29,8 @@ func (s *Service) ExportFiles(req *pb.ExportFilesRequest, stream pb.Agent_Export
 	gz := gzip.NewWriter(cw)
 	tw := tar.NewWriter(gz)
 
-	// A missing dir (or a non-directory at that path) yields an empty
-	// (header-only) tar — valid, and the destination handles it as "nothing to
-	// restore". But ANY OTHER stat error (a transient I/O error, a permission
-	// fault) must NOT be silently downgraded to an empty archive: a wipe-first
-	// ImportFiles on the destination would then discard the real files dir on the
-	// far host (data loss on a server move). So abort on such errors and let the
-	// control plane keep the source in place rather than relay an empty archive.
+	// A missing dir (or a non-directory at that path) yields an empty (header-only) tar —
+	// valid, and the destination handles it as "nothing to restore".
 	st, statErr := os.Stat(root)
 	switch {
 	case statErr == nil && st.IsDir():
@@ -78,12 +63,9 @@ func (s *Service) ExportFiles(req *pb.ExportFilesRequest, stream pb.Agent_Export
 	return nil
 }
 
-// ImportFiles is the destination half: the FIRST client message carries the target
-// slug + wipe flag; every following message carries a slice of the gzipped tar. The
-// agent (optionally) wipes the target files dir, then gunzips + untars the stream
-// into it. The caller MUST have stopped the destination stack first. Reuses
-// extractToDir (the same anti-traversal, link-skipping extractor the project
-// restore's files/ arm uses).
+// ImportFiles is the destination half: the FIRST client message carries the target slug
+// + wipe flag; every following message carries a slice of the gzipped tar. The caller
+// MUST have stopped the destination stack first.
 func (s *Service) ImportFiles(stream pb.Agent_ImportFilesServer) error {
 	// 1. Header frame first (slug + wipe).
 	first, err := stream.Recv()
@@ -101,9 +83,6 @@ func (s *Service) ImportFiles(stream pb.Agent_ImportFilesServer) error {
 	root := s.filesRoot(slug)
 
 	// 2. The wipe is DEFERRED to the first data frame (below), like ImportVolume's.
-	//    Emptying on the header alone means a stream that dies before sending
-	//    anything - a relay that never connected, a source that failed to read -
-	//    has already destroyed the destination by the time anyone finds out.
 
 	// 3. Reassemble the data frames, gunzip, and untar each entry (framed as
 	//    files/<rel>) into the dir via extractToDir. Drive the recv loop as the

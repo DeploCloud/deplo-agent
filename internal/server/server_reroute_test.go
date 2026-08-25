@@ -11,11 +11,8 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// teardownStack removes whatever the real `docker compose up` inside Reroute
-// brought up. Registered by every test here that passes a ComposeYaml: on a host
-// WITHOUT docker the up fails and this is a no-op, but on a host WITH docker it
-// succeeds, and without this the suite leaves a stray nginx running against a
-// t.TempDir compose file that no longer exists.
+// teardownStack removes whatever the real `docker compose up` inside Reroute brought
+// up.
 func teardownStack(t *testing.T, s *Service, slug string) {
 	t.Helper()
 	t.Cleanup(func() {
@@ -50,21 +47,9 @@ func TestReroute_missingComposeFailsCleanly(t *testing.T) {
 	}
 }
 
-// Reroute writes the rendered YAML, the 0600 env-file and the compose mount
-// files BEFORE it runs `compose up`, so the on-disk artefacts are observable
-// even on a host without docker (the compose call then just fails). This asserts
-// the file-writing half of the verb — the part that is host-independent.
-//
-// TWO things about this test are deliberate, and both exist because it calls the
-// REAL Reroute, which really runs `docker compose up` on whatever host the suite
-// happens to run on:
-//
-//   - The slug is namespaced. It used to be "myapp", and `compose up` brings the
-//     project up with --remove-orphans: on a host with a live app slugged myapp,
-//     running the suite deleted that app's containers.
-//   - The stack is torn down afterwards. On a host WITH docker the `up` succeeds,
-//     so without this the suite leaves a stray nginx behind pointing at a t.TempDir
-//     that no longer exists.
+// Reroute writes the rendered YAML, the 0600 env-file and the compose mount files
+// BEFORE it runs `compose up`, so the on-disk artefacts are observable even on a host
+// without docker (the compose call then just fails).
 func TestReroute_writesStackEnvAndMountFiles(t *testing.T) {
 	stackDir := t.TempDir()
 	s := New(stackDir, t.TempDir(), "/", "")
@@ -95,20 +80,19 @@ func TestReroute_writesStackEnvAndMountFiles(t *testing.T) {
 	if string(got) != yaml {
 		t.Fatalf("stack file = %q, want %q", got, yaml)
 	}
-	// 0600, like the env file below: for a SINGLE-IMAGE app the control plane
-	// bakes the whole environment into this YAML, so it holds exactly the secrets
-	// the env file is protected for. Reroute is also the path a restore runs, so
-	// getting this wrong here would quietly undo the deploy path's mode.
+	// 0600, like the env file below: for a SINGLE-IMAGE app the control plane bakes the
+	// whole environment into this YAML, so it holds exactly the secrets the env file is
+	// protected for.
 	if info, err := os.Stat(stackFile); err != nil {
 		t.Fatalf("stat stack file: %v", err)
 	} else if perm := info.Mode().Perm(); perm != 0o600 {
 		t.Errorf("stack file perm = %o, want 0600", perm)
 	}
 
-	// Env file: rendered KEY=VALUE (sorted), 0600, and inside the stack's OWN
-	// directory - the one compose is pointed at with --project-directory, so a
-	// relative path the author wrote (`env_file: .env` above all) resolves to
-	// this stack's file and never to another tenant's.
+	// Env file: rendered KEY=VALUE (sorted), 0600, and inside the stack's OWN directory -
+	// the one compose is pointed at with --project-directory, so a relative path the
+	// author wrote (`env_file: .env` above all) resolves to this stack's file and never to
+	// another tenant's.
 	envFile := filepath.Join(
 		stackDir,
 		"files",

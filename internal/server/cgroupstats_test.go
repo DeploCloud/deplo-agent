@@ -9,14 +9,7 @@ import (
 )
 
 // cgroupstats_test.go asserts the cgroup v2 backend against GOLDEN FILE CONTENTS
-// written into t.TempDir. No docker, no root, no cgroup mount is involved, which
-// is deliberate: this backend's whole job is to read files, so the tests must be
-// able to hand it hostile files (a limit of "max", a truncated io.stat, a
-// counter that ran backwards) that a real host would only produce at 3am.
-//
-// The parsers are pure functions over content — the same shape parseStatsLine
-// uses in containerstats.go — so every format question is answered here and the
-// filesystem layer stays a thin, uninteresting wrapper.
+// written into t.TempDir.
 
 // Golden contents, copied from a real cgroup v2 host.
 
@@ -260,10 +253,9 @@ MemAvailable:    4194304 kB
 }
 
 // cgroup2Available must agree with the presence of the unified hierarchy's root
-// interface file: /sys/fs/cgroup/cgroup.controllers exists only when cgroup v2
-// is mounted AT that path (on the hybrid layout v2 lives under unified/, so the
-// root has no such file). Cross-checking against a second signal catches a wrong
-// magic constant, which a self-referential statfs assertion never would.
+// interface file: /sys/fs/cgroup/cgroup.controllers exists only when cgroup v2 is
+// mounted AT that path (on the hybrid layout v2 lives under unified/, so the root has
+// no such file).
 func TestCgroup2Available(t *testing.T) {
 	_, err := os.Stat("/sys/fs/cgroup/cgroup.controllers")
 	wantV2 := err == nil
@@ -493,12 +485,8 @@ func TestCgroupSampler_DegradesPerMetricNotPerSample(t *testing.T) {
 	}
 }
 
-// A RUNNING container the backend cannot read is ABSENT, never a zeroed row: a
-// flat line at zero reads as "idle" instead of the "unknown" that actually
-// happened. A NON-RUNNING container is the other case — it is emitted with
-// identity, its real state and zeroed usage, exactly as the docker-stats backend
-// does, so a stopped container never vanishes from the stream depending on which
-// backend this host uses.
+// A RUNNING container the backend cannot read is ABSENT, never a zeroed row: a flat
+// line at zero reads as "idle" instead of the "unknown" that actually happened.
 func TestCgroupSampler_UnreadableEntriesAreAbsentNotZeroed(t *testing.T) {
 	tmp := t.TempDir()
 	c := newTestSampler(t, filepath.Join(tmp, "proc"))
@@ -565,13 +553,8 @@ func TestCgroupSampler_OneGoodReadResetsTheFailureRun(t *testing.T) {
 	}
 }
 
-// A tick that could not read usage_usec must not PRIME the baseline. This is the
-// regression test for a shipped bug: readOne emits a row whenever cpu.stat OR
-// memory.current reads, so a container whose cpu.stat alone blipped was stored
-// with usageUsec 0 — indistinguishable from a real zero — and the next tick
-// differenced a full since-start counter against it. Measured on the broken
-// code: 72000% CPU. The failure is injected here rather than waited for,
-// because the happy path passed all along.
+// A tick that could not read usage_usec must not PRIME the baseline. The failure is
+// injected here rather than waited for, because the happy path passed all along.
 func TestCgroupSampler_UnreadableCPUDoesNotPrimeTheBaseline(t *testing.T) {
 	tmp := t.TempDir()
 	cg := filepath.Join(tmp, "cg")
@@ -606,10 +589,9 @@ func TestCgroupSampler_UnreadableCPUDoesNotPrimeTheBaseline(t *testing.T) {
 	}
 }
 
-// A failed read advances NOTHING: an existing baseline keeps BOTH its value and
-// its timestamp, so the next successful read measures honestly across the gap
-// rather than either restarting from scratch or dividing a two-window delta by
-// one window.
+// A failed read advances NOTHING: an existing baseline keeps BOTH its value and its
+// timestamp, so the next successful read measures honestly across the gap rather than
+// either restarting from scratch or dividing a two-window delta by one window.
 func TestCgroupSampler_FailedCPUReadKeepsTheOlderBaseline(t *testing.T) {
 	tmp := t.TempDir()
 	cg := filepath.Join(tmp, "cg")
@@ -700,10 +682,8 @@ func TestCgroupSampler_UnresolvedPathsTripTheUnhealthyLatch(t *testing.T) {
 	}
 }
 
-// The reason this backend exists is that `docker stats --no-stream` BLOCKS for
-// 2.16s over 44 containers. "Sample returns promptly" is therefore load-bearing,
-// not incidental, and nothing else in this suite would fail if a settle-delay or
-// a retry-with-backoff were later added inside readOne.
+// The reason this backend exists is that `docker stats --no-stream` BLOCKS for 2.16s
+// over 44 containers.
 func TestCgroupSampler_SampleDoesNotBlock(t *testing.T) {
 	tmp := t.TempDir()
 	proc := filepath.Join(tmp, "proc")

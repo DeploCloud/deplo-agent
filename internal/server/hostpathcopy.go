@@ -18,28 +18,15 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// hostpathcopy.go copies a plain HOST DIRECTORY across hosts — the bind-mount half
-// of a migration from another platform, where a service's data may live in a
-// directory rather than in a Docker volume (Dokploy mounts a `type: bind` source
-// straight off the host).
-//
-// It is the same relay as volumecopy.go, with the same two hard-won rules: the
-// source must be proven to exist BEFORE anything is mounted (a `-v /missing:/v`
-// mount creates the path and exports nothing, which is how an empty archive ends up
-// overwriting real data), and the destination is not emptied until a byte actually
-// arrives.
-//
-// This is the only RPC that takes a host path off the wire, so it is narrow by
-// construction: absolute, existing, a directory, no "..", and never one of the
-// system roots below. That list is a guardrail against a mistake, not the security
-// boundary — the boundary is in the control plane, where this is instance-admin
-// plus the host-volumes grant, i.e. exactly the power a compose stack with a bind
-// mount already carries.
+// hostpathcopy.go copies a plain HOST DIRECTORY across hosts — the bind-mount half of a
+// migration from another platform, where a service's data may live in a directory
+// rather than in a Docker volume (Dokploy mounts a `type: bind` source straight off the
+// host).
 
-// deniedHostRoots are refused as a copy source or target, exactly (a path EQUAL to
-// one of them) — a deeper path under most of them is legitimate, and refusing those
-// wholesale would refuse the actual use case (the other platform keeps its service
-// data under /etc/<platform>/...).
+// deniedHostRoots are refused as a copy source or target, exactly (a path EQUAL to one
+// of them) — a deeper path under most of them is legitimate, and refusing those
+// wholesale would refuse the actual use case (the other platform keeps its service data
+// under /etc/<platform>/...).
 var deniedHostRoots = []string{
 	"/", "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib32", "/lib64",
 	"/media", "/mnt", "/opt", "/proc", "/root", "/run", "/sbin", "/srv", "/sys",
@@ -145,12 +132,9 @@ func (s *Service) ImportHostPath(stream pb.Agent_ImportHostPathServer) error {
 	if verr != nil {
 		return sendHostPathResult(stream, false, 0, "", verr.Error())
 	}
-	// The whole path is materialised, parents included. It was briefly required to
-	// exist already, and that refused the case this RPC is FOR: a machine migrating
-	// away from another platform does not have that platform's directories, so the
-	// destination host has never heard of the path the source bind-mounts from. The
-	// deny-list above is what keeps a wrong path from being a dangerous one; a
-	// missing parent only ever meant "this host has not run that platform".
+	// The whole path is materialised, parents included. The deny-list above is what keeps
+	// a wrong path from being a dangerous one; a missing parent only ever meant "this host
+	// has not run that platform".
 	if mkErr := os.MkdirAll(path, 0o755); mkErr != nil {
 		return sendHostPathResult(stream, false, 0, "",
 			fmt.Sprintf("create %s: %v", path, mkErr))

@@ -15,24 +15,16 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// sshgateway.go ports lib/infra/ssh-gateway.ts to the agent (PLAN Part D): the
-// per-host SSH gateway singleton (ADR-0002). The store's DevSshUser[] stays the
-// SOLE source of truth in the control plane; the running gateway container is a
-// disposable projection of it. The control plane keeps gateway-config.ts /
-// gateway-projection.ts as the single renderer (snapshot-tested) and ships the
-// rendered config files + the per-user exec-step plan; the agent writes the files,
-// brings the 2-service stack up, waits for sshd, and runs the steps. The agent
-// never re-implements the security-critical wrapper / sshd_config / allowlist.
+// sshgateway.go ports lib/infra/ssh-gateway.ts to the agent (PLAN Part D): the per-host
+// SSH gateway singleton (ADR-0002). The agent never re-implements the security-critical
+// wrapper / sshd_config / allowlist.
 
 const (
 	gatewayProject   = "deplo-ssh-gateway"
 	gatewayContainer = "deplo-ssh-gateway"
-	// GatewayHostDirSentinel is substituted in the rendered compose's bind path
-	// with the agent's OWN ssh-gateway dir. The control plane cannot know a remote
-	// agent's host path (its dataVolumeHostMountpoint resolves the CONTROL PLANE's
-	// mount, not the agent's), so it renders this sentinel and the agent — which
-	// owns the path — fills it in. The bind path is the only host-specific token in
-	// the otherwise-opaque YAML, so this keeps the renderer single-source (D2).
+	// GatewayHostDirSentinel is substituted in the rendered compose's bind path with the
+	// agent's OWN ssh-gateway dir. The bind path is the only host-specific token in the
+	// otherwise-opaque YAML, so this keeps the renderer single-source (D2).
 	gatewayHostDirSentinel = "__DEPLO_GW_HOST_DIR__"
 )
 
@@ -56,10 +48,9 @@ func (s *Service) ProvisionSshUser(ctx context.Context, req *pb.ProvisionSshUser
 	return nil, status.Error(codes.Unimplemented, "dev mode has been removed")
 }
 
-// DeprovisionSshUser is DORMANT — the SSH gateway was removed with dev mode
-// (#33/#34). Kept only to satisfy the generated Agent interface; refuses before
-// running any deluser/ssh/Docker work. (It previously failed OPEN, returning
-// Ok:true on failure — now it hard-refuses.) Never revive the body.
+// DeprovisionSshUser is DORMANT — the SSH gateway was removed with dev mode (#33/#34).
+// Kept only to satisfy the generated Agent interface; refuses before running any
+// deluser/ssh/Docker work.
 func (s *Service) DeprovisionSshUser(ctx context.Context, req *pb.DeprovisionSshUserRequest) (*pb.StackResult, error) {
 	return nil, status.Error(codes.Unimplemented, "dev mode has been removed")
 }
@@ -132,14 +123,8 @@ func (s *Service) gatewayRunning(ctx context.Context) bool {
 	return dockercli.IsRunning(ctx, gatewayContainer)
 }
 
-// waitGatewayReady polls until the gateway is ready to PROVISION users — i.e.
-// both sshd is installed AND the `devusers` group exists. The group is the real
-// precondition: provisioning runs `adduser -G devusers`, and the entrypoint
-// creates the group AFTER the sshd binary lands but BEFORE `exec sshd`. Waiting
-// only for `command -v sshd` (as the old in-process driver did) raced the group
-// creation, so an `adduser` fired before `addgroup` failed with "unknown group
-// devusers" and the account was silently never made. Gating on the group closes
-// that race. Mirrors lib/infra/ssh-gateway.ts waitGatewayReady, hardened.
+// waitGatewayReady polls until the gateway is ready to PROVISION users — i.e. both sshd
+// is installed AND the `devusers` group exists. Gating on the group closes that race.
 func (s *Service) waitGatewayReady(ctx context.Context, timeout time.Duration) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -171,10 +156,9 @@ func (s *Service) reconcileUsers(ctx context.Context, users []*pb.UserSteps) {
 	}
 }
 
-// runGatewayStep runs one control-plane-computed step inside the gateway:
-// `docker exec -i <gateway> <argv...>`, piping the step's `input` to stdin (so a
-// password reaches chpasswd over stdin, never argv/env). Best-effort, like the TS
-// driver's noThrow: a failed step on one user must not abort the whole reconcile.
+// runGatewayStep runs one control-plane-computed step inside the gateway: `docker exec
+// -i <gateway> <argv...>`, piping the step's `input` to stdin (so a password reaches
+// chpasswd over stdin, never argv/env).
 func (s *Service) runGatewayStep(ctx context.Context, step *pb.GatewayStep) {
 	argv := step.GetArgv()
 	if len(argv) == 0 {

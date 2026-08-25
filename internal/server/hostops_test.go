@@ -11,12 +11,10 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
-// The one thing TraefikConfig must never do is rewrite a proxy Deplo did not
-// install. install-agent.sh explicitly refuses to fight for :80/:443 when an
-// operator already runs their own Traefik — and a remote rewrite of that config
-// would be a far worse version of the same mistake. These tests pin the refusal
-// (which happens BEFORE any docker call, so they need no daemon) and the
-// backup-before-write rule.
+// The one thing TraefikConfig must never do is rewrite a proxy Deplo did not install.
+// install-agent.sh explicitly refuses to fight for :80/:443 when an operator already
+// runs their own Traefik — and a remote rewrite of that config would be a far worse
+// version of the same mistake.
 
 func TestTraefikConfigRefusesWhenDeploDidNotInstallTraefik(t *testing.T) {
 	ctx := context.Background()
@@ -147,10 +145,8 @@ func TestTraefikConfigWritesAndKeepsABackup(t *testing.T) {
 	}
 }
 
-// The config can carry the private key of a TLS certificate the operator pasted
-// in, and the .bak is a copy of the same secret. Both must end up 0600 even
-// though the file already on disk was 0644 (a rename keeps the old mode, so
-// writing the new bytes is not on its own enough).
+// The config can carry the private key of a TLS certificate the operator pasted in, and
+// the .bak is a copy of the same secret.
 func TestTraefikConfigIsNotWorldReadable(t *testing.T) {
 	svc, path := serviceWithTraefik(t, "services:\n  traefik:\n    image: traefik:v3.7\n")
 	svc.traefikApply = func(context.Context, string, bool) error { return nil }

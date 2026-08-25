@@ -17,18 +17,9 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// backup_store_e2e_test.go is the store sibling of backup_e2e_test.go: the same
-// dump → artifact → restore round-trip against a REAL Postgres, but landing on
-// THIS host's filesystem instead of a bucket, and encrypted.
-//
-// It proves the three things unit tests cannot:
-//
-//  1. a store restore actually OVERWRITES (the locked guarantee for every engine),
-//  2. the artifact on disk is genuinely unreadable without the identity, and
-//     genuinely readable WITH it — the promise the recovery key makes,
-//  3. the cross-host relay shape (stream_out → WriteStoreFile → ReadStoreFile →
-//     RestoreFrom) restores the same database, which is the path the control
-//     plane takes whenever the destination server is not the target's server.
+// backup_store_e2e_test.go is the store sibling of backup_e2e_test.go: the same dump →
+// artifact → restore round-trip against a REAL Postgres, but landing on THIS host's
+// filesystem instead of a bucket, and encrypted.
 
 // startE2EPostgres brings up a throwaway Postgres and returns its descriptor plus
 // a psql runner. Skips (never fails) when the host cannot host it.
@@ -100,10 +91,7 @@ func TestE2E_StoreBackupRestoreOverwrites(t *testing.T) {
 		t.Errorf("a store backup must report size + digest, got %d / %q", br.GetSizeBytes(), br.GetSha256())
 	}
 
-	// The artifact is on disk and it is REALLY an age file. Asserted on the age
-	// header rather than "the plaintext string is absent": pg_dump -Fc output is
-	// itself compressed, so a plaintext-substring check would pass even against a
-	// completely unencrypted dump and prove nothing.
+	// The artifact is on disk and it is REALLY an age file.
 	onDisk := filepath.Join(root, key)
 	raw, rerr := os.ReadFile(onDisk)
 	if rerr != nil {
@@ -169,12 +157,9 @@ func TestE2E_StoreBackupRestoreOverwrites(t *testing.T) {
 	}
 }
 
-// The CROSS-HOST shape, with the control plane's relay simulated in-process:
-// stream_out produces the artifact, WriteStoreFile lands it "elsewhere",
-// ReadStoreFile streams it back, and RestoreFrom replays it into the database.
-// Both halves run against the same Service here — what is being proven is the
-// FRAMING and the fact that only ciphertext ever crosses the relay, not that two
-// hosts exist.
+// The CROSS-HOST shape, with the control plane's relay simulated in-process: stream_out
+// produces the artifact, WriteStoreFile lands it "elsewhere", ReadStoreFile streams it
+// back, and RestoreFrom replays it into the database.
 func TestE2E_StoreRelayRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()

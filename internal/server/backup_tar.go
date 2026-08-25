@@ -14,21 +14,13 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// volumeNamePattern is the shape a Docker named volume always has. The volume
-// name arrives off the wire and is interpolated into `-v <name>:/v` for a helper
-// container; an unvalidated name like "/" or "/etc" would bind-mount a HOST PATH
-// instead of a managed volume, turning wipeVolume's `rm -rf` and the restore
-// untar loose on the host filesystem. So — exactly like validateSlug and
-// normalizeRel for the other off-the-wire identifiers — the name is re-validated
-// where the I/O runs and never trusted (defence in depth behind the control
-// plane's own naming). The pattern forbids '/', '..', and a leading '.', so a
-// path can never masquerade as a volume name.
+// volumeNamePattern is the shape a Docker named volume always has. The pattern forbids
+// '/', '..', and a leading '.', so a path can never masquerade as a volume name.
 var volumeNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 
-// hasDotDot reports whether a POSIX-ish relative path contains a ".." segment
-// (or is one), the traversal vector for a tar entry written into a helper
-// container's `tar -x`. Used by the volume-restore demux, mirroring the
-// extractToDir guard the files/ arm already applies.
+// hasDotDot reports whether a POSIX-ish relative path contains a ".." segment (or is
+// one), the traversal vector for a tar entry written into a helper container's `tar
+// -x`.
 func hasDotDot(p string) bool {
 	for _, seg := range strings.Split(filepath.ToSlash(p), "/") {
 		if seg == ".." {
@@ -48,15 +40,13 @@ func validateVolumeName(name string) error {
 	return nil
 }
 
-// backup_tar.go holds the tar/volume plumbing for project backup+restore: adding
-// a host dir or raw bytes to the archive, wiping + repopulating named volumes via
-// throwaway helper containers, extracting into the files dir (anti-traversal),
-// and the env-file round-trip used by the snapshot.
+// backup_tar.go holds the tar/volume plumbing for project backup+restore: adding a host
+// dir or raw bytes to the archive, wiping + repopulating named volumes via throwaway
+// helper containers, extracting into the files dir (anti-traversal), and the env-file
+// round-trip used by the snapshot.
 
 // addDirToTar walks `root` and writes every regular file + dir into `tw` under
-// `prefix/<relpath>`. Symlinks are SKIPPED (the files dir is operator-editable;
-// a symlink in the archive is an escape vector on restore — we never restore one,
-// matching the build-context's link rejection).
+// `prefix/<relpath>`.
 func addDirToTar(tw *tar.Writer, root, prefix string) error {
 	return filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -119,15 +109,12 @@ func addBytesToTar(tw *tar.Writer, name string, content []byte) error {
 }
 
 // extractToDir writes one tar entry (relative path `rel` under `root`) to disk,
-// re-validating the path against `root` (the entry name arrived from an S3 object
-// — never trusted). A ".." escape or absolute path is rejected; symlinks/links
-// are skipped (never restored). Mirrors materializeUpload's threat model.
+// re-validating the path against `root` (the entry name arrived from an S3 object —
+// never trusted).
 func extractToDir(root, rel string, hdr *tar.Header, r io.Reader) error {
-	// Reject any ".." segment OUTRIGHT (not merely anchor it away): the entry name
-	// came from an S3 object, so a traversal attempt is a clear signal the archive
-	// is hostile/corrupt and the restore must abort rather than silently relocate
-	// the file. Mirrors normalizeRel (files.go) rather than the build-context's
-	// anchoring, since here we'd rather fail loud than quietly drop the ".."s.
+	// Reject any ".." segment OUTRIGHT (not merely anchor it away): the entry name came
+	// from an S3 object, so a traversal attempt is a clear signal the archive is
+	// hostile/corrupt and the restore must abort rather than silently relocate the file.
 	for _, seg := range strings.Split(filepath.ToSlash(rel), "/") {
 		if seg == ".." {
 			return fmt.Errorf("archive entry %q escapes the target dir", rel)
@@ -156,10 +143,9 @@ func extractToDir(root, rel string, hdr *tar.Header, r io.Reader) error {
 	}
 }
 
-// wipeVolume empties a named volume's contents WITHOUT removing the volume
-// itself (the volume stays attached to the stopped stack; we just clear it so a
-// restore overwrites rather than merges). A helper container mounts the volume
-// and `rm -rf /v/* /v/.[!.]*`.
+// wipeVolume empties a named volume's contents WITHOUT removing the volume itself (the
+// volume stays attached to the stopped stack; we just clear it so a restore overwrites
+// rather than merges).
 func wipeVolume(ctx context.Context, vol string) error {
 	if err := validateVolumeName(vol); err != nil {
 		return err

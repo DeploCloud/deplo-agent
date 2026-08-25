@@ -1,8 +1,5 @@
-// Package hostmetrics is the agent's host telemetry: a Go port of
-// lib/infra/host.ts. It measures the server the agent runs on — CPU from
-// /proc/stat deltas, memory from /proc/meminfo, disk via statfs, net from
-// /proc/net/dev. No value is fabricated; an unmeasurable field is 0. This is the
-// per-server replacement for the control plane measuring only its own host.
+// Package hostmetrics is the agent's host telemetry: a Go port of lib/infra/host.ts.
+// This is the per-server replacement for the control plane measuring only its own host.
 package hostmetrics
 
 import (
@@ -79,21 +76,16 @@ func Collect(dataDir string) Metrics {
 
 type cpuTimes struct{ idle, total uint64 }
 
-// readCPUTimes keeps the lossy shape Collect was written against: a failed read
-// is reported as a zero cpuTimes. That is safe for Collect, which diffs two
-// reads taken within one call and whose cpuPercent returns 0 when total is 0 —
-// there is no baseline living across calls to corrupt. Anything that KEEPS a
-// baseline must use readCPUTimesOK instead.
+// readCPUTimes keeps the lossy shape Collect was written against: a failed read is
+// reported as a zero cpuTimes. Anything that KEEPS a baseline must use readCPUTimesOK
+// instead.
 func readCPUTimes() cpuTimes {
 	c, _ := readCPUTimesOK()
 	return c
 }
 
-// readCPUTimesOK is readCPUTimes plus the one bit of information the lossy form
-// throws away: whether the numbers are real. Without it a caller cannot tell an
-// unreadable /proc/stat from an idle CPU, and a streaming sampler that adopted
-// the zero as its next baseline would diff the whole since-boot counter against
-// it on the following tick.
+// readCPUTimesOK is readCPUTimes plus the one bit of information the lossy form throws
+// away: whether the numbers are real.
 func readCPUTimesOK() (cpuTimes, bool) {
 	f, err := os.Open("/proc/stat")
 	if err != nil {
@@ -183,12 +175,7 @@ func readNetCounters() (rx, tx int64) {
 	return r, t
 }
 
-// readNetCountersOK also reports whether the file was read to the end. A
-// half-read /proc/net/dev sums fewer interfaces than the previous read did, so
-// it looks exactly like a counter reset; clamping hides the dip, but adopting
-// the short total as the next baseline turns the following tick into a fake
-// multi-gigabyte spike. An empty-but-clean read (a netns with only lo) is a
-// genuine 0 and reports ok.
+// readNetCountersOK also reports whether the file was read to the end.
 func readNetCountersOK() (rx, tx int64, ok bool) {
 	f, err := os.Open("/proc/net/dev")
 	if err != nil {

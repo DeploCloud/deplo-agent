@@ -122,11 +122,9 @@ func TestExportVolume_unsafeName(t *testing.T) {
 	}
 }
 
-// TestE2E_VolumeCopyRoundTrip drives ExportVolume → (relay the chunks) →
-// ImportVolume against REAL docker volumes, proving the cross-host copy machinery
-// moves the bytes and that the import OVERWRITES the destination (wipe-first). It
-// isolates the volume tar/untar the way TestE2E_VolumeArchiveRoundTrip does for
-// backup — no real stack, just the two new RPCs relayed in-process.
+// TestE2E_VolumeCopyRoundTrip drives ExportVolume → (relay the chunks) → ImportVolume
+// against REAL docker volumes, proving the cross-host copy machinery moves the bytes
+// and that the import OVERWRITES the destination (wipe-first).
 func TestE2E_VolumeCopyRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -200,11 +198,10 @@ func TestE2E_VolumeCopyRoundTrip(t *testing.T) {
 	t.Log("volume export→import cross-copy OVERWRITE verified")
 }
 
-// TestExportVolume_missingVolumeIsNotFound is the guard that had to exist and did
-// not: `docker run -v <name>:/v` CREATES a missing named volume, so an export of a
-// volume that is not on this host used to exit 0 with a complete EMPTY archive —
-// and the caller wiped a real destination for it. The refusal must be NotFound, and
-// it must leave no volume behind.
+// TestExportVolume_missingVolumeIsNotFound is the guard that had to exist and did not:
+// `docker run -v <name>:/v` CREATES a missing named volume, so an export of a volume
+// that is not on this host used to exit 0 with a complete EMPTY archive — and the
+// caller wiped a real destination for it.
 func TestExportVolume_missingVolumeIsNotFound(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
 	defer cancel()
@@ -331,16 +328,8 @@ func TestImportVolume_reportsBytesAndDigest(t *testing.T) {
 	}
 }
 
-// TestImportVolume_truncatedStreamLeavesNothing proves all-or-nothing survives a
-// stream that dies MID-transfer, not only one that never starts.
-//
-// The deferred wipe covers the second case alone: once the first byte lands the
-// destination has already been emptied, and from there a truncated relay, a full
-// disk or a tar error used to leave HALF a volume. Half is worse than empty - an
-// engine reads a partial data directory as a corrupt one, an app that checks a
-// version file on disk decides it is a fresh install - and it is the shape that
-// looks like success from the outside. So a failed import takes its own leftovers
-// with it, and says so.
+// TestImportVolume_truncatedStreamLeavesNothing proves all-or-nothing survives a stream
+// that dies MID-transfer, not only one that never starts.
 func TestImportVolume_truncatedStreamLeavesNothing(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()

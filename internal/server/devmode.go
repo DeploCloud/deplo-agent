@@ -22,17 +22,11 @@ import (
 
 // devmode.go ports lib/deploy/dev.ts to the agent (PLAN Part D): the per-host dev
 // container lifecycle. Dev containers are per-host singletons (ADR-0002); once a
-// project lives on a remote server its dev container runs THERE. The control
-// plane stays the source of truth — it renders the dev compose (renderDevCompose),
-// the entrypoint script, the tokenized clone URL, and (for upload) the archive,
-// all opaque to the agent (D2). The agent writes files + drives Docker, exactly
-// as lib/deploy/dev.ts did against the local socket.
+// project lives on a remote server its dev container runs THERE.
 
-// WORKSPACE_BUILD_EXCLUDE — the workspace entries that are NOT the developer's
-// source and must never enter a production build context: the deps-volume
-// mountpoint, the tunnel/CLI state, the fallback HOME, and git metadata. MUST
-// match WORKSPACE_BUILD_EXCLUDE in lib/deploy/dev.ts (a deploy and the
-// source-existence check can never disagree on what counts as source).
+// WORKSPACE_BUILD_EXCLUDE — the workspace entries that are NOT the developer's source
+// and must never enter a production build context: the deps-volume mountpoint, the
+// tunnel/CLI state, the fallback HOME, and git metadata.
 var workspaceBuildExclude = map[string]struct{}{
 	"node_modules": {},
 	".deplo":       {},
@@ -118,11 +112,8 @@ func (s *Service) startDevBody(ctx context.Context, req *pb.StartDevRequest, e *
 		e.result(false, "create workspace: "+err.Error(), "")
 		return
 	}
-	// Pre-chown so the dev server (UID 1000) and the developer never fight over
-	// ownership across the bind mount. The bind SOURCE is the HOST path (the
-	// control plane host-translates it when it runs containerized; for a bare-host
-	// remote agent it equals the plain workspace path). Best-effort — the
-	// entrypoint re-chowns too.
+	// Pre-chown so the dev server (UID 1000) and the developer never fight over ownership
+	// across the bind mount.
 	chownMount := req.GetWorkspaceHostPath()
 	if chownMount == "" {
 		chownMount = ws
@@ -214,10 +205,8 @@ func (s *Service) ensureDevEntry(script string) error {
 	return os.Chmod(s.devEntryPath(), 0o755)
 }
 
-// writeCloneSecret stages the tokenized clone URL to a root-owned 0600 file, or
-// removes a stale one when `url` is empty (no longer a git source). Mirrors
-// lib/deploy/dev.ts writeCloneSecret — but the URL is already tokenized by the
-// control plane (it mints the GitHub App token; the agent never holds the key).
+// writeCloneSecret stages the tokenized clone URL to a root-owned 0600 file, or removes
+// a stale one when `url` is empty (no longer a git source).
 func (s *Service) writeCloneSecret(slug, url string) error {
 	path := s.cloneSecretPath(slug)
 	if url == "" {
@@ -233,12 +222,10 @@ func (s *Service) writeCloneSecret(slug, url string) error {
 	return os.Chmod(path, 0o600)
 }
 
-// materializeDevWorkspace copies the dev workspace into a fresh build dir for a
-// "deploy from dev workspace" (SOURCE_KIND_DEV_WORKSPACE), EXCLUDING the
-// non-source entries and rejecting any symlink (the tree is developer-controlled
-// — UID 1000 shell/SSH/VS Code access — so it is treated EXACTLY like an uploaded
-// archive). Mirrors lib/deploy/dev.ts copyWorkspaceForBuild. Returns the build
-// dir + a cleanup func; errors if the workspace is missing or holds no source.
+// materializeDevWorkspace copies the dev workspace into a fresh build dir for a "deploy
+// from dev workspace" (SOURCE_KIND_DEV_WORKSPACE), EXCLUDING the non-source entries and
+// rejecting any symlink (the tree is developer-controlled — UID 1000 shell/SSH/VS Code
+// access — so it is treated EXACTLY like an uploaded archive).
 func (s *Service) materializeDevWorkspace(slug, subdir string, e *emitter) (string, func(), error) {
 	ws := s.workspaceDir(slug)
 	ents, err := os.ReadDir(ws)
@@ -299,11 +286,10 @@ func (s *Service) materializeDevWorkspace(slug, subdir string, e *emitter) (stri
 	return buildDir, cleanup, nil
 }
 
-// copyTreeNoSymlinks copies src to dst recursively, REJECTING (not following,
-// not preserving) any symlink — the developer's tree is attacker-controlled, so a
-// planted `leak -> /data/dev/_secrets/<slug>.url` (or `-> /`) plus a `COPY leak`
-// in the Dockerfile would bake a host secret into the user's own image. This is
-// the Go twin of lib/deploy/dev.ts's `cp` + `rejectSymlinks(destDir)`.
+// copyTreeNoSymlinks copies src to dst recursively, REJECTING (not following, not
+// preserving) any symlink — the developer's tree is attacker-controlled, so a planted
+// `leak -> /data/dev/_secrets/<slug>.url` (or `-> /`) plus a `COPY leak` in the
+// Dockerfile would bake a host secret into the user's own image.
 func copyTreeNoSymlinks(src, dst string) error {
 	return filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -362,10 +348,7 @@ func (s *Service) workspaceHasSource(slug string) bool {
 
 // seedUploadWorkspace extracts the streamed archive into the (empty) workspace
 // host-side, ONLY when it holds no source yet (clone-once semantics — never clobber
-// user edits). The same anti-escape guards as materializeUpload apply (no
-// absolute paths, no "..", no symlinks). Mirrors lib/deploy/dev.ts
-// seedUploadWorkspace. The control plane only sends upload_tar for an upload
-// source, so a non-empty tar here is always meant for this workspace.
+// user edits).
 func (s *Service) seedUploadWorkspace(slug string, tarBytes []byte, e *emitter) error {
 	if s.workspaceHasSource(slug) {
 		return nil // already seeded; leave the user's tree intact

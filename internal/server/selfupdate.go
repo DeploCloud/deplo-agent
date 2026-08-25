@@ -20,18 +20,14 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
-// selfUpdateGrace is how long the handler waits after replying before re-execing,
-// so the SelfUpdateResponse is flushed to the control plane (and the gRPC stream
-// torn down) before this process is replaced. Short — just enough to not race the
-// reply onto the wire.
+// selfUpdateGrace is how long the handler waits after replying before re-execing, so
+// the SelfUpdateResponse is flushed to the control plane (and the gRPC stream torn
+// down) before this process is replaced.
 const selfUpdateGrace = 750 * time.Millisecond
 
-// reexec is the function that replaces the running process with the freshly
-// swapped binary. Overridable in tests (a real syscall.Exec never returns, which
-// would kill the test runner). Production value re-execs via syscall.Exec so the
-// new binary inherits the SAME argv (including --agent-dir and the listen addr),
-// finds the existing mTLS materials, skips bootstrap, and serves — all under the
-// same PID, so systemd's Restart policy is irrelevant.
+// reexec is the function that replaces the running process with the freshly swapped
+// binary. Overridable in tests (a real syscall.Exec never returns, which would kill the
+// test runner).
 var reexec = func(path string, argv []string, env []string) error {
 	return syscall.Exec(path, argv, env)
 }
@@ -56,17 +52,9 @@ var downloadFile = func(ctx context.Context, url string) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(resp.Body, 256*1024*1024))
 }
 
-// SelfUpdate replaces the agent's own binary in place with a newer release and
-// restarts to run it, WITHOUT touching the mTLS materials — so the server keeps
-// its identity and pinned fingerprint across the upgrade (see the RPC's contract
-// in proto/agent.proto). The control plane has already resolved the per-arch
-// asset; we download it, verify the sha256 (refusing a mismatch — never exec an
-// unverified binary), atomically swap our own binary, reply, then re-exec.
-//
-// Ordering matters: the swap + verification happen synchronously so any failure
-// is returned to the caller (the running binary untouched); the actual re-exec is
-// deferred to a goroutine AFTER we return the response, so the control plane gets
-// a clean "restarting=true" rather than a dropped connection it must guess about.
+// SelfUpdate replaces the agent's own binary in place with a newer release and restarts
+// to run it, WITHOUT touching the mTLS materials — so the server keeps its identity and
+// pinned fingerprint across the upgrade (see the RPC's contract in proto/agent.proto).
 func (s *Service) SelfUpdate(ctx context.Context, req *pb.SelfUpdateRequest) (*pb.SelfUpdateResponse, error) {
 	// Where we live. Resolve symlinks so we replace the REAL file (install-agent.sh
 	// installs to /usr/local/bin/deplo-agent directly, but a packaged setup may
@@ -82,17 +70,11 @@ func (s *Service) SelfUpdate(ctx context.Context, req *pb.SelfUpdateRequest) (*p
 	return s.applyUpdate(ctx, exe, req)
 }
 
-// applyUpdate performs the verified swap of the binary AT exePath and schedules
-// the re-exec. Split out from SelfUpdate (which only resolves os.Executable())
-// so tests drive the whole swap against a throwaway temp file instead of the
-// running test binary. On success the binary at exePath now holds the new bytes
-// and a deferred re-exec is in flight; on any failure the file is untouched and a
-// gRPC status error is returned.
+// applyUpdate performs the verified swap of the binary AT exePath and schedules the
+// re-exec.
 func (s *Service) applyUpdate(ctx context.Context, exePath string, req *pb.SelfUpdateRequest) (*pb.SelfUpdateResponse, error) {
-	// Pick the asset for THIS host's architecture — the agent is the authority on
-	// its own arch (runtime.GOARCH), exactly as install-agent.sh selects by
-	// `uname -m`. An absent arch means the release didn't publish a binary for this
-	// host; fail cleanly rather than install the wrong one.
+	// Pick the asset for THIS host's architecture — the agent is the authority on its own
+	// arch (runtime.GOARCH), exactly as install-agent.sh selects by `uname -m`.
 	bin := req.GetBinaries()[runtime.GOARCH]
 	if bin == nil || bin.GetUrl() == "" || bin.GetSha256() == "" {
 		return nil, status.Errorf(codes.FailedPrecondition,
@@ -126,10 +108,7 @@ func (s *Service) applyUpdate(ctx context.Context, exePath string, req *pb.SelfU
 		time.Sleep(selfUpdateGrace)
 		log.Printf("deplo-agent: re-execing %s to complete self-update to v%s", exePath, req.GetVersion())
 		if err := reexec(exePath, argv, env); err != nil {
-			// syscall.Exec only returns on failure. If it does, the old process is
-			// still running the old code — log loudly; the operator can restart the
-			// service (or systemd will on the next failure) to pick up the new binary
-			// that is already on disk.
+			// syscall.Exec only returns on failure.
 			log.Printf("deplo-agent: re-exec failed: %v (new binary is on disk; restart the service to apply)", err)
 		}
 	}()
@@ -137,12 +116,9 @@ func (s *Service) applyUpdate(ctx context.Context, exePath string, req *pb.SelfU
 	return &pb.SelfUpdateResponse{Version: req.GetVersion(), Restarting: true}, nil
 }
 
-// stageVerifiedBinary downloads url, verifies its bytes against wantSha256
-// (lowercase hex), writes them to a 0755 temp file beside `exe`, and returns that
-// temp file's path. The caller renames it over `exe`. Any failure removes the temp
-// file and returns a gRPC status error; the running binary is never touched until
-// the bytes are proven to match — the same "refuse an unverified binary" guarantee
-// install-agent.sh enforces before it ever runs the downloaded agent.
+// stageVerifiedBinary downloads url, verifies its bytes against wantSha256 (lowercase
+// hex), writes them to a 0755 temp file beside `exe`, and returns that temp file's
+// path.
 func (s *Service) stageVerifiedBinary(ctx context.Context, exe, url, wantSha256 string) (string, error) {
 	body, err := downloadFile(ctx, url)
 	if err != nil {

@@ -19,11 +19,11 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
-// CertManager owns the agent's live mTLS server materials and can hot-swap the
-// leaf cert WITHOUT a restart. main.go builds it from the on-disk cert/key/ca and
-// hands the gRPC server a TLS config whose GetConfigForClient reads the CURRENT
-// materials on every handshake, so an InstallRenewedCert takes effect immediately
-// for new connections. All access is guarded by a RWMutex.
+// CertManager owns the agent's live mTLS server materials and can hot-swap the leaf
+// cert WITHOUT a restart. main.go builds it from the on-disk cert/key/ca and hands the
+// gRPC server a TLS config whose GetConfigForClient reads the CURRENT materials on
+// every handshake, so an InstallRenewedCert takes effect immediately for new
+// connections.
 type CertManager struct {
 	certFile, keyFile, caFile string
 
@@ -73,11 +73,9 @@ func (m *CertManager) ServerTLSConfig() *tls.Config {
 	}
 }
 
-// install verifies the new cert matches keyPEM, swaps the in-memory materials so
-// LIVE handshakes use the new leaf immediately, then persists all three files
-// atomically (temp + rename) for restart survival. A persist failure is returned
-// but the in-memory swap already happened — the running server keeps serving with
-// the new cert and the control plane's next renewal attempt re-persists.
+// install verifies the new cert matches keyPEM, swaps the in-memory materials so LIVE
+// handshakes use the new leaf immediately, then persists all three files atomically
+// (temp + rename) for restart survival.
 func (m *CertManager) install(certPEM, keyPEM, caPEM []byte) error {
 	// The cert MUST correspond to the pending key, else a swap would break every
 	// future handshake. tls.X509KeyPair fails closed on a mismatch.
@@ -150,10 +148,9 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 // where the two RPCs return Unimplemented.
 func (s *Service) EnableCertRenewal(cm *CertManager) { s.certMgr = cm }
 
-// RenewalCSR generates a FRESH keypair and returns a CSR for it; the new private
-// key is held PENDING in memory (never sent) until InstallRenewedCert confirms
-// the control-plane-signed cert matches it. This is driven by the control plane
-// over the still-valid pinned mTLS channel before the current leaf expires.
+// RenewalCSR generates a FRESH keypair and returns a CSR for it; the new private key is
+// held PENDING in memory (never sent) until InstallRenewedCert confirms the
+// control-plane-signed cert matches it.
 func (s *Service) RenewalCSR(ctx context.Context, req *pb.RenewalCSRRequest) (*pb.RenewalCSRResponse, error) {
 	if s.certMgr == nil {
 		return nil, status.Error(codes.Unimplemented, "cert renewal is not enabled on this agent")
@@ -175,10 +172,9 @@ func (s *Service) RenewalCSR(ctx context.Context, req *pb.RenewalCSRRequest) (*p
 	return &pb.RenewalCSRResponse{CsrPem: string(csrPem)}, nil
 }
 
-// InstallRenewedCert installs the CA-signed leaf produced from the last
-// RenewalCSR: it checks the cert's public key matches the pending private key,
-// then hot-swaps + persists the materials. Idempotent-safe: a stale/mismatched
-// cert is rejected without touching the live materials.
+// InstallRenewedCert installs the CA-signed leaf produced from the last RenewalCSR: it
+// checks the cert's public key matches the pending private key, then hot-swaps +
+// persists the materials.
 func (s *Service) InstallRenewedCert(ctx context.Context, req *pb.InstallRenewedCertRequest) (*pb.StackResult, error) {
 	if s.certMgr == nil {
 		return nil, status.Error(codes.Unimplemented, "cert renewal is not enabled on this agent")

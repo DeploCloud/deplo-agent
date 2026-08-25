@@ -126,10 +126,10 @@ func TestInflight_subscriberCancelDetaches(t *testing.T) {
 	}
 }
 
-// A verbose/malicious build cannot grow the retained buffer without bound: log
-// events are capped by count, the oldest are coalesced into a single note, yet
-// the phase and terminal result events are always retained and the newest log
-// line survives — so reattach still yields a truncated log + a note + the result.
+// A verbose/malicious build cannot grow the retained buffer without bound: log events
+// are capped by count, the oldest are coalesced into a single note, yet the phase and
+// terminal result events are always retained and the newest log line survives — so
+// reattach still yields a truncated log + a note + the result.
 func TestInflight_logRetentionIsBounded(t *testing.T) {
 	f := newInflight(func() {})
 	f.append(phaseEvent(pb.DeployPhase_DEPLOY_PHASE_BUILDING)) // structural, must survive
