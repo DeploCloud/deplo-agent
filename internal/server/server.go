@@ -420,15 +420,15 @@ func (s *Service) StopStack(ctx context.Context, ref *pb.StackRef) (*pb.StackRes
 	if err := validateSlug(slug); err != nil {
 		return nil, err
 	}
-	res, err := dockercli.Run(ctx, time.Minute, "compose", "-p", "deplo-"+slug, "-f", s.stackPath(slug), "stop")
+	res, err := dockercli.Run(ctx, time.Minute, s.composeCtl(slug, "stop")...)
 	if err == nil && res.Code == 0 {
 		return &pb.StackResult{Ok: true}, nil
 	}
 	r2, err2 := dockercli.Run(ctx, 30*time.Second, "stop", "deplo-"+slug)
-	if err2 != nil {
-		return &pb.StackResult{Ok: false, Error: err2.Error()}, nil
+	if err2 == nil && r2.Code == 0 {
+		return &pb.StackResult{Ok: true}, nil
 	}
-	return &pb.StackResult{Ok: r2.Code == 0, Error: r2.Stderr}, nil
+	return &pb.StackResult{Ok: false, Error: stackFailure(res, err, r2, err2)}, nil
 }
 
 // StartStack starts a previously stopped stack.
@@ -437,15 +437,15 @@ func (s *Service) StartStack(ctx context.Context, ref *pb.StackRef) (*pb.StackRe
 	if err := validateSlug(slug); err != nil {
 		return nil, err
 	}
-	res, err := dockercli.Run(ctx, time.Minute, "compose", "-p", "deplo-"+slug, "-f", s.stackPath(slug), "start")
+	res, err := dockercli.Run(ctx, time.Minute, s.composeCtl(slug, "start")...)
 	if err == nil && res.Code == 0 {
 		return &pb.StackResult{Ok: true}, nil
 	}
 	r2, err2 := dockercli.Run(ctx, 30*time.Second, "start", "deplo-"+slug)
-	if err2 != nil {
-		return &pb.StackResult{Ok: false, Error: err2.Error()}, nil
+	if err2 == nil && r2.Code == 0 {
+		return &pb.StackResult{Ok: true}, nil
 	}
-	return &pb.StackResult{Ok: r2.Code == 0, Error: r2.Stderr}, nil
+	return &pb.StackResult{Ok: false, Error: stackFailure(res, err, r2, err2)}, nil
 }
 
 // DestroyStack stops and removes a stack (compose down, falling back to rm -f).
@@ -467,7 +467,7 @@ func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.Stack
 	if err := validateSlug(slug); err != nil {
 		return nil, err
 	}
-	downArgs := []string{"compose", "-p", "deplo-" + slug, "-f", s.stackPath(slug), "down", "--remove-orphans"}
+	downArgs := s.composeCtl(slug, "down", "--remove-orphans")
 	if ref.GetRemoveVolumes() {
 		downArgs = append(downArgs, "-v")
 	}
@@ -721,4 +721,59 @@ func (s *Service) CheckPort(ctx context.Context, req *pb.CheckPortRequest) (*pb.
 
 func (s *Service) stackPath(slug string) string {
 	return fmt.Sprintf("%s/%s.yml", s.stackDir, slug)
+}
+
+// composeCtl builds the argv for a lifecycle verb (`stop`, `start`, `down`) on a
+// stack that is already on disk.
+//
+// The `--project-directory` / `--env-file` pair is not decoration a deploy needs
+// and a stop does not: compose resolves the WHOLE file before it acts, every
+// verb included. So a stack whose author wrote `${VAR:?message}` - a required
+// variable, the ordinary way to say a setting is mandatory - failed at config
+// time on stop/start/down, fell through to the bare-container fallback, and came
+// back as `No such container: deplo-<slug>`. That names neither the cause nor a
+// container a compose stack ever has (its containers are `deplo-<slug>-<service>-1`),
+// and it left an app that deploys fine impossible to stop from the panel.
+//
+// Read off disk rather than passed in, because these RPCs carry no env: the
+// deploy wrote the file, and this finds it in either of the two places it has
+// lived (writeComposeEnv moved it into the stack's own directory). Both flags go
+// together, exactly as composeUpArgs sends them, so a relative path in the
+// compose file resolves to the same thing on a stop as it did on the deploy.
+func (s *Service) composeCtl(slug string, verb ...string) []string {
+	args := []string{"compose", "-p", "deplo-" + slug, "-f", s.stackPath(slug)}
+	if dir := s.filesRoot(slug); isFile(filepath.Join(dir, ".env")) {
+		args = append(args, "--project-directory", dir, "--env-file", filepath.Join(dir, ".env"))
+	} else if legacy := fmt.Sprintf("%s/%s.env", s.stackDir, slug); isFile(legacy) {
+		args = append(args, "--env-file", legacy)
+	}
+	return append(args, verb...)
+}
+
+func isFile(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && !st.IsDir()
+}
+
+// stackFailure picks what to report when BOTH the compose verb and the
+// bare-container fallback failed.
+//
+// Compose's own message wins. The fallback acts on `deplo-<slug>`, a name only a
+// single-image app's container carries, so on a compose stack it always answers
+// "No such container" - and reporting only that hid the real reason behind an
+// error about a container that was never supposed to exist.
+func stackFailure(res dockercli.Result, err error, fb dockercli.Result, fbErr error) string {
+	for _, msg := range []string{errText(err), strings.TrimSpace(res.Stderr), errText(fbErr), strings.TrimSpace(fb.Stderr)} {
+		if msg != "" {
+			return msg
+		}
+	}
+	return "the stack could not be stopped or started and docker said nothing"
+}
+
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }

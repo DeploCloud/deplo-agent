@@ -761,7 +761,7 @@ func (s *Service) restoreProject(ctx context.Context, p *pb.ProjectDescriptor, s
 
 	// Stop the stack so volumes aren't written under us while we wipe them.
 	e.log("info", "Stopping the stack")
-	if _, err := dockercli.Run(ctx, 90*time.Second, "compose", "-p", "deplo-"+slug, "-f", s.stackPath(slug), "stop"); err != nil {
+	if _, err := dockercli.Run(ctx, 90*time.Second, s.composeCtl(slug, "stop")...); err != nil {
 		e.log("warn", "stack stop: "+err.Error()+" (continuing)")
 	}
 
