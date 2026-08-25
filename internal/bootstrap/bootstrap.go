@@ -28,7 +28,7 @@ import (
 // Materials are the persisted mTLS files the agent serves with after bootstrap.
 type Materials struct {
 	CertPath string // agent's signed server cert (PEM)
-	KeyPath  string // agent's private key (PEM) — generated here, never sent
+	KeyPath  string // agent's private key (PEM) - generated here, never sent
 	CAPath   string // pinned CA cert (PEM)
 }
 
@@ -125,7 +125,7 @@ func Run(cfg Config) (Materials, error) {
 			return mats, fmt.Errorf("control plane did not sign the bootstrap response (refusing over plain HTTP)")
 		}
 		if !verifyMAC(cfg.Token, rawBody, mac) {
-			return mats, fmt.Errorf("bootstrap response HMAC did not verify — possible tampering")
+			return mats, fmt.Errorf("bootstrap response HMAC did not verify - possible tampering")
 		}
 	}
 
@@ -216,7 +216,7 @@ func callHome(cfg Config, csrPem string) (callHomeResponse, []byte, string, erro
 }
 
 // pinnedTransport builds an http.Transport that trusts the control plane IFF the
-// presented leaf cert's sha256 matches the expected fingerprint — Let's-Encrypt or
+// presented leaf cert's sha256 matches the expected fingerprint - Let's-Encrypt or
 // self-signed alike (P3).
 func pinnedTransport(expected string) *http.Transport {
 	want := strings.ToLower(strings.ReplaceAll(expected, ":", ""))

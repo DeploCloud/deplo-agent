@@ -8,7 +8,7 @@
 #   make fmt       -> gofmt the Go, Prettier the docs and workflows
 #   make fmt-check -> the same, as a verdict (what CI runs)
 
-# Stamp the agent version from the git tag — the SINGLE source of truth. A clean
+# Stamp the agent version from the git tag - the SINGLE source of truth. A clean
 # release checkout (`make build` at tag v1.2.0) stamps "1.2.0"; a dev checkout
 # stamps the nearest tag + commits-ahead + short SHA + `-dirty` (e.g.
 # "1.2.0-3-gabc1234-dirty"), or "dev" with no tags/git. The leading v is stripped
@@ -32,7 +32,7 @@ vet:
 
 # Regenerate BOTH sides of the contract: the Go agent stubs (here) AND the TS
 # control-plane client (written to ../deplo/lib/agent/gen when that checkout is a
-# sibling — see proto/generate.sh). Commit the Go stubs here; copy the TS stub
+# sibling - see proto/generate.sh). Commit the Go stubs here; copy the TS stub
 # into the control-plane repo.
 proto:
 	bash proto/generate.sh

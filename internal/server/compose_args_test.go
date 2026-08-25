@@ -8,7 +8,7 @@ import (
 )
 
 // The app's own extra `docker compose up` flags. They are APPENDED to the
-// bring-up the agent assembles — never a replacement — so the project name, the
+// bring-up the agent assembles, never a replacement, so the project name, the
 // stack file and the env-file stay the agent's, whatever arrives on the wire.
 
 func TestComposeUpArgsAppendsExtraFlags(t *testing.T) {

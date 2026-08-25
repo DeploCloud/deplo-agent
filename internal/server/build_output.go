@@ -21,7 +21,7 @@ func imageOutputArgs(ctx context.Context, imageRef string) []string {
 // both branches are testable without a Docker daemon.
 func imageOutputArgsFor(imageRef string, fastExport bool) []string {
 	// `--output` takes a CSV of key=value attributes, so a ref carrying a comma (or
-	// whitespace, or a quote) could smuggle an extra attribute — `push=true` being the
+	// whitespace, or a quote) could smuggle an extra attribute - `push=true` being the
 	// alarming one.
 	if !fastExport || !safeImageRef(imageRef) {
 		return []string{"-t", imageRef}

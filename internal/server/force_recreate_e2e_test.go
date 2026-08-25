@@ -73,7 +73,7 @@ func TestE2E_ForceRecreateReplacesAnUnchangedContainer(t *testing.T) {
 	}
 
 	// Unchanged redeploy: compose sees the same config and keeps the container.
-	// This is the behaviour every ordinary deploy relies on — assert it so the
+	// This is the behaviour every ordinary deploy relies on - assert it so the
 	// force below can't be mistaken for "deploys always recreate now".
 	if again := deploy("unchanged redeploy"); again != first {
 		t.Fatalf("an unchanged redeploy replaced the container (%s → %s); "+
@@ -84,7 +84,7 @@ func TestE2E_ForceRecreateReplacesAnUnchangedContainer(t *testing.T) {
 	req.ForceRecreate = true
 	forced := deploy("forced rebuild")
 	if forced == first {
-		t.Fatalf("force_recreate left the SAME container running (%s) — "+
+		t.Fatalf("force_recreate left the SAME container running (%s) - "+
 			"Rebuild container would report success without rebuilding anything", first)
 	}
 }

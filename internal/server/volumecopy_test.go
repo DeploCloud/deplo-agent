@@ -200,7 +200,7 @@ func TestE2E_VolumeCopyRoundTrip(t *testing.T) {
 
 // TestExportVolume_missingVolumeIsNotFound is the guard that had to exist and did not:
 // `docker run -v <name>:/v` CREATES a missing named volume, so an export of a volume
-// that is not on this host used to exit 0 with a complete EMPTY archive — and the
+// that is not on this host used to exit 0 with a complete EMPTY archive, and the
 // caller wiped a real destination for it.
 func TestExportVolume_missingVolumeIsNotFound(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)

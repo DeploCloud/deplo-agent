@@ -143,7 +143,7 @@ func logEventSize(ev *pb.DeployEvent) int {
 }
 
 // subscribe replays buffered events with seq > fromSeq, then streams live events until
-// the deploy is done or ctx is cancelled (the SUBSCRIBER's context — i.e. the gRPC
+// the deploy is done or ctx is cancelled (the SUBSCRIBER's context - i.e. the gRPC
 // stream; cancelling it detaches this reader without affecting the deploy or other
 // readers). send is the per-event sink; a send error detaches.
 func (f *inflight) subscribe(ctx context.Context, fromSeq uint64, send func(*pb.DeployEvent) error) error {

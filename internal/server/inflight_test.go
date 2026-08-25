@@ -52,7 +52,7 @@ func TestInflight_subscribeFromStart(t *testing.T) {
 	}
 }
 
-// A reattach with from_seq replays only events past the cursor — the core of D5:
+// A reattach with from_seq replays only events past the cursor - the core of D5:
 // a control plane that saw seq 1 reconnects with from_seq=1 and gets 2,3 only.
 func TestInflight_reattachReplaysPastCursor(t *testing.T) {
 	f := newInflight(func() {})
@@ -76,7 +76,7 @@ func TestInflight_reattachReplaysPastCursor(t *testing.T) {
 	}
 }
 
-// Two concurrent subscribers both see the full stream — a live Deploy reader and
+// Two concurrent subscribers both see the full stream - a live Deploy reader and
 // a reattacher do not steal events from each other.
 func TestInflight_twoSubscribers(t *testing.T) {
 	f := newInflight(func() {})
@@ -128,7 +128,7 @@ func TestInflight_subscriberCancelDetaches(t *testing.T) {
 
 // A verbose/malicious build cannot grow the retained buffer without bound: log events
 // are capped by count, the oldest are coalesced into a single note, yet the phase and
-// terminal result events are always retained and the newest log line survives — so
+// terminal result events are always retained and the newest log line survives, so
 // reattach still yields a truncated log + a note + the result.
 func TestInflight_logRetentionIsBounded(t *testing.T) {
 	f := newInflight(func() {})

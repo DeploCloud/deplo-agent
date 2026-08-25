@@ -49,7 +49,7 @@ func (s *Service) FollowLogs(req *pb.FollowLogsRequest, stream pb.Agent_FollowLo
 
 	// Bind the child to the STREAM's context: when the browser disconnects the
 	// control plane cancels the RPC, ctx is done, and CommandContext SIGKILLs the
-	// `docker logs` client — the container is untouched (logs -f never signals it).
+	// `docker logs` client - the container is untouched (logs -f never signals it).
 	cmd := exec.CommandContext(ctx, "docker", logArgs(tail, req)...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -94,14 +94,14 @@ func (s *Service) FollowLogs(req *pb.FollowLogsRequest, stream pb.Agent_FollowLo
 	wg.Wait()
 
 	// Reap the child. A kill-on-cancel (ctx done) is the normal browser-disconnect
-	// teardown, not an error — report ctx.Err() in that case so the gRPC layer
+	// teardown, not an error - report ctx.Err() in that case so the gRPC layer
 	// returns a clean Canceled, never a misleading "exit -1".
 	werr := cmd.Wait()
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
 	// `docker logs` exits 0 once a stopped container's history is drained; a real
-	// failure (no such container — though assertOwned already caught that) surfaces
+	// failure (no such container, though assertOwned already caught that) surfaces
 	// as the wait error.
 	if werr != nil {
 		if _, ok := werr.(*exec.ExitError); ok {

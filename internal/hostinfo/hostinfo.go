@@ -1,4 +1,4 @@
-// Package hostinfo answers "what IS this host?" — the neofetch question, as opposed to
+// Package hostinfo answers "what IS this host?" - the neofetch question, as opposed to
 // the gauge question hostmetrics answers. Putting them in one package would mean every
 // "show me the hardware" click paid for a 1s CPU sample.
 package hostinfo
@@ -147,7 +147,7 @@ func parseOSRelease(r io.Reader) string {
 }
 
 // unameInfo returns the kernel release and machine arch via the syscall rather
-// than shelling out to `uname` — the agent must work on a host with a minimal
+// than shelling out to `uname` - the agent must work on a host with a minimal
 // PATH, and an exec for two strings is a process we don't need.
 func unameInfo() (kernel, arch string) {
 	var u syscall.Utsname
@@ -174,7 +174,7 @@ func charsToString[T int8 | uint8](chars []T) string {
 // ---- Clock ----------------------------------------------------------------
 
 // clock reports the host's IANA zone, its current wall time, and its offset from UTC in
-// MINUTES — not hours, because Kathmandu is +345 and Kolkata +330.
+// MINUTES, not hours, because Kathmandu is +345 and Kolkata +330.
 func clock() (tz string, unixMs int64, offsetMinutes int32) {
 	now := time.Now()
 	tz = readTimezone()

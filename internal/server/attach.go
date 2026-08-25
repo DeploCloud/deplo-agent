@@ -21,7 +21,7 @@ import (
 // agent: interactive `docker attach` over one bidi gRPC stream.
 
 // attachClient abstracts the two backings (piped child / pty) the way the TS
-// AttachHandle did, but with a direct read([]byte) model — gRPC pumps bytes, it
+// AttachHandle did, but with a direct read([]byte) model - gRPC pumps bytes, it
 // does not register callbacks.
 type attachClient interface {
 	// read fills p with merged container output; returns io.EOF when the client
@@ -55,7 +55,7 @@ func (s *Service) Attach(stream pb.Agent_AttachServer) error {
 	if err := assertOwned(ctx, open.GetContainer(), open.GetProjectId()); err != nil {
 		return err
 	}
-	// Attaching to a stopped container's PID 1 would just hang — refuse early,
+	// Attaching to a stopped container's PID 1 would just hang - refuse early,
 	// mirroring resolveAttachTarget's "stopped" rejection (which the control plane
 	// also does, but a remote container's liveness must be checked where it runs).
 	if !dockercli.IsRunning(ctx, open.GetContainer()) {
@@ -102,7 +102,7 @@ func (s *Service) Attach(stream pb.Agent_AttachServer) error {
 
 	// Input pump: client -> container. Without this, an idle attach to a container that
 	// exits would stay blocked in Recv() and defer client.close() would not run until the
-	// client eventually tore the stream down — leaking the docker attach child.
+	// client eventually tore the stream down - leaking the docker attach child.
 	type frameOrErr struct {
 		in  *pb.AttachInput
 		err error
@@ -286,7 +286,7 @@ type attachPTY struct {
 
 // reap Wait()s the docker attach child exactly once (guarded), capturing its
 // exit code. Both read() (natural EOF) and close() (killed on a failed Send /
-// client teardown) call it, so the child is always reaped — never left a zombie.
+// client teardown) call it, so the child is always reaped, never left a zombie.
 func (a *attachPTY) reap() {
 	a.waitOnce.Do(func() {
 		werr := a.cmd.Wait()

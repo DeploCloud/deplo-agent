@@ -13,7 +13,7 @@ import (
 )
 
 // DestroyStack's `rm -f` fallback must report Ok based on the docker EXIT CODE, not
-// merely the spawn error — otherwise a genuine non-zero removal failure is reported as
+// merely the spawn error, otherwise a genuine non-zero removal failure is reported as
 // a successful destroy.
 func TestDestroyStack_missingContainerReportsOk(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -58,7 +58,7 @@ func TestRemoveStackFiles_idempotentAndScoped(t *testing.T) {
 	if _, err := os.Stat(env); !os.IsNotExist(err) {
 		t.Errorf("env file should be removed, stat err=%v", err)
 	}
-	// A different slug's files are untouched — removal is scoped to the slug.
+	// A different slug's files are untouched - removal is scoped to the slug.
 	if _, err := os.Stat(other); err != nil {
 		t.Errorf("an unrelated stack's file must survive, stat err=%v", err)
 	}
@@ -97,7 +97,7 @@ func TestDestroyStack_removeVolumesSweepsStackFile(t *testing.T) {
 
 // When a removeVolumes destroy can't run a clean `down -v` (here: a malformed compose
 // file makes `compose down` fail), it must fall through to rm -f and report Ok:false
-// WITHOUT sweeping the stack file — `rm -f` can't reclaim a named volume, so the volume
+// WITHOUT sweeping the stack file - `rm -f` can't reclaim a named volume, so the volume
 // survived and the only on-disk record of its name (the compose file) must be kept for
 // a retry.
 func TestDestroyStack_removeVolumesDownFailKeepsFileAndReportsNotOk(t *testing.T) {

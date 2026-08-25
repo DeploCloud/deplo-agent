@@ -183,7 +183,7 @@ func (s *Service) InstallRenewedCert(ctx context.Context, req *pb.InstallRenewed
 	priv := s.pendingKey
 	s.pendingMu.Unlock()
 	if priv == nil {
-		return &pb.StackResult{Ok: false, Error: "no pending renewal — call RenewalCSR first"}, nil
+		return &pb.StackResult{Ok: false, Error: "no pending renewal - call RenewalCSR first"}, nil
 	}
 	block, _ := pem.Decode([]byte(req.GetCertPem()))
 	if block == nil {

@@ -27,7 +27,7 @@ const cgroupUnhealthyTicks = 3
 
 // cgroup2Available reports whether this host can use the cgroup v2 backend. v1 and the
 // "hybrid" layout scatter every controller across its own mount (memory/, cpu,cpuacct/,
-// blkio/) with different filenames AND different semantics — memory.usage_in_bytes
+// blkio/) with different filenames AND different semantics - memory.usage_in_bytes
 // includes page cache in a place the v2 file does not, so a shared parser would
 // silently over-report on half the fleet.
 func cgroup2Available() bool {
@@ -92,7 +92,7 @@ func (c *cgroupSampler) Sample(entries []rosterEntry, now time.Time) []*pb.Conta
 	c.sampleMu.Lock()
 	defer c.sampleMu.Unlock()
 
-	// prev is only ever REPLACED, never mutated in place, and only Sample replaces it —
+	// prev is only ever REPLACED, never mutated in place, and only Sample replaces it,
 	// which sampleMu already serializes.
 	c.mu.Lock()
 	prev := c.prev
@@ -230,7 +230,7 @@ func (c *cgroupSampler) readOne(e rosterEntry, now time.Time, prev map[string]cg
 		pids, _ = parsePidsCurrent(raw)
 	}
 
-	// /proc/<pid>/net/dev read FROM THE HOST returns the CONTAINER's namespace counters —
+	// /proc/<pid>/net/dev read FROM THE HOST returns the CONTAINER's namespace counters -
 	// verified against a live host, where the container's eth0 showed 33,481,934 rx bytes
 	// while the host's eth0 showed 1,188,594,390. procfs resolves the network files
 	// through the target task's netns, so no setns, no nsenter and no privileged helper is
@@ -271,7 +271,7 @@ func cpuPercentFromUsage(prevUsec, curUsec int64, elapsed time.Duration) float64
 		return 0
 	}
 	delta := curUsec - prevUsec
-	// A counter that went BACKWARDS means the accounting was reset under us — a restart
+	// A counter that went BACKWARDS means the accounting was reset under us - a restart
 	// reuses the container id but not its cgroup.
 	if delta <= 0 {
 		return 0
@@ -394,7 +394,7 @@ func parseNetDev(content string) (rx, tx int64) {
 
 // skipNetIface drops the interfaces that would misreport a container's traffic: `lo` is
 // intra-container chatter that `docker stats` never counts, and a veth*/docker* device
-// can only appear if we are reading the HOST namespace by mistake — counting those
+// can only appear if we are reading the HOST namespace by mistake - counting those
 // would attribute the entire host bridge's throughput to one container, which looks
 // plausible enough that nobody would question it.
 func skipNetIface(name string) bool {

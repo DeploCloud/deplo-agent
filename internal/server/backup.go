@@ -150,7 +150,7 @@ func (s *Service) Restore(req *pb.RestoreRequest, stream pb.Agent_RestoreServer)
 }
 
 // ---------------------------------------------------------------------------
-// Database backup / restore — `docker exec` the engine's dump tool, gzip → S3
+// Database backup / restore - `docker exec` the engine's dump tool, gzip → S3
 // ---------------------------------------------------------------------------
 
 // execWithSecretEnv builds a `docker exec [flags...]` argv prefix that forwards a
@@ -212,13 +212,13 @@ func dumpArgv(d *pb.DatabaseDescriptor) (argv []string, env []string, err error)
 		return a, nil, nil
 	case "redis":
 		// redis-cli --rdb - streams a valid RDB to stdout. The password rides in
-		// REDISCLI_AUTH (env), which redis-cli honours — so it stays off argv.
+		// REDISCLI_AUTH (env), which redis-cli honours, so it stays off argv.
 		a, env := execWithSecretEnv(pw, "REDISCLI_AUTH")
 		a = append(a, c, "redis-cli", "--rdb", "-")
 		return a, env, nil
 	case "clickhouse":
 		// Clickhouse is multi-statement (schema + per-table data), not a single
-		// stdout pipe — handled by dumpClickhouse, dispatched in backupDatabase.
+		// stdout pipe - handled by dumpClickhouse, dispatched in backupDatabase.
 		return nil, nil, errClickhouseSeparate
 	default:
 		return nil, nil, fmt.Errorf("unsupported database engine %q", d.GetDbType())
@@ -258,7 +258,7 @@ func restoreArgv(d *pb.DatabaseDescriptor) (argv []string, env []string, err err
 		return a, nil, nil
 	case "redis":
 		// Redis does NOT restore over a single stdin pipe: the dump is an RDB file (redis-cli
-		// --rdb), and `redis-cli --pipe` speaks RESP, not RDB — feeding it an RDB fails
+		// --rdb), and `redis-cli --pipe` speaks RESP, not RDB - feeding it an RDB fails
 		// ("unknown command 'REDIS0014'").
 		return nil, nil, errRedisRestoreSeparate
 	case "clickhouse":
@@ -417,14 +417,14 @@ func (s *Service) restoreRedis(ctx context.Context, d *pb.DatabaseDescriptor, sr
 	}
 
 	// 4. SHUTDOWN NOSAVE: exits WITHOUT rewriting the RDB, leaving our file intact.
-	//    The redis-cli connection drops as the server exits — that is expected, not
+	//    The redis-cli connection drops as the server exits - that is expected, not
 	//    an error, so we don't gate on its exit code.
 	e.log("info", "Reloading redis from the restored snapshot")
 	_, _ = dockercli.RunEnv(ctx, 15*time.Second, cliEnv, cli("SHUTDOWN", "NOSAVE")...)
 
 	// 5. Wait for the supervisor to bring redis back AND for it to answer PING.
 	if !waitRedisReady(ctx, c, pw, 60*time.Second) {
-		e.result(false, "redis did not come back after SHUTDOWN NOSAVE — ensure the container has a restart policy")
+		e.result(false, "redis did not come back after SHUTDOWN NOSAVE - ensure the container has a restart policy")
 		return
 	}
 	if verr := src.verify(); verr != nil {
@@ -435,8 +435,8 @@ func (s *Service) restoreRedis(ctx context.Context, d *pb.DatabaseDescriptor, sr
 	e.result(true, "")
 }
 
-// redisConfig reads a single CONFIG GET value from a redis container ("" on any failure
-// — the caller falls back to the documented default). redisCliPrefix builds the `docker
+// redisConfig reads a single CONFIG GET value from a redis container ("" on any failure -
+// the caller falls back to the documented default). redisCliPrefix builds the `docker
 // exec [-e REDISCLI_AUTH] <container> redis-cli` argv prefix + the host-process env
 // carrying the password value, so redis-cli auth never lands on argv (the value rides
 // in REDISCLI_AUTH, forwarded by the valueless `-e` flag).
@@ -497,14 +497,14 @@ func combineErr(err error, stderr string) string {
 }
 
 // shellQuote single-quotes a path for use inside `sh -c`. The path is a redis
-// CONFIG value (dir/dbfilename) — control-plane/agent-derived, not user free
-// text — but we quote defensively since it is interpolated into a shell string.
+// CONFIG value (dir/dbfilename) - control-plane/agent-derived, not user free
+// text, but we quote defensively since it is interpolated into a shell string.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // ---------------------------------------------------------------------------
-// Project backup / restore — tar volumes + files + snapshot, gzip → S3
+// Project backup / restore - tar volumes + files + snapshot, gzip → S3
 // ---------------------------------------------------------------------------
 
 // backupProject tars a project's named + compose-stack volumes (via a throwaway helper
@@ -522,7 +522,7 @@ func (s *Service) backupProject(ctx context.Context, p *pb.ProjectDescriptor, de
 	e.log("info", fmt.Sprintf("Backing up project %q (%d volume(s), files=%v)", p.GetSlug(), len(p.GetVolumeNames()), p.GetIncludeFiles()))
 
 	// The tar lives INSIDE the producer so its trailer is written before the
-	// gzip and age layers are finished — the one ordering that yields a readable
+	// gzip and age layers are finished - the one ordering that yields a readable
 	// artifact (see artifactWriter.Close).
 	produce := func(w io.Writer) error {
 		tw := tar.NewWriter(w)
@@ -618,7 +618,7 @@ func (s *Service) archiveVolume(ctx context.Context, vol string, tw *tar.Writer,
 		hdr, err := tr.Next()
 		if err == io.EOF {
 			// Drain any trailing bytes so the producer's PipeOut write completes and reports its
-			// exit, then WARN (not fail) on a non-zero exit — the reader reached a clean
+			// exit, then WARN (not fail) on a non-zero exit - the reader reached a clean
 			// trailer, so the archive is complete (busybox's benign "file changed" exit 1 on a
 			// live volume is the common cause).
 			_, _ = io.Copy(io.Discard, pr)
@@ -859,7 +859,7 @@ func (s *Service) unpackProjectArchive(ctx context.Context, slug string, volumeN
 			if !ok {
 				continue // a volume not in our target set (defensive)
 			}
-			// The entry name + type come from an S3 object — never trusted.
+			// The entry name + type come from an S3 object, never trusted.
 			if hasDotDot(inner) {
 				return snap, fmt.Errorf("archive volume entry %q contains a path traversal", inner)
 			}
@@ -933,7 +933,7 @@ func (s *Service) S3Check(ctx context.Context, req *pb.S3CheckRequest) (*pb.S3Ch
 }
 
 // S3Delete deletes a single artifact (or, with prefix=true, a whole target
-// folder) — backs retention + delete-with-artifacts. Idempotent.
+// folder) - backs retention + delete-with-artifacts. Idempotent.
 func (s *Service) S3Delete(ctx context.Context, req *pb.S3DeleteRequest) (*pb.S3DeleteResponse, error) {
 	if t := req.GetStore(); t != nil {
 		root, err := s.resolveStoreRoot(t.GetRoot(), false)

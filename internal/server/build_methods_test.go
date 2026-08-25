@@ -167,7 +167,7 @@ func TestNixpacksDownloadURL_arch(t *testing.T) {
 	// musl asset URL for the pinned version (or a clear unsupported-arch error).
 	url, err := nixpacksDownloadURL()
 	if err != nil {
-		// Acceptable on a non-linux/unsupported-arch test host — just assert it's a
+		// Acceptable on a non-linux/unsupported-arch test host - just assert it's a
 		// deliberate error, not a malformed URL.
 		if !strings.Contains(err.Error(), "nixpacks auto-install") {
 			t.Fatalf("unexpected error: %v", err)

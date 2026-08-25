@@ -12,7 +12,7 @@ import (
 )
 
 // buildEnvKeys must sort deterministically and drop non-identifier names (keys
-// arrive off the wire — same threat model as railpack plan secrets).
+// arrive off the wire - same threat model as railpack plan secrets).
 func TestBuildEnvKeys(t *testing.T) {
 	got := buildEnvKeys(map[string]string{
 		"NEXT_PUBLIC_API": "x",
@@ -31,7 +31,7 @@ func TestBuildEnvKeys(t *testing.T) {
 }
 
 // declaredArgNames must catch single-name, =default, BuildKit multi-name and
-// continuation forms, in any stage, case-insensitively — and only those.
+// continuation forms, in any stage, case-insensitively, and only those.
 func TestDeclaredArgNames(t *testing.T) {
 	df := `FROM node:20 AS builder
 ARG NEXT_PUBLIC_API
@@ -58,7 +58,7 @@ ARG SECOND_STAGE
 }
 
 // dockerfileEnvKeys is the intersection: only env keys the Dockerfile declares
-// as ARG become build args — an undeclared var is never passed (no unconsumed-
+// as ARG become build args - an undeclared var is never passed (no unconsumed-
 // build-arg warnings), a declared-but-absent ARG gets nothing injected.
 func TestDockerfileEnvKeys(t *testing.T) {
 	df := "FROM node:20\nARG NEXT_PUBLIC_API\nARG UNSET_BY_USER\n"
@@ -69,7 +69,7 @@ func TestDockerfileEnvKeys(t *testing.T) {
 	}
 }
 
-// envKV pairs values to the selected keys only — the single place a value lives.
+// envKV pairs values to the selected keys only - the single place a value lives.
 func TestEnvKV(t *testing.T) {
 	got := envKV(map[string]string{"A": "1", "B": "2"}, []string{"B"})
 	if !slices.Equal(got, []string{"B=2"}) {
@@ -77,7 +77,7 @@ func TestEnvKV(t *testing.T) {
 	}
 }
 
-// appendBuildArgKeys must emit bare names (values NEVER ride argv — command
+// appendBuildArgKeys must emit bare names (values NEVER ride argv - command
 // lines are echoed into the user-visible deploy log).
 func TestAppendBuildArgKeysBareNames(t *testing.T) {
 	args := appendBuildArgKeys([]string{"build"}, []string{"NEXT_PUBLIC_API"})

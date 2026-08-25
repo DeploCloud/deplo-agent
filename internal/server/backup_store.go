@@ -153,7 +153,7 @@ func storeKeyPath(root, key string) (string, error) {
 }
 
 // ---------------------------------------------------------------------------
-// Store I/O — the four verbs that mirror s3client's surface
+// Store I/O - the four verbs that mirror s3client's surface
 // ---------------------------------------------------------------------------
 
 // storeWrite streams `r` to <root>/<key>, atomically: the bytes land in a `.partial`
@@ -173,7 +173,7 @@ func storeWrite(root, key string, r io.Reader, overwrite bool) (int64, string, e
 	}
 	tmp := dst + storePartialSuffix
 	// O_NOFOLLOW: resolveInside realpath-checks every EXISTING component, but the leaf is
-	// joined lexically because it usually does not exist yet — so a symlink planted at
+	// joined lexically because it usually does not exist yet, so a symlink planted at
 	// exactly this name is the one thing left that could redirect the write.
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY|syscall.O_NOFOLLOW, storeFilePerm)
 	if err != nil {
@@ -245,7 +245,7 @@ func storeDeleteOne(root, key string) (int64, error) {
 	return 1, nil
 }
 
-// storeDeletePrefix removes every artifact under a key prefix — one target's whole
+// storeDeletePrefix removes every artifact under a key prefix - one target's whole
 // folder, for retention and delete-with-artifacts.
 func storeDeletePrefix(root, prefix string) (int64, error) {
 	norm, err := normalizeRel(prefix)
@@ -265,7 +265,7 @@ func storeDeletePrefix(root, prefix string) (int64, error) {
 	st, serr := os.Stat(dir)
 	if serr != nil {
 		if os.IsNotExist(serr) {
-			return 0, nil // already gone — idempotent, same as S3
+			return 0, nil // already gone - idempotent, same as S3
 		}
 		return 0, fmt.Errorf("read backup prefix: %w", serr)
 	}
@@ -304,7 +304,7 @@ func pruneEmptyDirs(root, dir string) {
 	base := canonicalRoot(root)
 	for dir != base && strings.HasPrefix(dir, base+string(os.PathSeparator)) {
 		if err := os.Remove(dir); err != nil {
-			return // not empty (or not ours) — stop
+			return // not empty (or not ours) - stop
 		}
 		dir = filepath.Dir(dir)
 	}
@@ -346,7 +346,7 @@ func storeFreeBytes(root string) (free, total int64) {
 	return int64(st.Bavail) * bsize, int64(st.Blocks) * bsize
 }
 
-// --------------------------------------------------------------------------- age — the
+// --------------------------------------------------------------------------- age - the
 // encryption layer, applied in the SOURCE pipeline
 // ---------------------------------------------------------------------------
 // Encryption sits next to gzip in the producer, NOT inside the store.
@@ -356,7 +356,7 @@ func storeFreeBytes(root string) (free, total int64) {
 type artifactWriter struct {
 	gz  io.WriteCloser
 	age io.WriteCloser // nil when the destination takes plaintext (S3)
-	// gzOut counts gzip's OUTPUT, which is the artifact minus its age layer — the .tar.gz
+	// gzOut counts gzip's OUTPUT, which is the artifact minus its age layer - the .tar.gz
 	// / .dump.gz a download actually delivers.
 	gzOut *countingWriter
 }
@@ -440,11 +440,11 @@ func openArtifactReader(src io.Reader, identity string) (io.ReadCloser, error) {
 }
 
 // ---------------------------------------------------------------------------
-// artifactSource / artifactSink — where a backup goes, where a restore reads
+// artifactSource / artifactSink - where a backup goes, where a restore reads
 // ---------------------------------------------------------------------------
 
 // --------------------------------------------------------------------------- Integrity
-// — proving an artifact is the one the control plane wrote
+// - proving an artifact is the one the control plane wrote
 // --------------------------------------------------------------------------- An
 // artifact is NOT trusted input.
 
@@ -524,7 +524,7 @@ type artifactSource struct {
 	// - so its configuration snapshot is never used, not even as the fallback
 	// restoreConfig would otherwise reach for when the control plane sent none.
 	configUntrusted bool
-	// stream, when set, IS the artifact — the cross-host RestoreFrom case, where
+	// stream, when set, IS the artifact - the cross-host RestoreFrom case, where
 	// there is no destination on this host to open.
 	stream io.Reader
 	// label describes the source in log lines ("s3://bucket/key", a path, or
@@ -559,7 +559,7 @@ func sourceFromRestore(s *Service, req *pb.RestoreRequest) (*artifactSource, err
 	case req.GetS3() != nil && req.GetS3().GetObjectKey() != "":
 		// The identity rides an S3 restore too. Empty means a LEGACY artifact,
 		// written before bucket artifacts were encrypted, and openArtifactReader
-		// then skips the age layer — which is why old object keys keep restoring.
+		// then skips the age layer, which is why old object keys keep restoring.
 		return &artifactSource{
 			s3:             req.GetS3(),
 			identity:       req.GetAgeIdentity(),
@@ -696,7 +696,7 @@ func destinationFromBackup(s *Service, req *pb.BackupRequest, send func([]byte) 
 // numbers and mean different things, which is exactly why they are named fields
 // and not two int64 returns anyone could swap.
 type artifactWritten struct {
-	// size is the artifact AS STORED — ciphertext when it is encrypted, and the
+	// size is the artifact AS STORED - ciphertext when it is encrypted, and the
 	// number the control plane records on the run.
 	size int64
 	// decryptedSize is that same artifact with its age layer removed: the .tar.gz /
@@ -712,7 +712,7 @@ type artifactWritten struct {
 func (s *Service) writeArtifact(ctx context.Context, dest *artifactDestination, produce func(io.Writer) error) (out artifactWritten, err error) {
 	pr, pw := io.Pipe()
 	// Written by the producer goroutine BEFORE it closes the pipe, read here only
-	// after the read side has seen EOF — the pipe close is the happens-before
+	// after the read side has seen EOF - the pipe close is the happens-before
 	// edge, the same one that makes the artifact itself safe to read.
 	var decrypted int64
 	go func() {
@@ -754,7 +754,7 @@ func (s *Service) writeArtifact(ctx context.Context, dest *artifactDestination, 
 				// COPY before handing the slice off. grpc-go happens to marshal synchronously
 				// inside Send, but `stream` is an interface the caller supplies, and any
 				// implementation that RETAINS the slice (a test double, a buffering relay) would
-				// see it overwritten by the next Read — silently shipping an artifact stitched out
+				// see it overwritten by the next Read - silently shipping an artifact stitched out
 				// of repeated fragments that still has the right length.
 				frame := make([]byte, n)
 				copy(frame, buf[:n])
@@ -789,7 +789,7 @@ func (s *Service) writeArtifact(ctx context.Context, dest *artifactDestination, 
 }
 
 // ---------------------------------------------------------------------------
-// The store RPCs — cross-host relay primitives
+// The store RPCs - cross-host relay primitives
 // ---------------------------------------------------------------------------
 
 // readSourceFor resolves WHERE ReadStoreFile reads from: this host's store, or a bucket
@@ -909,7 +909,7 @@ func (s *Service) WriteStoreFile(stream pb.Agent_WriteStoreFileServer) error {
 	}
 
 	// Bridge the client stream to an io.Reader so storeWrite stays a plain
-	// io.Copy — the same shape the S3 upload has, and the reason the atomic
+	// io.Copy - the same shape the S3 upload has, and the reason the atomic
 	// write path is not duplicated per transport.
 	pr, pw := io.Pipe()
 	go func() {
@@ -962,7 +962,7 @@ func (s *Service) RestoreFrom(stream pb.Agent_RestoreFromServer) error {
 
 	// The remaining client messages ARE the artifact. Feeding them through a pipe
 	// lets the restore paths stay byte-for-byte the same code they run for a local
-	// artifact — the source is just another io.Reader.
+	// artifact - the source is just another io.Reader.
 	pr, pw := io.Pipe()
 	go func() {
 		var perr error

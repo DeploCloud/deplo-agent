@@ -6,7 +6,7 @@ import (
 )
 
 // These tests read real /proc on the test host, so they assert SHAPE and INVARIANTS
-// rather than pinning values — CI runners are shared and noisy, and a test that expects
+// rather than pinning values - CI runners are shared and noisy, and a test that expects
 // a particular CPU or byte count would fail for reasons that have nothing to do with
 // this package.
 
@@ -25,7 +25,7 @@ func TestSampler_Sample_doesNotSleep(t *testing.T) {
 		t.Fatal("timed a Sample() that returned early at the minWindow guard: the rate path was never on the clock")
 	}
 	if elapsed > 300*time.Millisecond {
-		t.Errorf("Sample() over a usable window took %v, want well under 300ms — a sleep has been reintroduced", elapsed)
+		t.Errorf("Sample() over a usable window took %v, want well under 300ms - a sleep has been reintroduced", elapsed)
 	}
 
 	// The degenerate branch carries the same guard, so a sleep cannot hide there
@@ -33,7 +33,7 @@ func TestSampler_Sample_doesNotSleep(t *testing.T) {
 	start = time.Now()
 	s.Sample()
 	if d := time.Since(start); d > 300*time.Millisecond {
-		t.Errorf("Sample() on a degenerate window took %v, want well under 300ms — a sleep has been reintroduced", d)
+		t.Errorf("Sample() on a degenerate window took %v, want well under 300ms - a sleep has been reintroduced", d)
 	}
 }
 
@@ -105,7 +105,7 @@ func TestSampler_degenerateWindowKeepsBaseline(t *testing.T) {
 	if m.NetRx != 0 || m.NetTx != 0 || m.CPU != 0 {
 		t.Errorf("degenerate window: got CPU=%f NetRx=%d NetTx=%d, want all 0", m.CPU, m.NetRx, m.NetTx)
 	}
-	// Point-in-time fields are still real — a too-short window makes RATES
+	// Point-in-time fields are still real - a too-short window makes RATES
 	// unmeasurable, it does not make the whole sample unmeasurable.
 	if m.MemTotal <= 0 {
 		t.Errorf("MemTotal = %d, want > 0 even on a degenerate window", m.MemTotal)
@@ -140,7 +140,7 @@ func windowed(s *Sampler) { s.prevAt = time.Now().Add(-time.Second) }
 // THE failure path: /proc/net/dev fails to read (fd exhaustion under load, a restricted
 // /proc in a container, a hostile ulimit). readNetCounters reports that as 0/0,
 // indistinguishable from a real reading, so a sampler that adopted it as its baseline
-// would diff the entire since-boot counter against 0 on the very next tick — measured
+// would diff the entire since-boot counter against 0 on the very next tick - measured
 // at 11.4 GB/s before this was fixed.
 func TestSampler_failedNetReadDoesNotPoisonBaseline(t *testing.T) {
 	const sinceBoot = int64(1) << 40 // ~1.1 TB, an ordinary long-lived host
@@ -167,7 +167,7 @@ func TestSampler_failedNetReadDoesNotPoisonBaseline(t *testing.T) {
 	windowed(s)
 	m := s.Sample()
 	if m.NetRx != 0 || m.NetTx != 0 {
-		t.Errorf("failed read: NetRx = %d, NetTx = %d, want 0/0 — a failed read is unmeasured, not zero traffic", m.NetRx, m.NetTx)
+		t.Errorf("failed read: NetRx = %d, NetTx = %d, want 0/0 - a failed read is unmeasured, not zero traffic", m.NetRx, m.NetTx)
 	}
 	if s.prevRx != sinceBoot || s.prevTx != sinceBoot {
 		t.Fatalf("failed read advanced the baseline to %d/%d; the next tick would divide a since-boot counter by one tick", s.prevRx, s.prevTx)
@@ -211,7 +211,7 @@ func TestSampler_failedCPUReadDoesNotPoisonBaseline(t *testing.T) {
 	ok = false
 	windowed(s)
 	if m := s.Sample(); m.CPU != 0 {
-		t.Errorf("failed read: CPU = %f, want 0 — unmeasured, not idle", m.CPU)
+		t.Errorf("failed read: CPU = %f, want 0 - unmeasured, not idle", m.CPU)
 	}
 	if s.prevCPU != (cpuTimes{idle: 900, total: 1000}) {
 		t.Fatalf("failed read advanced the CPU baseline to %+v; the next tick would report the since-boot average", s.prevCPU)
@@ -222,7 +222,7 @@ func TestSampler_failedCPUReadDoesNotPoisonBaseline(t *testing.T) {
 	cur = cpuTimes{idle: 900, total: 1100}
 	windowed(s)
 	if m := s.Sample(); m.CPU != 100 {
-		t.Errorf("after recovery: CPU = %f, want 100 — a poisoned baseline would report the since-boot average (~18)", m.CPU)
+		t.Errorf("after recovery: CPU = %f, want 100 - a poisoned baseline would report the since-boot average (~18)", m.CPU)
 	}
 }
 
@@ -242,7 +242,7 @@ func TestSampler_readFailuresAreIndependent(t *testing.T) {
 	}
 
 	// prevAt timestamps the NET baseline, so a net failure must leave it behind
-	// too — advancing the clock while keeping stale counters would divide a
+	// too - advancing the clock while keeping stale counters would divide a
 	// multi-tick delta by a single tick, the same fake spike by another route.
 	if time.Since(s.prevAt) < time.Second {
 		t.Error("net read failed but prevAt advanced; the next window would be measured too short")

@@ -52,7 +52,7 @@ func manifestOnlyInstallFiles(dir string) ([]string, bool) {
 
 	raw, err := os.ReadFile(filepath.Join(dir, "package.json"))
 	if err != nil {
-		return nil, false // not a Node app, or unreadable — leave it alone
+		return nil, false // not a Node app, or unreadable - leave it alone
 	}
 	var pkg struct {
 		Workspaces json.RawMessage   `json:"workspaces"`

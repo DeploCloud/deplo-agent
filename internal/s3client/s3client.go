@@ -1,4 +1,4 @@
-// Package s3client is the agent's S3 client — a thin wrapper over minio-go that the
+// Package s3client is the agent's S3 client - a thin wrapper over minio-go that the
 // backup/restore + S3Check/S3Delete RPCs use to move dump bytes to and from an
 // S3-compatible bucket WITHOUT a control-plane round-trip (ADR-0007).
 package s3client
@@ -44,7 +44,7 @@ type extraOptions struct {
 	// forcePathStyle overrides the control plane's provider-derived choice.
 	forcePathStyle *bool
 	// noCompression stops Go's transport adding `Accept-Encoding: gzip` AFTER
-	// the request was signed — the header the signature does not cover, which is
+	// the request was signed - the header the signature does not cover, which is
 	// what some gateways reject.
 	noCompression bool
 	// insecureSkipVerify accepts any TLS certificate. For a self-hosted store on
@@ -178,7 +178,7 @@ func validateEndpointHost(endpoint string, allowPrivate bool) error {
 		}
 		ips = resolved
 	}
-	// Reject if ANY resolved address is disallowed (conservative — thwarts a
+	// Reject if ANY resolved address is disallowed (conservative - thwarts a
 	// hostname that mixes a public A record with an internal one).
 	for _, ip := range ips {
 		if reason := blockedIPReason(ip); reason != "" {
@@ -205,7 +205,7 @@ func blockedIPReason(ip net.IP) string {
 }
 
 // Upload streams `r` to bucket/key via a multipart PUT, no temp file. Size may
-// be -1 (unknown — a piped dump), in which case minio-go buffers part-sized
+// be -1 (unknown - a piped dump), in which case minio-go buffers part-sized
 // chunks. Returns the bytes written so the control plane can record the size.
 func Upload(ctx context.Context, cfg Config, key string, r io.Reader) (int64, error) {
 	cl, err := New(cfg)

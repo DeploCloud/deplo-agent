@@ -217,7 +217,7 @@ func TestCPUPercentFromUsage(t *testing.T) {
 		// 0.5s of CPU over a 5s window = 10% of one core.
 		{"half a second over five seconds", 1000000, 1500000, 5 * time.Second, 10},
 		// Two cores fully busy for the whole window reads 200, exactly as
-		// `docker stats` does — the value is per-core percent SUMMED.
+		// `docker stats` does - the value is per-core percent SUMMED.
 		{"multicore exceeds 100", 0, 10000000, 5 * time.Second, 200},
 		{"idle container", 1000000, 1000000, 5 * time.Second, 0},
 		// A recreated cgroup resets the counter; the delta must clamp to 0, and
@@ -475,7 +475,7 @@ func TestCgroupSampler_DegradesPerMetricNotPerSample(t *testing.T) {
 	if st.BlockRead != 0 || st.BlockWrite != 0 {
 		t.Errorf("undelegated block IO = %d/%d, want 0/0", st.BlockRead, st.BlockWrite)
 	}
-	// memory.max is unreadable, so the limit is unknown — 0, not a guess.
+	// memory.max is unreadable, so the limit is unknown - 0, not a guess.
 	if st.MemLimit != 0 || st.MemPct != 0 {
 		t.Errorf("unreadable memory.max gave limit=%d pct=%v, want 0/0", st.MemLimit, st.MemPct)
 	}
@@ -492,8 +492,8 @@ func TestCgroupSampler_UnreadableEntriesAreAbsentNotZeroed(t *testing.T) {
 	c := newTestSampler(t, filepath.Join(tmp, "proc"))
 
 	entries := []rosterEntry{
-		// Exited: its cgroup is gone, but it must still be reported — with its real
-		// state and zeroed usage — so the control plane can show it as stopped.
+		// Exited: its cgroup is gone, but it must still be reported - with its real
+		// state and zeroed usage, so the control plane can show it as stopped.
 		{ID: "gone", Name: "old", ProjectID: "prj_1", State: "exited", CgroupPath: filepath.Join(tmp, "nope")},
 		// A RUNNING container whose path the roster could not resolve: nothing to
 		// read, so it is dropped rather than zeroed.
@@ -585,7 +585,7 @@ func TestCgroupSampler_UnreadableCPUDoesNotPrimeTheBaseline(t *testing.T) {
 		t.Fatalf("got %d stats, want 1", len(out))
 	}
 	if out[0].CpuPct != 0 {
-		t.Errorf("CpuPct = %v, want 0 (still unprimed — a cumulative counter is not a delta)", out[0].CpuPct)
+		t.Errorf("CpuPct = %v, want 0 (still unprimed - a cumulative counter is not a delta)", out[0].CpuPct)
 	}
 }
 
@@ -663,7 +663,7 @@ func TestCgroupSampler_WhollyUnreadableTickKeepsTheBaseline(t *testing.T) {
 
 // Path resolution breaking wholesale is THE failure mode the demotion exists
 // for; if an unresolved path skipped the health accounting, `expected` would sit
-// at 0 forever and the fallback could never fire — empty charts, no recovery.
+// at 0 forever and the fallback could never fire - empty charts, no recovery.
 func TestCgroupSampler_UnresolvedPathsTripTheUnhealthyLatch(t *testing.T) {
 	tmp := t.TempDir()
 	c := newTestSampler(t, filepath.Join(tmp, "proc"))
@@ -715,7 +715,7 @@ func TestCgroupSampler_SampleDoesNotBlock(t *testing.T) {
 func TestCgroupSampler_StoppedContainersNeverMarkTheBackendUnhealthy(t *testing.T) {
 	tmp := t.TempDir()
 	c := newTestSampler(t, filepath.Join(tmp, "proc"))
-	// A host whose containers are all stopped fails every read, correctly — a
+	// A host whose containers are all stopped fails every read, correctly - a
 	// stopped container has no cgroup. Counting that as backend failure would
 	// permanently demote a perfectly working host to the slow docker path.
 	e := rosterEntry{ID: "c1", Name: "web", ProjectID: "prj_1", State: "exited", CgroupPath: filepath.Join(tmp, "missing")}

@@ -111,7 +111,7 @@ func TestSelfUpdate_swapsBinaryAndReexecs(t *testing.T) {
 }
 
 // A checksum mismatch must REFUSE the update and leave the running binary byte-
-// for-byte untouched — the agent never installs an unverified binary (P2 parity).
+// for-byte untouched - the agent never installs an unverified binary (P2 parity).
 func TestSelfUpdate_checksumMismatchLeavesBinaryUntouched(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -147,7 +147,7 @@ func TestSelfUpdate_checksumMismatchLeavesBinaryUntouched(t *testing.T) {
 	// Give any (incorrectly scheduled) re-exec a chance to fire, then assert none did.
 	time.Sleep(selfUpdateGrace + 200*time.Millisecond)
 	if fired() {
-		t.Error("re-exec fired after a refused update — must not restart into an unverified binary")
+		t.Error("re-exec fired after a refused update - must not restart into an unverified binary")
 	}
 }
 
@@ -174,7 +174,7 @@ func TestSelfUpdate_downloadFailureIsUnavailable(t *testing.T) {
 }
 
 // No binary for this host's arch (empty map, or an entry with blank url/sha) is a
-// FailedPrecondition before anything is downloaded — the agent tells the operator
+// FailedPrecondition before anything is downloaded - the agent tells the operator
 // to re-run the installer rather than installing a wrong/absent binary.
 func TestSelfUpdate_noBinaryForThisArch(t *testing.T) {
 	s := New(t.TempDir(), t.TempDir(), "/", "")

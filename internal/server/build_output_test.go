@@ -7,7 +7,7 @@ import (
 )
 
 // On a daemon that cannot take image-exporter options, the argv must stay the
-// plain `-t <ref>` every Docker version understands — the flag is not merely an
+// plain `-t <ref>` every Docker version understands - the flag is not merely an
 // optimisation there, it is rejected outright.
 func TestImageOutputArgsFallsBackToTag(t *testing.T) {
 	got := imageOutputArgsFor("deplo/hub:dpl_abc", false)
@@ -17,7 +17,7 @@ func TestImageOutputArgsFallsBackToTag(t *testing.T) {
 }
 
 // With the containerd image store the argv switches to the image exporter with
-// zstd compression — the change that took a 900 MB layer's export from 25 s to
+// zstd compression - the change that took a 900 MB layer's export from 25 s to
 // 8 s.
 func TestImageOutputArgsUsesFastExport(t *testing.T) {
 	got := imageOutputArgsFor("deplo/hub:dpl_abc", true)
@@ -28,7 +28,7 @@ func TestImageOutputArgsUsesFastExport(t *testing.T) {
 }
 
 // `--output` takes a CSV, so a ref carrying a comma (or space, or quote) could smuggle
-// a second attribute — `push=true` being the one that would ship a private image to a
+// a second attribute - `push=true` being the one that would ship a private image to a
 // registry.
 func TestImageOutputArgsRefusesCSVSmuggling(t *testing.T) {
 	for _, ref := range []string{

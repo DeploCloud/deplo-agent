@@ -59,7 +59,7 @@ func (s *Service) materializeGit(
 	}
 
 	// Resolve the checked-out commit sha (reported back so the control plane can
-	// write it to the Deployment row — proto DeployResult.commit_sha).
+	// write it to the Deployment row - proto DeployResult.commit_sha).
 	sha, _ := gitOutput(ctx, dir, "rev-parse", "HEAD")
 	commitSha = strings.TrimSpace(sha)
 
@@ -68,7 +68,7 @@ func (s *Service) materializeGit(
 	stripVolatileGitMetadata(dir)
 
 	// Apply the optional sub-directory (the project's rootDirectory), validated to
-	// stay inside the clone — the subdir arrived off the wire, never trusted.
+	// stay inside the clone - the subdir arrived off the wire, never trusted.
 	buildDir = dir
 	if sub := strings.TrimSpace(g.GetSubdir()); sub != "" {
 		joined, ok := safepath.Join(dir, sub)
@@ -111,12 +111,12 @@ func stripVolatileGitMetadata(root string) {
 }
 
 // authenticatedURL returns (cloneURL, display, authHeader). Credentials are NEVER
-// placed on the clone URL — a URL on argv lands in /proc/<pid>/cmdline, which is
+// placed on the clone URL - a URL on argv lands in /proc/<pid>/cmdline, which is
 // world-readable, so the token would leak.
 func authenticatedURL(raw, token string) (cloneURL, display, authHeader string) {
 	u, err := url.Parse(raw)
 	if err != nil {
-		// Not a parseable URL (e.g. scp-like git@host:repo) — pass through. Such
+		// Not a parseable URL (e.g. scp-like git@host:repo) - pass through. Such
 		// forms carry no HTTP userinfo and authenticate over ssh, so no secret
 		// reaches argv.
 		return raw, raw, ""
@@ -193,7 +193,7 @@ func gitOutput(ctx context.Context, dir string, args ...string) (string, error) 
 }
 
 // sanitizeGitLine strips anything that looks like an x-access-token credential
-// from a log line, as belt-and-suspenders — git should not echo the URL, but a
+// from a log line, as belt-and-suspenders - git should not echo the URL, but a
 // defensive scrub guarantees a token never lands in the deployment log.
 func sanitizeGitLine(line string) string {
 	if i := strings.Index(line, "x-access-token:"); i >= 0 {

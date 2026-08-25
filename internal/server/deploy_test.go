@@ -66,7 +66,7 @@ func TestMaterializeUpload_rejectsTraversal(t *testing.T) {
 		map[string]string{"../escape.txt": "pwned"},
 	)
 	// filepath.Clean("/" + "../escape.txt") == "/escape.txt", landing INSIDE the
-	// dir — so the malicious name is neutralised, never written outside. Assert
+	// dir, so the malicious name is neutralised, never written outside. Assert
 	// nothing escaped the temp dir's PARENT.
 	dir, cleanup, err := s.materializeUpload(data, "demo")
 	if err != nil {

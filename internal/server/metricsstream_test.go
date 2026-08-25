@@ -12,7 +12,7 @@ import (
 )
 
 // metricsstream_test.go covers the StreamMetrics handler over the real in-process gRPC
-// harness (dialLocal — actual TCP on 127.0.0.1:0, not bufconn), so the
+// harness (dialLocal - actual TCP on 127.0.0.1:0, not bufconn), so the
 // context-cancellation semantics under test are the ones gRPC really delivers.
 
 // The handler must actually emit on the cadence it was asked for. Two frames is
@@ -38,7 +38,7 @@ func TestStreamMetrics_emitsSamplesAtInterval(t *testing.T) {
 			t.Fatalf("Recv %d: %v", i, err)
 		}
 		if sample.GetHost() == nil {
-			t.Fatalf("sample %d has no host metrics — the host half is never optional", i)
+			t.Fatalf("sample %d has no host metrics - the host half is never optional", i)
 		}
 		if sample.GetHost().GetCpuCores() < 1 {
 			t.Errorf("sample %d reports %d cores", i, sample.GetHost().GetCpuCores())
@@ -139,7 +139,7 @@ func TestStreamMetrics_clientCancelEndsTheStream(t *testing.T) {
 			t.Errorf("after cancel got code %v (%v), want Canceled", got, err)
 		}
 	case <-deadline:
-		t.Fatal("Recv did not return within 10s of cancel — the handler is not watching ctx.Done()")
+		t.Fatal("Recv did not return within 10s of cancel - the handler is not watching ctx.Done()")
 	}
 }
 
@@ -160,7 +160,7 @@ func TestBuildSample_panicCostsOneFrameNotTheStream(t *testing.T) {
 		t.Fatal("buildSample returned nil; callers dereference the frame")
 	}
 	// The recovered frame must carry NO host metrics. A partial frame is a
-	// fabricated one — the control plane refuses a frame with no host half,
+	// fabricated one - the control plane refuses a frame with no host half,
 	// which renders the honest gap.
 	if sample.GetHost() != nil {
 		t.Error("a recovered frame carried host metrics; a partial frame must not be emitted")

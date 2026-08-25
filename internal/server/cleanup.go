@@ -24,7 +24,7 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// cleanup.go implements DockerCleanup — reclaiming Docker disk on the host. THE PROOF
+// cleanup.go implements DockerCleanup - reclaiming Docker disk on the host. THE PROOF
 // IS NEVER A LABEL. If the index cannot be built, the scopes that rest on it are
 // SKIPPED, never guessed at.
 
@@ -43,7 +43,7 @@ const (
 	// One `docker volume rm` / `docker rmi`.
 	cleanupRemoveTimeout = 30 * time.Second
 
-	// CleanupScopeResult.items is a UI affordance, not a ledger — items_removed is
+	// CleanupScopeResult.items is a UI affordance, not a ledger - items_removed is
 	// the authoritative count. Bound the list so a host with thousands of dangling
 	// layers cannot blow up the response.
 	cleanupMaxItems = 200
@@ -69,7 +69,7 @@ var removeObject = func(ctx context.Context, args ...string) (dockercli.Result, 
 }
 
 // dockerQuery is the READ-ONLY half: enumeration only, it never mutates the host.
-// A seam as well, so the tests can drive the handler against a synthetic host —
+// A seam as well, so the tests can drive the handler against a synthetic host -
 // the safety properties have to be provable with no Docker daemon in the loop.
 var dockerQuery = func(ctx context.Context, timeout time.Duration, args ...string) (dockercli.Result, error) {
 	return dockercli.Run(ctx, timeout, args...)
@@ -88,11 +88,11 @@ type cleanupParams struct {
 	// rollback depth. Absent slug => the scalar. Normalised with the same floor of
 	// 1, so a scope reading it can never keep zero images of an app.
 	keepPerSlug map[string]int
-	// dataDir is the filesystem the build-cache ceiling is derived from — the
+	// dataDir is the filesystem the build-cache ceiling is derived from - the
 	// one the cache actually lands on (build_cache_cap.go).
 	dataDir string
 	// stackDir is where the rendered stacks and their files/<slug> directories
-	// live — the only thing LEFTOVER_APP_FILES looks at.
+	// live - the only thing LEFTOVER_APP_FILES looks at.
 	stackDir string
 	// liveSlugs is every stack the control plane still knows about, instance-wide.
 	// Nil/empty means it could not tell us, which SKIPS the scope that reads it.
@@ -100,7 +100,7 @@ type cleanupParams struct {
 	// cutoff is the newest a CACHE-type object (build cache, dangling image, orphan
 	// buildkit volume) may be to qualify. ZERO means "no age filter".
 	cutoff time.Time
-	// appImageCutoff is the newest an APP image may be to qualify — always
+	// appImageCutoff is the newest an APP image may be to qualify, always
 	// appImageDeployGrace ago, never the policy cutoff. See the constant's comment.
 	appImageCutoff time.Time
 	// filesCutoff is the newest a files/<slug> directory may be to qualify. Same
@@ -168,7 +168,7 @@ func (s *Service) DockerCleanup(ctx context.Context, req *pb.DockerCleanupReques
 	params.filesCutoff = time.Now().Add(-leftoverFilesGrace)
 
 	// The reverse index costs one inspect over every container on the host, and two
-	// scopes need it — so build it at most once, and only if a scope actually asks.
+	// scopes need it, so build it at most once, and only if a scope actually asks.
 	var idx *containerIndex
 	var idxErr error
 	var idxBuilt bool
@@ -248,7 +248,7 @@ func skippedScope(scope pb.CleanupScope, err error) *pb.CleanupScopeResult {
 }
 
 // ---------------------------------------------------------------------------
-// The container-reference reverse index — the ownership test everything rests on
+// The container-reference reverse index - the ownership test everything rests on
 // ---------------------------------------------------------------------------
 
 // containerIndex is every image and every volume referenced by ANY container on
@@ -305,7 +305,7 @@ func buildContainerIndex(ctx context.Context) (*containerIndex, error) {
 }
 
 // ---------------------------------------------------------------------------
-// Scope: build cache — `docker builder prune`
+// Scope: build cache - `docker builder prune`
 // ---------------------------------------------------------------------------
 
 // buildCacheRecord is one row of `docker system df -v`'s BuildCache array. Docker
@@ -341,7 +341,7 @@ func cleanBuildCache(ctx context.Context, p cleanupParams) *pb.CleanupScopeResul
 			if rec.InUse == "true" {
 				continue // a build is holding it right now
 			}
-			// Age off last use where docker knows it, creation otherwise — the same
+			// Age off last use where docker knows it, creation otherwise - the same
 			// choice `--filter until=` makes.
 			at := rec.LastUsedAt
 			if at == "" {
@@ -367,7 +367,7 @@ func cleanBuildCache(ctx context.Context, p cleanupParams) *pb.CleanupScopeResul
 	}
 	if enumFailure != "" {
 		// The preview failed; the prune is still safe (docker's filter decides) and
-		// still owed. Items stay empty — docker's total below is the honest number.
+		// still owed. Items stay empty - docker's total below is the honest number.
 		log.Printf("deplo-agent: build-cache enumeration failed (%s); pruning anyway", enumFailure)
 	}
 
@@ -392,8 +392,8 @@ func cleanBuildCache(ctx context.Context, p cleanupParams) *pb.CleanupScopeResul
 	total, totalKnown := parsePrunedTotal(pres.Stdout)
 	if totalKnown && total == 0 {
 		// Docker freed nothing, so our enumerated candidates were NOT removed (its
-		// filter disagreed, or another sweep beat us to them). Zero the whole line —
-		// count and list included — or the history reports removals that never were.
+		// filter disagreed, or another sweep beat us to them). Zero the whole line -
+		// count and list included, or the history reports removals that never were.
 		r.ReclaimedBytes = 0
 		r.ItemsRemoved = 0
 		r.Items = nil
@@ -404,7 +404,7 @@ func cleanBuildCache(ctx context.Context, p cleanupParams) *pb.CleanupScopeResul
 		return r
 	}
 	// Docker prints the total it actually freed; that beats our estimate. The
-	// estimate is the fallback for an output shape we cannot parse — never a made-up
+	// estimate is the fallback for an output shape we cannot parse, never a made-up
 	// number, just the same sum the dry run reported.
 	if totalKnown {
 		r.ReclaimedBytes = total
@@ -450,7 +450,7 @@ func enforceBuildCacheCeiling(ctx context.Context, p cleanupParams, r *pb.Cleanu
 	}
 	freed, known := parsePrunedTotal(res.Stdout)
 	if !known || freed <= 0 {
-		return // already under the ceiling — the normal case, and a no-op
+		return // already under the ceiling - the normal case, and a no-op
 	}
 	r.ReclaimedBytes += freed
 	for _, id := range prunedCacheRecordIDs(res.Stdout) {
@@ -460,17 +460,17 @@ func enforceBuildCacheCeiling(ctx context.Context, p cleanupParams, r *pb.Cleanu
 }
 
 // ---------------------------------------------------------------------------
-// Scope: dangling images — `docker image prune` (NEVER -a)
+// Scope: dangling images - `docker image prune` (NEVER -a)
 // ---------------------------------------------------------------------------
 
-// cleanDanglingImages removes untagged layers. Safe because a container — running or
-// STOPPED — still pins its image, so docker will not prune an image any app could come
+// cleanDanglingImages removes untagged layers. Safe because a container - running or
+// STOPPED - still pins its image, so docker will not prune an image any app could come
 // back to. It never passes `-a`/`--all`.
 func cleanDanglingImages(ctx context.Context, p cleanupParams) *pb.CleanupScopeResult {
 	r := &pb.CleanupScopeResult{Scope: pb.CleanupScope_CLEANUP_SCOPE_DANGLING_IMAGES}
 
 	var estimate int64
-	// The RAW dangling count before the prune (unfiltered — not just our candidates):
+	// The RAW dangling count before the prune (unfiltered, not just our candidates):
 	// one half of the post-prune diff that makes items_removed an observation instead
 	// of a prediction. -1 = the pre-list failed, no diff possible.
 	rawBefore := -1
@@ -525,7 +525,7 @@ func cleanDanglingImages(ctx context.Context, p cleanupParams) *pb.CleanupScopeR
 	}
 	total, totalKnown := parsePrunedTotal(pres.Stdout)
 	if totalKnown && total == 0 {
-		// Nothing was actually freed — see the build-cache scope for why the whole
+		// Nothing was actually freed - see the build-cache scope for why the whole
 		// line zeroes rather than reporting the un-removed candidates.
 		r.ReclaimedBytes = 0
 		r.ItemsRemoved = 0
@@ -555,7 +555,7 @@ func cleanDanglingImages(ctx context.Context, p cleanupParams) *pb.CleanupScopeR
 }
 
 // ---------------------------------------------------------------------------
-// Scope: orphaned buildkit caches — dangling volumes carrying the sentinel
+// Scope: orphaned buildkit caches - dangling volumes carrying the sentinel
 // ---------------------------------------------------------------------------
 
 // cleanOrphanBuildkitCache removes the anonymous volumes the railpack builder leaks:
@@ -592,7 +592,7 @@ func cleanOrphanBuildkitCache(ctx context.Context, p cleanupParams, idx *contain
 			continue
 		}
 		if _, err := os.Stat(filepath.Join(mountpoint, buildkitSentinel)); err != nil {
-			continue // THE proof. No sentinel, no removal — whatever else it looks like.
+			continue // THE proof. No sentinel, no removal - whatever else it looks like.
 		}
 		if !olderThan(created, p.cutoff) {
 			continue
@@ -622,7 +622,7 @@ func cleanOrphanBuildkitCache(ctx context.Context, p cleanupParams, idx *contain
 }
 
 // ---------------------------------------------------------------------------
-// Scope: unused app images — an explicit `docker rmi` per image, never a prune
+// Scope: unused app images - an explicit `docker rmi` per image, never a prune
 // ---------------------------------------------------------------------------
 
 // cleanUnusedAppImages removes old `deplo/<slug>:<deployment>` images. N is the app's
@@ -682,10 +682,10 @@ func cleanUnusedAppImages(ctx context.Context, p cleanupParams, idx *containerIn
 				continue // (d) among the newest kept for this app
 			}
 			if idx.images[im.id] {
-				continue // (a) a container — perhaps a stopped one — still needs it
+				continue // (a) a container, perhaps a stopped one, still needs it
 			}
 			if !olderThan(im.created, p.appImageCutoff) {
-				continue // (c) inside the deploy grace — possibly racing its own start
+				continue // (c) inside the deploy grace - possibly racing its own start
 			}
 
 			if !p.dryRun {
@@ -702,7 +702,7 @@ func cleanUnusedAppImages(ctx context.Context, p cleanupParams, idx *containerIn
 				}
 			}
 			// docker prints no total for `rmi`, so this is the image's own reported
-			// size — layers shared with a kept image inflate it, exactly as
+			// size - layers shared with a kept image inflate it, exactly as
 			// `docker system df` inflates them. A real number, not an exact one.
 			r.ReclaimedBytes += im.size
 			addItem(r, im.id)
@@ -720,7 +720,7 @@ func cleanUnusedAppImages(ctx context.Context, p cleanupParams, idx *containerIn
 
 // imageInfo is the five things the allow-list needs about an image.
 type imageInfo struct {
-	id      string // FULL sha256 — the form the container index is keyed by
+	id      string // FULL sha256 - the form the container index is keyed by
 	slug    string // deplo.slug label, "" when absent
 	service string // deplo.service label (compose-built images), "" when absent
 	created string
@@ -799,7 +799,7 @@ func (f *scopeFailures) summary() string {
 }
 
 // failedScope zeroes a scope's result and records why. Called when the removal
-// itself failed: nothing was reclaimed, so nothing may be reported as reclaimed —
+// itself failed: nothing was reclaimed, so nothing may be reported as reclaimed -
 // the enumerated candidates must not be passed off as removals.
 func failedScope(r *pb.CleanupScopeResult, msg string) *pb.CleanupScopeResult {
 	r.ReclaimedBytes = 0
@@ -853,7 +853,7 @@ func parseDockerTime(ts string) (time.Time, bool) {
 
 // parseHumanSize turns docker's rendered sizes ("8.19kB", "3.89GB", "1.5GiB", "0B")
 // back into bytes. `system df` prints only these, so a size we cannot parse counts
-// as 0 — an under-report, never an over-report.
+// as 0 - an under-report, never an over-report.
 func parseHumanSize(s string) int64 {
 	s = strings.TrimSpace(s)
 	end := 0
@@ -927,8 +927,8 @@ func pickReclaimed(out string, estimate int64) int64 {
 // Headers ("ID  RECLAIMABLE …"), totals and warnings never match.
 var cacheRecordID = regexp.MustCompile(`^[a-z0-9]{12,}$`)
 
-// prunedCacheRecordIDs recovers the record ids a `builder prune` printed — classic
-// docker prints one bare id per line, buildx one table row per record — so a sweep
+// prunedCacheRecordIDs recovers the record ids a `builder prune` printed - classic
+// docker prints one bare id per line, buildx one table row per record, so a sweep
 // whose own enumeration failed (or found nothing) can still report what was actually
 // pruned.
 func prunedCacheRecordIDs(out string) []string {
@@ -945,8 +945,8 @@ func prunedCacheRecordIDs(out string) []string {
 	return ids
 }
 
-// dirSize sums the disk a directory tree actually occupies, the way `du` does —
-// ALLOCATED BLOCKS, not apparent size — so a sparse buildkit store reports what
+// dirSize sums the disk a directory tree actually occupies, the way `du` does -
+// ALLOCATED BLOCKS, not apparent size, so a sparse buildkit store reports what
 // removing it really gives back.
 func dirSize(root string) int64 {
 	var total int64
@@ -980,7 +980,7 @@ func splitLines(out string) []string {
 	return lines
 }
 
-// uniqueLines is splitLines without duplicates — `docker image ls -q` repeats an id
+// uniqueLines is splitLines without duplicates - `docker image ls -q` repeats an id
 // once per tag it carries.
 func uniqueLines(out string) []string {
 	seen := map[string]bool{}
@@ -1019,7 +1019,7 @@ func dockerErr(what string, res dockercli.Result) string {
 }
 
 // cleanLeftoverAppFiles removes `<stack-dir>/files/<slug>` directories that belong to
-// no stack any more — the config files an App leaves behind when it is deleted, and the
+// no stack any more - the config files an App leaves behind when it is deleted, and the
 // only thing this file removes that no rebuild can recreate.
 func cleanLeftoverAppFiles(p cleanupParams) *pb.CleanupScopeResult {
 	r := &pb.CleanupScopeResult{Scope: pb.CleanupScope_CLEANUP_SCOPE_LEFTOVER_APP_FILES}

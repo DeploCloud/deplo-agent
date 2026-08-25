@@ -149,7 +149,7 @@ func TestE2E_PostgresBackupRestoreOverwrites(t *testing.T) {
 		t.Fatalf("pre-restore sanity: expected sentinel-B, got %q", r.Stdout)
 	}
 
-	// Restore in place — must DROP-AND-RECREATE, reverting to sentinel-A.
+	// Restore in place - must DROP-AND-RECREATE, reverting to sentinel-A.
 	rs := &fakeRestoreStream{}
 	if err := svc.Restore(&pb.RestoreRequest{Kind: pb.BackupKind_BACKUP_KIND_DATABASE, S3: target, Database: d}, rs); err != nil {
 		t.Fatalf("Restore rpc: %v", err)
@@ -201,7 +201,7 @@ func TestE2E_RedisBackupRestoreOverwrites(t *testing.T) {
 	name := "deplo-e2e-redis"
 	_, _ = dockercli.Run(ctx, 10*time.Second, "rm", "-f", name)
 	// A restart policy is REQUIRED for the redis restore (SHUTDOWN NOSAVE relies
-	// on the supervisor bringing it back) — mirror what Deplo's compose sets.
+	// on the supervisor bringing it back) - mirror what Deplo's compose sets.
 	res, err := dockercli.Run(ctx, 60*time.Second,
 		"run", "-d", "--name", name, "--restart", "unless-stopped", e2eRedisImage)
 	if err != nil || res.Code != 0 {

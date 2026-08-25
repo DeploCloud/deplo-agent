@@ -35,8 +35,8 @@ jobs:
       - run: bun run format:check
       - run: go vet ./...
       # The agent's gRPC port is reachable by anyone who can open a socket, and
-      # the TLS handshake + client-cert parse happen BEFORE mTLS proves anything
-      # — so a stdlib crypto/tls or crypto/x509 advisory is pre-auth surface here.
+      # the TLS handshake + client-cert parse happen BEFORE mTLS proves anything,
+      # so a stdlib crypto/tls or crypto/x509 advisory is pre-auth surface here.
       # `go-version-file: go.mod` above means the `go` directive is also the
       # toolchain pin: bump it to patch the standard library.
       - name: govulncheck

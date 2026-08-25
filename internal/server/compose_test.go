@@ -31,7 +31,7 @@ func TestRenderEnvFile_sortedKeyValueLines(t *testing.T) {
 
 func TestRenderEnvFile_collapsesNewlinesInValues(t *testing.T) {
 	// A newline in a value would break the env-file format, so it collapses to a
-	// space — matching the control plane's renderEnvFile (build.ts).
+	// space - matching the control plane's renderEnvFile (build.ts).
 	got := renderEnvFile(map[string]string{"KEY": "line1\nline2", "WIN": "a\r\nb"})
 	if strings.Contains(got, "\nline2") || strings.Contains(got, "a\r\nb") {
 		t.Fatalf("newline not collapsed: %q", got)

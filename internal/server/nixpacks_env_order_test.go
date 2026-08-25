@@ -101,7 +101,7 @@ func TestDeferEnvBelowInstall_movesAppVars(t *testing.T) {
 			t.Errorf("%s lost its ENV declaration", name)
 		}
 	}
-	// The nix layer must stay above everything we touched — it is the expensive
+	// The nix layer must stay above everything we touched - it is the expensive
 	// one and no app variable may ever reach its cache key.
 	if lineIndex(t, out, "RUN nix-env ") > movedArg {
 		t.Error("the nix layer moved below the app variables")
@@ -219,7 +219,7 @@ func TestDeferAppEnvBelowInstall_rewritesTheFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !slices.Equal(moved, []string{"PAYLOAD_SECRET"}) {
-		t.Fatalf("moved = %v — NODE_ENV steers the install and must stay", moved)
+		t.Fatalf("moved = %v - NODE_ENV steers the install and must stay", moved)
 	}
 	body, err := os.ReadFile(path)
 	if err != nil {

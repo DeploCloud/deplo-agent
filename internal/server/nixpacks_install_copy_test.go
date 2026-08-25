@@ -45,7 +45,7 @@ func TestManifestOnlyInstallFiles_plainApp(t *testing.T) {
 			t.Errorf("missing %s in %v", want, files)
 		}
 	}
-	// Only files that EXIST are listed — a COPY of an absent path fails the build.
+	// Only files that EXIST are listed - a COPY of an absent path fails the build.
 	for _, absent := range []string{"yarn.lock", "pnpm-lock.yaml", "package-lock.json"} {
 		if slices.Contains(files, absent) {
 			t.Errorf("listed a file that does not exist: %s", absent)
@@ -94,7 +94,7 @@ func TestManifestOnlyInstallFiles_refusesUnsafeRepos(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			if _, ok := manifestOnlyInstallFiles(writeRepo(t, c.files)); ok {
-				t.Fatalf("%s must NOT be scoped — the install needs the whole repo", c.name)
+				t.Fatalf("%s must NOT be scoped - the install needs the whole repo", c.name)
 			}
 		})
 	}

@@ -10,7 +10,7 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
-// nopEmitter discards every event — the tests assert on filesystem effects, not
+// nopEmitter discards every event - the tests assert on filesystem effects, not
 // the emitted log lines.
 func nopEmitter() *emitter {
 	return &emitter{send: func(*pb.DeployEvent) error { return nil }}
@@ -123,7 +123,7 @@ func TestMaterializeDevWorkspaceRejectsSymlink(t *testing.T) {
 	}
 	ws := s.workspaceDir("app")
 	mustWrite(t, filepath.Join(ws, "index.js"), "ok")
-	// A planted symlink to a host secret — must be rejected (not followed/preserved).
+	// A planted symlink to a host secret - must be rejected (not followed/preserved).
 	if err := os.Symlink("/etc/passwd", filepath.Join(ws, "leak")); err != nil {
 		t.Skipf("symlink unsupported: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestSeedUploadWorkspace(t *testing.T) {
 	if b, err := os.ReadFile(filepath.Join(ws, "index.js")); err != nil || string(b) != "main" {
 		t.Errorf("index.js not seeded: %v %q", err, b)
 	}
-	// A second seed is a no-op (clone-once — never clobbers edits).
+	// A second seed is a no-op (clone-once, never clobbers edits).
 	mustWrite(t, filepath.Join(ws, "index.js"), "EDITED")
 	if err := s.seedUploadWorkspace("app", tarBytes, e); err != nil {
 		t.Fatal(err)
@@ -183,7 +183,7 @@ func TestSeedUploadWorkspace(t *testing.T) {
 func TestSeedUploadWorkspaceConfinesTraversal(t *testing.T) {
 	s := devModeService(t)
 	// A `..`-laden entry is ANCHORED (Clean("/"+name) strips the leading `..`),
-	// so it lands CONFINED inside the workspace — never above it. Same defence as
+	// so it lands CONFINED inside the workspace, never above it. Same defence as
 	// materializeUpload. The host path the entry tried to escape to must NOT exist.
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
@@ -201,7 +201,7 @@ func TestSeedUploadWorkspaceConfinesTraversal(t *testing.T) {
 		t.Errorf("escaping entry should be confined inside the workspace: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(s.dataBase, "..", "etc", "evil")); err == nil {
-		t.Error("entry escaped the workspace — anti-traversal failed")
+		t.Error("entry escaped the workspace - anti-traversal failed")
 	}
 }
 

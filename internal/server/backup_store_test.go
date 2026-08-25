@@ -106,7 +106,7 @@ func TestResolveStoreRoot_refusesRelative(t *testing.T) {
 // --------------------------------------------------------------------------- THE
 // regression that justifies living in internal/server: deleting a prefix that does not
 // exist must delete NOTHING. safepath.Inside returns the BASE on every failure path, so
-// the obvious implementation — join, resolve, RemoveAll — resolves a missing prefix to
+// the obvious implementation (join, resolve, RemoveAll) resolves a missing prefix to
 // the root and wipes every backup on the server.
 
 func TestStoreDeletePrefix_missingPrefixDeletesNothing(t *testing.T) {
@@ -196,8 +196,8 @@ func TestStoreWrite_refusesTraversalKey(t *testing.T) {
 			t.Errorf("key %q must be refused", key)
 		}
 	}
-	// An ABSOLUTE key is not an error — normalizeRel strips the leading slash, the same
-	// way it does for the file RPCs — but it must stay CONTAINED.
+	// An ABSOLUTE key is not an error - normalizeRel strips the leading slash, the same
+	// way it does for the file RPCs, but it must stay CONTAINED.
 	if _, _, err := storeWrite(root, "/etc/cron.d/evil", strings.NewReader("x"), false); err != nil {
 		t.Fatalf("an absolute key should be relativised, not fail: %v", err)
 	}
@@ -251,7 +251,7 @@ func TestStoreWrite_partialWriteLeavesNoArtifact(t *testing.T) {
 		t.Fatal("a truncated write must fail")
 	}
 	if _, err := os.Stat(filepath.Join(root, key)); err == nil {
-		t.Fatal("a failed write must not leave an artifact at the real key — retention never cleans one up, and a restore would hand it to the user")
+		t.Fatal("a failed write must not leave an artifact at the real key - retention never cleans one up, and a restore would hand it to the user")
 	}
 	if _, err := os.Stat(filepath.Join(root, key+storePartialSuffix)); err == nil {
 		t.Error("the temp file should have been removed on the error path")
@@ -364,7 +364,7 @@ func TestArtifactWriter_roundTrip(t *testing.T) {
 
 // Pins the close-ordering bug. age's STREAM writer only emits its final-chunk marker on
 // Close: skip it and the artifact decrypts perfectly until the last chunk and then
-// fails — silent corruption discovered at restore time, months later.
+// fails - silent corruption discovered at restore time, months later.
 // artifactWriter.Close is what prevents it, so assert that NOT calling it really does
 // break the artifact.
 func TestArtifactWriter_skippingCloseCorruptsTheArtifact(t *testing.T) {
@@ -386,7 +386,7 @@ func TestArtifactWriter_skippingCloseCorruptsTheArtifact(t *testing.T) {
 
 	rc, err := openArtifactReader(bytes.NewReader(sink.Bytes()), identity)
 	if err != nil {
-		return // already unreadable — the point stands
+		return // already unreadable - the point stands
 	}
 	defer rc.Close()
 	if _, err := io.ReadAll(rc); err == nil {
@@ -842,7 +842,7 @@ func TestArtifactSource_verifyMarksTheSourceProven(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// ReadStoreFile — the two shapes an artifact can be read from
+// ReadStoreFile - the two shapes an artifact can be read from
 // ---------------------------------------------------------------------------
 
 // fakeBucket serves ONE object over plain http, ignoring the signature: what is
@@ -869,7 +869,7 @@ func fakeBucket(t *testing.T, key string, body []byte) *pb.S3Target {
 		SecretKey: "s",
 		ObjectKey: key,
 		PathStyle: true,
-		// httptest listens on 127.0.0.1, which the SSRF guard refuses by default —
+		// httptest listens on 127.0.0.1, which the SSRF guard refuses by default -
 		// the same flag a self-hosted bucket on the operator's own network needs.
 		AllowPrivateEndpoint: true,
 	}
@@ -950,7 +950,7 @@ func TestReadStoreFile_s3WithoutIdentityStaysCiphertext(t *testing.T) {
 }
 
 // The asymmetry, pinned in both directions. A bucket object cannot be hashed before it
-// is fetched, so its verdict lands at the END — after bytes have already gone.
+// is fetched, so its verdict lands at the END - after bytes have already gone.
 func TestReadStoreFile_s3DigestFailsOnlyAfterTheBytesAreGone(t *testing.T) {
 	s, _ := newStoreService(t)
 	recipient, identity := testKeypair(t)

@@ -22,7 +22,7 @@ git push -u origin main
 ## 2. Cut the first release
 
 The control plane resolves the **latest** release, so nothing installs until one
-exists. The git tag is the only version source — it is stamped into the binary
+exists. The git tag is the only version source - it is stamped into the binary
 directly, so just pick the tag.
 
 ```bash
@@ -32,7 +32,7 @@ git push origin v1.1.0
 
 The `release` workflow builds `deplo-agent-linux-amd64`, `deplo-agent-linux-arm64`
 and `checksums.txt` and attaches them to the release. Confirm all three assets
-appear on the release page — the control plane depends on those exact names.
+appear on the release page - the control plane depends on those exact names.
 
 ## 3. Clean up the control plane (IdraDev/deplo)
 
@@ -44,7 +44,7 @@ left is to delete the now-duplicated source. Verify nothing references it first:
 cd ../deplo
 git rm -r agent/ proto/
 # The control plane keeps lib/agent/ (its TS client) and the COMMITTED
-# generated stub lib/agent/gen/agent.ts — do NOT delete those.
+# generated stub lib/agent/gen/agent.ts - do NOT delete those.
 grep -rn '"\.\./agent\|/agent/version.json\|COPY agent' --include='*.ts' --include='*.tsx' Dockerfile . \
   | grep -v node_modules | grep -v lib/agent      # expect: no matches
 bun run test && bunx tsc --noEmit                  # expect: green
@@ -65,14 +65,14 @@ cd ../deplo && git add lib/agent/gen/agent.ts && git commit -m "proto: regen TS 
 ```
 
 Set `DEPLO_REPO=/path/to/deplo` if the control-plane checkout isn't `../deplo`.
-Both sides must be regenerated together — a proto change that lands here but not
+Both sides must be regenerated together - a proto change that lands here but not
 in the control plane (or vice-versa) silently breaks the wire contract.
 
 ## 5. Operational notes
 
 - **Always-latest policy.** Publishing a release immediately changes what new
   servers install (`lib/agent/release.ts` resolves `releases/latest`). There is
-  no control-plane gate beyond the checksum pin (integrity, not correctness) — so
+  no control-plane gate beyond the checksum pin (integrity, not correctness), so
   test a release before tagging. To switch to an explicit pin, change the
   `releases/latest` lookup in `lib/agent/release.ts` to `releases/tags/<tag>`.
 - **The control-plane image bakes latest-at-build.** Its own local agent is

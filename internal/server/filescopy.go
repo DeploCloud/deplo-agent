@@ -29,7 +29,7 @@ func (s *Service) ExportFiles(req *pb.ExportFilesRequest, stream pb.Agent_Export
 	gz := gzip.NewWriter(cw)
 	tw := tar.NewWriter(gz)
 
-	// A missing dir (or a non-directory at that path) yields an empty (header-only) tar —
+	// A missing dir (or a non-directory at that path) yields an empty (header-only) tar -
 	// valid, and the destination handles it as "nothing to restore".
 	st, statErr := os.Stat(root)
 	switch {

@@ -335,7 +335,7 @@ func TestTarDirRoundTrip(t *testing.T) {
 }
 
 // extractToDir must reject an entry whose path escapes the target root (the entry
-// name came from an S3 object — never trusted).
+// name came from an S3 object, never trusted).
 func TestExtractToDir_rejectsTraversal(t *testing.T) {
 	dst := t.TempDir()
 	hdr := &tar.Header{Name: "x", Typeflag: tar.TypeReg, Size: 3}
@@ -348,7 +348,7 @@ func TestExtractToDir_rejectsTraversal(t *testing.T) {
 	}
 }
 
-// addBytesToTar then read it back — the snapshot path relies on this.
+// addBytesToTar then read it back - the snapshot path relies on this.
 func TestAddBytesToTar(t *testing.T) {
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)

@@ -16,7 +16,7 @@ import (
 // (PLAN Part D).
 
 const (
-	// In-container tunnel state paths — mirror lib/deploy/dev.ts TUNNEL_* (under
+	// In-container tunnel state paths - mirror lib/deploy/dev.ts TUNNEL_* (under
 	// /workspace/.deplo so they persist across stop/start on the workspace bind).
 	tunnelDir = "/workspace/.deplo"
 	tunnelLog = tunnelDir + "/tunnel.log"

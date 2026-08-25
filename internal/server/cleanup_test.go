@@ -39,7 +39,7 @@ type hostFixture struct {
 	// psFails forces `docker ps -aq` to fail, so the container-reference index
 	// cannot be built.
 	psFails bool
-	// dfFails forces `docker system df -v` to fail — the loaded-host case where the
+	// dfFails forces `docker system df -v` to fail - the loaded-host case where the
 	// build-cache enumeration times out while the prune itself would still work.
 	dfFails bool
 	// ceilingFrees is what the SIZE-capped builder prune (the one carrying
@@ -93,7 +93,7 @@ func (h *hostFixture) query(args []string) (dockercli.Result, error) {
 }
 
 // install swaps the three package-level seams for this fixture and restores them on
-// cleanup. removeObject RECORDS and returns success — it never touches the host.
+// cleanup. removeObject RECORDS and returns success - it never touches the host.
 func (h *hostFixture) install(t *testing.T) {
 	t.Helper()
 	origQuery, origRemove, origAvail := dockerQuery, removeObject, dockerAvailable
@@ -111,7 +111,7 @@ func (h *hostFixture) install(t *testing.T) {
 				out := h.ceilingFrees
 				h.mu.Unlock()
 				if out == "" {
-					out = "Total:\t0B\n" // already under the ceiling — the normal case
+					out = "Total:\t0B\n" // already under the ceiling - the normal case
 				}
 				return okResult(out), nil
 			}
@@ -131,7 +131,7 @@ func (h *hostFixture) install(t *testing.T) {
 	t.Cleanup(func() { dockerQuery, removeObject, dockerAvailable = origQuery, origRemove, origAvail })
 }
 
-// isCeilingPrune recognises the size-capped prune — the one with a byte ceiling
+// isCeilingPrune recognises the size-capped prune - the one with a byte ceiling
 // and deliberately NO age filter (see enforceBuildCacheCeiling).
 func isCeilingPrune(args []string) bool {
 	for _, a := range args {
@@ -154,7 +154,7 @@ func (h *hostFixture) argv() []string {
 
 // newFixture builds a host with something to reclaim in every scope: - a running
 // container pinning image sha256:aaa… and volume `app-data`; - an exited container
-// pinning image sha256:bbb… — the case a naive `container prune` / label test gets
+// pinning image sha256:bbb… - the case a naive `container prune` / label test gets
 // wrong; - build cache: one idle record, one in use; - two dangling volumes, only ONE
 // of which carries the buildkitd.lock sentinel; - three deplo.managed images of slug
 // "web": the newest (in use), an older idle one, and an oldest idle one.
@@ -174,7 +174,7 @@ func newFixture(t *testing.T) *hostFixture {
 	if err := os.WriteFile(filepath.Join(orphanMount, buildkitSentinel), []byte("lock"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// A dangling volume with NO sentinel — on a real host this is where a stopped
+	// A dangling volume with NO sentinel - on a real host this is where a stopped
 	// MongoDB's WiredTiger files live. It must never be removed.
 	dataMount := filepath.Join(t.TempDir(), "_data")
 	if err := os.MkdirAll(dataMount, 0o755); err != nil {
@@ -188,7 +188,7 @@ func newFixture(t *testing.T) *hostFixture {
 		containers: []string{"c1", "c2"},
 		inspectRows: []string{
 			"sha256:aaa|app-data,", // running app
-			"sha256:bbb|",          // EXITED app — still pins its image
+			"sha256:bbb|",          // EXITED app - still pins its image
 		},
 		buildCacheJSON: `[
 			{"ID":"cache-idle","Size":"3.6GB","InUse":"false","CreatedAt":"` + dfTime + `","LastUsedAt":""},
@@ -270,7 +270,7 @@ func TestDockerCleanup_buildCacheArgv(t *testing.T) {
 			}
 			// The size ceiling is a SEPARATE prune, never flags on the age-filtered one:
 			// `--filter until=` picks the candidate set first, so a ceiling bolted onto it
-			// reclaims nothing on the very host it exists for — one whose apps all deploy daily,
+			// reclaims nothing on the very host it exists for - one whose apps all deploy daily,
 			// leaving no cache idle long enough to qualify.
 			for _, a := range got {
 				if strings.Contains(a, "--filter") &&
@@ -330,7 +330,7 @@ func TestDockerCleanup_danglingImagesArgv_neverAll(t *testing.T) {
 }
 
 // The sentinel IS the proof. A dangling volume without `buildkitd.lock` at its
-// mountpoint is never removed, however dangling docker thinks it is — on a real
+// mountpoint is never removed, however dangling docker thinks it is - on a real
 // host that volume holds a stopped database's data files.
 func TestDockerCleanup_orphanBuildkit_onlyWithSentinel(t *testing.T) {
 	h := newFixture(t)
@@ -348,7 +348,7 @@ func TestDockerCleanup_orphanBuildkit_onlyWithSentinel(t *testing.T) {
 	}
 	for _, a := range got {
 		if strings.Contains(a, "mongo-data") {
-			t.Fatal("removed a dangling volume with no buildkitd.lock sentinel — that is user data")
+			t.Fatal("removed a dangling volume with no buildkitd.lock sentinel - that is user data")
 		}
 	}
 	r := resultFor(t, resp, pb.CleanupScope_CLEANUP_SCOPE_ORPHAN_BUILDKIT_CACHE)
@@ -361,7 +361,7 @@ func TestDockerCleanup_orphanBuildkit_onlyWithSentinel(t *testing.T) {
 	}
 }
 
-// A dangling volume that a container — even an EXITED one — still references is
+// A dangling volume that a container, even an EXITED one, still references is
 // never removed, even with the sentinel present: the reverse index outranks docker's
 // dangling filter.
 func TestDockerCleanup_orphanBuildkit_skipsIndexedVolume(t *testing.T) {
@@ -375,7 +375,7 @@ func TestDockerCleanup_orphanBuildkit_skipsIndexedVolume(t *testing.T) {
 		t.Fatalf("DockerCleanup: %v", err)
 	}
 	if got := h.argv(); len(got) != 0 {
-		t.Fatalf("argv = %q, want none — a container still references that volume", got)
+		t.Fatalf("argv = %q, want none - a container still references that volume", got)
 	}
 }
 
@@ -395,7 +395,7 @@ func TestDockerCleanup_unusedAppImages_allowList(t *testing.T) {
 		t.Fatalf("DockerCleanup: %v", err)
 	}
 	// slug "web" has three images: sha256:aaa (newest, in use, rank 0 => kept twice
-	// over), sha256:ccc (rank 1) and sha256:eee (rank 2) — both idle and old.
+	// over), sha256:ccc (rank 1) and sha256:eee (rank 2) - both idle and old.
 	want := []string{"rmi sha256:ccc", "rmi sha256:eee"}
 	got := h.argv()
 	if len(got) != len(want) {
@@ -424,7 +424,7 @@ func TestDockerCleanup_unusedAppImages_allowList(t *testing.T) {
 }
 
 // keep_images_per_app ranks within the slug's WHOLE image set, in-use images
-// included — so keeping 2 keeps the running one plus the next newest.
+// included, so keeping 2 keeps the running one plus the next newest.
 func TestDockerCleanup_unusedAppImages_keepsN(t *testing.T) {
 	h := newFixture(t)
 	h.install(t)
@@ -453,19 +453,19 @@ func TestDockerCleanup_unusedAppImages_skipsUnslugged(t *testing.T) {
 		t.Fatalf("DockerCleanup: %v", err)
 	}
 	if got := h.argv(); len(got) != 0 {
-		t.Fatalf("argv = %q, want none — an image with no deplo.slug is not a candidate", got)
+		t.Fatalf("argv = %q, want none - an image with no deplo.slug is not a candidate", got)
 	}
 }
 
 // THE REGRESSION that saturated real hosts: an app redeployed many times a day piles up
-// superseded-but-tagged images, all younger than min_age_hours — and the old age gate
+// superseded-but-tagged images, all younger than min_age_hours, and the old age gate
 // meant none was EVER a candidate, so every sweep "succeeded" with 0 bytes while the
 // disk filled.
 func TestDockerCleanup_unusedAppImages_minAgeDoesNotShield(t *testing.T) {
 	h := newFixture(t)
 	now := time.Now()
 	// Today's churn: the running image, a 30-minute-old build (inside the deploy
-	// grace) and a five-hour-old superseded one — nothing near 168h old.
+	// grace) and a five-hour-old superseded one, nothing near 168h old.
 	h.imageRows["aaa1111"] = "sha256:aaa|web|<no value>|" + now.Format(time.RFC3339Nano) + "|1000000000"
 	h.imageRows["eee1111"] = "sha256:eee|web|<no value>|" + now.Add(-30*time.Minute).Format(time.RFC3339Nano) + "|800000000"
 	h.imageRows["ccc1111"] = "sha256:ccc|web|<no value>|" + now.Add(-5*time.Hour).Format(time.RFC3339Nano) + "|900000000"
@@ -478,10 +478,10 @@ func TestDockerCleanup_unusedAppImages_minAgeDoesNotShield(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("DockerCleanup: %v", err)
 	}
-	// Rank: aaa (newest, kept + in use), eee (30min — beyond keep but inside the
-	// grace, kept), ccc (5h — beyond keep, unreferenced, past the grace: removed).
+	// Rank: aaa (newest, kept + in use), eee (30min - beyond keep but inside the
+	// grace, kept), ccc (5h - beyond keep, unreferenced, past the grace: removed).
 	if got := h.argv(); len(got) != 1 || got[0] != "rmi sha256:ccc" {
-		t.Fatalf("argv = %q, want [rmi sha256:ccc] — min_age shielded a superseded image (or the grace didn't)", got)
+		t.Fatalf("argv = %q, want [rmi sha256:ccc] - min_age shielded a superseded image (or the grace didn't)", got)
 	}
 }
 
@@ -511,7 +511,7 @@ func TestDockerCleanup_unusedAppImages_composeServicesRankApart(t *testing.T) {
 	got := h.argv()
 	want := []string{"rmi sha256:web2", "rmi sha256:api2"}
 	if len(got) != len(want) {
-		t.Fatalf("argv = %q, want %q — services of one slug must rank separately", got, want)
+		t.Fatalf("argv = %q, want %q - services of one slug must rank separately", got, want)
 	}
 	for _, w := range want {
 		if !containsString(got, w) {
@@ -613,10 +613,10 @@ func TestDockerCleanup_pruneScopes_runEvenWithZeroCandidates(t *testing.T) {
 	want := []string{"builder prune --force --filter until=24h", "image prune --force --filter until=24h"}
 	for _, w := range want {
 		if !containsString(got, w) {
-			t.Fatalf("argv = %q, missing %q — zero own-candidates must not skip the prune", got, w)
+			t.Fatalf("argv = %q, missing %q - zero own-candidates must not skip the prune", got, w)
 		}
 	}
-	// Docker's own printed total (the fixture's "1.5GB") is the reported number —
+	// Docker's own printed total (the fixture's "1.5GB") is the reported number,
 	// never our zero estimate.
 	for _, r := range resp.GetResults() {
 		if r.GetReclaimedBytes() != 1500000000 {
@@ -634,12 +634,12 @@ func TestDockerCleanup_pruneScopes_runEvenWithZeroCandidates(t *testing.T) {
 	}
 	di := resultFor(t, resp, pb.CleanupScope_CLEANUP_SCOPE_DANGLING_IMAGES)
 	if di.GetItemsRemoved() != 0 || len(di.GetItems()) != 0 {
-		t.Errorf("dangling items = %d (%v), want 0 — the post-prune diff saw nothing disappear",
+		t.Errorf("dangling items = %d (%v), want 0 - the post-prune diff saw nothing disappear",
 			di.GetItemsRemoved(), di.GetItems())
 	}
 }
 
-// When docker's printed total is 0B, NOTHING was freed — the enumerated candidates
+// When docker's printed total is 0B, NOTHING was freed - the enumerated candidates
 // were not removed, and reporting them (count, list, bytes) would be the phantom
 // the history used to carry. The whole line zeroes.
 func TestDockerCleanup_pruneScopes_zeroTotalZeroesTheLine(t *testing.T) {
@@ -649,7 +649,7 @@ func TestDockerCleanup_pruneScopes_zeroTotalZeroesTheLine(t *testing.T) {
 		h.mu.Lock()
 		h.removals = append(h.removals, append([]string(nil), args...))
 		h.mu.Unlock()
-		// Docker ran, matched nothing, freed nothing — and says so.
+		// Docker ran, matched nothing, freed nothing, and says so.
 		return okResult("Total reclaimed space: 0B\n"), nil
 	}
 
@@ -670,12 +670,12 @@ func TestDockerCleanup_pruneScopes_zeroTotalZeroesTheLine(t *testing.T) {
 		"image prune --force --filter until=168h",
 	} {
 		if !containsString(got, w) {
-			t.Fatalf("argv = %q, missing %q — both prunes must be attempted", got, w)
+			t.Fatalf("argv = %q, missing %q - both prunes must be attempted", got, w)
 		}
 	}
 	for _, r := range resp.GetResults() {
 		if r.GetReclaimedBytes() != 0 || r.GetItemsRemoved() != 0 || len(r.GetItems()) != 0 {
-			t.Errorf("scope %s = %d bytes / %d items %v, want an all-zero line — docker freed nothing",
+			t.Errorf("scope %s = %d bytes / %d items %v, want an all-zero line - docker freed nothing",
 				r.GetScope(), r.GetReclaimedBytes(), r.GetItemsRemoved(), r.GetItems())
 		}
 	}
@@ -700,7 +700,7 @@ func TestDockerCleanup_danglingCount_isPostPruneDiff(t *testing.T) {
 	}
 	r := resultFor(t, resp, pb.CleanupScope_CLEANUP_SCOPE_DANGLING_IMAGES)
 	// Enumeration approved only sha256:ddd (xxx's age is unreadable), but the
-	// fixture's prune removed both — the diff must say 2.
+	// fixture's prune removed both - the diff must say 2.
 	if r.GetItemsRemoved() != 2 {
 		t.Errorf("items_removed = %d, want 2 (the post-prune diff, not the 1-candidate guess)",
 			r.GetItemsRemoved())
@@ -734,7 +734,7 @@ func TestPrunedCacheRecordIDs(t *testing.T) {
 }
 
 // A failed enumeration on a loaded host (`docker system df -v` signal-killed at
-// its timeout) must not abort the wet sweep — the prune is still safe and still
+// its timeout) must not abort the wet sweep - the prune is still safe and still
 // owed. The dry run, whose whole answer IS the enumeration, keeps failing loudly.
 func TestDockerCleanup_buildCache_enumerationFailureStillPrunes(t *testing.T) {
 	h := newFixture(t)
@@ -759,7 +759,7 @@ func TestDockerCleanup_buildCache_enumerationFailureStillPrunes(t *testing.T) {
 		t.Errorf("reclaimed_bytes = %d, want docker's own total", r.GetReclaimedBytes())
 	}
 
-	// Dry run: no enumeration, no answer — and never a prune.
+	// Dry run: no enumeration, no answer, and never a prune.
 	h2 := newFixture(t)
 	h2.dfFails = true
 	h2.install(t)
@@ -782,7 +782,7 @@ func TestDockerCleanup_buildCache_enumerationFailureStillPrunes(t *testing.T) {
 // Dry run
 // ---------------------------------------------------------------------------
 
-// dry_run enumerates and removes NOTHING — removeObject is never called — while
+// dry_run enumerates and removes NOTHING, removeObject is never called, while
 // still populating every result field, which is what the confirm dialog renders.
 func TestDockerCleanup_dryRun_removesNothing(t *testing.T) {
 	h := newFixture(t)
@@ -861,7 +861,7 @@ func TestDockerCleanup_neverEmitsAForbiddenPrune(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // Without the container-reference index the agent cannot prove what is unreferenced,
-// so it SKIPS the scopes that rest on it rather than guessing — and the scopes that
+// so it SKIPS the scopes that rest on it rather than guessing, and the scopes that
 // do not need it still run. Skipping is not failing: the sweep is still ok.
 func TestDockerCleanup_skipsIndexScopesWhenIndexFails(t *testing.T) {
 	h := newFixture(t)
@@ -889,7 +889,7 @@ func TestDockerCleanup_skipsIndexScopesWhenIndexFails(t *testing.T) {
 			t.Errorf("scope %s removed %d items with no index", scope, r.GetItemsRemoved())
 		}
 	}
-	// The two scopes that need no index still run — docker's own prunes already
+	// The two scopes that need no index still run - docker's own prunes already
 	// honour container references, stopped ones included. Nothing was removed BY ID,
 	// which is the part that would have needed the evidence we could not gather.
 	got := h.argv()
@@ -1044,7 +1044,7 @@ func TestPickReclaimed_zeroTotalIsAuthoritative(t *testing.T) {
 }
 
 // An object whose age we cannot read is never a candidate while an age filter is
-// set — we would rather leave it behind than delete something we know nothing about.
+// set - we would rather leave it behind than delete something we know nothing about.
 func TestOlderThan_unparseableNeverQualifies(t *testing.T) {
 	cutoff := time.Now().Add(-24 * time.Hour)
 	if olderThan("not a timestamp", cutoff) {
@@ -1068,7 +1068,7 @@ func containsString(haystack []string, needle string) bool {
 	return false
 }
 
-// hasSubstringIn reports whether any emitted command contains needle — used to
+// hasSubstringIn reports whether any emitted command contains needle - used to
 // assert that a derived, host-sized flag appears SOMEWHERE in the sweep without
 // pinning which command carries it.
 func hasSubstringIn(haystack []string, needle string) bool {
@@ -1092,7 +1092,7 @@ func TestDockerCleanup_buildCacheCeiling_prunesWhatTheAgeFilterCannot(t *testing
 	h.buildCacheJSON = `[{"ID":"cache-live","Size":"1.2GB","InUse":"true","CreatedAt":"","LastUsedAt":""}]`
 	h.ceilingFrees = "ceil1record0000000000000\n\nTotal:\t2.5GB\n"
 	h.install(t)
-	// The age prune itself frees nothing — the state a growing cache is actually in.
+	// The age prune itself frees nothing - the state a growing cache is actually in.
 	orig := removeObject
 	removeObject = func(ctx context.Context, args ...string) (dockercli.Result, error) {
 		if args[0] == "builder" && args[1] == "prune" && !isCeilingPrune(args) {
@@ -1175,7 +1175,7 @@ func TestDockerCleanup_unusedAppImages_keepPerSlugAppliesPerService(t *testing.T
 }
 
 // ---------------------------------------------------------------------------
-// LEFTOVER_APP_FILES — the only scope that removes something no rebuild recreates
+// LEFTOVER_APP_FILES - the only scope that removes something no rebuild recreates
 // ---------------------------------------------------------------------------
 
 // seedFilesDir writes <stackDir>/files/<slug>/<name> and back-dates the whole
@@ -1260,7 +1260,7 @@ func TestDockerCleanup_leftoverAppFiles_emptyListSkipsInsteadOfWiping(t *testing
 }
 
 // A directory written moments ago belongs to a stack the caller's snapshot may
-// predate — the same grace the app-image scope gives a build racing its deploy.
+// predate - the same grace the app-image scope gives a build racing its deploy.
 func TestDockerCleanup_leftoverAppFiles_sparesAFreshDirectory(t *testing.T) {
 	h := newFixture(t)
 	h.install(t)

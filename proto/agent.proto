@@ -26,7 +26,7 @@ service Agent {
   rpc Metrics(MetricsRequest) returns (HostMetrics);
 
   // Per-CONTAINER live resource snapshot (`docker stats --no-stream`) for the named
-  // containers of ONE project — the data source for the per-app / per-database
+  // containers of ONE project - the data source for the per-app / per-database
   // Monitoring tab, next to the host-level Metrics above.
   rpc ContainerStats(ContainerStatsRequest) returns (ContainerStatsResponse);
 
@@ -63,7 +63,7 @@ service Agent {
   rpc ImportVolume(stream VolumeChunk) returns (StackResult);
 
   // Copy a service's host-side FILES DIR (<stack_dir>/files/<slug>) across hosts, for a
-  // server move — the sibling of ExportVolume/ImportVolume for the one piece of a
+  // server move - the sibling of ExportVolume/ImportVolume for the one piece of a
   // service's state that is NOT a Docker volume.
   rpc ExportFiles(ExportFilesRequest) returns (stream FilesChunk);
 
@@ -72,7 +72,7 @@ service Agent {
   // subsequent message carries `data` (a slice of the gzipped tar).
   rpc ImportFiles(stream FilesChunk) returns (StackResult);
 
-  // Copy an arbitrary HOST DIRECTORY off this machine — the bind-mount half of a
+  // Copy an arbitrary HOST DIRECTORY off this machine - the bind-mount half of a
   // migration from another platform, where a service's data may sit in a plain
   // directory rather than in a Docker volume.
   rpc ExportHostPath(ExportHostPathRequest) returns (stream VolumeChunk);
@@ -104,7 +104,7 @@ service Agent {
   rpc CheckPort(CheckPortRequest) returns (CheckPortResponse);
 
   // ONE bounded HTTP GET to a container of an app's own stack, issued from the host
-  // over Docker's network — what a compose app's icon detection reads. The only way to
+  // over Docker's network - what a compose app's icon detection reads. The only way to
   // see it is to ask the running app for it, exactly as a browser would.
   rpc ProbeHttp(ProbeHttpRequest) returns (ProbeHttpResponse);
 
@@ -112,7 +112,7 @@ service Agent {
   // never be added.
   rpc DockerCleanup(DockerCleanupRequest) returns (DockerCleanupResponse);
 
-  // Update the agent BINARY in place to a newer release, WITHOUT re-bootstrapping — the
+  // Update the agent BINARY in place to a newer release, WITHOUT re-bootstrapping - the
   // agent's mTLS materials (agent.crt/agent.key/ca.crt under --agent-dir) are NEVER
   // touched, so the server keeps its identity and pinned fingerprint across the upgrade
   // and stays "online".
@@ -125,7 +125,7 @@ service Agent {
 
   // ---- BACKUPS: dump/restore a database or project to/from a DESTINATION, plus the
   // affordances the control plane needs (connectivity check + object delete).
-  // StoreTarget — a directory on THIS host's filesystem.
+  // StoreTarget - a directory on THIS host's filesystem.
 
   // Back up a database or a project to a destination, streaming progress.
   rpc Backup(BackupRequest) returns (stream BackupEvent);
@@ -156,7 +156,7 @@ service Agent {
   // `data`.
   rpc WriteStoreFile(stream StoreChunk) returns (StoreResult);
 
-  // Restore from an artifact this host CANNOT reach — the cross-host half of Restore.
+  // Restore from an artifact this host CANNOT reach - the cross-host half of Restore.
   rpc RestoreFrom(stream RestoreChunk) returns (stream RestoreEvent);
 
   // ---- PART C: console observability (replaces lib/logs + lib/attach +
@@ -164,7 +164,7 @@ service Agent {
 
   // Stream a container's live runtime logs (`docker logs -f --tail N`) as raw byte
   // chunks. Closing the stream (browser disconnect) cancels the RPC, which kills the
-  // agent's `docker logs` client only — never the container.
+  // agent's `docker logs` client only, never the container.
   rpc FollowLogs(FollowLogsRequest) returns (stream LogChunk);
 
   // Interactive `docker attach` to a running container, full-duplex over one bidi
@@ -180,7 +180,7 @@ service Agent {
   rpc Exec(ExecRequest) returns (ExecResponse);
 
   // The default (or chosen) container's shell label ("/bin/sh" | "/bin/bash" |
-  // "raw exec (no shell)") for the console banner — replaces shellLabel.
+  // "raw exec (no shell)") for the console banner - replaces shellLabel.
   rpc ShellLabel(ShellLabelRequest) returns (ShellLabelResponse);
 
   // ---- CRON JOBS: a scheduled `docker exec` the AGENT owns for its whole lifetime,
@@ -220,7 +220,7 @@ service Agent {
 
   // Start (or restart) a project's dev container.
   rpc StartDev(StartDevRequest) returns (stream DeployEvent);
-  // Stop a project's dev container (reversible — KEEPS the workspace + deps
+  // Stop a project's dev container (reversible - KEEPS the workspace + deps
   // volume so a later StartDev resumes the edited tree). Also stops the tunnel.
   rpc StopDev(StopDevRequest) returns (StackResult);
   // DESTRUCTIVE: wipe the workspace + deps volume, then reseed via StartDev's
@@ -238,7 +238,7 @@ service Agent {
   // reconcile every supplied user).
   rpc EnsureGateway(EnsureGatewayRequest) returns (StackResult);
   // Provision one user inside the running gateway by running the control-plane-
-  // computed exec steps (the password, if any, rides in a step's stdin — never
+  // computed exec steps (the password, if any, rides in a step's stdin, never
   // argv/env). Ensures the gateway first (carries the same gateway payload).
   rpc ProvisionSshUser(ProvisionSshUserRequest) returns (StackResult);
   // Remove one user from the gateway (account + key + map files). No-op if the
@@ -255,7 +255,7 @@ service Agent {
   rpc StopTunnel(TunnelRequest) returns (StackResult);
 
   // ---- CERT RENEWAL: the agent's mTLS leaf is minted once at bootstrap (~365d). A
-  // failed renewal is a no-op — the current cert stays valid until expiry — so a
+  // failed renewal is a no-op, the current cert stays valid until expiry, so a
   // renewal bug can never black out the fleet.
 
   // Generate a fresh keypair + CSR for renewal; the new private key is held
@@ -267,21 +267,21 @@ service Agent {
   rpc InstallRenewedCert(InstallRenewedCertRequest) returns (StackResult);
 
   // ---- HOST OPS: the four host-level actions the Servers page needs, none of which is
-  // scoped to an app. Gated behind ONE "hostops" capability — they ship in the same
+  // scoped to an app. Gated behind ONE "hostops" capability - they ship in the same
   // release, so four flags would buy nothing.
 
-  // Static host identity — the neofetch answer, not the gauge.
+  // Static host identity - the neofetch answer, not the gauge.
   rpc HostInfo(HostInfoRequest) returns (HostInfoResponse);
 
   // Set the host's timezone (IANA name, e.g. "Europe/Rome"). `timedatectl` when
   // present, otherwise relinking /etc/localtime.
   rpc SetTimezone(SetTimezoneRequest) returns (HostInfoResponse);
 
-  // Rewrite and/or restart THIS host's `deplo-traefik` stack — the reverse proxy the
+  // Rewrite and/or restart THIS host's `deplo-traefik` stack - the reverse proxy the
   // installer put at $AGENT_DATA/traefik/docker-compose.yml.
   rpc TraefikConfig(TraefikConfigRequest) returns (TraefikConfigResponse);
 
-  // Restart the container running the Deplo control plane on THIS host (agent 0 only —
+  // Restart the container running the Deplo control plane on THIS host (agent 0 only -
   // a remote has no panel to restart).
   rpc RestartControlPlane(RestartControlPlaneRequest) returns (RestartControlPlaneResponse);
 }
@@ -302,7 +302,7 @@ message InstallRenewedCertRequest {
   // The CA-signed leaf certificate (PEM) produced from the last RenewalCSR's CSR.
   string cert_pem = 1;
   // The CA certificate (PEM); the agent refreshes its trust pool too if non-empty.
-  // Empty ⇒ keep the existing CA (the common case — only the leaf rotates).
+  // Empty ⇒ keep the existing CA (the common case - only the leaf rotates).
   string ca_pem = 2;
 }
 
@@ -374,7 +374,7 @@ message HostMetrics {
 
 // Where the agent gets the bytes it builds/runs. Part B implements GIT (the agent
 // clones with a short-lived token, D3) so a remote build never ships the whole repo
-// over the wire — only the clone URL + branch + ephemeral token.
+// over the wire - only the clone URL + branch + ephemeral token.
 enum SourceKind {
   SOURCE_KIND_UNSPECIFIED = 0;
   // The control plane streams a tar archive of the materialised build context
@@ -386,12 +386,12 @@ enum SourceKind {
   // The agent clones a git URL itself with a short-lived token. PART B.
   SOURCE_KIND_GIT = 3;
   // A multi-service compose stack: the control plane rendered the full stack
-  // (buildComposeStack — Traefik labels, deplo-network wiring, the deplo.* labels on
+  // (buildComposeStack - Traefik labels, deplo-network wiring, the deplo.* labels on
   // EVERY service) into compose_yaml; the agent neither builds nor pulls an image (each
   // service's image comes up via `docker compose up` itself).
   SOURCE_KIND_COMPOSE = 4;
   // PART D: "deploy from dev workspace". The build context is the project's PERSISTENT
-  // dev workspace already on THIS agent's host (<dev-dir>/<slug>) — the developer's
+  // dev workspace already on THIS agent's host (<dev-dir>/<slug>) - the developer's
   // live, edited tree.
   SOURCE_KIND_DEV_WORKSPACE = 5;
 }
@@ -449,7 +449,7 @@ message BuildSpec {
 }
 
 // A git source the agent clones itself (SOURCE_KIND_GIT, D3). The token is the only
-// secret here and it is ephemeral — nothing long-lived crosses the wire, and the agent
+// secret here and it is ephemeral, nothing long-lived crosses the wire, and the agent
 // never persists it.
 message GitSource {
   // The clone URL.
@@ -468,7 +468,7 @@ message GitSource {
 
 message DockerfileBuild {
   // Path to the Dockerfile, relative to the build context root. Re-validated against
-  // the context root inside the agent (the anti-escape check is re-ported to Go — path
+  // the context root inside the agent (the anti-escape check is re-ported to Go - path
   // validation runs where the I/O runs, never trusting a path off the wire).
   string dockerfile_path = 1;
   // Build context dir, relative to the context root. Empty => ".".
@@ -480,7 +480,7 @@ message DockerfileBuild {
   bool generated = 4;
   // The generated Dockerfile body (only when `generated` is true). Rendered by
   // the control plane (generateDockerfile) so the agent stays dumb about
-  // framework presets — same single-source-of-truth principle as the compose.
+  // framework presets - same single-source-of-truth principle as the compose.
   string generated_dockerfile = 5;
 }
 
@@ -511,7 +511,7 @@ message DeployRequest {
 
   // Present iff source_kind == GIT (Part B). The agent clones this itself; the
   // control plane does not tar a context for git sources targeting a remote
-  // agent — only the descriptor crosses the wire (D3).
+  // agent - only the descriptor crosses the wire (D3).
   GitSource git = 13;
 
   // The fully-rendered compose YAML (D2): renderCompose stays the single TS source of
@@ -546,7 +546,7 @@ message DeployRequest {
   // workspace root (SOURCE_KIND_DEV_WORKSPACE, Part D).
   string dev_workspace_subdir = 15;
 
-  // The heavy build method's settings — present iff build_kind is STATIC / NIXPACKS /
+  // The heavy build method's settings - present iff build_kind is STATIC / NIXPACKS /
   // BUILDPACKS / RAILPACK.
   BuildSpec build_spec = 16;
 
@@ -592,7 +592,7 @@ message ReattachRequest {
 }
 
 message LogLine {
-  // info | warn | error | debug | command — mirrors lib/types.ts LogLevel so the
+  // info | warn | error | debug | command - mirrors lib/types.ts LogLevel so the
   // control plane writes it straight into the deployment log.
   string level = 1;
   string text = 2;
@@ -645,7 +645,7 @@ message StackResult {
 }
 
 // ---------------------------------------------------------------------------
-// Cross-host volume copy (server move) — see ExportVolume / ImportVolume
+// Cross-host volume copy (server move) - see ExportVolume / ImportVolume
 // ---------------------------------------------------------------------------
 
 message ExportHostPathRequest {
@@ -662,7 +662,7 @@ message HostPathChunk {
     // filesystem); refused for the same system roots as the export.
     string path = 1;
     // Empty the target first. Applied on the FIRST DATA FRAME, never on the header
-    // alone — see VolumeChunk.Header.wipe_first for why.
+    // alone - see VolumeChunk.Header.wipe_first for why.
     bool wipe_first = 2;
   }
   oneof frame {
@@ -752,7 +752,7 @@ message ImageChunk {
 // beyond what the control plane re-sends). Mirrors the compose-write half of a
 // Deploy: the control plane renders everything, the agent just writes + brings up.
 message RerouteRequest {
-  // Stack identity — keys the stack file, compose project and container name.
+  // Stack identity - keys the stack file, compose project and container name.
   string slug = 1;
   // The fully re-rendered stack YAML with the new domain/label set. Opaque to the
   // agent (same contract as DeployRequest.compose_yaml).
@@ -764,7 +764,7 @@ message RerouteRequest {
   // bringing the stack up. Empty for single-image projects.
   repeated MountFile mounts = 4;
   // The app's extra `compose up` flags, same contract as
-  // DeployRequest.compose_up_args — a reroute brings the stack up too, so the
+  // DeployRequest.compose_up_args - a reroute brings the stack up too, so the
   // flags the operator asked for apply here as well.
   repeated string compose_up_args = 5;
 }
@@ -797,7 +797,7 @@ message CheckPortRequest {
 
 message CheckPortResponse {
   // True when the agent could bind (and immediately released) the port on the
-  // host — i.e. nothing else holds it right now.
+  // host - i.e. nothing else holds it right now.
   bool available = 1;
   // "" when available; otherwise a human-readable reason (in use / out of range).
   string reason = 2;
@@ -807,7 +807,7 @@ message CheckPortResponse {
 // The agent picks the ADDRESS; the caller only picks what to ask for.
 message ProbeHttpRequest {
   // The app the container must belong to (its `deplo.project` label). Empty is
-  // refused — an unscoped probe could reach any container on the host.
+  // refused - an unscoped probe could reach any container on the host.
   string project_id = 1;
   // The app's slug, used to read the compose service out of a container name
   // (deplo-<slug>-<service>-N), exactly as ListInstances does.
@@ -815,7 +815,7 @@ message ProbeHttpRequest {
   // Which compose service to reach. Empty => the app's first running container
   // (the single-image case, where the stack has exactly one).
   string service = 3;
-  // The port INSIDE the container (1-65535) — the same port Traefik is routed
+  // The port INSIDE the container (1-65535) - the same port Traefik is routed
   // to, not a published host port.
   int32 port = 4;
   // Absolute request path ("/", "/favicon.ico"). Must start with "/" and carry
@@ -823,7 +823,7 @@ message ProbeHttpRequest {
   string path = 5;
   // Host header to send. Empty => the container's IP. An app that only answers
   // on its own hostname (ALLOWED_HOSTS, a configured site URL) needs its real
-  // domain here. Validated as a hostname — never a URL, never a header list.
+  // domain here. Validated as a hostname, never a URL, never a header list.
   string host = 6;
   // Cap on the body bytes returned. 0 => the agent's default; the agent clamps
   // to its own ceiling regardless, so a caller can never ask for an unbounded
@@ -846,7 +846,7 @@ message ProbeHttpResponse {
   string location = 5;
 }
 
-// In-place agent binary update (SelfUpdate). The agent stays otherwise dumb — it does
+// In-place agent binary update (SelfUpdate). The agent stays otherwise dumb - it does
 // not talk to the GitHub API or know the release repo, it just fetches the chosen URL,
 // checks the digest, and swaps itself.
 message SelfUpdateRequest {
@@ -864,7 +864,7 @@ message ArchBinary {
   // checksum passes.
   string url = 1;
   // Lowercase hex sha256 the downloaded bytes MUST match. A mismatch aborts the
-  // update with FAILED_PRECONDITION and the running binary is left untouched —
+  // update with FAILED_PRECONDITION and the running binary is left untouched -
   // the agent never execs an unverified binary (install-agent.sh P2 parity).
   string sha256 = 2;
 }
@@ -891,7 +891,7 @@ message SelfUpdateResponse {
 }
 
 // ---------------------------------------------------------------------------
-// BACKUPS — dump/restore to S3 (Backup / Restore / S3Check / S3Delete)
+// BACKUPS - dump/restore to S3 (Backup / Restore / S3Check / S3Delete)
 // ---------------------------------------------------------------------------
 
 // What a backup/restore targets. A DATABASE is dumped via the engine's tool
@@ -903,7 +903,7 @@ enum BackupKind {
   BACKUP_KIND_PROJECT = 2;
 }
 
-// The S3 destination the agent reads/writes with — the DECRYPTED creds (the control
+// The S3 destination the agent reads/writes with - the DECRYPTED creds (the control
 // plane decrypts via decryptSecret and sends plaintext over mTLS; the agent never holds
 // the encryption key, mirroring Deploy's env handling) plus the bucket coordinates and
 // the exact object key.
@@ -927,7 +927,7 @@ message S3Target {
   repeated string extra_args = 9;
 }
 
-// A directory on THIS host's filesystem that holds backup artifacts — the second
+// A directory on THIS host's filesystem that holds backup artifacts - the second
 // destination shape, for a user who would rather keep backups on a VPS they already pay
 // for than sign up for a bucket.
 message StoreTarget {
@@ -939,7 +939,7 @@ message StoreTarget {
 // resolves the container name + engine details from its store; the agent stays
 // dumb about Deplo's DB model and just runs the right tool inside the container.
 message DatabaseDescriptor {
-  // The DB container to `docker exec` into (the agent re-derives nothing — it
+  // The DB container to `docker exec` into (the agent re-derives nothing - it
   // execs exactly this name). For a Deplo DB this is the compose container of
   // the db-<name> stack.
   string container = 1;
@@ -958,7 +958,7 @@ message DatabaseDescriptor {
 // the persistent state's three shapes into a flat name list (host bind mounts
 // excluded) so the agent stays dumb about Deplo's volume-naming scheme.
 message ProjectDescriptor {
-  // The project slug — keys the files dir (<stack-dir>/files/<slug>) and the
+  // The project slug - keys the files dir (<stack-dir>/files/<slug>) and the
   // stack the restore re-Reroutes.
   string slug = 1;
   // The host volume names to tar: the named-volume shape (hostVolumeName =
@@ -984,18 +984,18 @@ message ProjectDescriptor {
 message BackupRequest {
   BackupKind kind = 1;
   // The destination: exactly one of `s3` / `store`, unless `stream_out` is set
-  // (in which case neither is needed — the caller IS the sink).
+  // (in which case neither is needed - the caller IS the sink).
   S3Target s3 = 2;
   // Exactly one of these is set, per `kind`.
   DatabaseDescriptor database = 3;
   ProjectDescriptor project = 4;
   StoreTarget store = 5;
   // The age recipient ("age1…", an X25519 public key) the artifact is encrypted to.
-  // REQUIRED whenever the artifact is not going to S3 — a store write or a stream_out
+  // REQUIRED whenever the artifact is not going to S3 - a store write or a stream_out
   // relay with an empty recipient is an ERROR, never a silent plaintext write.
   string age_recipient = 6;
   // Emit the artifact as BackupEvent.data frames instead of writing it anywhere. The
-  // BackupResult still reports the size this host produced — the durable number is the
+  // BackupResult still reports the size this host produced - the durable number is the
   // destination's StoreResult.bytes_written.
   bool stream_out = 7;
 }
@@ -1018,12 +1018,12 @@ message BackupResult {
   // A human-readable reason on failure (empty on success).
   string error = 2;
   // The object key written (echoes the destination's object_key on success) and
-  // its size in bytes — recorded on the control plane's BackupRun.
+  // its size in bytes - recorded on the control plane's BackupRun.
   string object_key = 3;
   int64 size_bytes = 4;
   // Hex sha256 of the artifact as written.
   string sha256 = 5;
-  // How big the artifact is once DECRYPTED — i.e. exactly how many bytes ReadStoreFile
+  // How big the artifact is once DECRYPTED - i.e. exactly how many bytes ReadStoreFile
   // emits when it is handed an age identity, which is what a download hands to a
   // browser.
   int64 decrypted_size_bytes = 6;
@@ -1070,7 +1070,7 @@ message S3CheckResponse {
   // True when the destination is reachable AND writable.
   bool ok = 1;
   // "" on success; a human-readable reason otherwise (bad creds, no bucket,
-  // unmarked root, read-only mount) — surfaced as the destination's status detail.
+  // unmarked root, read-only mount) - surfaced as the destination's status detail.
   string error = 2;
   // Store probes only (0 for S3): the resolved root's filesystem headroom, so the UI
   // can show how much room a destination has left without a second RPC.
@@ -1097,12 +1097,12 @@ message S3DeleteRequest {
 message S3DeleteResponse {
   bool ok = 1;
   string error = 2;
-  // How many objects were deleted (0 when already absent — still ok, idempotent).
+  // How many objects were deleted (0 when already absent - still ok, idempotent).
   int64 deleted = 3;
 }
 
 // --------------------------------------------------------------------------- BACKUP
-// STORES — the cross-host relay (ReadStoreFile / WriteStoreFile / RestoreFrom).
+// STORES - the cross-host relay (ReadStoreFile / WriteStoreFile / RestoreFrom).
 
 message ReadStoreFileRequest {
   // The artifact to stream out. Same root rules as every other StoreTarget.
@@ -1143,7 +1143,7 @@ message StoreResult {
   string error = 2;
   // What actually landed. A filesystem has no ETag, so these two are the only
   // durable proof of the transfer, and they are what the control plane records
-  // on the BackupRun — not the source's own count.
+  // on the BackupRun, not the source's own count.
   int64 bytes_written = 3;
   string sha256 = 4;
 }
@@ -1172,7 +1172,7 @@ message RestoreChunk {
 }
 
 // ---------------------------------------------------------------------------
-// PART C — console observability (logs / attach / exec / instances)
+// PART C - console observability (logs / attach / exec / instances)
 // ---------------------------------------------------------------------------
 
 // Every container RPC carries BOTH the project id and the already-resolved container
@@ -1267,7 +1267,7 @@ message ConsoleInstance {
   // "paused" | "dead" | "removing". Empty from an agent too old to send it.
   string state = 10;
   // Healthcheck verdict when the image defines one: "healthy" | "unhealthy" |
-  // "starting". Empty when the container has no healthcheck (the common case) —
+  // "starting". Empty when the container has no healthcheck (the common case),
   // NOT a synonym for healthy.
   string health = 11;
   // How many times docker has restarted this container. The number that turns
@@ -1292,7 +1292,7 @@ message ExecResponse {
   string stdout = 2;
   string stderr = 3;
   // True when the image had no shell and the command ran as raw argv (no pipes/
-  // globbing) — the console renders a notice.
+  // globbing) - the console renders a notice.
   bool raw_mode = 4;
 }
 
@@ -1371,7 +1371,7 @@ message KillJobResponse {
 }
 
 // ---------------------------------------------------------------------------
-// PART C — project config files
+// PART C - project config files
 // ---------------------------------------------------------------------------
 
 // File RPCs key on SLUG, not project_id: the on-disk root is <stack-dir>/files/<slug>
@@ -1411,7 +1411,7 @@ message ReadFileResponse {
   // The UTF-8 text body. Empty when reason != "" (binary/too-large).
   string text = 2;
   int64 size = 3;
-  // "" when text is present; "binary" or "too-large" when it is withheld —
+  // "" when text is present; "binary" or "too-large" when it is withheld -
   // matches lib/data/project-files.ts FileContent.reason byte-for-byte.
   string reason = 4;
 }
@@ -1458,12 +1458,12 @@ message FilesExistResponse {
 }
 
 // ---------------------------------------------------------------------------
-// PART D — dev containers + SSH gateway per server
+// PART D - dev containers + SSH gateway per server
 // ---------------------------------------------------------------------------
 
 // Everything the agent needs to start a project's dev container, all rendered by
 // the control plane (D2: one renderer, opaque artifacts on the wire). The agent
-// neither resolves the image nor renders labels — it writes files and runs Docker.
+// neither resolves the image nor renders labels - it writes files and runs Docker.
 message StartDevRequest {
   // Project identity. `slug` keys the dev compose project / container name
   // (deplo-dev-<slug>), the stack file, the workspace dir, and the deps volume;
@@ -1471,7 +1471,7 @@ message StartDevRequest {
   string slug = 1;
   string project_id = 2;
 
-  // The fully-rendered dev compose YAML (renderDevCompose) — opaque to the agent,
+  // The fully-rendered dev compose YAML (renderDevCompose) - opaque to the agent,
   // written to <stack-dir>/dev-<slug>.yml (0600: it holds decrypted `development` env).
   string compose_yaml = 3;
 
@@ -1514,7 +1514,7 @@ message GatewayConfig {
 
 // One control-plane-computed gateway exec step the agent runs verbatim inside the
 // gateway container: `docker exec -i <gateway> <argv...>`, optionally piping `input` to
-// the command's stdin (chpasswd / file writes — the secret never hits argv/env that
+// the command's stdin (chpasswd / file writes - the secret never hits argv/env that
 // `docker inspect` could surface).
 message GatewayStep {
   repeated string argv = 1;
@@ -1522,14 +1522,14 @@ message GatewayStep {
 }
 
 // Ensure the gateway is up, then reconcile EVERY supplied user into it (the store is
-// the sole source of truth — ADR-0002; the control plane sends the full provision plan
+// the sole source of truth - ADR-0002; the control plane sends the full provision plan
 // for every DevSshUser of this server so a fresh gateway rebuilds its whole
 // projection).
 message EnsureGatewayRequest {
   GatewayConfig config = 1;
   // The provision steps for every stored user of this server, in order. Each
   // inner step-list provisions one account/key/map. Replayed on first boot and
-  // after drift — provisioning is idempotent.
+  // after drift - provisioning is idempotent.
   repeated UserSteps users = 2;
 }
 
@@ -1555,13 +1555,13 @@ message DeprovisionSshUserRequest {
 
 message TunnelRequest {
   string slug = 1;
-  // The launch script (tunnelLaunchScript) — only set on StartTunnel; rendered by
+  // The launch script (tunnelLaunchScript) - only set on StartTunnel; rendered by
   // the control plane so the CLI download URL / tunnel name stay one source.
   string launch_script = 2;
 }
 
 // The agent returns the RAW tunnel log + running flag; the control plane parses
-// it (parseTunnelLog) into the device-login link / connected URL — that logic
+// it (parseTunnelLog) into the device-login link / connected URL - that logic
 // stays pure and testable in TS, not duplicated in Go.
 message TunnelStatus {
   bool running = 1;
@@ -1574,15 +1574,15 @@ message TunnelStatus {
 // button into a data-loss button.
 enum CleanupScope {
   CLEANUP_SCOPE_UNSPECIFIED = 0;
-  // `docker builder prune` — the daemon's own BuildKit cache. Touches no Deplo
+  // `docker builder prune` - the daemon's own BuildKit cache. Touches no Deplo
   // object at all.
   CLEANUP_SCOPE_BUILD_CACHE = 1;
-  // `docker image prune` — untagged layers only, NEVER `-a`. A stopped container
+  // `docker image prune` - untagged layers only, NEVER `-a`. A stopped container
   // still pins its image, so this cannot strand an app.
   CLEANUP_SCOPE_DANGLING_IMAGES = 2;
   // Dangling anonymous volumes that are PROVABLY buildkitd stores: the railpack builder
   // runs `moby/buildkit`, which declares VOLUME /var/lib/buildkit, and an orphaned one
-  // is identified by the `buildkitd.lock` sentinel file at its mountpoint — never by
+  // is identified by the `buildkitd.lock` sentinel file at its mountpoint, never by
   // name, never by label.
   CLEANUP_SCOPE_ORPHAN_BUILDKIT_CACHE = 3;
   // Old `deplo/<slug>:<deployment>` images labelled deplo.managed=true that NO
@@ -1608,15 +1608,15 @@ message DockerCleanupRequest {
   // closed).
   int32 min_age_hours = 3;
   // UNUSED_APP_IMAGES only: how many of the newest images to keep per deplo.slug.
-  // 0 => 1 — the current tag is always kept, even when no container references it
+  // 0 => 1 - the current tag is always kept, even when no container references it
   // (a stopped app must stay redeployable without a rebuild).
   int32 keep_images_per_app = 4;
   // UNUSED_APP_IMAGES only: a PER-SLUG override of keep_images_per_app, keyed by the
   // deplo.slug label. That over-keeps on an old host rather than under-keeping - a
   // rollback still works, it just costs more disk until the agent is updated.
   map<string, int32> keep_per_slug = 5;
-  // LEFTOVER_APP_FILES only: every stack slug the control plane still knows — Apps,
-  // their preview stacks (`<slug>__pr-<n>`) and databases — INSTANCE-WIDE, not just the
+  // LEFTOVER_APP_FILES only: every stack slug the control plane still knows - Apps,
+  // their preview stacks (`<slug>__pr-<n>`) and databases - INSTANCE-WIDE, not just the
   // ones placed on this host.
   repeated string live_slugs = 6;
 }
@@ -1626,12 +1626,12 @@ message CleanupScopeResult {
   // Bytes reclaimed by this scope.
   int64 reclaimed_bytes = 2;
   int32 items_removed = 3;
-  // The image ids / volume names / cache-record ids removed — or, under dry_run,
+  // The image ids / volume names / cache-record ids removed, or, under dry_run,
   // that WOULD be removed. Bounded to 200 entries; items_removed is authoritative.
   repeated string items = 4;
   // True when the agent DECLINED the scope: it could not build the
   // container-reference reverse index the scope's safety rests on, so it refused
-  // to guess. A skipped scope is not a failure — the sweep continues.
+  // to guess. A skipped scope is not a failure - the sweep continues.
   bool skipped = 5;
   // Per-scope failure. Non-fatal: the other scopes still run and the response is
   // still ok.
@@ -1648,13 +1648,13 @@ message DockerCleanupResponse {
 }
 
 // ---------------------------------------------------------------------------
-// ContainerStats — per-container `docker stats` for the Monitoring tab
+// ContainerStats - per-container `docker stats` for the Monitoring tab
 // --------------------------------------------------------------------------- Messages
 // for the ContainerStats RPC (declared up in the service block next to Metrics).
 
 message ContainerStatsRequest {
   // The project the containers must belong to (agent re-validates the label
-  // deplo.project=<project_id>). Empty is REJECTED — a blank filter would stat
+  // deplo.project=<project_id>). Empty is REJECTED - a blank filter would stat
   // every container on the host (cross-tenant), exactly like ListInstances.
   string project_id = 1;
   // The container names to stat (resolved control-plane-side from the project's
@@ -1665,7 +1665,7 @@ message ContainerStatsRequest {
 
 // One container's live resource usage, parsed from `docker stats --no-stream`. net_* /
 // block_* are CUMULATIVE totals since container start (that is what `docker stats`
-// reports), NOT rates — the control plane derives bytes/sec from the delta between
+// reports), NOT rates - the control plane derives bytes/sec from the delta between
 // consecutive samples, which also survives a counter reset on restart. cpu_pct and
 // mem_* are already instantaneous.
 message ContainerStat {
@@ -1680,13 +1680,13 @@ message ContainerStat {
   int64 block_write = 9;   // cumulative bytes written
   int32 pids = 10;
   // False for a container that exists in the project but is not running (stats
-  // are zeroed) — so the tab can distinguish "stopped" from "no such container".
+  // are zeroed), so the tab can distinguish "stopped" from "no such container".
   bool running = 11;
 
   // Fields 12-16 are ADDITIVE (contract stays V1).
 
   // The deplo.project label (an App id, prj_*, or a Database id) this container belongs
-  // to — the demux key for the host-wide stream.
+  // to - the demux key for the host-wide stream.
   string project_id = 12;
   // The full 64-hex Docker id. Stable for a container's lifetime and CHANGES on
   // recreation, which is exactly what the rate calculator needs in order to drop
@@ -1700,7 +1700,7 @@ message ContainerStat {
   // "paused" | "dead" | "removing". Empty from an agent too old to send it.
   string state = 14;
   // Healthcheck verdict when the image defines one: "healthy" | "unhealthy" |
-  // "starting". Empty when the container has no healthcheck (the common case) —
+  // "starting". Empty when the container has no healthcheck (the common case),
   // NOT a synonym for healthy.
   string health = 15;
   // How many times docker has restarted this container. The number that turns
@@ -1713,7 +1713,7 @@ message ContainerStatsResponse {
 }
 
 // ---------------------------------------------------------------------------
-// StreamMetrics — one long-lived telemetry stream per host
+// StreamMetrics - one long-lived telemetry stream per host
 // --------------------------------------------------------------------------- Appended
 // at the END of the file for the same reason ContainerStats was: the wire is identical
 // wherever they sit, but keeping additions last leaves the committed *.pb.go / agent.ts
@@ -1727,7 +1727,7 @@ message MetricsStreamRequest {
   // [1000, 60000]: a cadence is a HINT, never a way for a caller to pin the host
   // by asking for 10ms samples.
   int32 interval_ms = 2;
-  // False => host metrics only. No container roster, no `docker ps`, no stats —
+  // False => host metrics only. No container roster, no `docker ps`, no stats -
   // for a caller that only wants the host gauge.
   bool include_containers = 3;
 }
@@ -1763,7 +1763,7 @@ message HostInfoResponse {
   string cpu_model = 1;
   // PHYSICAL cores, deduplicated by (physical id, core id). 6 on the chip above.
   int32 cpu_cores = 2;
-  // Logical processors — what schedulers and `nproc` count. 12 on the chip above.
+  // Logical processors - what schedulers and `nproc` count. 12 on the chip above.
   int32 cpu_threads = 3;
   // bytes
   int64 mem_total_bytes = 4;
@@ -1777,7 +1777,7 @@ message HostInfoResponse {
   string arch = 9;
   // Docker server version, "" when the daemon is unreachable.
   string docker_version = 10;
-  // Docker's data root (`docker info -f {{.DockerRootDir}}`) — where images and
+  // Docker's data root (`docker info -f {{.DockerRootDir}}`), where images and
   // volumes actually live, which is not always the disk the operator assumes.
   string docker_root_dir = 11;
   int64 uptime_sec = 12;
@@ -1788,7 +1788,7 @@ message HostInfoResponse {
   int64 time_unix_ms = 14;
   int32 utc_offset_minutes = 15;
   // The current $AGENT_DATA/traefik/docker-compose.yml, verbatim. Empty when
-  // Deplo did not install Traefik here — which is exactly the signal that
+  // Deplo did not install Traefik here, which is exactly the signal that
   // TraefikConfig must refuse to write.
   string traefik_compose_yaml = 16;
   // The resolved container id for control_plane_hint, or "" when the hint named
@@ -1815,7 +1815,7 @@ message TraefikConfigRequest {
 
 message TraefikConfigResponse {
   bool ok = 1;
-  // Why not, verbatim for the operator — most usefully "this host runs a Traefik
+  // Why not, verbatim for the operator - most usefully "this host runs a Traefik
   // Deplo did not install".
   string error = 2;
   // The stack file as it stands AFTER the operation, so the control plane never
@@ -1824,7 +1824,7 @@ message TraefikConfigResponse {
 }
 
 message RestartControlPlaneRequest {
-  // The caller's own hostname / container id — see HostInfoRequest.
+  // The caller's own hostname / container id - see HostInfoRequest.
   string control_plane_hint = 1;
 }
 

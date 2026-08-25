@@ -168,7 +168,7 @@ func diskBytes(path string) (used, total int64) {
 	return used, total
 }
 
-// readNetCounters is the lossy form, kept for Collect — see readCPUTimes for
+// readNetCounters is the lossy form, kept for Collect - see readCPUTimes for
 // why a baseline-keeping caller must not use it.
 func readNetCounters() (rx, tx int64) {
 	r, t, _ := readNetCountersOK()

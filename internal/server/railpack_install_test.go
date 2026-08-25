@@ -13,7 +13,7 @@ import (
 )
 
 // The download URL must name the per-arch musl asset railpack actually
-// publishes — a wrong shape 404s and the build method is dead on arrival.
+// publishes - a wrong shape 404s and the build method is dead on arrival.
 func TestRailpackDownloadURL(t *testing.T) {
 	url, err := railpackDownloadURL("0.35.0")
 	if err != nil {
@@ -50,7 +50,7 @@ func TestRailpackBinaryVersion(t *testing.T) {
 		t.Fatalf("v-prefixed version = %q; want 0.35.0", got)
 	}
 
-	// A binary that cannot be asked reports "" — never a version we'd trust.
+	// A binary that cannot be asked reports "", never a version we'd trust.
 	if got := railpackBinaryVersion(context.Background(), filepath.Join(dir, "absent")); got != "" {
 		t.Fatalf("absent binary = %q; want empty", got)
 	}
@@ -88,7 +88,7 @@ func TestInstallTarBinary(t *testing.T) {
 		t.Fatalf("wrong file extracted: %q (%v)", body, err)
 	}
 
-	// No `.part` temp file may survive — a leftover would be mistaken for a tool.
+	// No `.part` temp file may survive - a leftover would be mistaken for a tool.
 	entries, _ := os.ReadDir(filepath.Dir(dest))
 	for _, e := range entries {
 		if strings.HasSuffix(e.Name(), ".part") {

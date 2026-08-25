@@ -33,7 +33,7 @@ const (
 	probeDefaultMaxBytes = 512 * 1024
 	probeMaxBytes        = 2 * 1024 * 1024
 	// Whole-request budget, dial included. An app that cannot answer this fast is
-	// treated as having no icon — detection is cosmetic and must never hold a
+	// treated as having no icon - detection is cosmetic and must never hold a
 	// deploy or a page open.
 	probeTimeout = 6 * time.Second
 	// Longest path we will send. Far past any real icon URL; a guard against a
@@ -42,7 +42,7 @@ const (
 )
 
 // probeHostRe is the Host header grammar: a plain hostname, optionally with a
-// port. No spaces, no CR/LF, no userinfo, no scheme — a Host header is a single
+// port. No spaces, no CR/LF, no userinfo, no scheme - a Host header is a single
 // token and anything richer is a request-splitting attempt, not a hostname.
 var probeHostRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,253}(:[0-9]{1,5})?$`)
 
@@ -62,7 +62,7 @@ func (s *Service) ProbeHttp(ctx context.Context, req *pb.ProbeHttpRequest) (*pb.
 	projectID := req.GetProjectId()
 	if projectID == "" {
 		// Without the label filter the container lookup would range over every
-		// container on the host — the same cross-tenant enumeration ListInstances
+		// container on the host - the same cross-tenant enumeration ListInstances
 		// refuses.
 		return nil, status.Error(codes.InvalidArgument, "project_id is required")
 	}
@@ -100,7 +100,7 @@ func probeOnce(ctx context.Context, addr, path, host string, maxBytes int) (*pb.
 	}
 	if host != "" {
 		// Go sends req.Host as the Host header while still dialling the URL's
-		// address — the container IP stays the destination.
+		// address - the container IP stays the destination.
 		hreq.Host = host
 	}
 	hreq.Header.Set("User-Agent", "deplo-agent/"+AgentVersion)
@@ -183,7 +183,7 @@ func resolveStackContainerIP(ctx context.Context, projectID, slug, service strin
 }
 
 // containerIP reads a container's address from Docker, preferring the `deplo` network
-// (the one Traefik reaches it on) and falling back to any other network it joined — a
+// (the one Traefik reaches it on) and falling back to any other network it joined - a
 // container that is only on its own compose network is still perfectly reachable from
 // the host.
 func containerIP(ctx context.Context, container string) (string, error) {

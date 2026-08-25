@@ -38,7 +38,7 @@ var installEnvNames = map[string]bool{
 }
 
 // installConfigFiles are the repo files that can interpolate an environment variable
-// into the install itself — the registry/auth config every Node package manager reads
+// into the install itself - the registry/auth config every Node package manager reads
 // (`//registry.npmjs.org/:_authToken=${NPM_TOKEN}`).
 var installConfigFiles = []string{
 	".npmrc", ".yarnrc", ".yarnrc.yml", ".pnpmrc", ".bunfig.toml", ".netrc",
@@ -157,7 +157,7 @@ func deferEnvBelowInstall(lines []string, movable map[string]bool) ([]string, []
 }
 
 // installFollowerIndex returns the index of the section comment that follows the
-// install phase — the build phase when there is one, otherwise whatever Nixpacks emits
+// install phase - the build phase when there is one, otherwise whatever Nixpacks emits
 // next.
 func installFollowerIndex(lines []string, after int) int {
 	install := -1
@@ -217,7 +217,7 @@ func deferAppEnvBelowInstall(path string, envKeys []string, buildDir, installCmd
 		return nil, err
 	}
 	// Preserve the file's own line endings by splitting on "\n" and keeping any
-	// trailing "\r" inside the line — the prefix checks below are unaffected and
+	// trailing "\r" inside the line - the prefix checks below are unaffected and
 	// an untouched line is written back byte-identical.
 	lines := strings.Split(string(body), "\n")
 	rewritten, moved := deferEnvBelowInstall(lines, movableBuildEnv(envKeys, buildDir, installCmd))

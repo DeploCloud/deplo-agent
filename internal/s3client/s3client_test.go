@@ -85,7 +85,7 @@ func TestNew_ssrfGuard(t *testing.T) {
 }
 
 // The quirk flags are an allowlist, and everything else is DROPPED rather than
-// refused — an agent mid-rollout will see flags a newer control plane accepted,
+// refused - an agent mid-rollout will see flags a newer control plane accepted,
 // and failing there would make one destination work per host.
 func TestParseExtraArgs(t *testing.T) {
 	opts, unknown := parseExtraArgs([]string{

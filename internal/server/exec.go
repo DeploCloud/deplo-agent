@@ -96,8 +96,8 @@ func evictShellCacheLocked(now time.Time) {
 	}
 }
 
-// resolveShellPlan determines how to run commands in a container — via a detected
-// shell, or raw argv when none exists — probed once per container and cached (keyed by
+// resolveShellPlan determines how to run commands in a container - via a detected
+// shell, or raw argv when none exists - probed once per container and cached (keyed by
 // name; re-probes on image change or TTL lapse).
 func resolveShellPlan(ctx context.Context, name, image string) shellPlan {
 	shellCacheMu.Lock()
@@ -113,7 +113,7 @@ func resolveShellPlan(ctx context.Context, name, image string) shellPlan {
 		res, err := dockercli.Run(ctx, 5*time.Second, args...)
 		if err != nil {
 			// Spawn failure / timeout / daemon unreachable: can't probe. Don't
-			// cache a possibly-transient result — treat as raw for this attempt.
+			// cache a possibly-transient result - treat as raw for this attempt.
 			return shellPlan{run: nil}
 		}
 		if res.Code == 0 {
@@ -121,7 +121,7 @@ func resolveShellPlan(ctx context.Context, name, image string) shellPlan {
 			break
 		}
 		// A docker-level error (container stopped/removed) fails every probe
-		// identically — bail without caching so a later restart re-probes.
+		// identically - bail without caching so a later restart re-probes.
 		if isDockerLevelStderr(res.Stderr) {
 			return shellPlan{run: nil}
 		}

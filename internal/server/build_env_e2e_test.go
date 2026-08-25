@@ -12,7 +12,7 @@ import (
 )
 
 // End-to-end (real docker): a deploy's env must reach the BUILD, not just the runtime
-// stack — the whole point of build-time env parity (NEXT_PUBLIC_* is inlined while the
+// stack - the whole point of build-time env parity (NEXT_PUBLIC_* is inlined while the
 // build command runs).
 func TestE2E_BuildEnvReachesDockerfileBuild(t *testing.T) {
 	ctx := context.Background()
@@ -26,7 +26,7 @@ func TestE2E_BuildEnvReachesDockerfileBuild(t *testing.T) {
 	const value = "https://api.example.test/v1"
 
 	// What the control plane's generateDockerfile now renders: ARG+ENV per var,
-	// then build steps that consume it. `RUN` writes the var to a file — if the
+	// then build steps that consume it. `RUN` writes the var to a file, if the
 	// value survives into the file, it was present AT BUILD TIME.
 	df := `FROM busybox
 ARG NEXT_PUBLIC_API
@@ -42,7 +42,7 @@ CMD ["cat", "/baked"]
 		Dockerfile: &pb.DockerfileBuild{Generated: true, GeneratedDockerfile: df},
 		Env: map[string]string{
 			"NEXT_PUBLIC_API": value,
-			// NOT declared as ARG — must never be passed (warning-free builds).
+			// NOT declared as ARG - must never be passed (warning-free builds).
 			"RUNTIME_ONLY": "never-a-build-arg",
 		},
 	}

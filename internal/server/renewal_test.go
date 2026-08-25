@@ -147,7 +147,7 @@ func TestCertRenewal_roundTrip(t *testing.T) {
 
 	// A replay of the same install now fails (pending key consumed).
 	if r, _ := svc.InstallRenewedCert(context.Background(), &pb.InstallRenewedCertRequest{CertPem: string(newCert)}); r.GetOk() {
-		t.Fatal("replay install unexpectedly succeeded — pending key not consumed")
+		t.Fatal("replay install unexpectedly succeeded - pending key not consumed")
 	}
 }
 
@@ -181,7 +181,7 @@ func TestCertRenewal_rejectsMismatchedCert(t *testing.T) {
 		t.Fatalf("unexpected rpc error: %v", err)
 	}
 	if res.GetOk() {
-		t.Fatal("install of a cert not matching the pending key succeeded — must be rejected")
+		t.Fatal("install of a cert not matching the pending key succeeded - must be rejected")
 	}
 	// The on-disk cert is untouched (still serial 1).
 	if got := leafSerial(t, certFile); got.Int64() != 1 {

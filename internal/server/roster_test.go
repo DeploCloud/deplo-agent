@@ -159,7 +159,7 @@ func TestParseRosterInspectLines(t *testing.T) {
 	if b.State != "restarting" || b.RestartCount != 17 {
 		t.Errorf("detail B = %+v, want restarting with 17 restarts", b)
 	}
-	// An image with no healthcheck reports "" — NOT a synonym for healthy.
+	// An image with no healthcheck reports "", NOT a synonym for healthy.
 	if b.Health != "" {
 		t.Errorf("health = %q, want empty for an image with no healthcheck", b.Health)
 	}
@@ -293,7 +293,7 @@ func TestIsChurnAction(t *testing.T) {
 			t.Errorf("isChurnAction(%q) = false, want true", a)
 		}
 	}
-	// Everything else must not cost a rebuild — these are the high-frequency
+	// Everything else must not cost a rebuild - these are the high-frequency
 	// actions a busy container emits.
 	quiet := []string{"", "create", "exec_start", "exec_die", "health_status", "attach", "top", "resize", "stop"}
 	for _, a := range quiet {
@@ -382,15 +382,15 @@ func TestBuildRosterEntriesNeverInventsContainers(t *testing.T) {
 		map[string]string{ghost: "/sys/fs/cgroup/system.slice/docker-dddd.scope"},
 	)
 	if len(got) != 0 {
-		t.Fatalf("got %d entries, want none — nothing was listed", len(got))
+		t.Fatalf("got %d entries, want none - nothing was listed", len(got))
 	}
 }
 
 func TestBuildRosterEntriesPrefersInspectState(t *testing.T) {
 	const id = "eeee1c9e5b2d4a7c8e1f0b6d9a2c5e8f1b4d7a0c3e6f9b2d5a8c1e4f7b0d3a6c"
 
-	// `docker ps` reported "running" but the inspect — the richer read from the
-	// same daemon — says the container is restarting. A crash loop reported as
+	// `docker ps` reported "running" but the inspect - the richer read from the
+	// same daemon - says the container is restarting. A crash loop reported as
 	// running is precisely how an app in a restart loop got shown as "Online".
 	got := buildRosterEntries(
 		[]rosterPsRow{{ID: id, Name: "deplo-web-app-1", State: "running"}},
@@ -404,7 +404,7 @@ func TestBuildRosterEntriesPrefersInspectState(t *testing.T) {
 		t.Errorf("restartCount = %d, want 9", got[0].RestartCount)
 	}
 	if got[0].PID != 0 {
-		t.Errorf("pid = %d, want 0 — a restarting container's pid is not stable", got[0].PID)
+		t.Errorf("pid = %d, want 0 - a restarting container's pid is not stable", got[0].PID)
 	}
 }
 
@@ -445,7 +445,7 @@ func TestCgroupPathForPIDResolvesAndValidates(t *testing.T) {
 
 	writeFakeProcCgroup(t, procRoot, 4242, "0::"+rel+"\n")
 	// The pid the /proc read resolves but whose cgroup dir does NOT exist in our
-	// view — the agent running in its own cgroup namespace is the real case.
+	// view - the agent running in its own cgroup namespace is the real case.
 	writeFakeProcCgroup(t, procRoot, 4343, "0::/system.slice/docker-gone.scope\n")
 	// A cgroup v1 host: no 0:: line at all.
 	writeFakeProcCgroup(t, procRoot, 4444, "11:memory:/docker/abc\n")
@@ -498,7 +498,7 @@ type fakeDocker struct {
 	inspErr  error
 	listHits int
 	inspHits int
-	// hostRunning is what an unfiltered `docker ps -q` would report — every
+	// hostRunning is what an unfiltered `docker ps -q` would report - every
 	// container on the host, Deplo-managed or not. Defaults to 0 so a test that
 	// does not care about the host gauge is unaffected.
 	hostRunning int
@@ -733,7 +733,7 @@ func TestRosterKeepsTheLastGoodRosterWhenTheInspectFails(t *testing.T) {
 		t.Fatalf("got %d entries, want the last good roster kept", len(entries))
 	}
 	if entries[0].ProjectID != "prj_abc" {
-		t.Fatalf("projectID = %q — a failed inspect blanked the demux key", entries[0].ProjectID)
+		t.Fatalf("projectID = %q - a failed inspect blanked the demux key", entries[0].ProjectID)
 	}
 	if entries[0].State != "running" {
 		t.Errorf("state = %q, want the last good value", entries[0].State)
@@ -887,7 +887,7 @@ func TestRosterStopsWhenTheParentContextIsCancelled(t *testing.T) {
 	seedOneApp(f)
 
 	// The stream's own context going away must tear the roster down just as
-	// Close() does — otherwise a cancelled subscription leaks a docker child.
+	// Close() does, otherwise a cancelled subscription leaks a docker child.
 	ctx, cancel := context.WithCancel(context.Background())
 	r.start(ctx)
 	cancel()
@@ -944,7 +944,7 @@ func TestRosterHostCountIsUnfilteredWhileRunningCountIsScoped(t *testing.T) {
 
 // A FAILED `docker ps -q` yields no count. Publishing a fabricated 0 would show "0
 // containers" on a machine plainly running some, so the last known figure is kept
-// instead — the same discipline the rest of the rebuild applies to a failed listing.
+// instead - the same discipline the rest of the rebuild applies to a failed listing.
 func TestRosterHostCountKeepsLastKnownOnFailure(t *testing.T) {
 	r, f := newFakeRoster(t)
 	seedOneApp(f)
@@ -990,7 +990,7 @@ func TestRosterHostCountPublishesGenuineZero(t *testing.T) {
 	r.markDirty()
 	// Wait on the COUNT, not on listHits. rebuild() calls list() first and publishes the
 	// count last, so "a second listing started" says nothing about whether the new figure
-	// has landed — the wait would return mid-rebuild and read the stale 4.
+	// has landed - the wait would return mid-rebuild and read the stale 4.
 	waitFor(t, "the host count to fall to a genuine 0", func() bool {
 		return r.HostRunningCount() == 0
 	})

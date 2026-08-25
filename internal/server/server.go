@@ -1,4 +1,4 @@
-// Package server implements the Agent gRPC service — the server side of the second
+// Package server implements the Agent gRPC service - the server side of the second
 // system boundary (ADR-0006).
 package server
 
@@ -51,11 +51,11 @@ var Capabilities = []string{
 	// (`--since`/`--until`/`--timestamps`).
 	"logs.timerange",
 	"metrics",
-	"container-stats", // per-container `docker stats` snapshot (ContainerStats) — the per-app/per-database Monitoring tab
+	"container-stats", // per-container `docker stats` snapshot (ContainerStats) - the per-app/per-database Monitoring tab
 	// ONE long-lived host+container telemetry stream (StreamMetrics), sampled on the
 	// agent's own ticker.
 	"metrics-stream",
-	"dev",         // dev container lifecycle (StartDev/StopDev/Reset/Teardown) — Part D
+	"dev",         // dev container lifecycle (StartDev/StopDev/Reset/Teardown) - Part D
 	"ssh-gateway", // the per-host SSH gateway singleton (Ensure/Provision/Deprovision)
 	"tunnel",      // the VS Code remote tunnel (Start/Get/Stop)
 	"self-update", // in-place agent binary update over mTLS (SelfUpdate), certs kept
@@ -64,7 +64,7 @@ var Capabilities = []string{
 	// unreachable or already de-trusted.
 	"self-uninstall",
 	"backup",    // dump/restore a DB or project to/from S3 (Backup/Restore/S3Check/S3Delete)
-	"checkport", // host TCP port availability probe (CheckPort) — gates DB "expose publicly"
+	"checkport", // host TCP port availability probe (CheckPort) - gates DB "expose publicly"
 	// One bounded HTTP GET to a container of an app's own stack (ProbeHttp).
 	"http-probe",
 	// Scheduled `docker exec` the agent owns for its whole lifetime
@@ -138,7 +138,7 @@ type Service struct {
 	dataDir     string
 	// dataBase is the host data root (the control plane's DEPLO_DATA_DIR, e.g. /data),
 	// under which dev workspaces (<dataBase>/dev) and the SSH gateway
-	// (<dataBase>/ssh-gateway) live — the Part D per-host singletons.
+	// (<dataBase>/ssh-gateway) live - the Part D per-host singletons.
 	dataBase string
 	// agentDir is the agent's OWN data root (--agent-dir, the installer's
 	// /var/lib/deplo-agent): mTLS materials, and the Traefik stack the installer puts
@@ -212,7 +212,7 @@ func (s *Service) Metrics(ctx context.Context, req *pb.MetricsRequest) (*pb.Host
 	}
 	m := hostmetrics.Collect(dataDir)
 	// `docker ps -q` per call is affordable here (one unary RPC, on demand) but
-	// NOT on the stream's ticker — StreamMetrics takes the count from its roster,
+	// NOT on the stream's ticker - StreamMetrics takes the count from its roster,
 	// which is rebuilt on container churn rather than every 5s. See roster.go.
 	return hostMetricsPB(m, dockercli.RunningContainers(ctx)), nil
 }
@@ -289,7 +289,7 @@ func (s *Service) driveDeploy(ctx context.Context, id string, req *pb.DeployRequ
 		return nil
 	}}
 	// A panic inside a builder (a nil-deref on a partial proto, an index error on
-	// malformed build input) must degrade to ONE failed deploy — not crash the whole
+	// malformed build input) must degrade to ONE failed deploy, not crash the whole
 	// agent, which would take down every tenant's streams/metrics/management on this
 	// shared host.
 	func() {
@@ -375,7 +375,7 @@ func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.Stack
 		return &pb.StackResult{Ok: false, Error: err.Error()}, nil
 	}
 	// A removeVolumes destroy that fell through to `rm -f` did NOT run a successful `down
-	// -v`, and `rm -f` only removes a container — it can never reclaim a named volume.
+	// -v`, and `rm -f` only removes a container - it can never reclaim a named volume.
 	if ref.GetRemoveVolumes() {
 		msg := r2.Stderr
 		if msg == "" {
@@ -485,7 +485,7 @@ func (s *Service) Reroute(ctx context.Context, req *pb.RerouteRequest) (*pb.Stac
 		}
 	}
 	// Through the SAME assembler as a deploy: a reroute brings the stack up too,
-	// so the operator's extra flags (and their vetting) must apply identically —
+	// so the operator's extra flags (and their vetting) must apply identically -
 	// two hand-rolled argvs is how one of them silently stops matching the other.
 	composeArgs := composeUpArgs(name, stackFile, envFile, projectDir, false, req.GetComposeUpArgs())
 
@@ -536,7 +536,7 @@ func (s *Service) CheckPort(ctx context.Context, req *pb.CheckPortRequest) (*pb.
 	}
 	addr := net.JoinHostPort("0.0.0.0", strconv.Itoa(int(port)))
 	// SO_REUSEADDR is NOT set (Go's default), so this bind contends for the port
-	// exactly as a fresh docker-proxy publish would — a TIME_WAIT or an active
+	// exactly as a fresh docker-proxy publish would - a TIME_WAIT or an active
 	// listener both make it fail, which is the answer we want.
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -545,7 +545,7 @@ func (s *Service) CheckPort(ctx context.Context, req *pb.CheckPortRequest) (*pb.
 			Reason:    fmt.Sprintf("port %d is already in use on the host", port),
 		}, nil
 	}
-	// Release immediately — this was only a probe. Close errors are irrelevant
+	// Release immediately - this was only a probe. Close errors are irrelevant
 	// (the OS reclaims the socket regardless); the port is confirmed bindable.
 	_ = ln.Close()
 	return &pb.CheckPortResponse{Available: true}, nil

@@ -13,7 +13,7 @@ import (
 
 // The one thing TraefikConfig must never do is rewrite a proxy Deplo did not install.
 // install-agent.sh explicitly refuses to fight for :80/:443 when an operator already
-// runs their own Traefik — and a remote rewrite of that config would be a far worse
+// runs their own Traefik, and a remote rewrite of that config would be a far worse
 // version of the same mistake.
 
 func TestTraefikConfigRefusesWhenDeploDidNotInstallTraefik(t *testing.T) {
@@ -79,7 +79,7 @@ func TestTraefikConfigRestoresThePreviousConfigWhenBringUpFails(t *testing.T) {
 	svc, path := serviceWithTraefik(t, original)
 
 	// What the bring-up saw, in order. The rollback must not merely restore the
-	// file — it must bring the restored file back up.
+	// file - it must bring the restored file back up.
 	var appliedContent []string
 	svc.traefikApply = func(_ context.Context, p string, _ bool) error {
 		appliedContent = append(appliedContent, readFileOrEmpty(p))
@@ -171,7 +171,7 @@ func TestTraefikConfigIsNotWorldReadable(t *testing.T) {
 	}
 }
 
-// restart_only must never look at compose_yaml — the plain "restart Traefik"
+// restart_only must never look at compose_yaml - the plain "restart Traefik"
 // button must not become a silent config change.
 func TestTraefikConfigRestartOnlyLeavesTheFileAlone(t *testing.T) {
 	const original = "services:\n  traefik:\n    image: traefik:v3.7\n"

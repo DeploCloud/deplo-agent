@@ -12,8 +12,8 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// backup_clickhouse.go implements clickhouse backup/restore, which — unlike the
-// single-`docker exec`-pipe engines — needs multi-statement orchestration: a clickhouse
+// backup_clickhouse.go implements clickhouse backup/restore, which - unlike the
+// single-`docker exec`-pipe engines - needs multi-statement orchestration: a clickhouse
 // database is a SET of tables, each with its own DDL + data, and there is no single
 // command that streams a restorable whole-database dump.
 
@@ -65,7 +65,7 @@ func (s *Service) dumpClickhouse(ctx context.Context, d *pb.DatabaseDescriptor, 
 	if db == "" {
 		return fmt.Errorf("clickhouse backup requires a database name")
 	}
-	// Enumerate the real tables (exclude views + temporary tables — a view's data
+	// Enumerate the real tables (exclude views + temporary tables - a view's data
 	// is derived, and its definition would be restored by its source table's DDL
 	// only if we dumped views too; keeping to base tables is the safe, portable set).
 	out, err := s.chQuery(ctx, d, fmt.Sprintf(

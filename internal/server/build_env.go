@@ -6,7 +6,7 @@ import (
 )
 
 // Build-time env, in parity with the runtime env: every build method makes the
-// request's decrypted env (req.env — the same map the runtime stack gets) available to
+// request's decrypted env (req.env - the same map the runtime stack gets) available to
 // the BUILD, so build-time-inlined configuration (Next.js NEXT_PUBLIC_*, Vite VITE_*,
 // CRA REACT_APP_*) works without the user knowing what a build arg is.
 
@@ -23,7 +23,7 @@ func buildEnvKeys(env map[string]string) []string {
 	return keys
 }
 
-// envKV renders "KEY=VALUE" process-env entries for the given keys — the ONLY
+// envKV renders "KEY=VALUE" process-env entries for the given keys - the ONLY
 // place a build-env VALUE lives on the way into a build tool.
 func envKV(env map[string]string, keys []string) []string {
 	kv := make([]string, 0, len(keys))
@@ -44,7 +44,7 @@ func filterKeys(keys []string, keep func(string) bool) []string {
 	return out
 }
 
-// declaredArgNames scans a Dockerfile body for the ARG names it declares — single-name
+// declaredArgNames scans a Dockerfile body for the ARG names it declares - single-name
 // (`ARG FOO`, `ARG FOO=default`) and BuildKit's multi-name (`ARG FOO BAR=x`) forms, in
 // any stage.
 func declaredArgNames(dockerfile string) map[string]struct{} {
@@ -74,7 +74,7 @@ func declaredArgNames(dockerfile string) map[string]struct{} {
 	return names
 }
 
-// dockerfileEnvKeys returns the env keys this Dockerfile declares as ARGs — the set
+// dockerfileEnvKeys returns the env keys this Dockerfile declares as ARGs - the set
 // that becomes bare `--build-arg KEY` flags.
 func dockerfileEnvKeys(dockerfile string, env map[string]string) []string {
 	declared := declaredArgNames(dockerfile)
@@ -85,7 +85,7 @@ func dockerfileEnvKeys(dockerfile string, env map[string]string) []string {
 }
 
 // appendBuildArgKeys appends one bare `--build-arg KEY` per key (docker reads a
-// bare name's value from the client's process env — pass envKV alongside).
+// bare name's value from the client's process env - pass envKV alongside).
 func appendBuildArgKeys(args []string, keys []string) []string {
 	for _, k := range keys {
 		args = append(args, "--build-arg", k)

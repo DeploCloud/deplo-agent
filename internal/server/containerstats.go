@@ -15,7 +15,7 @@ import (
 )
 
 // containerstats.go implements the ContainerStats RPC: a one-shot `docker stats
-// --no-stream` snapshot for the named containers of ONE project — the agent-side data
+// --no-stream` snapshot for the named containers of ONE project - the agent-side data
 // source for the per-app / per-database Monitoring tab.
 
 // ContainerStats returns live resource usage for a project's containers.
@@ -103,7 +103,7 @@ func collectContainerStats(ctx context.Context, names []string) map[string]*pb.C
 		return out
 	}
 	// A non-zero code (a name that stopped mid-call) still leaves the found rows
-	// on stdout — parse whatever came back, like inspectContainers does.
+	// on stdout - parse whatever came back, like inspectContainers does.
 	for _, line := range strings.Split(strings.TrimSpace(res.Stdout), "\n") {
 		if st, ok := parseStatsLine(line); ok {
 			out[st.Name] = st

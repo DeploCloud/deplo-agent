@@ -2,7 +2,7 @@ package server
 
 import "testing"
 
-// parseStatsLine is the pure heart of ContainerStats — it turns one
+// parseStatsLine is the pure heart of ContainerStats - it turns one
 // `docker stats --format {{json .}}` line into a ContainerStat with no docker
 // involved, so the byte/percent/PID parsing is asserted directly here.
 

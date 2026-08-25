@@ -55,7 +55,7 @@ var downloadFile = func(ctx context.Context, url string) ([]byte, error) {
 }
 
 // SelfUpdate replaces the agent's own binary in place with a newer release and restarts
-// to run it, WITHOUT touching the mTLS materials — so the server keeps its identity and
+// to run it, WITHOUT touching the mTLS materials, so the server keeps its identity and
 // pinned fingerprint across the upgrade (see the RPC's contract in proto/agent.proto).
 func (s *Service) SelfUpdate(ctx context.Context, req *pb.SelfUpdateRequest) (*pb.SelfUpdateResponse, error) {
 	// Where we live. Resolve symlinks so we replace the REAL file (install-agent.sh
@@ -75,7 +75,7 @@ func (s *Service) SelfUpdate(ctx context.Context, req *pb.SelfUpdateRequest) (*p
 // applyUpdate performs the verified swap of the binary AT exePath and schedules the
 // re-exec.
 func (s *Service) applyUpdate(ctx context.Context, exePath string, req *pb.SelfUpdateRequest) (*pb.SelfUpdateResponse, error) {
-	// Pick the asset for THIS host's architecture — the agent is the authority on its own
+	// Pick the asset for THIS host's architecture - the agent is the authority on its own
 	// arch (runtime.GOARCH), exactly as install-agent.sh selects by `uname -m`.
 	bin := req.GetBinaries()[runtime.GOARCH]
 	if bin == nil || bin.GetUrl() == "" || bin.GetSha256() == "" {
@@ -91,7 +91,7 @@ func (s *Service) applyUpdate(ctx context.Context, exePath string, req *pb.SelfU
 		return nil, err
 	}
 
-	// Atomic swap: on Linux you can rename over the file of a running process —
+	// Atomic swap: on Linux you can rename over the file of a running process -
 	// the open text segment keeps the old inode until exit, the path now points at
 	// the new binary, and the next exec of this path runs the new code.
 	if err := os.Rename(staged, exePath); err != nil {

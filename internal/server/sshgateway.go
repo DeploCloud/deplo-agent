@@ -29,26 +29,26 @@ const (
 )
 
 // gwDir is the host dir holding all gateway-managed files (host keys, sshd_config,
-// wrapper, maps) — mirrors lib/infra/ssh-gateway.ts GW_DIR (<DATA_DIR>/ssh-gateway).
+// wrapper, maps) - mirrors lib/infra/ssh-gateway.ts GW_DIR (<DATA_DIR>/ssh-gateway).
 func (s *Service) gwDir() string { return filepath.Join(s.dataBase, "ssh-gateway") }
 
 func (s *Service) gwStackFile() string { return filepath.Join(s.gwDir(), "docker-compose.yml") }
 
-// EnsureGateway is DORMANT — dev mode (and its SSH gateway) was removed from the
+// EnsureGateway is DORMANT - dev mode (and its SSH gateway) was removed from the
 // control plane (#33/#34). Kept only to satisfy the generated Agent interface; it
 // refuses before touching Docker/ssh/fs. Never revive the body.
 func (s *Service) EnsureGateway(ctx context.Context, req *pb.EnsureGatewayRequest) (*pb.StackResult, error) {
 	return nil, status.Error(codes.Unimplemented, "dev mode has been removed")
 }
 
-// ProvisionSshUser is DORMANT — the SSH gateway was removed with dev mode
+// ProvisionSshUser is DORMANT - the SSH gateway was removed with dev mode
 // (#33/#34). Kept only to satisfy the generated Agent interface; refuses before
 // running any useradd/ssh/Docker work. Never revive the body.
 func (s *Service) ProvisionSshUser(ctx context.Context, req *pb.ProvisionSshUserRequest) (*pb.StackResult, error) {
 	return nil, status.Error(codes.Unimplemented, "dev mode has been removed")
 }
 
-// DeprovisionSshUser is DORMANT — the SSH gateway was removed with dev mode (#33/#34).
+// DeprovisionSshUser is DORMANT - the SSH gateway was removed with dev mode (#33/#34).
 // Kept only to satisfy the generated Agent interface; refuses before running any
 // deluser/ssh/Docker work.
 func (s *Service) DeprovisionSshUser(ctx context.Context, req *pb.DeprovisionSshUserRequest) (*pb.StackResult, error) {
@@ -123,7 +123,7 @@ func (s *Service) gatewayRunning(ctx context.Context) bool {
 	return dockercli.IsRunning(ctx, gatewayContainer)
 }
 
-// waitGatewayReady polls until the gateway is ready to PROVISION users — i.e. both sshd
+// waitGatewayReady polls until the gateway is ready to PROVISION users - i.e. both sshd
 // is installed AND the `devusers` group exists. Gating on the group closes that race.
 func (s *Service) waitGatewayReady(ctx context.Context, timeout time.Duration) {
 	deadline := time.Now().Add(timeout)

@@ -74,7 +74,7 @@ func TestImportFiles_headerRequired(t *testing.T) {
 }
 
 // TestExportFiles_missingDir: a service with no files dir exports a valid empty
-// archive (not an error) — a common case (plain single-image project).
+// archive (not an error) - a common case (plain single-image project).
 func TestExportFiles_missingDir(t *testing.T) {
 	svc := New(t.TempDir(), t.TempDir(), "/", "")
 	st := &fakeExportFilesStream{}
@@ -99,7 +99,7 @@ func TestExportFiles_missingDir(t *testing.T) {
 }
 
 // TestFilesCopyRoundTrip drives ExportFiles -> (relay) -> ImportFiles against real
-// host directories (no docker needed — the files dir is a plain host dir), proving
+// host directories (no docker needed - the files dir is a plain host dir), proving
 // the tree copies across AND that wipe-first overwrites stale destination content.
 func TestFilesCopyRoundTrip(t *testing.T) {
 	stackDir := t.TempDir()

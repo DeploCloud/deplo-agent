@@ -45,7 +45,7 @@ var runSystemctl = func(ctx context.Context, args ...string) error {
 	return nil
 }
 
-// errNoSystemd means the host has no systemctl — a skip, never a failure.
+// errNoSystemd means the host has no systemctl - a skip, never a failure.
 var errNoSystemd = errors.New("systemctl not found")
 
 // exitProcess ends this process. Overridable in tests (a real os.Exit would take
@@ -88,7 +88,7 @@ func (s *Service) applyUninstall(ctx context.Context, exe string) (*pb.SelfUnins
 		log.Printf("deplo-agent: self-uninstall: %v (continuing)", err)
 	}
 
-	// 2. The unit file. Absent is a skip — that is what an agent run in a
+	// 2. The unit file. Absent is a skip - that is what an agent run in a
 	// container looks like, and it is not a failure.
 	if err := os.Remove(agentUnitPath); err == nil {
 		removed = append(removed, agentUnitPath)
@@ -99,7 +99,7 @@ func (s *Service) applyUninstall(ctx context.Context, exe string) (*pb.SelfUnins
 
 	// 3. The state dir: the mTLS materials, and whatever else the installer put
 	// under --agent-dir. This is the one removal that must not be skipped
-	// silently — leaving the keys behind is leaving the trust behind.
+	// silently, leaving the keys behind is leaving the trust behind.
 	if s.agentDir != "" {
 		if err := os.RemoveAll(s.agentDir); err != nil {
 			return nil, status.Errorf(codes.FailedPrecondition,

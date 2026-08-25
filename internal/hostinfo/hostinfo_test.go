@@ -125,7 +125,7 @@ func TestResolveZoneRefusesAnythingOutsideZoneinfo(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A secret next to the zone tree, and a symlink inside the tree pointing at
-	// it — the escape a string-prefix check would wave through.
+	// it - the escape a string-prefix check would wave through.
 	secret := filepath.Join(dir, "shadow")
 	if err := os.WriteFile(secret, []byte("root:x:"), 0o600); err != nil {
 		t.Fatal(err)
@@ -165,7 +165,7 @@ func TestResolveZoneRefusesAnythingOutsideZoneinfo(t *testing.T) {
 	}
 }
 
-// Collect must never panic or block on a host where some source is missing —
+// Collect must never panic or block on a host where some source is missing -
 // it is called from an interactive RPC.
 func TestCollectIsBestEffort(t *testing.T) {
 	got := Collect("/")

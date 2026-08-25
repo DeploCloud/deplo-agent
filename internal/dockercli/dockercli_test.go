@@ -24,7 +24,7 @@ func TestStream_cancellationReportsClearError(t *testing.T) {
 		t.Skip("command completed before cancellation (no docker / fast error path)")
 	}
 	// Accept either the explicit cancellation message OR a docker spawn/daemon error
-	// (docker absent) — both are non-"-1"-exit error paths.
+	// (docker absent) - both are non-"-1"-exit error paths.
 	if ctx.Err() == context.Canceled && !strings.Contains(err.Error(), "canceled") &&
 		!strings.Contains(err.Error(), "Cannot connect") && !strings.Contains(err.Error(), "docker") {
 		t.Fatalf("cancellation should surface a clear error, got: %v", err)
@@ -66,7 +66,7 @@ func TestTraefikRunning(t *testing.T) {
 	}
 }
 
-// ImageExportOptsSupported decides whether builds may pass `--output type=image,…` — a
+// ImageExportOptsSupported decides whether builds may pass `--output type=image,…` - a
 // flag the containerd image store accepts and the classic graphdriver store rejects
 // outright, so a wrong answer breaks every build rather than merely slowing one.
 func TestImageExportOptsSupported(t *testing.T) {
@@ -94,7 +94,7 @@ func TestImageExportOptsSupported(t *testing.T) {
 	}
 
 	// Sticky: with the probe cached, a context that is already dead must still
-	// return the same answer — proof no further docker call is made.
+	// return the same answer - proof no further docker call is made.
 	dead, cancel := context.WithCancel(ctx)
 	cancel()
 	if got := ImageExportOptsSupported(dead); got != want {
@@ -109,7 +109,7 @@ func TestImageExportProbeDoesNotCacheInconclusive(t *testing.T) {
 	resetImageExportProbe()
 	t.Cleanup(resetImageExportProbe)
 
-	// A cancelled context makes `docker info` fail to run at all — the
+	// A cancelled context makes `docker info` fail to run at all - the
 	// inconclusive path.
 	dead, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -175,7 +175,7 @@ func TestRedactArgs(t *testing.T) {
 		// Inline KEY=VALUE secret env: value hidden, key kept.
 		{[]string{"exec", "-e", "PGPASSWORD=hunter2", "c", "pg_dump"}, "exec -e PGPASSWORD=*** c pg_dump"},
 		{[]string{"exec", "-e", "MYSQL_PWD=s3cret", "c"}, "exec -e MYSQL_PWD=*** c"},
-		// Bare -e NAME (no value) is NOT a secret value — left intact.
+		// Bare -e NAME (no value) is NOT a secret value - left intact.
 		{[]string{"exec", "-e", "PGPASSWORD", "c", "pg_dump"}, "exec -e PGPASSWORD c pg_dump"},
 		// Value after a secret flag is masked.
 		{[]string{"exec", "c", "redis-cli", "-a", "topsecret", "PING"}, "exec c redis-cli -a *** PING"},

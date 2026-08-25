@@ -48,7 +48,7 @@ func (e *emitter) result(ready bool, errMsg, commitSha string) {
 func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitter) {
 	slug := req.GetSlug()
 	// The slug is written into host paths (stack file, env file, files dir) and
-	// docker project names, so it must be a safe token before ANY of that — a
+	// docker project names, so it must be a safe token before ANY of that - a
 	// `../…` slug is otherwise an arbitrary root-owned write on the shared host.
 	if err := validateSlug(slug); err != nil {
 		e.result(false, err.Error(), "")
@@ -130,7 +130,7 @@ func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitt
 		}
 	case pb.SourceKind_SOURCE_KIND_DEV_WORKSPACE:
 		// Part D: "deploy from dev workspace". The build context is the developer's live tree
-		// already on THIS host (<dataBase>/dev/<slug>). No bytes cross the wire — the build
+		// already on THIS host (<dataBase>/dev/<slug>). No bytes cross the wire - the build
 		// stays on the owning host.
 		buildDir, cleanup, err := s.materializeDevWorkspace(slug, req.GetDevWorkspaceSubdir(), e)
 		if err != nil {
@@ -164,7 +164,7 @@ func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitt
 	// A multi-service compose stack interpolates `${VAR}` from a --env-file (the control
 	// plane did NOT bake env into its YAML, unlike the single-image path), and its
 	// containers are compose-prefixed (deplo-<slug>-<service>-N) rather than named
-	// deplo-<slug> — so the readiness wait is by label, not by name.
+	// deplo-<slug>, so the readiness wait is by label, not by name.
 	isCompose := req.GetSourceKind() == pb.SourceKind_SOURCE_KIND_COMPOSE
 
 	// --- Phase: write the rendered stack and bring it up. ---
@@ -199,7 +199,7 @@ func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitt
 	if req.GetForceRecreate() {
 		upLog += " --force-recreate"
 	}
-	// Echo the operator's own flags into the build log — that is also how they
+	// Echo the operator's own flags into the build log - that is also how they
 	// find out a set was rejected and dropped (it simply isn't here).
 	if extra := sanitizeComposeArgs(req.GetComposeUpArgs()); len(extra) > 0 {
 		upLog += " " + strings.Join(extra, " ")
@@ -270,7 +270,7 @@ func (s *Service) writeMountFiles(slug string, mounts []*pb.MountFile, e *emitte
 	filesDir := filepath.Join(s.stackDir, "files", slug)
 	for _, m := range mounts {
 		// safepath.Join strips a leading "./"/"/", rejects any ".." segment, and returns the
-		// bare filesDir for an empty/"." path — all three of which are "no file to write
+		// bare filesDir for an empty/"." path - all three of which are "no file to write
 		// here", so skip them rather than write outside or onto the dir itself.
 		target, ok := safepath.Join(filesDir, m.GetPath())
 		if !ok || target == filesDir {
@@ -330,7 +330,7 @@ func (s *Service) buildImage(ctx context.Context, req *pb.DeployRequest, buildDi
 }
 
 // buildDockerfile builds req.image_ref from a Dockerfile in buildDir. Mirrors
-// builders.ts' buildFromDockerfile / buildGenerated for the Dockerfile family —
+// builders.ts' buildFromDockerfile / buildGenerated for the Dockerfile family -
 // the most common path.
 func (s *Service) buildDockerfile(ctx context.Context, req *pb.DeployRequest, buildDir string, e *emitter) bool {
 	df := req.GetDockerfile()
@@ -347,7 +347,7 @@ func (s *Service) buildDockerfile(ctx context.Context, req *pb.DeployRequest, bu
 				e.result(false, "write generated Dockerfile: "+err.Error(), "")
 				return false
 			}
-			e.log("info", "No Dockerfile found — using one generated from build settings")
+			e.log("info", "No Dockerfile found - using one generated from build settings")
 		}
 		// Build-time env (build_env.go): forward every env var the Dockerfile declares as an
 		// ARG.
@@ -360,7 +360,7 @@ func (s *Service) buildDockerfile(ctx context.Context, req *pb.DeployRequest, bu
 	}
 
 	// Explicit Dockerfile path + context, each re-validated to stay inside the
-	// context tree (path arrived off the wire — never trusted).
+	// context tree (path arrived off the wire, never trusted).
 	dockerfilePath, ok := safepath.Join(buildDir, orDefault(df.GetDockerfilePath(), "Dockerfile"))
 	if !ok {
 		e.result(false, "dockerfile path escapes the build context", "")
@@ -395,7 +395,7 @@ func (s *Service) buildDockerfile(ctx context.Context, req *pb.DeployRequest, bu
 		args = append(args, "--target", stage)
 	}
 	// Build-time env: an explicit Dockerfile opts into a variable by declaring
-	// `ARG NAME` — only declared names are forwarded, so builds stay warning-free.
+	// `ARG NAME` - only declared names are forwarded, so builds stay warning-free.
 	envKeys := dockerfileBuildEnv(dockerfilePath, req)
 	args = appendBuildArgKeys(args, envKeys)
 	args = append(args, imageOutputArgs(ctx, req.GetImageRef())...)
@@ -405,7 +405,7 @@ func (s *Service) buildDockerfile(ctx context.Context, req *pb.DeployRequest, bu
 }
 
 // dockerfileBuildEnv reads the Dockerfile about to build and returns the env
-// keys it declares as ARGs (build_env.go). Unreadable file ⇒ no keys — the
+// keys it declares as ARGs (build_env.go). Unreadable file ⇒ no keys - the
 // build itself will surface the real error.
 func dockerfileBuildEnv(dockerfilePath string, req *pb.DeployRequest) []string {
 	body, err := os.ReadFile(dockerfilePath)
@@ -479,8 +479,8 @@ func sanitizeComposeArgs(extra []string) []string {
 		for _, r := range a {
 			// An ALLOWLIST, not a ban list: every real `compose up` flag and value is made of
 			// these (`--pull`, `always`, `web=3`, `--timeout=60`, `--exit-code-from=web`), and
-			// anything else — a space, a quote, `;`, `&`, `|`, `$`, a backtick, a control
-			// character — is either a token the control plane failed to split or someone
+			// anything else - a space, a quote, `;`, `&`, `|`, `$`, a backtick, a control
+			// character - is either a token the control plane failed to split or someone
 			// expecting a shell.
 			if !strings.ContainsRune(composeArgAlphabet, r) {
 				return nil
@@ -512,7 +512,7 @@ func buildArgv(req *pb.DeployRequest, rest ...string) []string {
 // `--build-arg KEY` flags in args resolve from it) and may be nil.
 func (s *Service) runBuild(ctx context.Context, args []string, extraEnv []string, e *emitter) bool {
 	// A containerd image store can only be built into by BuildKit, and the `--output
-	// type=image,…` flag imageOutputArgs adds on those hosts is a BuildKit-only flag — so
+	// type=image,…` flag imageOutputArgs adds on those hosts is a BuildKit-only flag, so
 	// force BuildKit on rather than trust whatever DOCKER_BUILDKIT the agent's unit
 	// happened to inherit.
 	if dockercli.ImageExportOptsSupported(ctx) {
@@ -533,7 +533,7 @@ func (s *Service) runBuild(ctx context.Context, args []string, extraEnv []string
 
 // materializeUpload extracts a tar archive (the streamed build context) into a fresh
 // temp dir, rejecting any entry that would escape it (absolute paths, "..", and
-// symlinks — same threat model as the control plane's extractArchive).
+// symlinks - same threat model as the control plane's extractArchive).
 func (s *Service) materializeUpload(tarBytes []byte, slug string) (string, func(), error) {
 	dir, err := os.MkdirTemp(s.buildTmpDir, "deplo-build-"+slug+"-")
 	if err != nil {
@@ -551,7 +551,7 @@ func (s *Service) materializeUpload(tarBytes []byte, slug string) (string, func(
 			cleanup()
 			return "", func() {}, fmt.Errorf("read tar: %w", err)
 		}
-		// Reject symlinks/hardlinks outright — they are the escape vector.
+		// Reject symlinks/hardlinks outright - they are the escape vector.
 		if hdr.Typeflag == tar.TypeSymlink || hdr.Typeflag == tar.TypeLink {
 			cleanup()
 			return "", func() {}, fmt.Errorf("archive contains a link entry (%s), which is not allowed", hdr.Name)

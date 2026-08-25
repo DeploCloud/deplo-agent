@@ -114,7 +114,7 @@ func main() {
 
 	srv := grpc.NewServer(opts...)
 	svc := server.New(*stackDir, *buildTmpDir, *dataDir, *dataBase)
-	// The agent's own data root — where the installer put Traefik's stack, which
+	// The agent's own data root, where the installer put Traefik's stack, which
 	// TraefikConfig manages. Distinct from --data-base (the host data root the
 	// control plane shares); conflating them would point Traefik ops at /data.
 	svc.SetAgentDir(*agentDir)
@@ -142,7 +142,7 @@ func main() {
 			log.Fatalf("deplo-agent: serve: %v", err)
 		}
 	case <-ctx.Done():
-		log.Printf("deplo-agent: signal received — draining in-flight RPCs…")
+		log.Printf("deplo-agent: signal received - draining in-flight RPCs…")
 		drained := make(chan struct{})
 		go func() { srv.GracefulStop(); close(drained) }()
 		select {

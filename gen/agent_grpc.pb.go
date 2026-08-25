@@ -101,7 +101,7 @@ type AgentClient interface {
 	// (Wired into getServerMetrics in Part C; defined now so the contract is whole.)
 	Metrics(ctx context.Context, in *MetricsRequest, opts ...grpc.CallOption) (*HostMetrics, error)
 	// Per-CONTAINER live resource snapshot (`docker stats --no-stream`) for the named
-	// containers of ONE project — the data source for the per-app / per-database
+	// containers of ONE project - the data source for the per-app / per-database
 	// Monitoring tab, next to the host-level Metrics above.
 	ContainerStats(ctx context.Context, in *ContainerStatsRequest, opts ...grpc.CallOption) (*ContainerStatsResponse, error)
 	// ONE long-lived stream carrying this host's metrics AND every Deplo-managed
@@ -130,14 +130,14 @@ type AgentClient interface {
 	// the untar.
 	ImportVolume(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[VolumeChunk, StackResult], error)
 	// Copy a service's host-side FILES DIR (<stack_dir>/files/<slug>) across hosts, for a
-	// server move — the sibling of ExportVolume/ImportVolume for the one piece of a
+	// server move - the sibling of ExportVolume/ImportVolume for the one piece of a
 	// service's state that is NOT a Docker volume.
 	ExportFiles(ctx context.Context, in *ExportFilesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[FilesChunk], error)
 	// The destination half of a files-dir copy (see ExportFiles). The FIRST client
 	// message MUST be a FilesChunk carrying `header` (the target slug + wipe flag); every
 	// subsequent message carries `data` (a slice of the gzipped tar).
 	ImportFiles(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[FilesChunk, StackResult], error)
-	// Copy an arbitrary HOST DIRECTORY off this machine — the bind-mount half of a
+	// Copy an arbitrary HOST DIRECTORY off this machine - the bind-mount half of a
 	// migration from another platform, where a service's data may sit in a plain
 	// directory rather than in a Docker volume.
 	ExportHostPath(ctx context.Context, in *ExportHostPathRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[VolumeChunk], error)
@@ -162,13 +162,13 @@ type AgentClient interface {
 	// Whether a HOST TCP port is free to publish.
 	CheckPort(ctx context.Context, in *CheckPortRequest, opts ...grpc.CallOption) (*CheckPortResponse, error)
 	// ONE bounded HTTP GET to a container of an app's own stack, issued from the host
-	// over Docker's network — what a compose app's icon detection reads. The only way to
+	// over Docker's network - what a compose app's icon detection reads. The only way to
 	// see it is to ask the running app for it, exactly as a browser would.
 	ProbeHttp(ctx context.Context, in *ProbeHttpRequest, opts ...grpc.CallOption) (*ProbeHttpResponse, error)
 	// Reclaim Docker disk on the host. Those verbs are absent from CleanupScope and must
 	// never be added.
 	DockerCleanup(ctx context.Context, in *DockerCleanupRequest, opts ...grpc.CallOption) (*DockerCleanupResponse, error)
-	// Update the agent BINARY in place to a newer release, WITHOUT re-bootstrapping — the
+	// Update the agent BINARY in place to a newer release, WITHOUT re-bootstrapping - the
 	// agent's mTLS materials (agent.crt/agent.key/ca.crt under --agent-dir) are NEVER
 	// touched, so the server keeps its identity and pinned fingerprint across the upgrade
 	// and stays "online".
@@ -197,11 +197,11 @@ type AgentClient interface {
 	// `header` (the destination root + object key); every following message carries
 	// `data`.
 	WriteStoreFile(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[StoreChunk, StoreResult], error)
-	// Restore from an artifact this host CANNOT reach — the cross-host half of Restore.
+	// Restore from an artifact this host CANNOT reach - the cross-host half of Restore.
 	RestoreFrom(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[RestoreChunk, RestoreEvent], error)
 	// Stream a container's live runtime logs (`docker logs -f --tail N`) as raw byte
 	// chunks. Closing the stream (browser disconnect) cancels the RPC, which kills the
-	// agent's `docker logs` client only — never the container.
+	// agent's `docker logs` client only, never the container.
 	FollowLogs(ctx context.Context, in *FollowLogsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LogChunk], error)
 	// Interactive `docker attach` to a running container, full-duplex over one bidi
 	// stream. `--sig-proxy` is off, so a client disconnect never signals the container.
@@ -213,7 +213,7 @@ type AgentClient interface {
 	// Run a command in a container (`docker exec`), replacing execInContainer.
 	Exec(ctx context.Context, in *ExecRequest, opts ...grpc.CallOption) (*ExecResponse, error)
 	// The default (or chosen) container's shell label ("/bin/sh" | "/bin/bash" |
-	// "raw exec (no shell)") for the console banner — replaces shellLabel.
+	// "raw exec (no shell)") for the console banner - replaces shellLabel.
 	ShellLabel(ctx context.Context, in *ShellLabelRequest, opts ...grpc.CallOption) (*ShellLabelResponse, error)
 	// Spawn a command in a container and return immediately with its handle.
 	StartJob(ctx context.Context, in *StartJobRequest, opts ...grpc.CallOption) (*StartJobResponse, error)
@@ -236,7 +236,7 @@ type AgentClient interface {
 	FilesExist(ctx context.Context, in *FilesExistRequest, opts ...grpc.CallOption) (*FilesExistResponse, error)
 	// Start (or restart) a project's dev container.
 	StartDev(ctx context.Context, in *StartDevRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[DeployEvent], error)
-	// Stop a project's dev container (reversible — KEEPS the workspace + deps
+	// Stop a project's dev container (reversible - KEEPS the workspace + deps
 	// volume so a later StartDev resumes the edited tree). Also stops the tunnel.
 	StopDev(ctx context.Context, in *StopDevRequest, opts ...grpc.CallOption) (*StackResult, error)
 	// DESTRUCTIVE: wipe the workspace + deps volume, then reseed via StartDev's
@@ -251,7 +251,7 @@ type AgentClient interface {
 	// reconcile every supplied user).
 	EnsureGateway(ctx context.Context, in *EnsureGatewayRequest, opts ...grpc.CallOption) (*StackResult, error)
 	// Provision one user inside the running gateway by running the control-plane-
-	// computed exec steps (the password, if any, rides in a step's stdin — never
+	// computed exec steps (the password, if any, rides in a step's stdin, never
 	// argv/env). Ensures the gateway first (carries the same gateway payload).
 	ProvisionSshUser(ctx context.Context, in *ProvisionSshUserRequest, opts ...grpc.CallOption) (*StackResult, error)
 	// Remove one user from the gateway (account + key + map files). No-op if the
@@ -270,15 +270,15 @@ type AgentClient interface {
 	// verifies the cert matches the pending key, atomically swaps cert+key on disk,
 	// and hot-reloads its TLS config so new handshakes present the fresh cert.
 	InstallRenewedCert(ctx context.Context, in *InstallRenewedCertRequest, opts ...grpc.CallOption) (*StackResult, error)
-	// Static host identity — the neofetch answer, not the gauge.
+	// Static host identity - the neofetch answer, not the gauge.
 	HostInfo(ctx context.Context, in *HostInfoRequest, opts ...grpc.CallOption) (*HostInfoResponse, error)
 	// Set the host's timezone (IANA name, e.g. "Europe/Rome"). `timedatectl` when
 	// present, otherwise relinking /etc/localtime.
 	SetTimezone(ctx context.Context, in *SetTimezoneRequest, opts ...grpc.CallOption) (*HostInfoResponse, error)
-	// Rewrite and/or restart THIS host's `deplo-traefik` stack — the reverse proxy the
+	// Rewrite and/or restart THIS host's `deplo-traefik` stack - the reverse proxy the
 	// installer put at $AGENT_DATA/traefik/docker-compose.yml.
 	TraefikConfig(ctx context.Context, in *TraefikConfigRequest, opts ...grpc.CallOption) (*TraefikConfigResponse, error)
-	// Restart the container running the Deplo control plane on THIS host (agent 0 only —
+	// Restart the container running the Deplo control plane on THIS host (agent 0 only -
 	// a remote has no panel to restart).
 	RestartControlPlane(ctx context.Context, in *RestartControlPlaneRequest, opts ...grpc.CallOption) (*RestartControlPlaneResponse, error)
 }
@@ -1081,7 +1081,7 @@ type AgentServer interface {
 	// (Wired into getServerMetrics in Part C; defined now so the contract is whole.)
 	Metrics(context.Context, *MetricsRequest) (*HostMetrics, error)
 	// Per-CONTAINER live resource snapshot (`docker stats --no-stream`) for the named
-	// containers of ONE project — the data source for the per-app / per-database
+	// containers of ONE project - the data source for the per-app / per-database
 	// Monitoring tab, next to the host-level Metrics above.
 	ContainerStats(context.Context, *ContainerStatsRequest) (*ContainerStatsResponse, error)
 	// ONE long-lived stream carrying this host's metrics AND every Deplo-managed
@@ -1110,14 +1110,14 @@ type AgentServer interface {
 	// the untar.
 	ImportVolume(grpc.ClientStreamingServer[VolumeChunk, StackResult]) error
 	// Copy a service's host-side FILES DIR (<stack_dir>/files/<slug>) across hosts, for a
-	// server move — the sibling of ExportVolume/ImportVolume for the one piece of a
+	// server move - the sibling of ExportVolume/ImportVolume for the one piece of a
 	// service's state that is NOT a Docker volume.
 	ExportFiles(*ExportFilesRequest, grpc.ServerStreamingServer[FilesChunk]) error
 	// The destination half of a files-dir copy (see ExportFiles). The FIRST client
 	// message MUST be a FilesChunk carrying `header` (the target slug + wipe flag); every
 	// subsequent message carries `data` (a slice of the gzipped tar).
 	ImportFiles(grpc.ClientStreamingServer[FilesChunk, StackResult]) error
-	// Copy an arbitrary HOST DIRECTORY off this machine — the bind-mount half of a
+	// Copy an arbitrary HOST DIRECTORY off this machine - the bind-mount half of a
 	// migration from another platform, where a service's data may sit in a plain
 	// directory rather than in a Docker volume.
 	ExportHostPath(*ExportHostPathRequest, grpc.ServerStreamingServer[VolumeChunk]) error
@@ -1142,13 +1142,13 @@ type AgentServer interface {
 	// Whether a HOST TCP port is free to publish.
 	CheckPort(context.Context, *CheckPortRequest) (*CheckPortResponse, error)
 	// ONE bounded HTTP GET to a container of an app's own stack, issued from the host
-	// over Docker's network — what a compose app's icon detection reads. The only way to
+	// over Docker's network - what a compose app's icon detection reads. The only way to
 	// see it is to ask the running app for it, exactly as a browser would.
 	ProbeHttp(context.Context, *ProbeHttpRequest) (*ProbeHttpResponse, error)
 	// Reclaim Docker disk on the host. Those verbs are absent from CleanupScope and must
 	// never be added.
 	DockerCleanup(context.Context, *DockerCleanupRequest) (*DockerCleanupResponse, error)
-	// Update the agent BINARY in place to a newer release, WITHOUT re-bootstrapping — the
+	// Update the agent BINARY in place to a newer release, WITHOUT re-bootstrapping - the
 	// agent's mTLS materials (agent.crt/agent.key/ca.crt under --agent-dir) are NEVER
 	// touched, so the server keeps its identity and pinned fingerprint across the upgrade
 	// and stays "online".
@@ -1177,11 +1177,11 @@ type AgentServer interface {
 	// `header` (the destination root + object key); every following message carries
 	// `data`.
 	WriteStoreFile(grpc.ClientStreamingServer[StoreChunk, StoreResult]) error
-	// Restore from an artifact this host CANNOT reach — the cross-host half of Restore.
+	// Restore from an artifact this host CANNOT reach - the cross-host half of Restore.
 	RestoreFrom(grpc.BidiStreamingServer[RestoreChunk, RestoreEvent]) error
 	// Stream a container's live runtime logs (`docker logs -f --tail N`) as raw byte
 	// chunks. Closing the stream (browser disconnect) cancels the RPC, which kills the
-	// agent's `docker logs` client only — never the container.
+	// agent's `docker logs` client only, never the container.
 	FollowLogs(*FollowLogsRequest, grpc.ServerStreamingServer[LogChunk]) error
 	// Interactive `docker attach` to a running container, full-duplex over one bidi
 	// stream. `--sig-proxy` is off, so a client disconnect never signals the container.
@@ -1193,7 +1193,7 @@ type AgentServer interface {
 	// Run a command in a container (`docker exec`), replacing execInContainer.
 	Exec(context.Context, *ExecRequest) (*ExecResponse, error)
 	// The default (or chosen) container's shell label ("/bin/sh" | "/bin/bash" |
-	// "raw exec (no shell)") for the console banner — replaces shellLabel.
+	// "raw exec (no shell)") for the console banner - replaces shellLabel.
 	ShellLabel(context.Context, *ShellLabelRequest) (*ShellLabelResponse, error)
 	// Spawn a command in a container and return immediately with its handle.
 	StartJob(context.Context, *StartJobRequest) (*StartJobResponse, error)
@@ -1216,7 +1216,7 @@ type AgentServer interface {
 	FilesExist(context.Context, *FilesExistRequest) (*FilesExistResponse, error)
 	// Start (or restart) a project's dev container.
 	StartDev(*StartDevRequest, grpc.ServerStreamingServer[DeployEvent]) error
-	// Stop a project's dev container (reversible — KEEPS the workspace + deps
+	// Stop a project's dev container (reversible - KEEPS the workspace + deps
 	// volume so a later StartDev resumes the edited tree). Also stops the tunnel.
 	StopDev(context.Context, *StopDevRequest) (*StackResult, error)
 	// DESTRUCTIVE: wipe the workspace + deps volume, then reseed via StartDev's
@@ -1231,7 +1231,7 @@ type AgentServer interface {
 	// reconcile every supplied user).
 	EnsureGateway(context.Context, *EnsureGatewayRequest) (*StackResult, error)
 	// Provision one user inside the running gateway by running the control-plane-
-	// computed exec steps (the password, if any, rides in a step's stdin — never
+	// computed exec steps (the password, if any, rides in a step's stdin, never
 	// argv/env). Ensures the gateway first (carries the same gateway payload).
 	ProvisionSshUser(context.Context, *ProvisionSshUserRequest) (*StackResult, error)
 	// Remove one user from the gateway (account + key + map files). No-op if the
@@ -1250,15 +1250,15 @@ type AgentServer interface {
 	// verifies the cert matches the pending key, atomically swaps cert+key on disk,
 	// and hot-reloads its TLS config so new handshakes present the fresh cert.
 	InstallRenewedCert(context.Context, *InstallRenewedCertRequest) (*StackResult, error)
-	// Static host identity — the neofetch answer, not the gauge.
+	// Static host identity - the neofetch answer, not the gauge.
 	HostInfo(context.Context, *HostInfoRequest) (*HostInfoResponse, error)
 	// Set the host's timezone (IANA name, e.g. "Europe/Rome"). `timedatectl` when
 	// present, otherwise relinking /etc/localtime.
 	SetTimezone(context.Context, *SetTimezoneRequest) (*HostInfoResponse, error)
-	// Rewrite and/or restart THIS host's `deplo-traefik` stack — the reverse proxy the
+	// Rewrite and/or restart THIS host's `deplo-traefik` stack - the reverse proxy the
 	// installer put at $AGENT_DATA/traefik/docker-compose.yml.
 	TraefikConfig(context.Context, *TraefikConfigRequest) (*TraefikConfigResponse, error)
-	// Restart the container running the Deplo control plane on THIS host (agent 0 only —
+	// Restart the container running the Deplo control plane on THIS host (agent 0 only -
 	// a remote has no panel to restart).
 	RestartControlPlane(context.Context, *RestartControlPlaneRequest) (*RestartControlPlaneResponse, error)
 	mustEmbedUnimplementedAgentServer()

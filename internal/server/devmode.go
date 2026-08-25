@@ -24,7 +24,7 @@ import (
 // container lifecycle. Dev containers are per-host singletons (ADR-0002); once a
 // project lives on a remote server its dev container runs THERE.
 
-// WORKSPACE_BUILD_EXCLUDE — the workspace entries that are NOT the developer's source
+// WORKSPACE_BUILD_EXCLUDE - the workspace entries that are NOT the developer's source
 // and must never enter a production build context: the deps-volume mountpoint, the
 // tunnel/CLI state, the fallback HOME, and git metadata.
 var workspaceBuildExclude = map[string]struct{}{
@@ -35,7 +35,7 @@ var workspaceBuildExclude = map[string]struct{}{
 }
 
 // devDir is the host dir holding all persistent dev workspaces (one per
-// dev-enabled project) — mirrors lib/deploy/dev.ts DEV_DIR (<DATA_DIR>/dev).
+// dev-enabled project) - mirrors lib/deploy/dev.ts DEV_DIR (<DATA_DIR>/dev).
 func (s *Service) devDir() string { return filepath.Join(s.dataBase, "dev") }
 
 // workspaceDir is a project's persistent workspace (the /workspace bind source).
@@ -63,14 +63,14 @@ func (s *Service) devStackFile(slug string) string {
 func devProjectName(slug string) string { return "deplo-dev-" + slug }
 func depsVolume(slug string) string     { return "deplo-dev-" + slug + "-deps" }
 
-// StartDev is DORMANT — dev mode was removed from the control plane (#33/#34).
+// StartDev is DORMANT - dev mode was removed from the control plane (#33/#34).
 // The method is kept only so the generated Agent interface stays satisfied; it
 // refuses immediately, before any Docker/fs work. Never revive the body.
 func (s *Service) StartDev(req *pb.StartDevRequest, stream pb.Agent_StartDevServer) error {
 	return status.Error(codes.Unimplemented, "dev mode has been removed")
 }
 
-// ResetDevWorkspace is DORMANT — dev mode was removed from the control plane
+// ResetDevWorkspace is DORMANT - dev mode was removed from the control plane
 // (#33/#34). Kept only to satisfy the generated Agent interface; refuses before
 // any destructive Docker/fs work. Never revive the body.
 func (s *Service) ResetDevWorkspace(req *pb.StartDevRequest, stream pb.Agent_ResetDevWorkspaceServer) error {
@@ -165,7 +165,7 @@ func (s *Service) startDevBody(ctx context.Context, req *pb.StartDevRequest, e *
 	e.result(false, "Dev container did not reach a running state", "")
 }
 
-// StopDev is DORMANT — dev mode was removed from the control plane (#33/#34).
+// StopDev is DORMANT - dev mode was removed from the control plane (#33/#34).
 // Kept only to satisfy the generated Agent interface; refuses before any
 // Docker/fs work. Never revive the body.
 func (s *Service) StopDev(ctx context.Context, req *pb.StopDevRequest) (*pb.StackResult, error) {
@@ -182,7 +182,7 @@ func (s *Service) stopDevContainer(ctx context.Context, slug string) {
 	}
 }
 
-// TeardownDev is DORMANT — dev mode was removed from the control plane (#33/#34).
+// TeardownDev is DORMANT - dev mode was removed from the control plane (#33/#34).
 // Kept only to satisfy the generated Agent interface; refuses before any
 // destructive Docker/fs work. Never revive the body.
 func (s *Service) TeardownDev(ctx context.Context, req *pb.TeardownDevRequest) (*pb.StackResult, error) {
@@ -224,13 +224,13 @@ func (s *Service) writeCloneSecret(slug, url string) error {
 
 // materializeDevWorkspace copies the dev workspace into a fresh build dir for a "deploy
 // from dev workspace" (SOURCE_KIND_DEV_WORKSPACE), EXCLUDING the non-source entries and
-// rejecting any symlink (the tree is developer-controlled — UID 1000 shell/SSH/VS Code
-// access — so it is treated EXACTLY like an uploaded archive).
+// rejecting any symlink (the tree is developer-controlled - UID 1000 shell/SSH/VS Code
+// access, so it is treated EXACTLY like an uploaded archive).
 func (s *Service) materializeDevWorkspace(slug, subdir string, e *emitter) (string, func(), error) {
 	ws := s.workspaceDir(slug)
 	ents, err := os.ReadDir(ws)
 	if err != nil {
-		return "", func() {}, fmt.Errorf("dev workspace not found — start the dev container before deploying from it")
+		return "", func() {}, fmt.Errorf("dev workspace not found - start the dev container before deploying from it")
 	}
 	var sources []string
 	for _, d := range ents {
@@ -240,7 +240,7 @@ func (s *Service) materializeDevWorkspace(slug, subdir string, e *emitter) (stri
 		sources = append(sources, d.Name())
 	}
 	if len(sources) == 0 {
-		return "", func() {}, fmt.Errorf("dev workspace is empty — nothing to deploy")
+		return "", func() {}, fmt.Errorf("dev workspace is empty, nothing to deploy")
 	}
 
 	dir, err := os.MkdirTemp(s.buildTmpDir, "deplo-devws-"+slug+"-")
@@ -257,7 +257,7 @@ func (s *Service) materializeDevWorkspace(slug, subdir string, e *emitter) (stri
 	}
 
 	// Apply the rootDirectory subdir (the project's build.rootDirectory),
-	// re-validated to stay inside the build dir — the subdir arrived off the wire,
+	// re-validated to stay inside the build dir - the subdir arrived off the wire,
 	// never trusted. Mirrors materializeGit's subdir handling.
 	buildDir := dir
 	if sub := strings.TrimSpace(subdir); sub != "" {
@@ -267,7 +267,7 @@ func (s *Service) materializeDevWorkspace(slug, subdir string, e *emitter) (stri
 			return "", func() {}, fmt.Errorf("dev workspace subdir %q escapes the build context", sub)
 		}
 		// Stat the LEXICALLY-joined path (safepath.Join already rejected any ".."),
-		// not the Inside result — Inside collapses a NON-EXISTENT path to the root,
+		// not the Inside result - Inside collapses a NON-EXISTENT path to the root,
 		// which would silently build the whole workspace for a typo'd rootDirectory.
 		info, statErr := os.Stat(joined)
 		if statErr != nil || !info.IsDir() {
@@ -287,7 +287,7 @@ func (s *Service) materializeDevWorkspace(slug, subdir string, e *emitter) (stri
 }
 
 // copyTreeNoSymlinks copies src to dst recursively, REJECTING (not following, not
-// preserving) any symlink — the developer's tree is attacker-controlled, so a planted
+// preserving) any symlink - the developer's tree is attacker-controlled, so a planted
 // `leak -> /data/dev/_secrets/<slug>.url` (or `-> /`) plus a `COPY leak` in the
 // Dockerfile would bake a host secret into the user's own image.
 func copyTreeNoSymlinks(src, dst string) error {
@@ -330,7 +330,7 @@ func copyTreeNoSymlinks(src, dst string) error {
 	})
 }
 
-// workspaceHasSource reports whether the workspace holds REAL source — any entry
+// workspaceHasSource reports whether the workspace holds REAL source - any entry
 // outside workspaceBuildExclude. Mirrors lib/deploy/dev.ts workspaceHasSource and
 // gates the once-only upload seed (user edits are never clobbered).
 func (s *Service) workspaceHasSource(slug string) bool {
@@ -347,7 +347,7 @@ func (s *Service) workspaceHasSource(slug string) bool {
 }
 
 // seedUploadWorkspace extracts the streamed archive into the (empty) workspace
-// host-side, ONLY when it holds no source yet (clone-once semantics — never clobber
+// host-side, ONLY when it holds no source yet (clone-once semantics, never clobber
 // user edits).
 func (s *Service) seedUploadWorkspace(slug string, tarBytes []byte, e *emitter) error {
 	if s.workspaceHasSource(slug) {

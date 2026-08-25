@@ -29,7 +29,7 @@ func (s *Service) ensureNixpacks(ctx context.Context, e *emitter) (string, error
 	toolsDir := filepath.Join(s.dataBase, "tools")
 	// Version-scope the cached binary so bumping nixpacksVersion re-downloads the new
 	// release instead of silently reusing a stale cached copy (an unversioned path would
-	// pin every server to whatever it first downloaded — the exact trap that kept broken
+	// pin every server to whatever it first downloaded - the exact trap that kept broken
 	// 1.21.0 around after a bump).
 	dest := filepath.Join(toolsDir, "nixpacks-"+nixpacksVersion)
 
@@ -51,7 +51,7 @@ func (s *Service) ensureNixpacks(ctx context.Context, e *emitter) (string, error
 	return dest, nil
 }
 
-// usableBinary reports whether path is an existing, executable regular file —
+// usableBinary reports whether path is an existing, executable regular file -
 // i.e. a cached tool we can run instead of re-downloading.
 func usableBinary(path string) bool {
 	fi, err := os.Stat(path)

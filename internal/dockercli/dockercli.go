@@ -93,7 +93,7 @@ func StreamEnv(ctx context.Context, timeout time.Duration, onLine LineFn, extraE
 }
 
 // Spawn runs an ARBITRARY host binary (not docker) and streams its merged output,
-// for build tools that run on the host rather than via the daemon — e.g. the
+// for build tools that run on the host rather than via the daemon - e.g. the
 // nixpacks binary (lazily installed). Same streaming/timeout discipline as Stream.
 func Spawn(ctx context.Context, timeout time.Duration, onLine LineFn, input, name string, args ...string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
@@ -102,7 +102,7 @@ func Spawn(ctx context.Context, timeout time.Duration, onLine LineFn, input, nam
 }
 
 // SpawnEnv is Spawn with extra "KEY=VALUE" env entries layered on top of the agent's
-// own env — e.g. the nixpacks binary resolving bare `--env KEY` refs from its process
+// own env - e.g. the nixpacks binary resolving bare `--env KEY` refs from its process
 // env, so a build-env VALUE never rides argv (which the deploy log echoes).
 func SpawnEnv(ctx context.Context, timeout time.Duration, onLine LineFn, extraEnv []string, name string, args ...string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
@@ -114,7 +114,7 @@ func SpawnEnv(ctx context.Context, timeout time.Duration, onLine LineFn, extraEn
 	return streamCmd(cctx, timeout, onLine, "", cmd)
 }
 
-// StreamOut runs `docker <args>` (no shell — argv is injection-safe) with extra
+// StreamOut runs `docker <args>` (no shell - argv is injection-safe) with extra
 // "KEY=VALUE" env layered on, streaming the child's RAW stdout into dst (e.g. a build
 // image tar written straight to disk) while forwarding each stderr line to onLine (the
 // live progress log).
@@ -222,7 +222,7 @@ func streamCmd(cctx context.Context, timeout time.Duration, onLine LineFn, input
 }
 
 // PipeOut runs `docker <args>` and copies the child's RAW stdout into `dst` (bytes, not
-// lines) while collecting stderr for diagnostics — for piping a dump tool's output
+// lines) while collecting stderr for diagnostics - for piping a dump tool's output
 // (`docker exec <c> pg_dump …`) straight into the gzip→S3 pipeline with no temp file.
 func PipeOut(ctx context.Context, timeout time.Duration, dst io.Writer, extraEnv []string, args ...string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
@@ -337,7 +337,7 @@ var (
 )
 
 // ImageExportOptsSupported reports whether `docker build --output type=image,…` is
-// available on this host — i.e. the daemon keeps images in containerd AND the CLI has
+// available on this host - i.e. the daemon keeps images in containerd AND the CLI has
 // the buildx plugin that accepts the flag.
 func ImageExportOptsSupported(ctx context.Context) bool {
 	imageExportMu.Lock()
@@ -349,7 +349,7 @@ func ImageExportOptsSupported(ctx context.Context) bool {
 	// containerd image store announces itself with this driver-type row.
 	res, err := Run(ctx, 15*time.Second, "info", "--format", "{{json .DriverStatus}}")
 	if err != nil || res.Code != 0 {
-		return false // inconclusive — do not cache
+		return false // inconclusive - do not cache
 	}
 	if !strings.Contains(res.Stdout, "io.containerd.snapshotter.v1") {
 		imageExportKnown, imageExportOK = true, false
@@ -357,7 +357,7 @@ func ImageExportOptsSupported(ctx context.Context) bool {
 	}
 	bx, err := Run(ctx, 15*time.Second, "buildx", "version")
 	if err != nil {
-		return false // inconclusive — do not cache
+		return false // inconclusive - do not cache
 	}
 	imageExportKnown, imageExportOK = true, bx.Code == 0
 	return imageExportOK
@@ -371,14 +371,14 @@ func resetImageExportProbe() {
 }
 
 // Build-cache size caps. Docker 29 has dropped the old name entirely, so the flag a
-// host accepts has to be asked for rather than assumed — passing the wrong one turns a
+// host accepts has to be asked for rather than assumed - passing the wrong one turns a
 // routine sweep into a hard error.
 const (
 	// PruneCapModern accepts --max-used-space / --min-free-space.
 	PruneCapModern = "modern"
 	// PruneCapLegacy accepts only --keep-storage.
 	PruneCapLegacy = "legacy"
-	// PruneCapNone accepts no size cap at all — prune by age only.
+	// PruneCapNone accepts no size cap at all - prune by age only.
 	PruneCapNone = "none"
 )
 
@@ -399,7 +399,7 @@ func BuildCachePruneCap(ctx context.Context) string {
 	}
 	res, err := Run(ctx, 15*time.Second, "builder", "prune", "--help")
 	if err != nil {
-		return PruneCapNone // inconclusive — do not cache
+		return PruneCapNone // inconclusive - do not cache
 	}
 	help := res.Stdout + res.Stderr
 	mode := PruneCapNone
@@ -461,7 +461,7 @@ func TraefikRunning(ctx context.Context) bool {
 	}
 	for _, line := range strings.Split(strings.TrimSpace(res.Stdout), "\n") {
 		// Match the image repo (traefik, traefik:v3.7, library/traefik, …) or a
-		// container named *traefik* — covers the deplo-traefik instance and a
+		// container named *traefik* - covers the deplo-traefik instance and a
 		// bring-your-own proxy alike.
 		low := strings.ToLower(line)
 		if strings.Contains(low, "traefik") {

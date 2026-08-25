@@ -39,7 +39,7 @@ func TestBuildCacheCapScalesAndClamps(t *testing.T) {
 	}
 }
 
-// An unmeasurable filesystem must yield NO flags — better to fall back to the
+// An unmeasurable filesystem must yield NO flags - better to fall back to the
 // age filter alone than to invent a ceiling out of a failed statfs and prune
 // somebody's cache on the strength of it.
 func TestBuildCacheCapArgsSilentWhenDiskUnknown(t *testing.T) {
@@ -49,7 +49,7 @@ func TestBuildCacheCapArgsSilentWhenDiskUnknown(t *testing.T) {
 }
 
 // filesystemBytes reads the real filesystem behind a path, and treats "" as the
-// root — the same default the metrics sampler uses.
+// root - the same default the metrics sampler uses.
 func TestFilesystemBytes(t *testing.T) {
 	if got := filesystemBytes(t.TempDir()); got <= 0 {
 		t.Fatalf("filesystemBytes(tempdir) = %d; want a positive size", got)

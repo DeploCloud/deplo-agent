@@ -7,7 +7,7 @@ import "testing"
 func TestIsExposed(t *testing.T) {
 	// A real compose stack: the app, its database, its cache. Every container's
 	// NAME contains "-activepieces-", because the compose project is named after
-	// the slug — only the app's SERVICE is actually the exposed one.
+	// the slug - only the app's SERVICE is actually the exposed one.
 	cases := []struct {
 		service, expose string
 		want            bool
@@ -67,7 +67,7 @@ func TestParseInspectLines(t *testing.T) {
 }
 
 // A container that disappears between the `ps` and the `inspect` leaves docker
-// printing an error and a non-zero code — the surviving lines must still parse,
+// printing an error and a non-zero code - the surviving lines must still parse,
 // and the missing one must simply be absent rather than shifting the others.
 func TestParseInspectLinesSkipsGarbage(t *testing.T) {
 	stdout := `{"name":"/deplo-a","user":"","workdir":"","openStdin":false,"tty":false,"state":"running","restartCount":0,"health":""}

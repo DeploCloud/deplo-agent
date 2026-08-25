@@ -1,7 +1,7 @@
 # Build and publish the agent binaries on a version tag.
 #
 # The control plane (IdraDev/deplo) installs the agent by downloading these
-# release assets and verifying their sha256 against checksums.txt — so the asset
+# release assets and verifying their sha256 against checksums.txt, so the asset
 # NAMES and the checksums format are a contract:
 #
 #   deplo-agent-linux-amd64

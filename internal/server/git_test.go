@@ -135,7 +135,7 @@ func TestStripVolatileGitMetadataMakesClonesIdentical(t *testing.T) {
 	}
 }
 
-// A `.git` FILE (a worktree or submodule pointer) must be left alone — there is
+// A `.git` FILE (a worktree or submodule pointer) must be left alone - there is
 // no index of ours behind it and following it would reach outside the clone.
 func TestStripVolatileGitMetadataIgnoresGitFile(t *testing.T) {
 	dir := t.TempDir()

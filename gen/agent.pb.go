@@ -75,7 +75,7 @@ func (ContractVersion) EnumDescriptor() ([]byte, []int) {
 
 // Where the agent gets the bytes it builds/runs. Part B implements GIT (the agent
 // clones with a short-lived token, D3) so a remote build never ships the whole repo
-// over the wire — only the clone URL + branch + ephemeral token.
+// over the wire - only the clone URL + branch + ephemeral token.
 type SourceKind int32
 
 const (
@@ -89,12 +89,12 @@ const (
 	// The agent clones a git URL itself with a short-lived token. PART B.
 	SourceKind_SOURCE_KIND_GIT SourceKind = 3
 	// A multi-service compose stack: the control plane rendered the full stack
-	// (buildComposeStack — Traefik labels, deplo-network wiring, the deplo.* labels on
+	// (buildComposeStack - Traefik labels, deplo-network wiring, the deplo.* labels on
 	// EVERY service) into compose_yaml; the agent neither builds nor pulls an image (each
 	// service's image comes up via `docker compose up` itself).
 	SourceKind_SOURCE_KIND_COMPOSE SourceKind = 4
 	// PART D: "deploy from dev workspace". The build context is the project's PERSISTENT
-	// dev workspace already on THIS agent's host (<dev-dir>/<slug>) — the developer's
+	// dev workspace already on THIS agent's host (<dev-dir>/<slug>) - the developer's
 	// live, edited tree.
 	SourceKind_SOURCE_KIND_DEV_WORKSPACE SourceKind = 5
 )
@@ -324,15 +324,15 @@ type CleanupScope int32
 
 const (
 	CleanupScope_CLEANUP_SCOPE_UNSPECIFIED CleanupScope = 0
-	// `docker builder prune` — the daemon's own BuildKit cache. Touches no Deplo
+	// `docker builder prune` - the daemon's own BuildKit cache. Touches no Deplo
 	// object at all.
 	CleanupScope_CLEANUP_SCOPE_BUILD_CACHE CleanupScope = 1
-	// `docker image prune` — untagged layers only, NEVER `-a`. A stopped container
+	// `docker image prune` - untagged layers only, NEVER `-a`. A stopped container
 	// still pins its image, so this cannot strand an app.
 	CleanupScope_CLEANUP_SCOPE_DANGLING_IMAGES CleanupScope = 2
 	// Dangling anonymous volumes that are PROVABLY buildkitd stores: the railpack builder
 	// runs `moby/buildkit`, which declares VOLUME /var/lib/buildkit, and an orphaned one
-	// is identified by the `buildkitd.lock` sentinel file at its mountpoint — never by
+	// is identified by the `buildkitd.lock` sentinel file at its mountpoint, never by
 	// name, never by label.
 	CleanupScope_CLEANUP_SCOPE_ORPHAN_BUILDKIT_CACHE CleanupScope = 3
 	// Old `deplo/<slug>:<deployment>` images labelled deplo.managed=true that NO
@@ -479,7 +479,7 @@ type InstallRenewedCertRequest struct {
 	// The CA-signed leaf certificate (PEM) produced from the last RenewalCSR's CSR.
 	CertPem string `protobuf:"bytes,1,opt,name=cert_pem,json=certPem,proto3" json:"cert_pem,omitempty"`
 	// The CA certificate (PEM); the agent refreshes its trust pool too if non-empty.
-	// Empty ⇒ keep the existing CA (the common case — only the leaf rotates).
+	// Empty ⇒ keep the existing CA (the common case - only the leaf rotates).
 	CaPem         string `protobuf:"bytes,2,opt,name=ca_pem,json=caPem,proto3" json:"ca_pem,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1046,7 +1046,7 @@ func (x *BuildSpec) GetStaticSinglePageApp() bool {
 }
 
 // A git source the agent clones itself (SOURCE_KIND_GIT, D3). The token is the only
-// secret here and it is ephemeral — nothing long-lived crosses the wire, and the agent
+// secret here and it is ephemeral, nothing long-lived crosses the wire, and the agent
 // never persists it.
 type GitSource struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -1127,7 +1127,7 @@ func (x *GitSource) GetSubdir() string {
 type DockerfileBuild struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Path to the Dockerfile, relative to the build context root. Re-validated against
-	// the context root inside the agent (the anti-escape check is re-ported to Go — path
+	// the context root inside the agent (the anti-escape check is re-ported to Go - path
 	// validation runs where the I/O runs, never trusting a path off the wire).
 	DockerfilePath string `protobuf:"bytes,1,opt,name=dockerfile_path,json=dockerfilePath,proto3" json:"dockerfile_path,omitempty"`
 	// Build context dir, relative to the context root. Empty => ".".
@@ -1139,7 +1139,7 @@ type DockerfileBuild struct {
 	Generated bool `protobuf:"varint,4,opt,name=generated,proto3" json:"generated,omitempty"`
 	// The generated Dockerfile body (only when `generated` is true). Rendered by
 	// the control plane (generateDockerfile) so the agent stays dumb about
-	// framework presets — same single-source-of-truth principle as the compose.
+	// framework presets - same single-source-of-truth principle as the compose.
 	GeneratedDockerfile string `protobuf:"bytes,5,opt,name=generated_dockerfile,json=generatedDockerfile,proto3" json:"generated_dockerfile,omitempty"`
 	unknownFields       protoimpl.UnknownFields
 	sizeCache           protoimpl.SizeCache
@@ -1281,7 +1281,7 @@ type DeployRequest struct {
 	Dockerfile *DockerfileBuild `protobuf:"bytes,7,opt,name=dockerfile,proto3" json:"dockerfile,omitempty"`
 	// Present iff source_kind == GIT (Part B). The agent clones this itself; the
 	// control plane does not tar a context for git sources targeting a remote
-	// agent — only the descriptor crosses the wire (D3).
+	// agent - only the descriptor crosses the wire (D3).
 	Git *GitSource `protobuf:"bytes,13,opt,name=git,proto3" json:"git,omitempty"`
 	// The fully-rendered compose YAML (D2): renderCompose stays the single TS source of
 	// truth; the agent receives opaque YAML and never re-implements routing/label logic
@@ -1308,7 +1308,7 @@ type DeployRequest struct {
 	// The rootDirectory subdir within the dev workspace to build from, relative to the
 	// workspace root (SOURCE_KIND_DEV_WORKSPACE, Part D).
 	DevWorkspaceSubdir string `protobuf:"bytes,15,opt,name=dev_workspace_subdir,json=devWorkspaceSubdir,proto3" json:"dev_workspace_subdir,omitempty"`
-	// The heavy build method's settings — present iff build_kind is STATIC / NIXPACKS /
+	// The heavy build method's settings - present iff build_kind is STATIC / NIXPACKS /
 	// BUILDPACKS / RAILPACK.
 	BuildSpec *BuildSpec `protobuf:"bytes,16,opt,name=build_spec,json=buildSpec,proto3" json:"build_spec,omitempty"`
 	// Build this deploy WITHOUT the host's layer cache: every `docker build` runs with
@@ -1667,7 +1667,7 @@ func (x *ReattachRequest) GetFromSeq() uint64 {
 
 type LogLine struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// info | warn | error | debug | command — mirrors lib/types.ts LogLevel so the
+	// info | warn | error | debug | command - mirrors lib/types.ts LogLevel so the
 	// control plane writes it straight into the deployment log.
 	Level         string `protobuf:"bytes,1,opt,name=level,proto3" json:"level,omitempty"`
 	Text          string `protobuf:"bytes,2,opt,name=text,proto3" json:"text,omitempty"`
@@ -2504,7 +2504,7 @@ func (*ImageChunk_Data) isImageChunk_Frame() {}
 // Deploy: the control plane renders everything, the agent just writes + brings up.
 type RerouteRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Stack identity — keys the stack file, compose project and container name.
+	// Stack identity - keys the stack file, compose project and container name.
 	Slug string `protobuf:"bytes,1,opt,name=slug,proto3" json:"slug,omitempty"`
 	// The fully re-rendered stack YAML with the new domain/label set. Opaque to the
 	// agent (same contract as DeployRequest.compose_yaml).
@@ -2516,7 +2516,7 @@ type RerouteRequest struct {
 	// bringing the stack up. Empty for single-image projects.
 	Mounts []*MountFile `protobuf:"bytes,4,rep,name=mounts,proto3" json:"mounts,omitempty"`
 	// The app's extra `compose up` flags, same contract as
-	// DeployRequest.compose_up_args — a reroute brings the stack up too, so the
+	// DeployRequest.compose_up_args - a reroute brings the stack up too, so the
 	// flags the operator asked for apply here as well.
 	ComposeUpArgs []string `protobuf:"bytes,5,rep,name=compose_up_args,json=composeUpArgs,proto3" json:"compose_up_args,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -2798,7 +2798,7 @@ func (x *CheckPortRequest) GetPort() int32 {
 type CheckPortResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// True when the agent could bind (and immediately released) the port on the
-	// host — i.e. nothing else holds it right now.
+	// host - i.e. nothing else holds it right now.
 	Available bool `protobuf:"varint,1,opt,name=available,proto3" json:"available,omitempty"`
 	// "" when available; otherwise a human-readable reason (in use / out of range).
 	Reason        string `protobuf:"bytes,2,opt,name=reason,proto3" json:"reason,omitempty"`
@@ -2855,7 +2855,7 @@ func (x *CheckPortResponse) GetReason() string {
 type ProbeHttpRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The app the container must belong to (its `deplo.project` label). Empty is
-	// refused — an unscoped probe could reach any container on the host.
+	// refused - an unscoped probe could reach any container on the host.
 	ProjectId string `protobuf:"bytes,1,opt,name=project_id,json=projectId,proto3" json:"project_id,omitempty"`
 	// The app's slug, used to read the compose service out of a container name
 	// (deplo-<slug>-<service>-N), exactly as ListInstances does.
@@ -2863,7 +2863,7 @@ type ProbeHttpRequest struct {
 	// Which compose service to reach. Empty => the app's first running container
 	// (the single-image case, where the stack has exactly one).
 	Service string `protobuf:"bytes,3,opt,name=service,proto3" json:"service,omitempty"`
-	// The port INSIDE the container (1-65535) — the same port Traefik is routed
+	// The port INSIDE the container (1-65535) - the same port Traefik is routed
 	// to, not a published host port.
 	Port int32 `protobuf:"varint,4,opt,name=port,proto3" json:"port,omitempty"`
 	// Absolute request path ("/", "/favicon.ico"). Must start with "/" and carry
@@ -2871,7 +2871,7 @@ type ProbeHttpRequest struct {
 	Path string `protobuf:"bytes,5,opt,name=path,proto3" json:"path,omitempty"`
 	// Host header to send. Empty => the container's IP. An app that only answers
 	// on its own hostname (ALLOWED_HOSTS, a configured site URL) needs its real
-	// domain here. Validated as a hostname — never a URL, never a header list.
+	// domain here. Validated as a hostname, never a URL, never a header list.
 	Host string `protobuf:"bytes,6,opt,name=host,proto3" json:"host,omitempty"`
 	// Cap on the body bytes returned. 0 => the agent's default; the agent clamps
 	// to its own ceiling regardless, so a caller can never ask for an unbounded
@@ -3043,7 +3043,7 @@ func (x *ProbeHttpResponse) GetLocation() string {
 	return ""
 }
 
-// In-place agent binary update (SelfUpdate). The agent stays otherwise dumb — it does
+// In-place agent binary update (SelfUpdate). The agent stays otherwise dumb - it does
 // not talk to the GitHub API or know the release repo, it just fetches the chosen URL,
 // checks the digest, and swaps itself.
 type SelfUpdateRequest struct {
@@ -3109,7 +3109,7 @@ type ArchBinary struct {
 	// checksum passes.
 	Url string `protobuf:"bytes,1,opt,name=url,proto3" json:"url,omitempty"`
 	// Lowercase hex sha256 the downloaded bytes MUST match. A mismatch aborts the
-	// update with FAILED_PRECONDITION and the running binary is left untouched —
+	// update with FAILED_PRECONDITION and the running binary is left untouched -
 	// the agent never execs an unverified binary (install-agent.sh P2 parity).
 	Sha256        string `protobuf:"bytes,2,opt,name=sha256,proto3" json:"sha256,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -3309,7 +3309,7 @@ func (x *SelfUpdateResponse) GetRestarting() bool {
 	return false
 }
 
-// The S3 destination the agent reads/writes with — the DECRYPTED creds (the control
+// The S3 destination the agent reads/writes with - the DECRYPTED creds (the control
 // plane decrypts via decryptSecret and sends plaintext over mTLS; the agent never holds
 // the encryption key, mirroring Deploy's env handling) plus the bucket coordinates and
 // the exact object key.
@@ -3429,7 +3429,7 @@ func (x *S3Target) GetExtraArgs() []string {
 	return nil
 }
 
-// A directory on THIS host's filesystem that holds backup artifacts — the second
+// A directory on THIS host's filesystem that holds backup artifacts - the second
 // destination shape, for a user who would rather keep backups on a VPS they already pay
 // for than sign up for a bucket.
 type StoreTarget struct {
@@ -3489,7 +3489,7 @@ func (x *StoreTarget) GetObjectKey() string {
 // dumb about Deplo's DB model and just runs the right tool inside the container.
 type DatabaseDescriptor struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The DB container to `docker exec` into (the agent re-derives nothing — it
+	// The DB container to `docker exec` into (the agent re-derives nothing - it
 	// execs exactly this name). For a Deplo DB this is the compose container of
 	// the db-<name> stack.
 	Container string `protobuf:"bytes,1,opt,name=container,proto3" json:"container,omitempty"`
@@ -3576,7 +3576,7 @@ func (x *DatabaseDescriptor) GetPassword() string {
 // excluded) so the agent stays dumb about Deplo's volume-naming scheme.
 type ProjectDescriptor struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The project slug — keys the files dir (<stack-dir>/files/<slug>) and the
+	// The project slug - keys the files dir (<stack-dir>/files/<slug>) and the
 	// stack the restore re-Reroutes.
 	Slug string `protobuf:"bytes,1,opt,name=slug,proto3" json:"slug,omitempty"`
 	// The host volume names to tar: the named-volume shape (hostVolumeName =
@@ -3677,18 +3677,18 @@ type BackupRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Kind  BackupKind             `protobuf:"varint,1,opt,name=kind,proto3,enum=deplo.agent.v1.BackupKind" json:"kind,omitempty"`
 	// The destination: exactly one of `s3` / `store`, unless `stream_out` is set
-	// (in which case neither is needed — the caller IS the sink).
+	// (in which case neither is needed - the caller IS the sink).
 	S3 *S3Target `protobuf:"bytes,2,opt,name=s3,proto3" json:"s3,omitempty"`
 	// Exactly one of these is set, per `kind`.
 	Database *DatabaseDescriptor `protobuf:"bytes,3,opt,name=database,proto3" json:"database,omitempty"`
 	Project  *ProjectDescriptor  `protobuf:"bytes,4,opt,name=project,proto3" json:"project,omitempty"`
 	Store    *StoreTarget        `protobuf:"bytes,5,opt,name=store,proto3" json:"store,omitempty"`
 	// The age recipient ("age1…", an X25519 public key) the artifact is encrypted to.
-	// REQUIRED whenever the artifact is not going to S3 — a store write or a stream_out
+	// REQUIRED whenever the artifact is not going to S3 - a store write or a stream_out
 	// relay with an empty recipient is an ERROR, never a silent plaintext write.
 	AgeRecipient string `protobuf:"bytes,6,opt,name=age_recipient,json=ageRecipient,proto3" json:"age_recipient,omitempty"`
 	// Emit the artifact as BackupEvent.data frames instead of writing it anywhere. The
-	// BackupResult still reports the size this host produced — the durable number is the
+	// BackupResult still reports the size this host produced - the durable number is the
 	// destination's StoreResult.bytes_written.
 	StreamOut     bool `protobuf:"varint,7,opt,name=stream_out,json=streamOut,proto3" json:"stream_out,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -3883,12 +3883,12 @@ type BackupResult struct {
 	// A human-readable reason on failure (empty on success).
 	Error string `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
 	// The object key written (echoes the destination's object_key on success) and
-	// its size in bytes — recorded on the control plane's BackupRun.
+	// its size in bytes - recorded on the control plane's BackupRun.
 	ObjectKey string `protobuf:"bytes,3,opt,name=object_key,json=objectKey,proto3" json:"object_key,omitempty"`
 	SizeBytes int64  `protobuf:"varint,4,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
 	// Hex sha256 of the artifact as written.
 	Sha256 string `protobuf:"bytes,5,opt,name=sha256,proto3" json:"sha256,omitempty"`
-	// How big the artifact is once DECRYPTED — i.e. exactly how many bytes ReadStoreFile
+	// How big the artifact is once DECRYPTED - i.e. exactly how many bytes ReadStoreFile
 	// emits when it is handed an age identity, which is what a download hands to a
 	// browser.
 	DecryptedSizeBytes int64 `protobuf:"varint,6,opt,name=decrypted_size_bytes,json=decryptedSizeBytes,proto3" json:"decrypted_size_bytes,omitempty"`
@@ -4261,7 +4261,7 @@ type S3CheckResponse struct {
 	// True when the destination is reachable AND writable.
 	Ok bool `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
 	// "" on success; a human-readable reason otherwise (bad creds, no bucket,
-	// unmarked root, read-only mount) — surfaced as the destination's status detail.
+	// unmarked root, read-only mount) - surfaced as the destination's status detail.
 	Error string `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
 	// Store probes only (0 for S3): the resolved root's filesystem headroom, so the UI
 	// can show how much room a destination has left without a second RPC.
@@ -4410,7 +4410,7 @@ type S3DeleteResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Ok    bool                   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
 	Error string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
-	// How many objects were deleted (0 when already absent — still ok, idempotent).
+	// How many objects were deleted (0 when already absent - still ok, idempotent).
 	Deleted       int64 `protobuf:"varint,3,opt,name=deleted,proto3" json:"deleted,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -4635,7 +4635,7 @@ type StoreResult struct {
 	Error string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
 	// What actually landed. A filesystem has no ETag, so these two are the only
 	// durable proof of the transfer, and they are what the control plane records
-	// on the BackupRun — not the source's own count.
+	// on the BackupRun, not the source's own count.
 	BytesWritten  int64  `protobuf:"varint,3,opt,name=bytes_written,json=bytesWritten,proto3" json:"bytes_written,omitempty"`
 	Sha256        string `protobuf:"bytes,4,opt,name=sha256,proto3" json:"sha256,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -5358,7 +5358,7 @@ type ConsoleInstance struct {
 	// "paused" | "dead" | "removing". Empty from an agent too old to send it.
 	State string `protobuf:"bytes,10,opt,name=state,proto3" json:"state,omitempty"`
 	// Healthcheck verdict when the image defines one: "healthy" | "unhealthy" |
-	// "starting". Empty when the container has no healthcheck (the common case) —
+	// "starting". Empty when the container has no healthcheck (the common case),
 	// NOT a synonym for healthy.
 	Health string `protobuf:"bytes,11,opt,name=health,proto3" json:"health,omitempty"`
 	// How many times docker has restarted this container. The number that turns
@@ -5601,7 +5601,7 @@ type ExecResponse struct {
 	Stdout string                 `protobuf:"bytes,2,opt,name=stdout,proto3" json:"stdout,omitempty"`
 	Stderr string                 `protobuf:"bytes,3,opt,name=stderr,proto3" json:"stderr,omitempty"`
 	// True when the image had no shell and the command ran as raw argv (no pipes/
-	// globbing) — the console renders a notice.
+	// globbing) - the console renders a notice.
 	RawMode       bool `protobuf:"varint,4,opt,name=raw_mode,json=rawMode,proto3" json:"raw_mode,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -6497,7 +6497,7 @@ type ReadFileResponse struct {
 	// The UTF-8 text body. Empty when reason != "" (binary/too-large).
 	Text string `protobuf:"bytes,2,opt,name=text,proto3" json:"text,omitempty"`
 	Size int64  `protobuf:"varint,3,opt,name=size,proto3" json:"size,omitempty"`
-	// "" when text is present; "binary" or "too-large" when it is withheld —
+	// "" when text is present; "binary" or "too-large" when it is withheld -
 	// matches lib/data/project-files.ts FileContent.reason byte-for-byte.
 	Reason        string `protobuf:"bytes,4,opt,name=reason,proto3" json:"reason,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -6981,7 +6981,7 @@ func (x *FilesExistResponse) GetExists() bool {
 
 // Everything the agent needs to start a project's dev container, all rendered by
 // the control plane (D2: one renderer, opaque artifacts on the wire). The agent
-// neither resolves the image nor renders labels — it writes files and runs Docker.
+// neither resolves the image nor renders labels - it writes files and runs Docker.
 type StartDevRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Project identity. `slug` keys the dev compose project / container name
@@ -6989,7 +6989,7 @@ type StartDevRequest struct {
 	// `project_id` goes into the deplo.* labels (already baked into compose_yaml).
 	Slug      string `protobuf:"bytes,1,opt,name=slug,proto3" json:"slug,omitempty"`
 	ProjectId string `protobuf:"bytes,2,opt,name=project_id,json=projectId,proto3" json:"project_id,omitempty"`
-	// The fully-rendered dev compose YAML (renderDevCompose) — opaque to the agent,
+	// The fully-rendered dev compose YAML (renderDevCompose) - opaque to the agent,
 	// written to <stack-dir>/dev-<slug>.yml (0600: it holds decrypted `development` env).
 	ComposeYaml string `protobuf:"bytes,3,opt,name=compose_yaml,json=composeYaml,proto3" json:"compose_yaml,omitempty"`
 	// The dev entrypoint script (DEV_ENTRY_SCRIPT) the compose bind-mounts.
@@ -7258,7 +7258,7 @@ func (x *GatewayConfig) GetSocketFilterCfg() string {
 
 // One control-plane-computed gateway exec step the agent runs verbatim inside the
 // gateway container: `docker exec -i <gateway> <argv...>`, optionally piping `input` to
-// the command's stdin (chpasswd / file writes — the secret never hits argv/env that
+// the command's stdin (chpasswd / file writes - the secret never hits argv/env that
 // `docker inspect` could surface).
 type GatewayStep struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -7313,7 +7313,7 @@ func (x *GatewayStep) GetInput() string {
 }
 
 // Ensure the gateway is up, then reconcile EVERY supplied user into it (the store is
-// the sole source of truth — ADR-0002; the control plane sends the full provision plan
+// the sole source of truth - ADR-0002; the control plane sends the full provision plan
 // for every DevSshUser of this server so a fresh gateway rebuilds its whole
 // projection).
 type EnsureGatewayRequest struct {
@@ -7321,7 +7321,7 @@ type EnsureGatewayRequest struct {
 	Config *GatewayConfig         `protobuf:"bytes,1,opt,name=config,proto3" json:"config,omitempty"`
 	// The provision steps for every stored user of this server, in order. Each
 	// inner step-list provisions one account/key/map. Replayed on first boot and
-	// after drift — provisioning is idempotent.
+	// after drift - provisioning is idempotent.
 	Users         []*UserSteps `protobuf:"bytes,2,rep,name=users,proto3" json:"users,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -7519,7 +7519,7 @@ func (x *DeprovisionSshUserRequest) GetSteps() []*GatewayStep {
 type TunnelRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Slug  string                 `protobuf:"bytes,1,opt,name=slug,proto3" json:"slug,omitempty"`
-	// The launch script (tunnelLaunchScript) — only set on StartTunnel; rendered by
+	// The launch script (tunnelLaunchScript) - only set on StartTunnel; rendered by
 	// the control plane so the CLI download URL / tunnel name stay one source.
 	LaunchScript  string `protobuf:"bytes,2,opt,name=launch_script,json=launchScript,proto3" json:"launch_script,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -7571,7 +7571,7 @@ func (x *TunnelRequest) GetLaunchScript() string {
 }
 
 // The agent returns the RAW tunnel log + running flag; the control plane parses
-// it (parseTunnelLog) into the device-login link / connected URL — that logic
+// it (parseTunnelLog) into the device-login link / connected URL - that logic
 // stays pure and testable in TS, not duplicated in Go.
 type TunnelStatus struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -7639,15 +7639,15 @@ type DockerCleanupRequest struct {
 	// closed).
 	MinAgeHours int32 `protobuf:"varint,3,opt,name=min_age_hours,json=minAgeHours,proto3" json:"min_age_hours,omitempty"`
 	// UNUSED_APP_IMAGES only: how many of the newest images to keep per deplo.slug.
-	// 0 => 1 — the current tag is always kept, even when no container references it
+	// 0 => 1 - the current tag is always kept, even when no container references it
 	// (a stopped app must stay redeployable without a rebuild).
 	KeepImagesPerApp int32 `protobuf:"varint,4,opt,name=keep_images_per_app,json=keepImagesPerApp,proto3" json:"keep_images_per_app,omitempty"`
 	// UNUSED_APP_IMAGES only: a PER-SLUG override of keep_images_per_app, keyed by the
 	// deplo.slug label. That over-keeps on an old host rather than under-keeping - a
 	// rollback still works, it just costs more disk until the agent is updated.
 	KeepPerSlug map[string]int32 `protobuf:"bytes,5,rep,name=keep_per_slug,json=keepPerSlug,proto3" json:"keep_per_slug,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
-	// LEFTOVER_APP_FILES only: every stack slug the control plane still knows — Apps,
-	// their preview stacks (`<slug>__pr-<n>`) and databases — INSTANCE-WIDE, not just the
+	// LEFTOVER_APP_FILES only: every stack slug the control plane still knows - Apps,
+	// their preview stacks (`<slug>__pr-<n>`) and databases - INSTANCE-WIDE, not just the
 	// ones placed on this host.
 	LiveSlugs     []string `protobuf:"bytes,6,rep,name=live_slugs,json=liveSlugs,proto3" json:"live_slugs,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -7732,12 +7732,12 @@ type CleanupScopeResult struct {
 	// Bytes reclaimed by this scope.
 	ReclaimedBytes int64 `protobuf:"varint,2,opt,name=reclaimed_bytes,json=reclaimedBytes,proto3" json:"reclaimed_bytes,omitempty"`
 	ItemsRemoved   int32 `protobuf:"varint,3,opt,name=items_removed,json=itemsRemoved,proto3" json:"items_removed,omitempty"`
-	// The image ids / volume names / cache-record ids removed — or, under dry_run,
+	// The image ids / volume names / cache-record ids removed, or, under dry_run,
 	// that WOULD be removed. Bounded to 200 entries; items_removed is authoritative.
 	Items []string `protobuf:"bytes,4,rep,name=items,proto3" json:"items,omitempty"`
 	// True when the agent DECLINED the scope: it could not build the
 	// container-reference reverse index the scope's safety rests on, so it refused
-	// to guess. A skipped scope is not a failure — the sweep continues.
+	// to guess. A skipped scope is not a failure - the sweep continues.
 	Skipped bool `protobuf:"varint,5,opt,name=skipped,proto3" json:"skipped,omitempty"`
 	// Per-scope failure. Non-fatal: the other scopes still run and the response is
 	// still ok.
@@ -7891,7 +7891,7 @@ func (x *DockerCleanupResponse) GetResults() []*CleanupScopeResult {
 type ContainerStatsRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The project the containers must belong to (agent re-validates the label
-	// deplo.project=<project_id>). Empty is REJECTED — a blank filter would stat
+	// deplo.project=<project_id>). Empty is REJECTED - a blank filter would stat
 	// every container on the host (cross-tenant), exactly like ListInstances.
 	ProjectId string `protobuf:"bytes,1,opt,name=project_id,json=projectId,proto3" json:"project_id,omitempty"`
 	// The container names to stat (resolved control-plane-side from the project's
@@ -7948,7 +7948,7 @@ func (x *ContainerStatsRequest) GetContainers() []string {
 
 // One container's live resource usage, parsed from `docker stats --no-stream`. net_* /
 // block_* are CUMULATIVE totals since container start (that is what `docker stats`
-// reports), NOT rates — the control plane derives bytes/sec from the delta between
+// reports), NOT rates - the control plane derives bytes/sec from the delta between
 // consecutive samples, which also survives a counter reset on restart. cpu_pct and
 // mem_* are already instantaneous.
 type ContainerStat struct {
@@ -7964,10 +7964,10 @@ type ContainerStat struct {
 	BlockWrite int64                  `protobuf:"varint,9,opt,name=block_write,json=blockWrite,proto3" json:"block_write,omitempty"` // cumulative bytes written
 	Pids       int32                  `protobuf:"varint,10,opt,name=pids,proto3" json:"pids,omitempty"`
 	// False for a container that exists in the project but is not running (stats
-	// are zeroed) — so the tab can distinguish "stopped" from "no such container".
+	// are zeroed), so the tab can distinguish "stopped" from "no such container".
 	Running bool `protobuf:"varint,11,opt,name=running,proto3" json:"running,omitempty"`
 	// The deplo.project label (an App id, prj_*, or a Database id) this container belongs
-	// to — the demux key for the host-wide stream.
+	// to - the demux key for the host-wide stream.
 	ProjectId string `protobuf:"bytes,12,opt,name=project_id,json=projectId,proto3" json:"project_id,omitempty"`
 	// The full 64-hex Docker id. Stable for a container's lifetime and CHANGES on
 	// recreation, which is exactly what the rate calculator needs in order to drop
@@ -7977,7 +7977,7 @@ type ContainerStat struct {
 	// "paused" | "dead" | "removing". Empty from an agent too old to send it.
 	State string `protobuf:"bytes,14,opt,name=state,proto3" json:"state,omitempty"`
 	// Healthcheck verdict when the image defines one: "healthy" | "unhealthy" |
-	// "starting". Empty when the container has no healthcheck (the common case) —
+	// "starting". Empty when the container has no healthcheck (the common case),
 	// NOT a synonym for healthy.
 	Health string `protobuf:"bytes,15,opt,name=health,proto3" json:"health,omitempty"`
 	// How many times docker has restarted this container. The number that turns
@@ -8182,7 +8182,7 @@ type MetricsStreamRequest struct {
 	// [1000, 60000]: a cadence is a HINT, never a way for a caller to pin the host
 	// by asking for 10ms samples.
 	IntervalMs int32 `protobuf:"varint,2,opt,name=interval_ms,json=intervalMs,proto3" json:"interval_ms,omitempty"`
-	// False => host metrics only. No container roster, no `docker ps`, no stats —
+	// False => host metrics only. No container roster, no `docker ps`, no stats -
 	// for a caller that only wants the host gauge.
 	IncludeContainers bool `protobuf:"varint,3,opt,name=include_containers,json=includeContainers,proto3" json:"include_containers,omitempty"`
 	unknownFields     protoimpl.UnknownFields
@@ -8376,7 +8376,7 @@ type HostInfoResponse struct {
 	CpuModel string `protobuf:"bytes,1,opt,name=cpu_model,json=cpuModel,proto3" json:"cpu_model,omitempty"`
 	// PHYSICAL cores, deduplicated by (physical id, core id). 6 on the chip above.
 	CpuCores int32 `protobuf:"varint,2,opt,name=cpu_cores,json=cpuCores,proto3" json:"cpu_cores,omitempty"`
-	// Logical processors — what schedulers and `nproc` count. 12 on the chip above.
+	// Logical processors - what schedulers and `nproc` count. 12 on the chip above.
 	CpuThreads int32 `protobuf:"varint,3,opt,name=cpu_threads,json=cpuThreads,proto3" json:"cpu_threads,omitempty"`
 	// bytes
 	MemTotalBytes  int64 `protobuf:"varint,4,opt,name=mem_total_bytes,json=memTotalBytes,proto3" json:"mem_total_bytes,omitempty"`
@@ -8390,7 +8390,7 @@ type HostInfoResponse struct {
 	Arch string `protobuf:"bytes,9,opt,name=arch,proto3" json:"arch,omitempty"`
 	// Docker server version, "" when the daemon is unreachable.
 	DockerVersion string `protobuf:"bytes,10,opt,name=docker_version,json=dockerVersion,proto3" json:"docker_version,omitempty"`
-	// Docker's data root (`docker info -f {{.DockerRootDir}}`) — where images and
+	// Docker's data root (`docker info -f {{.DockerRootDir}}`), where images and
 	// volumes actually live, which is not always the disk the operator assumes.
 	DockerRootDir string `protobuf:"bytes,11,opt,name=docker_root_dir,json=dockerRootDir,proto3" json:"docker_root_dir,omitempty"`
 	UptimeSec     int64  `protobuf:"varint,12,opt,name=uptime_sec,json=uptimeSec,proto3" json:"uptime_sec,omitempty"`
@@ -8401,7 +8401,7 @@ type HostInfoResponse struct {
 	TimeUnixMs       int64 `protobuf:"varint,14,opt,name=time_unix_ms,json=timeUnixMs,proto3" json:"time_unix_ms,omitempty"`
 	UtcOffsetMinutes int32 `protobuf:"varint,15,opt,name=utc_offset_minutes,json=utcOffsetMinutes,proto3" json:"utc_offset_minutes,omitempty"`
 	// The current $AGENT_DATA/traefik/docker-compose.yml, verbatim. Empty when
-	// Deplo did not install Traefik here — which is exactly the signal that
+	// Deplo did not install Traefik here, which is exactly the signal that
 	// TraefikConfig must refuse to write.
 	TraefikComposeYaml string `protobuf:"bytes,16,opt,name=traefik_compose_yaml,json=traefikComposeYaml,proto3" json:"traefik_compose_yaml,omitempty"`
 	// The resolved container id for control_plane_hint, or "" when the hint named
@@ -8681,7 +8681,7 @@ func (x *TraefikConfigRequest) GetRestartOnly() bool {
 type TraefikConfigResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Ok    bool                   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
-	// Why not, verbatim for the operator — most usefully "this host runs a Traefik
+	// Why not, verbatim for the operator - most usefully "this host runs a Traefik
 	// Deplo did not install".
 	Error string `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
 	// The stack file as it stands AFTER the operation, so the control plane never
@@ -8744,7 +8744,7 @@ func (x *TraefikConfigResponse) GetComposeYaml() string {
 
 type RestartControlPlaneRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The caller's own hostname / container id — see HostInfoRequest.
+	// The caller's own hostname / container id - see HostInfoRequest.
 	ControlPlaneHint string `protobuf:"bytes,1,opt,name=control_plane_hint,json=controlPlaneHint,proto3" json:"control_plane_hint,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
@@ -8858,7 +8858,7 @@ type HostPathChunk_Header struct {
 	// filesystem); refused for the same system roots as the export.
 	Path string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
 	// Empty the target first. Applied on the FIRST DATA FRAME, never on the header
-	// alone — see VolumeChunk.Header.wipe_first for why.
+	// alone - see VolumeChunk.Header.wipe_first for why.
 	WipeFirst     bool `protobuf:"varint,2,opt,name=wipe_first,json=wipeFirst,proto3" json:"wipe_first,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

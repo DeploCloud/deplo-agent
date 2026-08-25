@@ -12,8 +12,8 @@ import (
 // filled up overnight".
 const (
 	buildCacheCapFraction = 10       // a tenth of the filesystem
-	buildCacheCapMin      = 2 << 30  // 2 GiB — enough to stay useful
-	buildCacheCapMax      = 50 << 30 // 50 GiB — never more, however big the disk
+	buildCacheCapMin      = 2 << 30  // 2 GiB - enough to stay useful
+	buildCacheCapMax      = 50 << 30 // 50 GiB, never more, however big the disk
 	buildCacheFreeFloor   = 2 << 30  // keep at least this much free
 	buildCacheFreeCeiling = 20 << 30 // asking for more free space than this is pointless
 )
@@ -21,7 +21,7 @@ const (
 // buildCacheCapArgs returns the `docker builder prune` flags that cap the cache on this
 // host, or nil when the host's CLI takes no size flags (then the age filter alone
 // decides, exactly as before). dataDir is the filesystem the agent already measures for
-// disk metrics — the one the cache actually lands on.
+// disk metrics - the one the cache actually lands on.
 func buildCacheCapArgs(ctx context.Context, dataDir string) []string {
 	total := filesystemBytes(dataDir)
 	if total <= 0 {

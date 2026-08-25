@@ -66,7 +66,7 @@ func TestSanitizeSecretNames(t *testing.T) {
 
 // railpackBuildArgs must select the railpack frontend via BUILDKIT_SYNTAX, feed the
 // plan as the Dockerfile, forward every plan secret as `--secret id=NAME,env=NAME`, and
-// carry the caller's image output — all as discrete argv tokens, so a hostile name from
+// carry the caller's image output - all as discrete argv tokens, so a hostile name from
 // an untrusted plan can never be word-split or shell-interpreted.
 func TestRailpackBuildArgs(t *testing.T) {
 	names := []string{"RAILPACK_NODE_VERSION", "RAILPACK_BUILD_CMD"}
@@ -92,25 +92,25 @@ func TestRailpackBuildArgs(t *testing.T) {
 			t.Fatalf("argv missing %q in: %s", want, joined)
 		}
 	}
-	// Labels are the relabel pass's job — the frontend drops them, so emitting
+	// Labels are the relabel pass's job - the frontend drops them, so emitting
 	// them here would be dead argv that reads as if it worked.
 	if slices.Contains(args, "--label") {
 		t.Fatalf("labels must not ride the railpack frontend build: %v", args)
 	}
-	// The build context is the final positional argument — docker reads it there.
+	// The build context is the final positional argument - docker reads it there.
 	if args[len(args)-1] != "/tmp/ctx" {
 		t.Fatalf("context must be the last arg: %v", args)
 	}
 
 	// Injection safety: a crafted secret name lands as EXACTLY one argv token in
-	// the `--secret` slot — never split, never a command.
+	// the `--secret` slot, never split, never a command.
 	evil := "x; rm -rf / #"
 	adv := railpackBuildArgs("front", "plan.json", "ctx", []string{evil}, nil, false)
 	if !slices.Contains(adv, "--secret") || !slices.Contains(adv, "id="+evil+",env="+evil) {
 		t.Fatalf("hostile name not a single --secret token: %v", adv)
 	}
 
-	// A no-cache deploy must reach the railpack frontend build too — --no-cache
+	// A no-cache deploy must reach the railpack frontend build too - --no-cache
 	// right after the verb, where docker parses global build flags.
 	fresh := railpackBuildArgs("front", "plan.json", "ctx", nil, nil, true)
 	if fresh[0] != "build" || fresh[1] != "--no-cache" {

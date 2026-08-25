@@ -79,7 +79,7 @@ func (s *Service) ExportVolume(req *pb.ExportVolumeRequest, stream pb.Agent_Expo
 	}
 
 	// gzip the tar as it is produced, writing compressed bytes straight into the
-	// stream via chunkWriter — no temp file, no full-archive buffering.
+	// stream via chunkWriter - no temp file, no full-archive buffering.
 	cw := &chunkWriter{send: func(b []byte) error {
 		return stream.Send(&pb.VolumeChunk{Frame: &pb.VolumeChunk_Data{Data: b}})
 	}}
@@ -96,7 +96,7 @@ func (s *Service) ExportVolume(req *pb.ExportVolumeRequest, stream pb.Agent_Expo
 		return fmt.Errorf("export volume %q: finish gzip: %w", vol, cerr)
 	}
 	if cw.err != nil {
-		// stream.Send failed (the control plane relay went away) — nothing more to do.
+		// stream.Send failed (the control plane relay went away), nothing more to do.
 		return cw.err
 	}
 	if err != nil {
@@ -146,7 +146,7 @@ func (w *chunkWriter) Write(p []byte) (int, error) {
 		if n > chunkBytes {
 			n = chunkBytes
 		}
-		// Copy the slice — gRPC may retain the message past this call, and gzip reuses
+		// Copy the slice - gRPC may retain the message past this call, and gzip reuses
 		// its buffer across Writes.
 		buf := make([]byte, n)
 		copy(buf, p[:n])

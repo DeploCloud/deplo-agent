@@ -30,7 +30,7 @@ import (
 const (
 	// Files larger than this are never streamed to the editor as text.
 	maxViewBytes = 512 * 1024 // 512 KiB
-	// Reject writes whose body exceeds this — the editor is for config, not blobs.
+	// Reject writes whose body exceeds this - the editor is for config, not blobs.
 	maxWriteBytes = 1024 * 1024 // 1 MiB
 )
 
@@ -74,7 +74,7 @@ func normalizeRel(rel string) (string, error) {
 }
 
 // resolveInside resolves a (user-supplied) relative path to an absolute host path
-// PROVABLY inside `root`, with symlinks resolved — mirroring resolveWithinRoot.
+// PROVABLY inside `root`, with symlinks resolved - mirroring resolveWithinRoot.
 func resolveInside(root, rel string) (string, error) {
 	norm, err := normalizeRel(rel)
 	if err != nil {
@@ -239,7 +239,7 @@ func (s *Service) ReadFile(ctx context.Context, req *pb.ReadFileRequest) (*pb.Re
 	}
 	// Read through a LimitReader (cap+1): the files dir is bind-mounted rw into the
 	// container, so a file just under the cap at Stat time can be grown before/ during the
-	// read — os.ReadFile would then pull the whole (now-huge) file into the agent heap.
+	// read - os.ReadFile would then pull the whole (now-huge) file into the agent heap.
 	buf, err := io.ReadAll(io.LimitReader(f, maxViewBytes+1))
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "read %s: %v", rel, err)
@@ -295,7 +295,7 @@ func (s *Service) writeBytes(slug, p string, data []byte) (*pb.FileEntryResult, 
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return nil, status.Errorf(codes.Internal, "mkdir: %v", err)
 	}
-	// 0644 — bind-mounted into the app container, which may run as non-root.
+	// 0644 - bind-mounted into the app container, which may run as non-root.
 	f, err := os.OpenFile(abs, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0o644)
 	if err != nil {
 		if errors.Is(err, syscall.ELOOP) {

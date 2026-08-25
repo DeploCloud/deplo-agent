@@ -87,7 +87,7 @@ func addDirToTar(tw *tar.Writer, root, prefix string) error {
 			_, err = io.Copy(tw, f)
 			return err
 		default:
-			// Symlink / device / socket — skip (not part of a config-files backup).
+			// Symlink / device / socket - skip (not part of a config-files backup).
 			return nil
 		}
 	})
@@ -109,7 +109,7 @@ func addBytesToTar(tw *tar.Writer, name string, content []byte) error {
 }
 
 // extractToDir writes one tar entry (relative path `rel` under `root`) to disk,
-// re-validating the path against `root` (the entry name arrived from an S3 object —
+// re-validating the path against `root` (the entry name arrived from an S3 object,
 // never trusted).
 func extractToDir(root, rel string, hdr *tar.Header, r io.Reader) error {
 	// Reject any ".." segment OUTRIGHT (not merely anchor it away): the entry name came

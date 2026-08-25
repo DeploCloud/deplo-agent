@@ -100,7 +100,7 @@ func TestE2E_StoreBackupRestoreOverwrites(t *testing.T) {
 	if !bytes.HasPrefix(raw, []byte("age-encryption.org/v1")) {
 		t.Fatalf("the artifact on disk is not age-encrypted (starts with %q)", firstBytes(raw, 24))
 	}
-	// ...and it IS readable with the identity — the recovery key's whole promise.
+	// ...and it IS readable with the identity - the recovery key's whole promise.
 	// PGDMP is pg_dump's custom-format magic, so this pins that what comes back
 	// out is a real restorable dump, not merely bytes that decrypted.
 	rc, oerr := openArtifactReader(bytes.NewReader(raw), identity)
@@ -113,7 +113,7 @@ func TestE2E_StoreBackupRestoreOverwrites(t *testing.T) {
 		t.Errorf("the decrypted artifact is not a pg_dump archive (starts with %q)", firstBytes(plain, 16))
 	}
 
-	// Mutate, then restore in place — must drop-and-recreate back to sentinel-A.
+	// Mutate, then restore in place - must drop-and-recreate back to sentinel-A.
 	if _, e := psql("UPDATE t SET v='sentinel-B';"); e != nil {
 		t.Fatalf("mutate: %v", e)
 	}
@@ -180,7 +180,7 @@ func TestE2E_StoreRelayRoundTrip(t *testing.T) {
 		t.Fatalf("seed: %v", e)
 	}
 
-	// 1. Backup with stream_out — the control plane's side of the relay.
+	// 1. Backup with stream_out - the control plane's side of the relay.
 	bs := &fakeBackupStream{}
 	if err := svc.Backup(&pb.BackupRequest{
 		Kind:         pb.BackupKind_BACKUP_KIND_DATABASE,

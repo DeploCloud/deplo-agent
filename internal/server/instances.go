@@ -34,7 +34,7 @@ func (s *Service) ListInstances(ctx context.Context, req *pb.ListInstancesReques
 	for _, c := range cs {
 		names = append(names, c.Name)
 	}
-	// ONE `docker inspect` for the whole stack, keyed by container name — not two
+	// ONE `docker inspect` for the whole stack, keyed by container name, not two
 	// per container. A container that vanished between the `ps` and the inspect
 	// is simply absent from the map (never silently mistaken for another one).
 	details := inspectContainers(ctx, names)
@@ -64,7 +64,7 @@ func (s *Service) ListInstances(ctx context.Context, req *pb.ListInstancesReques
 			RestartCount: d.RestartCount,
 		})
 	}
-	// Exposed app first, then running, then alphabetical by service — the same
+	// Exposed app first, then running, then alphabetical by service - the same
 	// order listInstances produces (so instances[0] is the default target).
 	sort.SliceStable(out, func(i, j int) bool {
 		a, b := out[i], out[j]
@@ -178,7 +178,7 @@ func parseInspectLines(stdout string) map[string]containerDetail {
 			continue
 		}
 		// An image that declares no USER runs as root, and no WORKDIR means "/".
-		// Defaulted HERE, on the parsed field — never by string-splitting, which
+		// Defaulted HERE, on the parsed field, never by string-splitting, which
 		// is what shifted workdir into user when Config.User was empty.
 		if d.User == "" {
 			d.User = "root"

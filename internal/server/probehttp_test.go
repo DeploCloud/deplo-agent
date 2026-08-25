@@ -26,7 +26,7 @@ func TestValidateProbePath(t *testing.T) {
 			t.Errorf("path %q should be accepted: %v", p, err)
 		}
 	}
-	// A space or a newline in the path is request smuggling, not a typo — the
+	// A space or a newline in the path is request smuggling, not a typo - the
 	// path lands verbatim in the request line.
 	bad := []string{"", "favicon.ico", "/a b", "/a\r\nX-Injected: 1", "/a\nb", "/\x7f", strings.Repeat("/a", 2000)}
 	for _, p := range bad {
@@ -95,7 +95,7 @@ func TestProbeOnce_sendsTheHostHeaderWhileDiallingTheAddress(t *testing.T) {
 		t.Fatalf("probeOnce: %v", err)
 	}
 	// The app is reached at the container's address, but told it is being asked
-	// for its own hostname — what an app with host authorization requires.
+	// for its own hostname - what an app with host authorization requires.
 	if gotHost != "app.example.com" {
 		t.Errorf("Host header = %q, want app.example.com", gotHost)
 	}
@@ -147,7 +147,7 @@ func TestProbeOnce_reportsARedirectWithoutFollowingIt(t *testing.T) {
 		t.Fatalf("probeOnce: %v", err)
 	}
 	if followed {
-		t.Error("the agent must not follow a redirect — that is the control plane's call")
+		t.Error("the agent must not follow a redirect - that is the control plane's call")
 	}
 	if resp.GetStatus() != 302 || resp.GetLocation() != "/elsewhere" {
 		t.Errorf("status=%d location=%q", resp.GetStatus(), resp.GetLocation())
@@ -183,7 +183,7 @@ func TestPickContainerIP(t *testing.T) {
 	if err != nil || ip != "fd00::2" {
 		t.Fatalf("got %q, %v", ip, err)
 	}
-	// network_mode: host, or networking gone — nothing to probe.
+	// network_mode: host, or networking gone - nothing to probe.
 	if _, err := pickContainerIP(`{"host":{"IPAddress":""}}`); err == nil {
 		t.Error("a container with no address must be an error")
 	}

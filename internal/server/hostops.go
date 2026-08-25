@@ -25,7 +25,7 @@ import (
 const traefikContainer = "deplo-traefik"
 
 // SetAgentDir tells the service where the agent's own data lives (the installer's
-// $AGENT_DATA, i.e. --agent-dir) — the parent of the Traefik stack this manages.
+// $AGENT_DATA, i.e. --agent-dir) - the parent of the Traefik stack this manages.
 func (s *Service) SetAgentDir(dir string) { s.agentDir = dir }
 
 // traefikDir is where install-agent.sh puts the Traefik it installs:
@@ -45,7 +45,7 @@ func (s *Service) traefikCompose() string {
 	return filepath.Join(dir, "docker-compose.yml")
 }
 
-// HostInfo answers what this host IS — see the proto. Like Hello it never fails:
+// HostInfo answers what this host IS - see the proto. Like Hello it never fails:
 // every field is best-effort, because an operator opening the hardware panel on
 // a half-broken box should still learn what they can.
 func (s *Service) HostInfo(ctx context.Context, req *pb.HostInfoRequest) (*pb.HostInfoResponse, error) {
@@ -152,7 +152,7 @@ func (s *Service) TraefikConfig(ctx context.Context, req *pb.TraefikConfigReques
 	}
 	if _, err := os.Stat(path); err != nil {
 		// Either Traefik was never installed here, or the operator runs their own
-		// proxy — install-agent.sh skips its Traefik when one is already up. Both
+		// proxy - install-agent.sh skips its Traefik when one is already up. Both
 		// mean the same thing: there is nothing of OURS to reconfigure.
 		return &pb.TraefikConfigResponse{
 			Ok: false,
@@ -199,7 +199,7 @@ func (s *Service) TraefikConfig(ctx context.Context, req *pb.TraefikConfigReques
 			}
 			return &pb.TraefikConfigResponse{
 				Ok:          false,
-				Error:       fmt.Sprintf("%v — the previous Traefik config was restored", err),
+				Error:       fmt.Sprintf("%v - the previous Traefik config was restored", err),
 				ComposeYaml: readFileOrEmpty(path),
 			}, nil
 		}

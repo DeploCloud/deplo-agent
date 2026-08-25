@@ -20,13 +20,13 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// hostpathcopy.go copies a plain HOST DIRECTORY across hosts — the bind-mount half of a
+// hostpathcopy.go copies a plain HOST DIRECTORY across hosts - the bind-mount half of a
 // migration from another platform, where a service's data may live in a directory
 // rather than in a Docker volume (Dokploy mounts a `type: bind` source straight off the
 // host).
 
 // deniedHostRoots are refused as a copy source or target, exactly (a path EQUAL to one
-// of them) — a deeper path under most of them is legitimate, and refusing those
+// of them) - a deeper path under most of them is legitimate, and refusing those
 // wholesale would refuse the actual use case (the other platform keeps its service data
 // under /etc/<platform>/...).
 var deniedHostRoots = []string{
@@ -72,7 +72,7 @@ func validateHostPath(p string) (string, error) {
 }
 
 // ExportHostPath tars a host directory out of this machine, gzipped, as raw byte
-// chunks — the same producer as ExportVolume, with a bind mount in place of the
+// chunks - the same producer as ExportVolume, with a bind mount in place of the
 // named volume. The caller is expected to have QUIESCED whatever writes there.
 func (s *Service) ExportHostPath(
 	req *pb.ExportHostPathRequest,
@@ -83,7 +83,7 @@ func (s *Service) ExportHostPath(
 		return err
 	}
 	// It must ALREADY be here, and be a directory. Docker would happily create it
-	// on the mount and export an empty archive — the exact shape that made a wrong
+	// on the mount and export an empty archive - the exact shape that made a wrong
 	// source host look like a successful copy of nothing.
 	info, statErr := os.Stat(path)
 	if statErr != nil {

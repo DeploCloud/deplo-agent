@@ -104,7 +104,7 @@ func buildSample(
 		running = containers.RunningCount()
 	} else {
 		// include_containers=false skips per-container stats, but running_containers is a
-		// HOST gauge that must not change meaning with that flag — the unary Metrics RPC
+		// HOST gauge that must not change meaning with that flag - the unary Metrics RPC
 		// always reports it.
 		running = dockercli.RunningContainers(ctx)
 	}
@@ -143,7 +143,7 @@ func newContainerSampler(ctx context.Context) *containerSampler {
 	if cgroup2Available() {
 		cs.cg = newCgroupSampler()
 	} else {
-		// cgroup v1 or a hybrid hierarchy. Deliberately NOT solved — the fallback
+		// cgroup v1 or a hybrid hierarchy. Deliberately NOT solved - the fallback
 		// is code that has been in production since ContainerStats shipped.
 		log.Printf("deplo-agent: cgroup v2 unavailable, metrics stream using %s", sourceDockerStats)
 	}
@@ -159,7 +159,7 @@ func (cs *containerSampler) Sample(ctx context.Context) ([]*pb.ContainerStat, st
 
 	if cs.cg != nil && !cs.demoted {
 		if cs.cg.Unhealthy() {
-			// The cgroup reader has failed repeatedly — a delegated-controller gap
+			// The cgroup reader has failed repeatedly - a delegated-controller gap
 			// under rootless, a path shape we did not anticipate. Demote rather
 			// than keep emitting a degraded series, and say so in `source`.
 			log.Printf("deplo-agent: cgroup reads failing, demoting metrics stream to %s", sourceDockerStats)
@@ -194,7 +194,7 @@ func (cs *containerSampler) dockerStatsSample(ctx context.Context, entries []ros
 		if !ok {
 			// Not running, or it vanished between the roster read and the stats read. Report it
 			// with identity and running=false so the tab can say "stopped" rather than dropping
-			// the container entirely — but never with synthesised usage numbers.
+			// the container entirely, but never with synthesised usage numbers.
 			st = &pb.ContainerStat{}
 		}
 		applyIdentity(st, e, ok && e.State == "running")
@@ -223,7 +223,7 @@ func (cs *containerSampler) sourceName() string {
 }
 
 // RunningCount is the HOST-WIDE running-container count for the frame's host
-// gauge — deliberately not the roster's label-scoped RunningCount(). See the
+// gauge - deliberately not the roster's label-scoped RunningCount(). See the
 // roster's hostRunning field.
 func (cs *containerSampler) RunningCount() int { return cs.ros.HostRunningCount() }
 

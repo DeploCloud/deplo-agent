@@ -4,7 +4,7 @@ import "time"
 
 // sampler.go exists because Collect is the wrong shape for a streaming loop: it blocks
 // on time.Sleep(1s) purely to manufacture a delta window, and reports NetRx/NetTx as
-// the RAW delta over that window — only accidentally "bytes/sec" because the window
+// the RAW delta over that window - only accidentally "bytes/sec" because the window
 // happens to be one second.
 
 // minWindow is the shortest elapsed time we are willing to divide by.
@@ -12,7 +12,7 @@ const minWindow = 50 * time.Millisecond
 
 // Sampler holds the previous CPU/net counters so successive Sample() calls
 // derive rates from the REAL elapsed time between them instead of sleeping.
-// Not safe for concurrent use — one Sampler per stream.
+// Not safe for concurrent use - one Sampler per stream.
 type Sampler struct {
 	dataDir string
 
@@ -83,21 +83,21 @@ func (s *Sampler) Sample() Metrics {
 		m.DiskPct = round1(float64(diskUsed) / float64(diskTotal) * 100)
 	}
 
-	// Degenerate window — two calls effectively back-to-back.
+	// Degenerate window - two calls effectively back-to-back.
 	window := now.Sub(s.prevAt)
 	if window < minWindow {
 		return m
 	}
 	elapsed := window.Seconds()
 
-	// A FAILED read must advance NOTHING — the same discipline as the degenerate window
+	// A FAILED read must advance NOTHING - the same discipline as the degenerate window
 	// above, and for a sharper reason. readCPUTimes/readNetCounters report failure as a
 	// zero value indistinguishable from a real 0, so adopting it as the baseline makes the
 	// NEXT tick diff a full since-boot counter against 0 and divide by one tick: a
 	// measured 11.4 GB/s on a host that has never seen it.
 	if cpuOK && s.prevCPUOK {
-		// cpuPercent is already a ratio of deltas — self-normalising over any
-		// window, and clamped to [0,100] — so it needs no elapsed-time division,
+		// cpuPercent is already a ratio of deltas - self-normalising over any
+		// window, and clamped to [0,100], so it needs no elapsed-time division,
 		// and it stays correct when the window spans a skipped tick.
 		m.CPU = cpuPercent(s.prevCPU, cpu)
 	}

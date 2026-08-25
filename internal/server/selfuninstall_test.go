@@ -43,7 +43,7 @@ func captureExit(t *testing.T) func() bool {
 }
 
 // waitExit blocks until the deferred exit fires, and fails the test if it never
-// does — the agent promising "stopping" and then staying up would leave a live
+// does - the agent promising "stopping" and then staying up would leave a live
 // agent on a host the control plane has already forgotten.
 func waitExit(t *testing.T, exited func() bool) {
 	t.Helper()
@@ -65,7 +65,7 @@ func unitAt(t *testing.T, path string) {
 	t.Cleanup(func() { agentUnitPath = orig })
 }
 
-// The whole footprint goes: unit, state dir, binary — and the process then exits
+// The whole footprint goes: unit, state dir, binary, and the process then exits
 // on its own rather than being stopped (which would kill it mid-removal).
 func TestSelfUninstall_removesUnitStateAndBinary(t *testing.T) {
 	ctx := context.Background()

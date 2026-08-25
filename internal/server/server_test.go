@@ -12,7 +12,7 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
-// dialLocal spins up the Agent service on an in-process listener (no TLS — the
+// dialLocal spins up the Agent service on an in-process listener (no TLS - the
 // mTLS handshake is covered cross-language in the TS PKI tests and the harness
 // integration test) and returns a connected client.
 func dialLocal(t *testing.T) (pb.AgentClient, func()) {
@@ -57,7 +57,7 @@ func TestHello_reportsContractAndCapabilities(t *testing.T) {
 		t.Errorf("capabilities %v do not advertise docker-cleanup", resp.GetCapabilities())
 	}
 	// Same discipline for the telemetry stream. Drop it and every host silently degrades
-	// to the poll path — which still draws correct charts, so nothing would tell you.
+	// to the poll path, which still draws correct charts, so nothing would tell you.
 	if !containsString(resp.GetCapabilities(), "metrics-stream") {
 		t.Errorf("capabilities %v do not advertise metrics-stream", resp.GetCapabilities())
 	}

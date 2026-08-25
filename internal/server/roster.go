@@ -33,7 +33,7 @@ const (
 	// The label the control plane stamps on everything it creates.
 	rosterManagedFilter = "label=deplo.managed=true"
 	// cgroup v2 unified hierarchy mount point. Joined with the RELATIVE path read
-	// out of /proc/<pid>/cgroup — never string-built from a container id.
+	// out of /proc/<pid>/cgroup, never string-built from a container id.
 	rosterCgroupRoot = "/sys/fs/cgroup"
 	// Ceiling on the SYNCHRONOUS first rebuild only.
 	rosterInitialRebuild = 10 * time.Second
@@ -283,7 +283,7 @@ func (r *roster) streamEvents(ctx context.Context) error {
 	}
 
 	// A scanner error (a token past the 1MiB limit, a read error on the pipe) ends the
-	// loop with the child still RUNNING and its stdout no longer drained — cmd.Wait()
+	// loop with the child still RUNNING and its stdout no longer drained - cmd.Wait()
 	// would then block forever on a `docker events` that never exits, and watchEvents
 	// would never get to log, markDirty or restart.
 	serr := sc.Err()
@@ -315,7 +315,7 @@ func (r *roster) relevant(ev dockerEvent) bool {
 
 // markDirty records that the roster needs rebuilding, without blocking. A token
 // already in the channel means a rebuild is pending and will observe this change
-// too — dropping the send is correct, not a lost update.
+// too - dropping the send is correct, not a lost update.
 func (r *roster) markDirty() {
 	select {
 	case r.dirty <- struct{}{}:
@@ -340,7 +340,7 @@ func (r *roster) rebuildLoop(ctx context.Context) {
 			case <-time.After(r.debounce):
 			}
 			// Drain the tokens this window collected: the rebuild that follows
-			// covers them. Draining BEFORE rebuilding (not after) is deliberate —
+			// covers them. Draining BEFORE rebuilding (not after) is deliberate -
 			// an event arriving mid-rebuild must survive and trigger the next one.
 			select {
 			case <-r.dirty:
@@ -359,7 +359,7 @@ func (r *roster) rebuildLoop(ctx context.Context) {
 // ---------------------------------------------------------------------------
 
 // rebuild re-lists the managed containers and swaps in a fresh snapshot. NEVER fatal,
-// and — just as important — never PARTIAL. (RestartCount collapsing to 0 and back would
+// and, just as important, never PARTIAL. (RestartCount collapsing to 0 and back would
 // likewise read as a counter reset to any delta consumer.)
 func (r *roster) rebuild(ctx context.Context) {
 	rows, err := r.listFn(ctx)
@@ -428,7 +428,7 @@ func (r *roster) rebuild(ctx context.Context) {
 	r.cgroups = cgroups // rebuilt from the live set, so destroyed ids drop out
 	// Only publish a figure we actually READ. A failed `docker ps -q` (ok=false) means the
 	// count is UNKNOWN, and fabricating a 0 on a host that plainly has containers is worse
-	// than reporting the last known figure — keep the previous value.
+	// than reporting the last known figure - keep the previous value.
 	if ok {
 		r.hostRunning = hostRunning
 	}
@@ -466,8 +466,8 @@ func listManagedContainers(ctx context.Context) ([]rosterPsRow, error) {
 	return rows, nil
 }
 
-// hostRunningCount counts EVERY running container on the host — the unfiltered `docker
-// ps -q` the host gauge is built from — returning ok=false when the read itself failed.
+// hostRunningCount counts EVERY running container on the host - the unfiltered `docker
+// ps -q` the host gauge is built from - returning ok=false when the read itself failed.
 func hostRunningCount(ctx context.Context) (int, bool) {
 	res, err := dockercli.Run(ctx, 10*time.Second, "ps", "-q")
 	if err != nil || res.Code != 0 {
@@ -534,7 +534,7 @@ func inspectRosterContainers(ctx context.Context, ids []string) (map[string]rost
 }
 
 // ---------------------------------------------------------------------------
-// pure parsing / assembly — everything below is docker-free and table-tested
+// pure parsing / assembly - everything below is docker-free and table-tested
 // ---------------------------------------------------------------------------
 
 // parseRosterPsLine turns one `docker ps --format {{json .}}` line into a row.
@@ -647,8 +647,8 @@ func parseEventLine(line string) (dockerEvent, bool) {
 	}, true
 }
 
-// isChurnAction reports whether an action changes WHICH containers exist or run
-// — the only reason to pay for a rebuild.
+// isChurnAction reports whether an action changes WHICH containers exist or run -
+// the only reason to pay for a rebuild.
 func isChurnAction(action string) bool {
 	switch action {
 	case "start", "die", "destroy":
