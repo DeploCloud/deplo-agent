@@ -56,8 +56,10 @@ chore(proto): regenerate the stubs
 splits.
 
 ```sh
-make proto   # writes gen/*.pb.go HERE and ../deplo/lib/agent/gen/agent.ts THERE
+make proto                 # or: bash proto/generate.sh, where make is absent
 ```
+
+It writes `gen/*.pb.go` HERE and `../deplo/lib/agent/gen/agent.ts` THERE.
 
 Needs `protoc`, `protoc-gen-go` and `protoc-gen-go-grpc` on PATH, plus a sibling `../deplo` checkout
 that has run `bun install` (ts-proto comes from its `node_modules`; override with
