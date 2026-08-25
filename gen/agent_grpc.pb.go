@@ -4,39 +4,9 @@
 // - protoc             v5.29.3
 // source: agent.proto
 
-// The Deplo server-agent contract: the second system boundary, alongside
-// GraphQL (UI <-> control plane). This is control plane <-> server. The agent
-// is a single-purpose Go binary, one per server, that owns the host-coupled
-// half of the platform (Docker, the build pipeline, host metrics) and exposes
-// it over this typed RPC. See docs/research/server-agent/PLAN.md and
+// The Deplo server-agent contract: the second system boundary, alongside GraphQL (UI
+// <-> control plane). See docs/research/server-agent/PLAN.md and
 // docs/adr/0006-server-agent-is-a-per-host-go-binary.md.
-//
-// PART A SUBSET (extended in PART B + PART C). This file is the versioned
-// boundary for the whole A-D arc. Part A implemented Hello / Metrics / Deploy
-// (UPLOAD+IMAGE) / Inspect / control verbs (localhost agent, deploy-only). Part B
-// adds: the GIT source case (the agent clones with a short-lived token, D3), and
-// ReattachDeploy (reconnect to an in-flight deploy and replay missed events, D5).
-// PART C adds the per-server OBSERVABILITY + FILES surface: FollowLogs (live
-// `docker logs -f`), Attach (bidi console/pty), Exec + ListInstances + ShellLabel
-// (the console introspection that was direct-Docker in lib/data/console.ts), and
-// the file RPCs (List/Read/Write/Upload/CreateDir/Delete/Rename/FilesExist) that
-// repoint lib/data/project-files.ts off the control plane's local fs onto the
-// project's host. PART D adds the DEV-MODE + SSH-GATEWAY surface (the last
-// per-host singletons, ADR-0002): StartDev/StopDev/ResetDevWorkspace/TeardownDev
-// (the dev container lifecycle, repointing lib/deploy/dev.ts), EnsureGateway/
-// ProvisionSshUser/DeprovisionSshUser (the SSH gateway, repointing
-// lib/infra/ssh-gateway.ts — the control plane renders config + steps, the agent
-// applies them), StartTunnel/GetTunnel/StopTunnel (the VS Code tunnel), and a new
-// SOURCE_KIND_DEV_WORKSPACE so "deploy from dev workspace" builds on the owning
-// host. Every addition is new RPCs/messages — the contract version stays V1
-// (additive, never a redesign; D6's forward-compat principle holds).
-//
-// The agent's CALL-HOME BOOTSTRAP (PLAN P1-P4) is deliberately NOT a method on
-// this service: it travels agent -> control plane (the opposite direction of
-// every RPC here, which is control plane -> agent), is a one-shot HTTP POST over
-// a fingerprint-pinned TLS channel, and happens BEFORE the mTLS identity this
-// service requires even exists. It lives at the control plane's /api/agent/
-// bootstrap endpoint; see lib/agent/bootstrap.ts and app/api/agent/bootstrap.
 
 package agentpb
 
@@ -130,44 +100,19 @@ type AgentClient interface {
 	// Host CPU/mem/disk/net snapshot. Replaces lib/infra/host.ts per server.
 	// (Wired into getServerMetrics in Part C; defined now so the contract is whole.)
 	Metrics(ctx context.Context, in *MetricsRequest, opts ...grpc.CallOption) (*HostMetrics, error)
-	// Per-CONTAINER live resource snapshot (`docker stats --no-stream`) for the
-	// named containers of ONE project — the data source for the per-app /
-	// per-database Monitoring tab, next to the host-level Metrics above. Scoped to
-	// a project by label (deplo.project=<project_id>) exactly like the Part C
-	// container RPCs, so a container name off the wire can never stat a sibling
-	// project's container. ADDITIVE: gated by the "container-stats" capability.
+	// Per-CONTAINER live resource snapshot (`docker stats --no-stream`) for the named
+	// containers of ONE project — the data source for the per-app / per-database
+	// Monitoring tab, next to the host-level Metrics above.
 	ContainerStats(ctx context.Context, in *ContainerStatsRequest, opts ...grpc.CallOption) (*ContainerStatsResponse, error)
 	// ONE long-lived stream carrying this host's metrics AND every Deplo-managed
-	// container's stats, sampled on the AGENT's own ticker. Replaces the
-	// per-viewer, per-resource Metrics/ContainerStats poll: the control plane
-	// opens exactly one of these per server and demuxes frames into its RAM ring
-	// buffer, so telemetry cost is O(hosts) — independent of how many containers
-	// run there and how many people are looking.
-	//
-	// The agent is still a pure gRPC SERVER: the control plane dials and the agent
-	// streams, exactly like FollowLogs. There is no agent->control-plane channel.
-	//
-	// Container scoping is by the deplo.managed=true label, NEVER an empty filter
-	// (which would enumerate every container on the host, including ones Deplo
-	// does not own). Each stat carries its deplo.project label so the control
-	// plane demuxes to an App / Database without a second lookup.
-	//
-	// ADDITIVE: gated by the "metrics-stream" capability. An agent without it
-	// keeps serving the unary Metrics / ContainerStats poll unchanged, and the
-	// control plane falls back to polling that ONE server.
+	// container's stats, sampled on the AGENT's own ticker.
 	StreamMetrics(ctx context.Context, in *MetricsStreamRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[MetricsSample], error)
 	// Deploy lifecycle. Server-streaming so build/run logs flow live, in one
 	// connection, into the control plane's existing per-deployment log + status
 	// writes (which republish over the GraphQL SSE subscriptions unchanged).
 	Deploy(ctx context.Context, in *DeployRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[DeployEvent], error)
-	// Reconnect to an in-flight (or just-finished) deploy and replay the events
-	// the control plane missed (PLAN D5, Part-B half). Remote builds are long and
-	// costly to lose, so the agent keeps a bounded record of each deploy's events
-	// keyed by deploy_id; if the control plane drops mid-build it dials back with
-	// ReattachDeploy(deploy_id, from_seq) and the agent replays from the cursor,
-	// then continues streaming live events as the build proceeds. Returns
-	// NOT_FOUND if the agent has no record of that deploy (it never ran there, or
-	// its record was evicted) — the control plane then reconciles it to error.
+	// Reconnect to an in-flight (or just-finished) deploy and replay the events the
+	// control plane missed (PLAN D5, Part-B half).
 	ReattachDeploy(ctx context.Context, in *ReattachRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[DeployEvent], error)
 	// Lifecycle control over an already-deployed stack. These replace the direct
 	// stop/start/destroy docker calls in lib/deploy/build.ts for agent-owned
@@ -175,310 +120,102 @@ type AgentClient interface {
 	StopStack(ctx context.Context, in *StackRef, opts ...grpc.CallOption) (*StackResult, error)
 	StartStack(ctx context.Context, in *StackRef, opts ...grpc.CallOption) (*StackResult, error)
 	DestroyStack(ctx context.Context, in *StackRef, opts ...grpc.CallOption) (*StackResult, error)
-	// Re-apply routing to a running stack WITHOUT a rebuild. The control plane
-	// re-renders the stack YAML with the new domain set (renderCompose /
-	// buildComposeStack stay the single TS source of truth) and sends it; the agent
-	// overwrites <stack_dir>/<slug>.yml (+ the env-file and any compose mount files)
-	// and `docker compose up -d --remove-orphans`, which recreates only the routed
-	// service in place so Traefik picks up the new labels. Replaces the in-process
-	// reroute that read/wrote the stack file on the control plane's own disk.
+	// Re-apply routing to a running stack WITHOUT a rebuild.
 	Reroute(ctx context.Context, in *RerouteRequest, opts ...grpc.CallOption) (*StackResult, error)
 	// Copy a single Docker named volume across HOSTS, for a server MOVE (a
-	// database/project relocating to another server). Docker named volumes are
-	// host-local and the agent trust model is strictly star (an agent can neither
-	// dial nor trust a peer agent), so a volume cannot be copied host-to-host
-	// directly — instead the control plane RELAYS the bytes: it calls ExportVolume
-	// on the SOURCE agent (streaming the volume's gzipped tar out), and feeds those
-	// chunks into ImportVolume on the DESTINATION agent (which untars them into the
-	// target volume). No S3 hop and no agent↔agent connection.
-	//
-	// ExportVolume tars the named volume from inside a read-only helper container
-	// (the same busybox `tar -C /v -cf -` used by Backup's archiveVolume), gzips it,
-	// and streams it as raw byte chunks. The caller is expected to have QUIESCED the
-	// source (stopped the stack) first so the on-disk files can't change mid-read —
-	// the agent does not stop anything here (it only reads), keeping this a pure,
-	// reusable primitive. Any agent advertising the "volume-copy" capability serves
-	// it; an older agent returns UNIMPLEMENTED, which the control plane maps to an
-	// "update the agent" error.
+	// database/project relocating to another server).
 	ExportVolume(ctx context.Context, in *ExportVolumeRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[VolumeChunk], error)
-	// The destination half of a cross-host volume copy (see ExportVolume). The FIRST
-	// client message MUST be a VolumeChunk carrying `header` (the target volume name +
-	// whether to wipe it first); every subsequent message carries `data` (a raw slice
-	// of the gzipped tar produced by ExportVolume). The agent wipes the target volume
-	// (unless told not to), then untars the reassembled stream into it via a helper
-	// container (the same `tar -C /v -xf -` used by Restore). The caller MUST have
-	// stopped the destination stack first so nothing writes the volume under the
-	// untar. Terminal StackResult reports success/failure of the whole import.
+	// The destination half of a cross-host volume copy (see ExportVolume). The caller
+	// MUST have stopped the destination stack first so nothing writes the volume under
+	// the untar.
 	ImportVolume(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[VolumeChunk, StackResult], error)
-	// Copy a service's host-side FILES DIR (<stack_dir>/files/<slug>) across hosts,
-	// for a server move — the sibling of ExportVolume/ImportVolume for the one piece
-	// of a service's state that is NOT a Docker volume. The files dir holds a
-	// compose-stack's `./` bind-mount files, template config-file mounts, and
-	// `type: "service"` volume mounts; most of it is re-materialised from the control
-	// plane on a deploy, but any RUNTIME data written under it would otherwise be lost
-	// on a move. ExportFiles tars the dir out (gzipped) and streams it; a missing dir
-	// streams an empty archive (not an error). Same relay + capability model as the
-	// volume RPCs.
+	// Copy a service's host-side FILES DIR (<stack_dir>/files/<slug>) across hosts, for a
+	// server move — the sibling of ExportVolume/ImportVolume for the one piece of a
+	// service's state that is NOT a Docker volume.
 	ExportFiles(ctx context.Context, in *ExportFilesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[FilesChunk], error)
 	// The destination half of a files-dir copy (see ExportFiles). The FIRST client
-	// message MUST be a FilesChunk carrying `header` (the target slug + wipe flag);
-	// every subsequent message carries `data` (a slice of the gzipped tar). The agent
-	// wipes the target files dir (unless told not to), then untars the stream into it
-	// (anti-traversal enforced, symlinks skipped — same guard as Restore's files/
-	// arm). The caller must have stopped the destination stack first. Terminal
-	// StackResult reports success/failure.
+	// message MUST be a FilesChunk carrying `header` (the target slug + wipe flag); every
+	// subsequent message carries `data` (a slice of the gzipped tar).
 	ImportFiles(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[FilesChunk, StackResult], error)
 	// Copy an arbitrary HOST DIRECTORY off this machine — the bind-mount half of a
 	// migration from another platform, where a service's data may sit in a plain
 	// directory rather than in a Docker volume.
-	//
-	// Deliberately narrow, because this is the one RPC that names a host path off the
-	// wire. The path must already EXIST and be a directory (a `-v /missing:/v` mount
-	// would otherwise create it and export nothing, the same trap ExportVolume has),
-	// and a short list of system roots is refused outright. The real gate is on the
-	// control-plane side: instance admin plus the host-volumes grant, which is the
-	// same power a compose stack with a bind mount already has — this is a second
-	// door onto it, never a wider one.
 	ExportHostPath(ctx context.Context, in *ExportHostPathRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[VolumeChunk], error)
 	// The destination half of a host-directory copy (see ExportHostPath). First
 	// message carries the header (target path + wipe flag), the rest carry the
 	// gzipped tar. Same deferred wipe as ImportVolume: no data, no wipe.
 	ImportHostPath(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[HostPathChunk, StackResult], error)
-	// Stream a BUILT IMAGE off this host, for a build server: the third sibling of
-	// the volume and files-dir relays, and the same star-topology reasoning - the
-	// control plane calls ExportImage on the BUILDER and feeds the chunks into
-	// ImportImage on the host that will run it. No registry, no agent↔agent link.
-	//
-	// `docker save <ref>` piped through gzip, framed like VolumeChunk. Only a local
-	// `deplo/<key>:<dep>` tag is ever asked for, and the ref is re-validated agent
-	// side before it reaches argv. `remove_after` deletes the image here once the
-	// last byte is written: on a build server the image is a courier, not an
-	// artifact - what is worth keeping is the BuildKit cache, which this never
-	// touches. Capability: "image-copy".
+	// Stream a BUILT IMAGE off this host, for a build server: the third sibling of the
+	// volume and files-dir relays, and the same star-topology reasoning - the control
+	// plane calls ExportImage on the BUILDER and feeds the chunks into ImportImage on the
+	// host that will run it.
 	ExportImage(ctx context.Context, in *ExportImageRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ImageChunk], error)
-	// The destination half of an image copy (see ExportImage). The FIRST client
-	// message MUST be an ImageChunk carrying `header`; every subsequent message
-	// carries `data`. The agent pipes the reassembled stream into `docker image
-	// load`, which decompresses it itself.
-	//
-	// The archive is NOT trusted to name itself: `docker load` restores whatever
-	// RepoTags it declares, not the tag the caller announced, so an archive could
-	// carry a second image and replace a neighbouring app's - or a base image - on a
-	// host that merely accepted a build. The agent diffs the host's tag list either
-	// side of the load and REFUSES (removing them) if any other `deplo/` tag
-	// appeared. Scoped to that namespace on purpose: other deploys mutate the same
-	// host concurrently, so treating a base image someone else just pulled as
-	// smuggled would break a deploy that did nothing wrong.
-	// Terminal StoreResult reports bytes + sha256 of what actually landed, the same
-	// proof of transfer WriteStoreFile returns - a loaded image has no ETag either.
-	// Capability: "image-copy".
+	// The destination half of an image copy (see ExportImage). The FIRST client message
+	// MUST be an ImageChunk carrying `header`; every subsequent message carries `data`.
 	ImportImage(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[ImageChunk, StoreResult], error)
 	// Read back the rendered stack YAML the agent has on disk (<stack_dir>/<slug>.yml)
-	// for the "View full compose" preview. The single-image/built stack's image ref
-	// + env live only in this file (not on the project), so the preview must read it
-	// from the owning host. Returns exists=false (empty yaml) when no stack file is
-	// present yet (never deployed).
+	// for the "View full compose" preview. Returns exists=false (empty yaml) when no
+	// stack file is present yet (never deployed).
 	ReadStack(ctx context.Context, in *StackRef, opts ...grpc.CallOption) (*ReadStackResponse, error)
 	// Container introspection (status/running) for the live-status subscriptions.
 	Inspect(ctx context.Context, in *InspectRequest, opts ...grpc.CallOption) (*InspectResponse, error)
-	// Whether a HOST TCP port is free to publish. The control plane calls this
-	// BEFORE provisioning a database with "Expose publicly" (a published `ports:`
-	// mapping) so a port already taken — by another Deplo stack OR by any non-Deplo
-	// host process (a system Postgres on 5432, the control plane's own DB, …) —
-	// fails the creation up front with a clear message rather than leaving a
-	// half-provisioned container whose `compose up` lost the port bind. The agent
-	// answers by attempting to BIND the port on the host (0.0.0.0 + ::, then
-	// immediately closing): a bind is the only check that sees BOTH Docker-published
-	// ports and raw host listeners, with no output parsing. Gated behind the
-	// "checkport" Hello capability so an older agent surfaces "update the agent"
-	// rather than a fake "available".
+	// Whether a HOST TCP port is free to publish.
 	CheckPort(ctx context.Context, in *CheckPortRequest, opts ...grpc.CallOption) (*CheckPortResponse, error)
-	// ONE bounded HTTP GET to a container of an app's own stack, issued from the
-	// host over Docker's network — what a compose app's icon detection reads.
-	//
-	// An app deployed as a compose stack runs PREBUILT images: its favicon is not
-	// a file anywhere on the host (the files dir holds only the config its bind
-	// mounts need), it exists only inside the image and is SERVED. The only way to
+	// ONE bounded HTTP GET to a container of an app's own stack, issued from the host
+	// over Docker's network — what a compose app's icon detection reads. The only way to
 	// see it is to ask the running app for it, exactly as a browser would.
-	//
-	// The agent resolves the target itself: the container is found by the app's own
-	// `deplo.project` label + compose service, and the request goes to THAT
-	// container's IP. The caller supplies a port, a path and a Host header — never
-	// an address — so this can never be turned into a general outbound fetch from
-	// the host (no DNS, no user-supplied IP, no scheme: plain HTTP to a container
-	// this app owns). Redirects are returned, never followed: where to go next is
-	// the control plane's decision, not the agent's.
-	//
-	// Deliberately NOT a health check and not a proxy — one request, one bounded
-	// body, no streaming. Gated behind the "http-probe" Hello capability.
 	ProbeHttp(ctx context.Context, in *ProbeHttpRequest, opts ...grpc.CallOption) (*ProbeHttpResponse, error)
-	// Reclaim Docker disk on the host. STRICTLY AN ALLOW-LIST: the agent removes
-	// only what it can PROVE is unreferenced, and the proof is always a
-	// container-reference REVERSE INDEX over `docker ps -aq` (running AND exited) or
-	// an on-disk sentinel — never a label, because a genuine app container may carry
-	// no `deplo.*` label at all (`deplo-myapp-web-1` does not). It therefore never
-	// runs `docker system prune`, `container prune`, `volume prune` or `network
-	// prune`: on a Deplo host a STOPPED app is a LIVE app (StopStack is `compose
-	// stop`, StartStack is `compose start` — the container, its volumes and its
-	// networks must all survive a stop), and a dangling volume may hold a database's
-	// data files. Those verbs are absent from CleanupScope and must never be added.
-	//
-	// With dry_run the agent enumerates candidates and reclaims NOTHING, filling in
-	// every result field as if it had — this is what the UI calls first, to render
-	// the confirm dialog. A scope that fails, or that the agent declines because it
-	// could not build the reverse index and refuses to guess, is reported per-scope
-	// and the sweep carries on; ok=false is reserved for a sweep that could not start
-	// at all (UNAVAILABLE when Docker is unreachable). Gated behind the
-	// "docker-cleanup" Hello capability so an older agent surfaces "update the agent"
-	// rather than a fake success.
+	// Reclaim Docker disk on the host. Those verbs are absent from CleanupScope and must
+	// never be added.
 	DockerCleanup(ctx context.Context, in *DockerCleanupRequest, opts ...grpc.CallOption) (*DockerCleanupResponse, error)
-	// Update the agent BINARY in place to a newer release, WITHOUT re-bootstrapping
-	// — the agent's mTLS materials (agent.crt/agent.key/ca.crt under --agent-dir)
-	// are NEVER touched, so the server keeps its identity and pinned fingerprint
-	// across the upgrade and stays "online". This is the in-place sibling of
-	// re-running install-agent.sh (which mints a fresh token and re-bootstraps,
-	// resetting trust). The control plane resolves the latest release (the SAME
-	// GitHub release the install path uses) and sends the per-arch download URL +
-	// its sha256 here; the agent downloads, VERIFIES the checksum (refusing a
-	// mismatch, exactly like the installer's P2 guard), atomically swaps its own
-	// on-disk binary, replies, then re-execs ITSELF (syscall.Exec — same PID, same
-	// argv, same env; no exit, so a supervisor's Restart policy is not involved).
-	// The re-execed binary finds the existing materials and serves straight away —
-	// no call-home.
-	// INVARIANT: trust material is out of scope here; a SelfUpdate can change the
-	// code but never the identity. Returns FAILED_PRECONDITION when the agent can't
-	// locate/replace its own binary (e.g. a read-only install dir), so the control
-	// plane can tell the operator to fall back to re-running the installer.
+	// Update the agent BINARY in place to a newer release, WITHOUT re-bootstrapping — the
+	// agent's mTLS materials (agent.crt/agent.key/ca.crt under --agent-dir) are NEVER
+	// touched, so the server keeps its identity and pinned fingerprint across the upgrade
+	// and stays "online".
 	SelfUpdate(ctx context.Context, in *SelfUpdateRequest, opts ...grpc.CallOption) (*SelfUpdateResponse, error)
-	// Remove the agent's own footprint from this host and stop: the systemd unit,
-	// the binary, and the state dir under --agent-dir (mTLS materials included).
-	// The sibling of SelfUpdate, and the ONLY RPC that ends the agent's own life.
-	//
-	// Exists for the MIGRATION SOURCE: a host of another platform that Deplo is
-	// importing from, where the agent is installed to read volumes and for nothing
-	// else. Sending someone to a shell to undo an install Deplo performed is the
-	// exact thing the product refuses to do.
-	//
-	// Ordering is the whole contract, and the control plane depends on it: the
-	// removals happen BEFORE the reply (so a failure is returnable and the row is
-	// kept), the process then exits 0 shortly after — cleanly, so systemd's
-	// Restart=on-failure does not bring it back. The unit is disabled but never
-	// `stop`ped: KillMode defaults to control-group, so stopping first would kill
-	// this process before it could delete anything.
-	//
-	// OUT OF SCOPE, deliberately: Docker. No container, image, volume or network
-	// is touched — on a migration source they belong to the other platform, and on
-	// an ordinary server that is what uninstall-agent.sh is for. The script also
-	// stays the answer for a host that is unreachable or already de-trusted
-	// (ADR-0011), which is why the control plane always hands it over too.
+	// Remove the agent's own footprint from this host and stop: the systemd unit, the
+	// binary, and the state dir under --agent-dir (mTLS materials included). The sibling
+	// of SelfUpdate, and the ONLY RPC that ends the agent's own life.
 	SelfUninstall(ctx context.Context, in *SelfUninstallRequest, opts ...grpc.CallOption) (*SelfUninstallResponse, error)
 	// Back up a database or a project to a destination, streaming progress.
-	// DATABASE → the agent `docker exec`s the engine's dump tool (per the format
-	// table in docs/research/dbs-backups/PLAN.md), gzip-compresses the stream, and
-	// writes it out, so no temp file and no control-plane round-trip. PROJECT →
-	// the agent tars the project's named + compose-stack volumes (via a throwaway
-	// helper container that mounts them), the project files dir, and the rendered
-	// compose/env snapshot, gzip-compresses, and writes it out. Host bind mounts
-	// are EXCLUDED (shared cross-tenant paths, outside Deplo). The terminal
-	// BackupResult carries the final object key + byte size the control plane
-	// records on the BackupRun.
-	//
-	// The SINK is one of three, in the order the request selects them: `s3` (a
-	// multipart PUT via minio-go), `store` (an age-encrypted file under a
-	// validated root on this host), or — when `stream_out` is set — this RPC's own
-	// BackupEvent.data frames, so the control plane can relay the artifact to
-	// another host's WriteStoreFile. All three consume the SAME producer: the
-	// compression and the age wrap happen once, in the source pipeline, so a
-	// relayed artifact is ciphertext before it ever leaves this host.
 	Backup(ctx context.Context, in *BackupRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[BackupEvent], error)
 	// Restore a database or project from a previously-written artifact, IN PLACE,
-	// streaming progress. DATABASE → read the artifact, decrypt (store only),
-	// decompress, and restore per the format table — drop-and-recreate, guaranteed
-	// by the dump format (pg `--clean --if-exists`, mysql `--add-drop-table`,
-	// mongo `--drop`) so a restore overwrites rather than appends. PROJECT → stop
-	// the stack, wipe + untar the volumes + files, re-`Reroute` the snapshot
-	// compose/env (which restarts the stack) = full data + config in place. A
-	// restart failure (e.g. a snapshot image that no longer exists) is reported
-	// clearly on the stream rather than silently leaving the stack down.
-	//
-	// This RPC reads the artifact from a destination THIS host can reach (`s3` or
-	// a local `store`). When the artifact lives on another server's disk, the
-	// control plane uses RestoreFrom instead and streams the bytes in.
+	// streaming progress. A restart failure (e.g. a snapshot image that no longer exists)
+	// is reported clearly on the stream rather than silently leaving the stack down.
 	Restore(ctx context.Context, in *RestoreRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RestoreEvent], error)
-	// Verify a destination for the "Test connection" button. S3 → HEAD/stat the
-	// bucket with the supplied creds and report reachable + writable. STORE →
-	// resolve the root, create it if it is the agent's own managed one, verify the
-	// sentinel for a custom one, probe writability, sweep stale `.partial` files,
-	// and report free/total bytes so the UI can show headroom. An S3 check needs
-	// no Docker and no host state, so any agent advertising "backup" can serve it;
-	// a STORE check is about THIS host's disk, so it must run on the destination's
-	// own server.
+	// Verify a destination for the "Test connection" button. An S3 check needs no Docker
+	// and no host state, so any agent advertising "backup" can serve it; a STORE check is
+	// about THIS host's disk, so it must run on the destination's own server.
 	S3Check(ctx context.Context, in *S3CheckRequest, opts ...grpc.CallOption) (*S3CheckResponse, error)
-	// Delete artifacts by exact key or by prefix. Backs retention pruning (the
-	// control plane deletes objects older than retentionDays for a backup) and
-	// the "delete artifacts too" branch of target deletion. Idempotent: a missing
-	// object is not an error. Returns how many objects were removed.
+	// Delete artifacts by exact key or by prefix.
 	S3Delete(ctx context.Context, in *S3DeleteRequest, opts ...grpc.CallOption) (*S3DeleteResponse, error)
-	// Stream an artifact OUT, for a restore or a download whose reader lives
-	// elsewhere. The artifact is either on this host's store or in a bucket this
-	// host can dial (`store` or `s3`). Emits `data` frames only (no header). By
-	// default the bytes are exactly what was written — still age-encrypted — so a
-	// control plane relaying them to another host never holds plaintext. Pass
-	// `age_identity` to decrypt on the way out instead, which is what a user
-	// downloading their own backup needs.
+	// Stream an artifact OUT, for a restore or a download whose reader lives elsewhere.
+	// The artifact is either on this host's store or in a bucket this host can dial
+	// (`store` or `s3`).
 	ReadStoreFile(ctx context.Context, in *ReadStoreFileRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[StoreChunk], error)
-	// Receive an artifact INTO this host's store. The FIRST client message MUST
-	// carry `header` (the destination root + object key); every following message
-	// carries `data`. The agent writes to `<key>.partial`, fsyncs, and renames on
-	// a clean end — so a broken relay leaves a sweepable temp file rather than a
-	// truncated artifact at the real key that retention would later hand to a
-	// restore. The terminal StoreResult carries the bytes written and their
-	// sha256: on a filesystem there is no ETag, so this is the only durable proof
-	// of what landed, and it is what the control plane records on the run.
+	// Receive an artifact INTO this host's store. The FIRST client message MUST carry
+	// `header` (the destination root + object key); every following message carries
+	// `data`.
 	WriteStoreFile(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[StoreChunk, StoreResult], error)
-	// Restore from an artifact this host CANNOT reach — the cross-host half of
-	// Restore. Bidirectional because a restore must both receive bytes and report
-	// progress: the first client message carries the header (kind + descriptor +
-	// the age identity), every following message carries a slice of the artifact,
-	// and the agent pipes them straight into the same restore chain Restore uses.
-	// Deliberately NOT "stage the artifact to a temp file then call Restore": that
-	// would need a full artifact's worth of free space on the very host being
-	// restored, plus cleanup that has to survive an agent restart.
+	// Restore from an artifact this host CANNOT reach — the cross-host half of Restore.
 	RestoreFrom(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[RestoreChunk, RestoreEvent], error)
-	// Stream a container's live runtime logs (`docker logs -f --tail N`) as raw
-	// byte chunks. Output-only — there is no stdin. The control plane proxies these
-	// chunks straight into the unchanged SSE log route. Closing the stream (browser
-	// disconnect) cancels the RPC, which kills the agent's `docker logs` client
-	// only — never the container. Works on a stopped container (tails its recorded
-	// output, then ends).
+	// Stream a container's live runtime logs (`docker logs -f --tail N`) as raw byte
+	// chunks. Closing the stream (browser disconnect) cancels the RPC, which kills the
+	// agent's `docker logs` client only — never the container.
 	FollowLogs(ctx context.Context, in *FollowLogsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LogChunk], error)
 	// Interactive `docker attach` to a running container, full-duplex over one bidi
-	// stream. The FIRST client message MUST be an AttachOpen (selects the container,
-	// declares tty + initial size); subsequent client messages are stdin bytes or a
-	// resize. The agent streams the container's merged output down. `--sig-proxy` is
-	// off, so a client disconnect never signals the container. The pty backing (Go
-	// creack/pty) lives here now (was Node node-pty), so tty containers get a real
-	// terminal regardless of the agent host.
+	// stream. `--sig-proxy` is off, so a client disconnect never signals the container.
 	Attach(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AttachInput, AttachOutput], error)
 	// Every attachable container in a project's stack (replaces listInstances +
-	// inspectRuntime + inspectStdio in lib/data/console.ts), default (exposed/
-	// running) first. Carries the project id + slug + exposed-service so the agent
-	// can label-filter and order without knowing Deplo's store.
+	// inspectRuntime + inspectStdio in lib/data/console.ts), default (exposed/ running)
+	// first.
 	ListInstances(ctx context.Context, in *ListInstancesRequest, opts ...grpc.CallOption) (*ListInstancesResponse, error)
-	// Run a command in a container (`docker exec`), replacing execInContainer. The
-	// agent detects the image's shell (or falls back to raw argv on distroless) and
-	// returns the guest exit code/stdout/stderr instead of erroring on a non-zero
-	// exit — the REPL renders failures. A docker/OCI-level failure (no such
-	// container, stopped, no shell) is a gRPC error, not a guest exit.
+	// Run a command in a container (`docker exec`), replacing execInContainer.
 	Exec(ctx context.Context, in *ExecRequest, opts ...grpc.CallOption) (*ExecResponse, error)
 	// The default (or chosen) container's shell label ("/bin/sh" | "/bin/bash" |
 	// "raw exec (no shell)") for the console banner — replaces shellLabel.
 	ShellLabel(ctx context.Context, in *ShellLabelRequest, opts ...grpc.CallOption) (*ShellLabelResponse, error)
-	// Spawn a command in a container and return immediately with its handle. The
-	// container check and the shell probe happen INSIDE the job goroutine (they
-	// cost up to ~25s on a cold shell-plan cache), so this RPC is a map insert:
-	// a pre-spawn failure surfaces through PollJob as
-	// {running: false, exit_code: -1, stderr: "..."} rather than as an RPC error.
+	// Spawn a command in a container and return immediately with its handle.
 	StartJob(ctx context.Context, in *StartJobRequest, opts ...grpc.CallOption) (*StartJobResponse, error)
 	// The job's current state. Output is returned ONLY on the terminal poll -
 	// streaming it every minute for every in-flight job would be megabytes of
@@ -497,11 +234,7 @@ type AgentClient interface {
 	RenameFile(ctx context.Context, in *RenameFileRequest, opts ...grpc.CallOption) (*FileEntryResult, error)
 	// Whether a project's files root exists on this host (drives the Files tab).
 	FilesExist(ctx context.Context, in *FilesExistRequest, opts ...grpc.CallOption) (*FilesExistResponse, error)
-	// Start (or restart) a project's dev container. Server-streaming like Deploy
-	// (it materialises the workspace, ensures the gateway, pre-chowns, writes the
-	// stack, `compose up`s) so progress logs flow live into the same SSE plumbing.
-	// The control plane sends the rendered dev compose + entrypoint + (for git) the
-	// tokenized clone URL + (for upload) the archive; the agent stays dumb.
+	// Start (or restart) a project's dev container.
 	StartDev(ctx context.Context, in *StartDevRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[DeployEvent], error)
 	// Stop a project's dev container (reversible — KEEPS the workspace + deps
 	// volume so a later StartDev resumes the edited tree). Also stops the tunnel.
@@ -514,11 +247,8 @@ type AgentClient interface {
 	// (its per-project users are removed via DeprovisionSshUser).
 	TeardownDev(ctx context.Context, in *TeardownDevRequest, opts ...grpc.CallOption) (*StackResult, error)
 	// Lazily ensure the 2-service SSH gateway stack is up on this host (idempotent;
-	// ensureNetwork + write the rendered config files + `compose up` + wait for
-	// sshd + reconcile every supplied user). The control plane sends the rendered
-	// files (sshd_config / wrapper / socket-filter / compose / entrypoint) and the
-	// full provision step-list for every stored DevSshUser of this server so the
-	// agent rebuilds the projection from the store's truth (ADR-0002).
+	// ensureNetwork + write the rendered config files + `compose up` + wait for sshd +
+	// reconcile every supplied user).
 	EnsureGateway(ctx context.Context, in *EnsureGatewayRequest, opts ...grpc.CallOption) (*StackResult, error)
 	// Provision one user inside the running gateway by running the control-plane-
 	// computed exec steps (the password, if any, rides in a step's stdin — never
@@ -540,38 +270,16 @@ type AgentClient interface {
 	// verifies the cert matches the pending key, atomically swaps cert+key on disk,
 	// and hot-reloads its TLS config so new handshakes present the fresh cert.
 	InstallRenewedCert(ctx context.Context, in *InstallRenewedCertRequest, opts ...grpc.CallOption) (*StackResult, error)
-	// Static host identity — the neofetch answer, not the gauge. Metrics/
-	// StreamMetrics already carry the USAGE numbers (cpu %, mem used, disk used);
-	// this carries what the hardware and OS actually ARE, plus the host clock and
-	// the two pieces of host state the control plane can act on (the Traefik stack
-	// file and whether a given container id resolves). Read live, persisted
-	// nowhere agent-side.
+	// Static host identity — the neofetch answer, not the gauge.
 	HostInfo(ctx context.Context, in *HostInfoRequest, opts ...grpc.CallOption) (*HostInfoResponse, error)
 	// Set the host's timezone (IANA name, e.g. "Europe/Rome"). `timedatectl` when
-	// present, otherwise relinking /etc/localtime. The name is validated against
-	// /usr/share/zoneinfo before anything is written — defence in depth, since the
-	// control plane validates too. Answers with a FRESH HostInfoResponse so the UI
-	// shows the moved clock without a second round trip.
+	// present, otherwise relinking /etc/localtime.
 	SetTimezone(ctx context.Context, in *SetTimezoneRequest, opts ...grpc.CallOption) (*HostInfoResponse, error)
-	// Rewrite and/or restart THIS host's `deplo-traefik` stack — the reverse proxy
-	// the installer put at $AGENT_DATA/traefik/docker-compose.yml. Per ADR-0006 the
-	// agent renders NOTHING: the compose YAML is authored control-plane-side and
-	// shipped opaque, exactly like an app stack, so the Traefik label grammar stays
-	// in one place (lib/deploy) and never leaks into Go.
-	//
-	// Refuses when that file is absent or the running Traefik is not deplo-traefik:
-	// the installer explicitly leaves an operator's own proxy alone, and so does
-	// this. The previous file is kept as docker-compose.yml.bak before any write —
-	// a config change that takes :80/:443 down must be reversible from the host.
+	// Rewrite and/or restart THIS host's `deplo-traefik` stack — the reverse proxy the
+	// installer put at $AGENT_DATA/traefik/docker-compose.yml.
 	TraefikConfig(ctx context.Context, in *TraefikConfigRequest, opts ...grpc.CallOption) (*TraefikConfigResponse, error)
-	// Restart the container running the Deplo control plane on THIS host (agent 0
-	// only — a remote has no panel to restart). The caller names itself: it sends
-	// its own hostname, which inside a container IS the short container id.
-	//
-	// The restart is DETACHED and delayed by a moment on purpose: it kills the very
-	// process waiting on this RPC, so the reply has to win the race. An unresolvable
-	// hint answers ok=false with a reason — never a silent success, because "did my
-	// panel restart?" is not a question the operator can answer by looking.
+	// Restart the container running the Deplo control plane on THIS host (agent 0 only —
+	// a remote has no panel to restart).
 	RestartControlPlane(ctx context.Context, in *RestartControlPlaneRequest, opts ...grpc.CallOption) (*RestartControlPlaneResponse, error)
 }
 
@@ -1372,44 +1080,19 @@ type AgentServer interface {
 	// Host CPU/mem/disk/net snapshot. Replaces lib/infra/host.ts per server.
 	// (Wired into getServerMetrics in Part C; defined now so the contract is whole.)
 	Metrics(context.Context, *MetricsRequest) (*HostMetrics, error)
-	// Per-CONTAINER live resource snapshot (`docker stats --no-stream`) for the
-	// named containers of ONE project — the data source for the per-app /
-	// per-database Monitoring tab, next to the host-level Metrics above. Scoped to
-	// a project by label (deplo.project=<project_id>) exactly like the Part C
-	// container RPCs, so a container name off the wire can never stat a sibling
-	// project's container. ADDITIVE: gated by the "container-stats" capability.
+	// Per-CONTAINER live resource snapshot (`docker stats --no-stream`) for the named
+	// containers of ONE project — the data source for the per-app / per-database
+	// Monitoring tab, next to the host-level Metrics above.
 	ContainerStats(context.Context, *ContainerStatsRequest) (*ContainerStatsResponse, error)
 	// ONE long-lived stream carrying this host's metrics AND every Deplo-managed
-	// container's stats, sampled on the AGENT's own ticker. Replaces the
-	// per-viewer, per-resource Metrics/ContainerStats poll: the control plane
-	// opens exactly one of these per server and demuxes frames into its RAM ring
-	// buffer, so telemetry cost is O(hosts) — independent of how many containers
-	// run there and how many people are looking.
-	//
-	// The agent is still a pure gRPC SERVER: the control plane dials and the agent
-	// streams, exactly like FollowLogs. There is no agent->control-plane channel.
-	//
-	// Container scoping is by the deplo.managed=true label, NEVER an empty filter
-	// (which would enumerate every container on the host, including ones Deplo
-	// does not own). Each stat carries its deplo.project label so the control
-	// plane demuxes to an App / Database without a second lookup.
-	//
-	// ADDITIVE: gated by the "metrics-stream" capability. An agent without it
-	// keeps serving the unary Metrics / ContainerStats poll unchanged, and the
-	// control plane falls back to polling that ONE server.
+	// container's stats, sampled on the AGENT's own ticker.
 	StreamMetrics(*MetricsStreamRequest, grpc.ServerStreamingServer[MetricsSample]) error
 	// Deploy lifecycle. Server-streaming so build/run logs flow live, in one
 	// connection, into the control plane's existing per-deployment log + status
 	// writes (which republish over the GraphQL SSE subscriptions unchanged).
 	Deploy(*DeployRequest, grpc.ServerStreamingServer[DeployEvent]) error
-	// Reconnect to an in-flight (or just-finished) deploy and replay the events
-	// the control plane missed (PLAN D5, Part-B half). Remote builds are long and
-	// costly to lose, so the agent keeps a bounded record of each deploy's events
-	// keyed by deploy_id; if the control plane drops mid-build it dials back with
-	// ReattachDeploy(deploy_id, from_seq) and the agent replays from the cursor,
-	// then continues streaming live events as the build proceeds. Returns
-	// NOT_FOUND if the agent has no record of that deploy (it never ran there, or
-	// its record was evicted) — the control plane then reconciles it to error.
+	// Reconnect to an in-flight (or just-finished) deploy and replay the events the
+	// control plane missed (PLAN D5, Part-B half).
 	ReattachDeploy(*ReattachRequest, grpc.ServerStreamingServer[DeployEvent]) error
 	// Lifecycle control over an already-deployed stack. These replace the direct
 	// stop/start/destroy docker calls in lib/deploy/build.ts for agent-owned
@@ -1417,310 +1100,102 @@ type AgentServer interface {
 	StopStack(context.Context, *StackRef) (*StackResult, error)
 	StartStack(context.Context, *StackRef) (*StackResult, error)
 	DestroyStack(context.Context, *StackRef) (*StackResult, error)
-	// Re-apply routing to a running stack WITHOUT a rebuild. The control plane
-	// re-renders the stack YAML with the new domain set (renderCompose /
-	// buildComposeStack stay the single TS source of truth) and sends it; the agent
-	// overwrites <stack_dir>/<slug>.yml (+ the env-file and any compose mount files)
-	// and `docker compose up -d --remove-orphans`, which recreates only the routed
-	// service in place so Traefik picks up the new labels. Replaces the in-process
-	// reroute that read/wrote the stack file on the control plane's own disk.
+	// Re-apply routing to a running stack WITHOUT a rebuild.
 	Reroute(context.Context, *RerouteRequest) (*StackResult, error)
 	// Copy a single Docker named volume across HOSTS, for a server MOVE (a
-	// database/project relocating to another server). Docker named volumes are
-	// host-local and the agent trust model is strictly star (an agent can neither
-	// dial nor trust a peer agent), so a volume cannot be copied host-to-host
-	// directly — instead the control plane RELAYS the bytes: it calls ExportVolume
-	// on the SOURCE agent (streaming the volume's gzipped tar out), and feeds those
-	// chunks into ImportVolume on the DESTINATION agent (which untars them into the
-	// target volume). No S3 hop and no agent↔agent connection.
-	//
-	// ExportVolume tars the named volume from inside a read-only helper container
-	// (the same busybox `tar -C /v -cf -` used by Backup's archiveVolume), gzips it,
-	// and streams it as raw byte chunks. The caller is expected to have QUIESCED the
-	// source (stopped the stack) first so the on-disk files can't change mid-read —
-	// the agent does not stop anything here (it only reads), keeping this a pure,
-	// reusable primitive. Any agent advertising the "volume-copy" capability serves
-	// it; an older agent returns UNIMPLEMENTED, which the control plane maps to an
-	// "update the agent" error.
+	// database/project relocating to another server).
 	ExportVolume(*ExportVolumeRequest, grpc.ServerStreamingServer[VolumeChunk]) error
-	// The destination half of a cross-host volume copy (see ExportVolume). The FIRST
-	// client message MUST be a VolumeChunk carrying `header` (the target volume name +
-	// whether to wipe it first); every subsequent message carries `data` (a raw slice
-	// of the gzipped tar produced by ExportVolume). The agent wipes the target volume
-	// (unless told not to), then untars the reassembled stream into it via a helper
-	// container (the same `tar -C /v -xf -` used by Restore). The caller MUST have
-	// stopped the destination stack first so nothing writes the volume under the
-	// untar. Terminal StackResult reports success/failure of the whole import.
+	// The destination half of a cross-host volume copy (see ExportVolume). The caller
+	// MUST have stopped the destination stack first so nothing writes the volume under
+	// the untar.
 	ImportVolume(grpc.ClientStreamingServer[VolumeChunk, StackResult]) error
-	// Copy a service's host-side FILES DIR (<stack_dir>/files/<slug>) across hosts,
-	// for a server move — the sibling of ExportVolume/ImportVolume for the one piece
-	// of a service's state that is NOT a Docker volume. The files dir holds a
-	// compose-stack's `./` bind-mount files, template config-file mounts, and
-	// `type: "service"` volume mounts; most of it is re-materialised from the control
-	// plane on a deploy, but any RUNTIME data written under it would otherwise be lost
-	// on a move. ExportFiles tars the dir out (gzipped) and streams it; a missing dir
-	// streams an empty archive (not an error). Same relay + capability model as the
-	// volume RPCs.
+	// Copy a service's host-side FILES DIR (<stack_dir>/files/<slug>) across hosts, for a
+	// server move — the sibling of ExportVolume/ImportVolume for the one piece of a
+	// service's state that is NOT a Docker volume.
 	ExportFiles(*ExportFilesRequest, grpc.ServerStreamingServer[FilesChunk]) error
 	// The destination half of a files-dir copy (see ExportFiles). The FIRST client
-	// message MUST be a FilesChunk carrying `header` (the target slug + wipe flag);
-	// every subsequent message carries `data` (a slice of the gzipped tar). The agent
-	// wipes the target files dir (unless told not to), then untars the stream into it
-	// (anti-traversal enforced, symlinks skipped — same guard as Restore's files/
-	// arm). The caller must have stopped the destination stack first. Terminal
-	// StackResult reports success/failure.
+	// message MUST be a FilesChunk carrying `header` (the target slug + wipe flag); every
+	// subsequent message carries `data` (a slice of the gzipped tar).
 	ImportFiles(grpc.ClientStreamingServer[FilesChunk, StackResult]) error
 	// Copy an arbitrary HOST DIRECTORY off this machine — the bind-mount half of a
 	// migration from another platform, where a service's data may sit in a plain
 	// directory rather than in a Docker volume.
-	//
-	// Deliberately narrow, because this is the one RPC that names a host path off the
-	// wire. The path must already EXIST and be a directory (a `-v /missing:/v` mount
-	// would otherwise create it and export nothing, the same trap ExportVolume has),
-	// and a short list of system roots is refused outright. The real gate is on the
-	// control-plane side: instance admin plus the host-volumes grant, which is the
-	// same power a compose stack with a bind mount already has — this is a second
-	// door onto it, never a wider one.
 	ExportHostPath(*ExportHostPathRequest, grpc.ServerStreamingServer[VolumeChunk]) error
 	// The destination half of a host-directory copy (see ExportHostPath). First
 	// message carries the header (target path + wipe flag), the rest carry the
 	// gzipped tar. Same deferred wipe as ImportVolume: no data, no wipe.
 	ImportHostPath(grpc.ClientStreamingServer[HostPathChunk, StackResult]) error
-	// Stream a BUILT IMAGE off this host, for a build server: the third sibling of
-	// the volume and files-dir relays, and the same star-topology reasoning - the
-	// control plane calls ExportImage on the BUILDER and feeds the chunks into
-	// ImportImage on the host that will run it. No registry, no agent↔agent link.
-	//
-	// `docker save <ref>` piped through gzip, framed like VolumeChunk. Only a local
-	// `deplo/<key>:<dep>` tag is ever asked for, and the ref is re-validated agent
-	// side before it reaches argv. `remove_after` deletes the image here once the
-	// last byte is written: on a build server the image is a courier, not an
-	// artifact - what is worth keeping is the BuildKit cache, which this never
-	// touches. Capability: "image-copy".
+	// Stream a BUILT IMAGE off this host, for a build server: the third sibling of the
+	// volume and files-dir relays, and the same star-topology reasoning - the control
+	// plane calls ExportImage on the BUILDER and feeds the chunks into ImportImage on the
+	// host that will run it.
 	ExportImage(*ExportImageRequest, grpc.ServerStreamingServer[ImageChunk]) error
-	// The destination half of an image copy (see ExportImage). The FIRST client
-	// message MUST be an ImageChunk carrying `header`; every subsequent message
-	// carries `data`. The agent pipes the reassembled stream into `docker image
-	// load`, which decompresses it itself.
-	//
-	// The archive is NOT trusted to name itself: `docker load` restores whatever
-	// RepoTags it declares, not the tag the caller announced, so an archive could
-	// carry a second image and replace a neighbouring app's - or a base image - on a
-	// host that merely accepted a build. The agent diffs the host's tag list either
-	// side of the load and REFUSES (removing them) if any other `deplo/` tag
-	// appeared. Scoped to that namespace on purpose: other deploys mutate the same
-	// host concurrently, so treating a base image someone else just pulled as
-	// smuggled would break a deploy that did nothing wrong.
-	// Terminal StoreResult reports bytes + sha256 of what actually landed, the same
-	// proof of transfer WriteStoreFile returns - a loaded image has no ETag either.
-	// Capability: "image-copy".
+	// The destination half of an image copy (see ExportImage). The FIRST client message
+	// MUST be an ImageChunk carrying `header`; every subsequent message carries `data`.
 	ImportImage(grpc.ClientStreamingServer[ImageChunk, StoreResult]) error
 	// Read back the rendered stack YAML the agent has on disk (<stack_dir>/<slug>.yml)
-	// for the "View full compose" preview. The single-image/built stack's image ref
-	// + env live only in this file (not on the project), so the preview must read it
-	// from the owning host. Returns exists=false (empty yaml) when no stack file is
-	// present yet (never deployed).
+	// for the "View full compose" preview. Returns exists=false (empty yaml) when no
+	// stack file is present yet (never deployed).
 	ReadStack(context.Context, *StackRef) (*ReadStackResponse, error)
 	// Container introspection (status/running) for the live-status subscriptions.
 	Inspect(context.Context, *InspectRequest) (*InspectResponse, error)
-	// Whether a HOST TCP port is free to publish. The control plane calls this
-	// BEFORE provisioning a database with "Expose publicly" (a published `ports:`
-	// mapping) so a port already taken — by another Deplo stack OR by any non-Deplo
-	// host process (a system Postgres on 5432, the control plane's own DB, …) —
-	// fails the creation up front with a clear message rather than leaving a
-	// half-provisioned container whose `compose up` lost the port bind. The agent
-	// answers by attempting to BIND the port on the host (0.0.0.0 + ::, then
-	// immediately closing): a bind is the only check that sees BOTH Docker-published
-	// ports and raw host listeners, with no output parsing. Gated behind the
-	// "checkport" Hello capability so an older agent surfaces "update the agent"
-	// rather than a fake "available".
+	// Whether a HOST TCP port is free to publish.
 	CheckPort(context.Context, *CheckPortRequest) (*CheckPortResponse, error)
-	// ONE bounded HTTP GET to a container of an app's own stack, issued from the
-	// host over Docker's network — what a compose app's icon detection reads.
-	//
-	// An app deployed as a compose stack runs PREBUILT images: its favicon is not
-	// a file anywhere on the host (the files dir holds only the config its bind
-	// mounts need), it exists only inside the image and is SERVED. The only way to
+	// ONE bounded HTTP GET to a container of an app's own stack, issued from the host
+	// over Docker's network — what a compose app's icon detection reads. The only way to
 	// see it is to ask the running app for it, exactly as a browser would.
-	//
-	// The agent resolves the target itself: the container is found by the app's own
-	// `deplo.project` label + compose service, and the request goes to THAT
-	// container's IP. The caller supplies a port, a path and a Host header — never
-	// an address — so this can never be turned into a general outbound fetch from
-	// the host (no DNS, no user-supplied IP, no scheme: plain HTTP to a container
-	// this app owns). Redirects are returned, never followed: where to go next is
-	// the control plane's decision, not the agent's.
-	//
-	// Deliberately NOT a health check and not a proxy — one request, one bounded
-	// body, no streaming. Gated behind the "http-probe" Hello capability.
 	ProbeHttp(context.Context, *ProbeHttpRequest) (*ProbeHttpResponse, error)
-	// Reclaim Docker disk on the host. STRICTLY AN ALLOW-LIST: the agent removes
-	// only what it can PROVE is unreferenced, and the proof is always a
-	// container-reference REVERSE INDEX over `docker ps -aq` (running AND exited) or
-	// an on-disk sentinel — never a label, because a genuine app container may carry
-	// no `deplo.*` label at all (`deplo-myapp-web-1` does not). It therefore never
-	// runs `docker system prune`, `container prune`, `volume prune` or `network
-	// prune`: on a Deplo host a STOPPED app is a LIVE app (StopStack is `compose
-	// stop`, StartStack is `compose start` — the container, its volumes and its
-	// networks must all survive a stop), and a dangling volume may hold a database's
-	// data files. Those verbs are absent from CleanupScope and must never be added.
-	//
-	// With dry_run the agent enumerates candidates and reclaims NOTHING, filling in
-	// every result field as if it had — this is what the UI calls first, to render
-	// the confirm dialog. A scope that fails, or that the agent declines because it
-	// could not build the reverse index and refuses to guess, is reported per-scope
-	// and the sweep carries on; ok=false is reserved for a sweep that could not start
-	// at all (UNAVAILABLE when Docker is unreachable). Gated behind the
-	// "docker-cleanup" Hello capability so an older agent surfaces "update the agent"
-	// rather than a fake success.
+	// Reclaim Docker disk on the host. Those verbs are absent from CleanupScope and must
+	// never be added.
 	DockerCleanup(context.Context, *DockerCleanupRequest) (*DockerCleanupResponse, error)
-	// Update the agent BINARY in place to a newer release, WITHOUT re-bootstrapping
-	// — the agent's mTLS materials (agent.crt/agent.key/ca.crt under --agent-dir)
-	// are NEVER touched, so the server keeps its identity and pinned fingerprint
-	// across the upgrade and stays "online". This is the in-place sibling of
-	// re-running install-agent.sh (which mints a fresh token and re-bootstraps,
-	// resetting trust). The control plane resolves the latest release (the SAME
-	// GitHub release the install path uses) and sends the per-arch download URL +
-	// its sha256 here; the agent downloads, VERIFIES the checksum (refusing a
-	// mismatch, exactly like the installer's P2 guard), atomically swaps its own
-	// on-disk binary, replies, then re-execs ITSELF (syscall.Exec — same PID, same
-	// argv, same env; no exit, so a supervisor's Restart policy is not involved).
-	// The re-execed binary finds the existing materials and serves straight away —
-	// no call-home.
-	// INVARIANT: trust material is out of scope here; a SelfUpdate can change the
-	// code but never the identity. Returns FAILED_PRECONDITION when the agent can't
-	// locate/replace its own binary (e.g. a read-only install dir), so the control
-	// plane can tell the operator to fall back to re-running the installer.
+	// Update the agent BINARY in place to a newer release, WITHOUT re-bootstrapping — the
+	// agent's mTLS materials (agent.crt/agent.key/ca.crt under --agent-dir) are NEVER
+	// touched, so the server keeps its identity and pinned fingerprint across the upgrade
+	// and stays "online".
 	SelfUpdate(context.Context, *SelfUpdateRequest) (*SelfUpdateResponse, error)
-	// Remove the agent's own footprint from this host and stop: the systemd unit,
-	// the binary, and the state dir under --agent-dir (mTLS materials included).
-	// The sibling of SelfUpdate, and the ONLY RPC that ends the agent's own life.
-	//
-	// Exists for the MIGRATION SOURCE: a host of another platform that Deplo is
-	// importing from, where the agent is installed to read volumes and for nothing
-	// else. Sending someone to a shell to undo an install Deplo performed is the
-	// exact thing the product refuses to do.
-	//
-	// Ordering is the whole contract, and the control plane depends on it: the
-	// removals happen BEFORE the reply (so a failure is returnable and the row is
-	// kept), the process then exits 0 shortly after — cleanly, so systemd's
-	// Restart=on-failure does not bring it back. The unit is disabled but never
-	// `stop`ped: KillMode defaults to control-group, so stopping first would kill
-	// this process before it could delete anything.
-	//
-	// OUT OF SCOPE, deliberately: Docker. No container, image, volume or network
-	// is touched — on a migration source they belong to the other platform, and on
-	// an ordinary server that is what uninstall-agent.sh is for. The script also
-	// stays the answer for a host that is unreachable or already de-trusted
-	// (ADR-0011), which is why the control plane always hands it over too.
+	// Remove the agent's own footprint from this host and stop: the systemd unit, the
+	// binary, and the state dir under --agent-dir (mTLS materials included). The sibling
+	// of SelfUpdate, and the ONLY RPC that ends the agent's own life.
 	SelfUninstall(context.Context, *SelfUninstallRequest) (*SelfUninstallResponse, error)
 	// Back up a database or a project to a destination, streaming progress.
-	// DATABASE → the agent `docker exec`s the engine's dump tool (per the format
-	// table in docs/research/dbs-backups/PLAN.md), gzip-compresses the stream, and
-	// writes it out, so no temp file and no control-plane round-trip. PROJECT →
-	// the agent tars the project's named + compose-stack volumes (via a throwaway
-	// helper container that mounts them), the project files dir, and the rendered
-	// compose/env snapshot, gzip-compresses, and writes it out. Host bind mounts
-	// are EXCLUDED (shared cross-tenant paths, outside Deplo). The terminal
-	// BackupResult carries the final object key + byte size the control plane
-	// records on the BackupRun.
-	//
-	// The SINK is one of three, in the order the request selects them: `s3` (a
-	// multipart PUT via minio-go), `store` (an age-encrypted file under a
-	// validated root on this host), or — when `stream_out` is set — this RPC's own
-	// BackupEvent.data frames, so the control plane can relay the artifact to
-	// another host's WriteStoreFile. All three consume the SAME producer: the
-	// compression and the age wrap happen once, in the source pipeline, so a
-	// relayed artifact is ciphertext before it ever leaves this host.
 	Backup(*BackupRequest, grpc.ServerStreamingServer[BackupEvent]) error
 	// Restore a database or project from a previously-written artifact, IN PLACE,
-	// streaming progress. DATABASE → read the artifact, decrypt (store only),
-	// decompress, and restore per the format table — drop-and-recreate, guaranteed
-	// by the dump format (pg `--clean --if-exists`, mysql `--add-drop-table`,
-	// mongo `--drop`) so a restore overwrites rather than appends. PROJECT → stop
-	// the stack, wipe + untar the volumes + files, re-`Reroute` the snapshot
-	// compose/env (which restarts the stack) = full data + config in place. A
-	// restart failure (e.g. a snapshot image that no longer exists) is reported
-	// clearly on the stream rather than silently leaving the stack down.
-	//
-	// This RPC reads the artifact from a destination THIS host can reach (`s3` or
-	// a local `store`). When the artifact lives on another server's disk, the
-	// control plane uses RestoreFrom instead and streams the bytes in.
+	// streaming progress. A restart failure (e.g. a snapshot image that no longer exists)
+	// is reported clearly on the stream rather than silently leaving the stack down.
 	Restore(*RestoreRequest, grpc.ServerStreamingServer[RestoreEvent]) error
-	// Verify a destination for the "Test connection" button. S3 → HEAD/stat the
-	// bucket with the supplied creds and report reachable + writable. STORE →
-	// resolve the root, create it if it is the agent's own managed one, verify the
-	// sentinel for a custom one, probe writability, sweep stale `.partial` files,
-	// and report free/total bytes so the UI can show headroom. An S3 check needs
-	// no Docker and no host state, so any agent advertising "backup" can serve it;
-	// a STORE check is about THIS host's disk, so it must run on the destination's
-	// own server.
+	// Verify a destination for the "Test connection" button. An S3 check needs no Docker
+	// and no host state, so any agent advertising "backup" can serve it; a STORE check is
+	// about THIS host's disk, so it must run on the destination's own server.
 	S3Check(context.Context, *S3CheckRequest) (*S3CheckResponse, error)
-	// Delete artifacts by exact key or by prefix. Backs retention pruning (the
-	// control plane deletes objects older than retentionDays for a backup) and
-	// the "delete artifacts too" branch of target deletion. Idempotent: a missing
-	// object is not an error. Returns how many objects were removed.
+	// Delete artifacts by exact key or by prefix.
 	S3Delete(context.Context, *S3DeleteRequest) (*S3DeleteResponse, error)
-	// Stream an artifact OUT, for a restore or a download whose reader lives
-	// elsewhere. The artifact is either on this host's store or in a bucket this
-	// host can dial (`store` or `s3`). Emits `data` frames only (no header). By
-	// default the bytes are exactly what was written — still age-encrypted — so a
-	// control plane relaying them to another host never holds plaintext. Pass
-	// `age_identity` to decrypt on the way out instead, which is what a user
-	// downloading their own backup needs.
+	// Stream an artifact OUT, for a restore or a download whose reader lives elsewhere.
+	// The artifact is either on this host's store or in a bucket this host can dial
+	// (`store` or `s3`).
 	ReadStoreFile(*ReadStoreFileRequest, grpc.ServerStreamingServer[StoreChunk]) error
-	// Receive an artifact INTO this host's store. The FIRST client message MUST
-	// carry `header` (the destination root + object key); every following message
-	// carries `data`. The agent writes to `<key>.partial`, fsyncs, and renames on
-	// a clean end — so a broken relay leaves a sweepable temp file rather than a
-	// truncated artifact at the real key that retention would later hand to a
-	// restore. The terminal StoreResult carries the bytes written and their
-	// sha256: on a filesystem there is no ETag, so this is the only durable proof
-	// of what landed, and it is what the control plane records on the run.
+	// Receive an artifact INTO this host's store. The FIRST client message MUST carry
+	// `header` (the destination root + object key); every following message carries
+	// `data`.
 	WriteStoreFile(grpc.ClientStreamingServer[StoreChunk, StoreResult]) error
-	// Restore from an artifact this host CANNOT reach — the cross-host half of
-	// Restore. Bidirectional because a restore must both receive bytes and report
-	// progress: the first client message carries the header (kind + descriptor +
-	// the age identity), every following message carries a slice of the artifact,
-	// and the agent pipes them straight into the same restore chain Restore uses.
-	// Deliberately NOT "stage the artifact to a temp file then call Restore": that
-	// would need a full artifact's worth of free space on the very host being
-	// restored, plus cleanup that has to survive an agent restart.
+	// Restore from an artifact this host CANNOT reach — the cross-host half of Restore.
 	RestoreFrom(grpc.BidiStreamingServer[RestoreChunk, RestoreEvent]) error
-	// Stream a container's live runtime logs (`docker logs -f --tail N`) as raw
-	// byte chunks. Output-only — there is no stdin. The control plane proxies these
-	// chunks straight into the unchanged SSE log route. Closing the stream (browser
-	// disconnect) cancels the RPC, which kills the agent's `docker logs` client
-	// only — never the container. Works on a stopped container (tails its recorded
-	// output, then ends).
+	// Stream a container's live runtime logs (`docker logs -f --tail N`) as raw byte
+	// chunks. Closing the stream (browser disconnect) cancels the RPC, which kills the
+	// agent's `docker logs` client only — never the container.
 	FollowLogs(*FollowLogsRequest, grpc.ServerStreamingServer[LogChunk]) error
 	// Interactive `docker attach` to a running container, full-duplex over one bidi
-	// stream. The FIRST client message MUST be an AttachOpen (selects the container,
-	// declares tty + initial size); subsequent client messages are stdin bytes or a
-	// resize. The agent streams the container's merged output down. `--sig-proxy` is
-	// off, so a client disconnect never signals the container. The pty backing (Go
-	// creack/pty) lives here now (was Node node-pty), so tty containers get a real
-	// terminal regardless of the agent host.
+	// stream. `--sig-proxy` is off, so a client disconnect never signals the container.
 	Attach(grpc.BidiStreamingServer[AttachInput, AttachOutput]) error
 	// Every attachable container in a project's stack (replaces listInstances +
-	// inspectRuntime + inspectStdio in lib/data/console.ts), default (exposed/
-	// running) first. Carries the project id + slug + exposed-service so the agent
-	// can label-filter and order without knowing Deplo's store.
+	// inspectRuntime + inspectStdio in lib/data/console.ts), default (exposed/ running)
+	// first.
 	ListInstances(context.Context, *ListInstancesRequest) (*ListInstancesResponse, error)
-	// Run a command in a container (`docker exec`), replacing execInContainer. The
-	// agent detects the image's shell (or falls back to raw argv on distroless) and
-	// returns the guest exit code/stdout/stderr instead of erroring on a non-zero
-	// exit — the REPL renders failures. A docker/OCI-level failure (no such
-	// container, stopped, no shell) is a gRPC error, not a guest exit.
+	// Run a command in a container (`docker exec`), replacing execInContainer.
 	Exec(context.Context, *ExecRequest) (*ExecResponse, error)
 	// The default (or chosen) container's shell label ("/bin/sh" | "/bin/bash" |
 	// "raw exec (no shell)") for the console banner — replaces shellLabel.
 	ShellLabel(context.Context, *ShellLabelRequest) (*ShellLabelResponse, error)
-	// Spawn a command in a container and return immediately with its handle. The
-	// container check and the shell probe happen INSIDE the job goroutine (they
-	// cost up to ~25s on a cold shell-plan cache), so this RPC is a map insert:
-	// a pre-spawn failure surfaces through PollJob as
-	// {running: false, exit_code: -1, stderr: "..."} rather than as an RPC error.
+	// Spawn a command in a container and return immediately with its handle.
 	StartJob(context.Context, *StartJobRequest) (*StartJobResponse, error)
 	// The job's current state. Output is returned ONLY on the terminal poll -
 	// streaming it every minute for every in-flight job would be megabytes of
@@ -1739,11 +1214,7 @@ type AgentServer interface {
 	RenameFile(context.Context, *RenameFileRequest) (*FileEntryResult, error)
 	// Whether a project's files root exists on this host (drives the Files tab).
 	FilesExist(context.Context, *FilesExistRequest) (*FilesExistResponse, error)
-	// Start (or restart) a project's dev container. Server-streaming like Deploy
-	// (it materialises the workspace, ensures the gateway, pre-chowns, writes the
-	// stack, `compose up`s) so progress logs flow live into the same SSE plumbing.
-	// The control plane sends the rendered dev compose + entrypoint + (for git) the
-	// tokenized clone URL + (for upload) the archive; the agent stays dumb.
+	// Start (or restart) a project's dev container.
 	StartDev(*StartDevRequest, grpc.ServerStreamingServer[DeployEvent]) error
 	// Stop a project's dev container (reversible — KEEPS the workspace + deps
 	// volume so a later StartDev resumes the edited tree). Also stops the tunnel.
@@ -1756,11 +1227,8 @@ type AgentServer interface {
 	// (its per-project users are removed via DeprovisionSshUser).
 	TeardownDev(context.Context, *TeardownDevRequest) (*StackResult, error)
 	// Lazily ensure the 2-service SSH gateway stack is up on this host (idempotent;
-	// ensureNetwork + write the rendered config files + `compose up` + wait for
-	// sshd + reconcile every supplied user). The control plane sends the rendered
-	// files (sshd_config / wrapper / socket-filter / compose / entrypoint) and the
-	// full provision step-list for every stored DevSshUser of this server so the
-	// agent rebuilds the projection from the store's truth (ADR-0002).
+	// ensureNetwork + write the rendered config files + `compose up` + wait for sshd +
+	// reconcile every supplied user).
 	EnsureGateway(context.Context, *EnsureGatewayRequest) (*StackResult, error)
 	// Provision one user inside the running gateway by running the control-plane-
 	// computed exec steps (the password, if any, rides in a step's stdin — never
@@ -1782,38 +1250,16 @@ type AgentServer interface {
 	// verifies the cert matches the pending key, atomically swaps cert+key on disk,
 	// and hot-reloads its TLS config so new handshakes present the fresh cert.
 	InstallRenewedCert(context.Context, *InstallRenewedCertRequest) (*StackResult, error)
-	// Static host identity — the neofetch answer, not the gauge. Metrics/
-	// StreamMetrics already carry the USAGE numbers (cpu %, mem used, disk used);
-	// this carries what the hardware and OS actually ARE, plus the host clock and
-	// the two pieces of host state the control plane can act on (the Traefik stack
-	// file and whether a given container id resolves). Read live, persisted
-	// nowhere agent-side.
+	// Static host identity — the neofetch answer, not the gauge.
 	HostInfo(context.Context, *HostInfoRequest) (*HostInfoResponse, error)
 	// Set the host's timezone (IANA name, e.g. "Europe/Rome"). `timedatectl` when
-	// present, otherwise relinking /etc/localtime. The name is validated against
-	// /usr/share/zoneinfo before anything is written — defence in depth, since the
-	// control plane validates too. Answers with a FRESH HostInfoResponse so the UI
-	// shows the moved clock without a second round trip.
+	// present, otherwise relinking /etc/localtime.
 	SetTimezone(context.Context, *SetTimezoneRequest) (*HostInfoResponse, error)
-	// Rewrite and/or restart THIS host's `deplo-traefik` stack — the reverse proxy
-	// the installer put at $AGENT_DATA/traefik/docker-compose.yml. Per ADR-0006 the
-	// agent renders NOTHING: the compose YAML is authored control-plane-side and
-	// shipped opaque, exactly like an app stack, so the Traefik label grammar stays
-	// in one place (lib/deploy) and never leaks into Go.
-	//
-	// Refuses when that file is absent or the running Traefik is not deplo-traefik:
-	// the installer explicitly leaves an operator's own proxy alone, and so does
-	// this. The previous file is kept as docker-compose.yml.bak before any write —
-	// a config change that takes :80/:443 down must be reversible from the host.
+	// Rewrite and/or restart THIS host's `deplo-traefik` stack — the reverse proxy the
+	// installer put at $AGENT_DATA/traefik/docker-compose.yml.
 	TraefikConfig(context.Context, *TraefikConfigRequest) (*TraefikConfigResponse, error)
-	// Restart the container running the Deplo control plane on THIS host (agent 0
-	// only — a remote has no panel to restart). The caller names itself: it sends
-	// its own hostname, which inside a container IS the short container id.
-	//
-	// The restart is DETACHED and delayed by a moment on purpose: it kills the very
-	// process waiting on this RPC, so the reply has to win the race. An unresolvable
-	// hint answers ok=false with a reason — never a silent success, because "did my
-	// panel restart?" is not a question the operator can answer by looking.
+	// Restart the container running the Deplo control plane on THIS host (agent 0 only —
+	// a remote has no panel to restart).
 	RestartControlPlane(context.Context, *RestartControlPlaneRequest) (*RestartControlPlaneResponse, error)
 	mustEmbedUnimplementedAgentServer()
 }

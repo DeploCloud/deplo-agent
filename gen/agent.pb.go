@@ -4,39 +4,9 @@
 // 	protoc        v5.29.3
 // source: agent.proto
 
-// The Deplo server-agent contract: the second system boundary, alongside
-// GraphQL (UI <-> control plane). This is control plane <-> server. The agent
-// is a single-purpose Go binary, one per server, that owns the host-coupled
-// half of the platform (Docker, the build pipeline, host metrics) and exposes
-// it over this typed RPC. See docs/research/server-agent/PLAN.md and
+// The Deplo server-agent contract: the second system boundary, alongside GraphQL (UI
+// <-> control plane). See docs/research/server-agent/PLAN.md and
 // docs/adr/0006-server-agent-is-a-per-host-go-binary.md.
-//
-// PART A SUBSET (extended in PART B + PART C). This file is the versioned
-// boundary for the whole A-D arc. Part A implemented Hello / Metrics / Deploy
-// (UPLOAD+IMAGE) / Inspect / control verbs (localhost agent, deploy-only). Part B
-// adds: the GIT source case (the agent clones with a short-lived token, D3), and
-// ReattachDeploy (reconnect to an in-flight deploy and replay missed events, D5).
-// PART C adds the per-server OBSERVABILITY + FILES surface: FollowLogs (live
-// `docker logs -f`), Attach (bidi console/pty), Exec + ListInstances + ShellLabel
-// (the console introspection that was direct-Docker in lib/data/console.ts), and
-// the file RPCs (List/Read/Write/Upload/CreateDir/Delete/Rename/FilesExist) that
-// repoint lib/data/project-files.ts off the control plane's local fs onto the
-// project's host. PART D adds the DEV-MODE + SSH-GATEWAY surface (the last
-// per-host singletons, ADR-0002): StartDev/StopDev/ResetDevWorkspace/TeardownDev
-// (the dev container lifecycle, repointing lib/deploy/dev.ts), EnsureGateway/
-// ProvisionSshUser/DeprovisionSshUser (the SSH gateway, repointing
-// lib/infra/ssh-gateway.ts — the control plane renders config + steps, the agent
-// applies them), StartTunnel/GetTunnel/StopTunnel (the VS Code tunnel), and a new
-// SOURCE_KIND_DEV_WORKSPACE so "deploy from dev workspace" builds on the owning
-// host. Every addition is new RPCs/messages — the contract version stays V1
-// (additive, never a redesign; D6's forward-compat principle holds).
-//
-// The agent's CALL-HOME BOOTSTRAP (PLAN P1-P4) is deliberately NOT a method on
-// this service: it travels agent -> control plane (the opposite direction of
-// every RPC here, which is control plane -> agent), is a one-shot HTTP POST over
-// a fingerprint-pinned TLS channel, and happens BEFORE the mTLS identity this
-// service requires even exists. It lives at the control plane's /api/agent/
-// bootstrap endpoint; see lib/agent/bootstrap.ts and app/api/agent/bootstrap.
 
 package agentpb
 
@@ -103,12 +73,9 @@ func (ContractVersion) EnumDescriptor() ([]byte, []int) {
 	return file_agent_proto_rawDescGZIP(), []int{0}
 }
 
-// Where the agent gets the bytes it builds/runs. Part A implemented UPLOAD
-// (archive streamed inside the Deploy RPC) and IMAGE (an already-built image ref
-// the agent runs as-is). Part B implements GIT (the agent clones with a
-// short-lived token, D3) so a remote build never ships the whole repo over the
-// wire — only the clone URL + branch + ephemeral token. New sources (e.g.
-// registry pull) are new enum cases — not a redesign (D6).
+// Where the agent gets the bytes it builds/runs. Part B implements GIT (the agent
+// clones with a short-lived token, D3) so a remote build never ships the whole repo
+// over the wire — only the clone URL + branch + ephemeral token.
 type SourceKind int32
 
 const (
@@ -122,24 +89,13 @@ const (
 	// The agent clones a git URL itself with a short-lived token. PART B.
 	SourceKind_SOURCE_KIND_GIT SourceKind = 3
 	// A multi-service compose stack: the control plane rendered the full stack
-	// (buildComposeStack — Traefik labels, deplo-network wiring, the deplo.* labels
-	// on EVERY service) into compose_yaml; the agent neither builds nor pulls an
-	// image (each service's image comes up via `docker compose up` itself). The
-	// agent writes the env map to a 0600 --env-file (the YAML interpolates `${VAR}`
-	// — it is NOT baked in like the single-image path), writes any `mounts`
-	// (template config files) under <stack_dir>/files/<slug>, then `compose up`s and
-	// waits for the stack by LABEL (deplo.slug), since the containers are
-	// compose-prefixed, not named deplo-<slug>. PART C.
+	// (buildComposeStack — Traefik labels, deplo-network wiring, the deplo.* labels on
+	// EVERY service) into compose_yaml; the agent neither builds nor pulls an image (each
+	// service's image comes up via `docker compose up` itself).
 	SourceKind_SOURCE_KIND_COMPOSE SourceKind = 4
-	// PART D: "deploy from dev workspace". The build context is the project's
-	// PERSISTENT dev workspace already on THIS agent's host (<dev-dir>/<slug>) —
-	// the developer's live, edited tree. The agent copies it into a fresh build
-	// dir EXCLUDING the non-source entries (node_modules / .deplo / .deplo-home /
-	// .git — same WORKSPACE_BUILD_EXCLUDE the control plane's copyWorkspaceForBuild
-	// applies) and rejects symlinks (the tree is attacker-controlled, UID-1000
-	// shell/SSH access), then builds it exactly like UPLOAD. No workspace bytes
-	// cross the wire — the build stays on the owning host. Only the Dockerfile
-	// descriptor + image_ref travel in the request, like GIT.
+	// PART D: "deploy from dev workspace". The build context is the project's PERSISTENT
+	// dev workspace already on THIS agent's host (<dev-dir>/<slug>) — the developer's
+	// live, edited tree.
 	SourceKind_SOURCE_KIND_DEV_WORKSPACE SourceKind = 5
 )
 
@@ -190,15 +146,7 @@ func (SourceKind) EnumDescriptor() ([]byte, []int) {
 	return file_agent_proto_rawDescGZIP(), []int{1}
 }
 
-// How the agent turns the build context into an image. The DOCKERFILE family (an
-// explicit or generated Dockerfile, the most common path) was Part A; the heavier
-// builders (Nixpacks/Buildpacks/Railpack/static) — ported from the control plane's
-// old in-process builders (lib/deploy/builders.ts) — now ALSO run agent-side, each
-// keyed by a BuildKind below and parameterised by DeployRequest.build_spec. NONE
-// means "no build, run the IMAGE source directly". A heavy kind is only sent to an
-// agent whose Hello advertised the matching capability (deploy.nixpacks / .static /
-// .buildpacks / .railpack); an older agent surfaces a clear "update the agent"
-// error rather than silently mishandling the request — forward-compatible (D6).
+// How the agent turns the build context into an image.
 type BuildKind int32
 
 const (
@@ -370,13 +318,8 @@ func (BackupKind) EnumDescriptor() ([]byte, []int) {
 	return file_agent_proto_rawDescGZIP(), []int{4}
 }
 
-// Which classes of object a cleanup may reclaim. Every scope is an ALLOW-LIST —
-// see the DockerCleanup RPC contract. Scopes not listed here DO NOT EXIST:
-// container prune, volume prune, network prune and `system prune` are
-// deliberately absent and must never be added, because a stopped Deplo app is a
-// live app (its container, volumes and networks must survive a `compose stop`)
-// and a dangling volume may hold a database's data files. Adding one would turn
-// a disk-reclaim button into a data-loss button.
+// Which classes of object a cleanup may reclaim. Adding one would turn a disk-reclaim
+// button into a data-loss button.
 type CleanupScope int32
 
 const (
@@ -387,30 +330,18 @@ const (
 	// `docker image prune` — untagged layers only, NEVER `-a`. A stopped container
 	// still pins its image, so this cannot strand an app.
 	CleanupScope_CLEANUP_SCOPE_DANGLING_IMAGES CleanupScope = 2
-	// Dangling anonymous volumes that are PROVABLY buildkitd stores: the railpack
-	// builder runs `moby/buildkit`, which declares VOLUME /var/lib/buildkit, and an
-	// orphaned one is identified by the `buildkitd.lock` sentinel file at its
-	// mountpoint — never by name, never by label. Removed one `docker volume rm` at
-	// a time.
+	// Dangling anonymous volumes that are PROVABLY buildkitd stores: the railpack builder
+	// runs `moby/buildkit`, which declares VOLUME /var/lib/buildkit, and an orphaned one
+	// is identified by the `buildkitd.lock` sentinel file at its mountpoint — never by
+	// name, never by label.
 	CleanupScope_CLEANUP_SCOPE_ORPHAN_BUILDKIT_CACHE CleanupScope = 3
 	// Old `deplo/<slug>:<deployment>` images labelled deplo.managed=true that NO
 	// container (running or exited) references, older than min_age_hours, minus the
-	// newest keep_images_per_app per deplo.slug. Removed BY ID with an explicit
-	// `docker rmi` each — never `image prune -a`, which would decide for us. There
-	// is no registry push anywhere in Deplo, so a removed image is recoverable only
-	// by a rebuild: this scope is opt-in and off by default.
+	// newest keep_images_per_app per deplo.slug.
 	CleanupScope_CLEANUP_SCOPE_UNUSED_APP_IMAGES CleanupScope = 4
-	// `<stack-dir>/files/<slug>` directories belonging to no stack any more: the
-	// config files of Apps and stacks that were DELETED. Nothing on the host says
-	// an app is gone — the directory is simply never read again — so the control
-	// plane sends the slugs it still knows about (live_slugs) and everything else
-	// is leftover. Removed one directory at a time.
-	//
-	// The only scope that removes something a rebuild cannot recreate, which is why
-	// it fails CLOSED: an empty live_slugs is not "nothing is live", it is a caller
-	// that could not tell us, and the scope is SKIPPED rather than guessed at. A
-	// directory younger than the grace period is left alone too, so a stack being
-	// written right now is never a candidate.
+	// `<stack-dir>/files/<slug>` directories belonging to no stack any more: the config
+	// files of Apps and stacks that were DELETED. A directory younger than the grace
+	// period is left alone too, so a stack being written right now is never a candidate.
 	CleanupScope_CLEANUP_SCOPE_LEFTOVER_APP_FILES CleanupScope = 5
 )
 
@@ -665,34 +596,14 @@ type HelloResponse struct {
 	DockerVersion string `protobuf:"bytes,4,opt,name=docker_version,json=dockerVersion,proto3" json:"docker_version,omitempty"`
 	// Coarse capability flags so the control plane can route only what this agent
 	// supports (Part A: a localhost agent that handles the Dockerfile build +
-	// single-image compose-up path). Absent capability => control plane keeps the
-	// local fallback path. Forward-compatible: new capabilities are new entries.
-	// The "backup" capability gates the Backup/Restore/S3Check/S3Delete RPCs: the
-	// control plane preflights it (AgentBackupUnsupportedError when absent) so an
-	// older agent gives a clear "update the agent" message, never a fake success.
-	// "backup-store" is its younger sibling and gates the destination arms that
-	// write to this host's disk (StoreTarget) plus ReadStoreFile/WriteStoreFile/
-	// RestoreFrom. Split from "backup" on purpose: an agent old enough to dump to
-	// S3 but not to hold artifacts must fail the SECOND thing clearly instead of
-	// failing both or, worse, accepting a store request it will ignore.
+	// single-image compose-up path).
 	Capabilities []string `protobuf:"bytes,5,rep,name=capabilities,proto3" json:"capabilities,omitempty"`
-	// Whether a Traefik reverse proxy is running on this host (a container on the
-	// shared `deplo` network that reads the deploy labels and routes traffic).
-	// Read LIVE by the agent, so the control plane can set the server's
-	// `traefikEnabled` from each Hello rather than a stored value that goes stale —
-	// the same read-live-not-stored model as health. Without Traefik, deployed
-	// apps run on the host but are not reachable on their domains.
+	// Whether a Traefik reverse proxy is running on this host (a container on the shared
+	// `deplo` network that reads the deploy labels and routes traffic). Without Traefik,
+	// deployed apps run on the host but are not reachable on their domains.
 	TraefikRunning bool `protobuf:"varint,6,opt,name=traefik_running,json=traefikRunning,proto3" json:"traefik_running,omitempty"`
-	// This host's CPU architecture, from Go's runtime.GOARCH: "amd64" or "arm64"
-	// (the two the release publishes binaries for). Reported so the control plane
-	// can refuse to BUILD an image on one host and run it on a host of the other -
-	// an amd64 image loaded on an arm64 box starts and dies with `exec format
-	// error`, long after the deploy called itself a success. An agent too old to
-	// send this leaves it "", which the control plane reads as "unknown" and which
-	// can never match another host's arch, so a build server is simply not offered
-	// until both ends are new enough. Constant for the life of the host, but sent
-	// on every Hello for the same reason `docker_version` is: nothing here is
-	// stored on the agent side.
+	// This host's CPU architecture, from Go's runtime.GOARCH: "amd64" or "arm64" (the two
+	// the release publishes binaries for).
 	HostArch      string `protobuf:"bytes,7,opt,name=host_arch,json=hostArch,proto3" json:"host_arch,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -980,12 +891,7 @@ func (x *HostMetrics) GetRunningContainers() int32 {
 }
 
 // The build method's settings for a heavy BuildKind (STATIC/NIXPACKS/BUILDPACKS/
-// RAILPACK). Mirrors the fields lib/deploy/builders.ts reads off BuildConfig +
-// methodSettings, flattened onto the wire. The control plane is the single source
-// of truth: it resolves the framework's runtime language (runtimeFor().language)
-// so the agent stays dumb about Deplo's framework registry. Only the fields the
-// chosen method uses are read; the rest are ignored. Present iff build_kind is one
-// of the heavy kinds (DeployRequest.build_spec).
+// RAILPACK).
 type BuildSpec struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The build method name, for logs + the buildpacks flavor select
@@ -1007,9 +913,7 @@ type BuildSpec struct {
 	// Empty => the method's default.
 	RuntimeVersion string `protobuf:"bytes,7,opt,name=runtime_version,json=runtimeVersion,proto3" json:"runtime_version,omitempty"`
 	// The framework's runtime language, resolved control-plane-side via
-	// runtimeFor(framework).language ("node"|"python"|…|"none"). Used to pin the
-	// nixpacks per-language version var (NIXPACKS_<LANG>_VERSION) and to gate the
-	// static builder's Node builder stage. Empty/"none" => no language pin.
+	// runtimeFor(framework).language ("node"|"python"|…|"none").
 	RuntimeLanguage string `protobuf:"bytes,8,opt,name=runtime_language,json=runtimeLanguage,proto3" json:"runtime_language,omitempty"`
 	// nixpacks: the dir the build publishes/serves; non-empty switches nixpacks to
 	// the nginx-wrap static path (methodSettings.nixpacksPublishDirectory).
@@ -1141,18 +1045,12 @@ func (x *BuildSpec) GetStaticSinglePageApp() bool {
 	return false
 }
 
-// A git source the agent clones itself (SOURCE_KIND_GIT, D3). The control plane
-// resolves the clone URL and mints a SHORT-LIVED token (e.g. a GitHub App
-// installation token, ~1h) and sends both inside the Deploy request over mTLS;
-// the agent clones, resolves the commit sha (reported back in DeployResult), and
-// builds locally. The token is the only secret here and it is ephemeral —
-// nothing long-lived crosses the wire, and the agent never persists it.
+// A git source the agent clones itself (SOURCE_KIND_GIT, D3). The token is the only
+// secret here and it is ephemeral — nothing long-lived crosses the wire, and the agent
+// never persists it.
 type GitSource struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The clone URL. For a private GitHub repo the control plane has already
-	// embedded the installation token (https://x-access-token:<tok>@github.com/...);
-	// `token` below is then empty. For other providers the agent injects `token`
-	// into the URL itself. Either way the agent treats the resulting URL as opaque.
+	// The clone URL.
 	Url string `protobuf:"bytes,1,opt,name=url,proto3" json:"url,omitempty"`
 	// The branch (or ref) to check out. Empty => the remote's default branch.
 	Branch string `protobuf:"bytes,2,opt,name=branch,proto3" json:"branch,omitempty"`
@@ -1228,10 +1126,9 @@ func (x *GitSource) GetSubdir() string {
 
 type DockerfileBuild struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Path to the Dockerfile, relative to the build context root. Empty =>
-	// "Dockerfile". Re-validated against the context root inside the agent (the
-	// anti-escape check is re-ported to Go — path validation runs where the I/O
-	// runs, never trusting a path off the wire).
+	// Path to the Dockerfile, relative to the build context root. Re-validated against
+	// the context root inside the agent (the anti-escape check is re-ported to Go — path
+	// validation runs where the I/O runs, never trusting a path off the wire).
 	DockerfilePath string `protobuf:"bytes,1,opt,name=dockerfile_path,json=dockerfilePath,proto3" json:"dockerfile_path,omitempty"`
 	// Build context dir, relative to the context root. Empty => ".".
 	ContextPath string `protobuf:"bytes,2,opt,name=context_path,json=contextPath,proto3" json:"context_path,omitempty"`
@@ -1314,12 +1211,6 @@ func (x *DockerfileBuild) GetGeneratedDockerfile() string {
 }
 
 // One template config file a compose stack bind-mounts (SOURCE_KIND_COMPOSE).
-// The control plane carries the file CONTENT (it lives in its store, not on the
-// remote host); the agent materialises it under <stack_dir>/files/<slug>/<path>
-// before `compose up` — the rendered compose already points its bind sources at
-// that directory. `path` is relative to the project files dir; the agent rejects
-// any `..` segment or absolute path (the content arrives off the wire — same
-// anti-escape guard as the build context and the file RPCs).
 type MountFile struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Path          string                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
@@ -1374,11 +1265,9 @@ func (x *MountFile) GetContent() string {
 
 type DeployRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// A stable id for this deploy, minted by the control plane (the Deployment
-	// row id). Carried from day one so the agent can key an in-flight record and a
-	// future re-attach RPC can replay by it (D5). The control plane reconciles a
-	// still-"building" deploy to error on restart even though Part A is otherwise
-	// fire-and-forget.
+	// A stable id for this deploy, minted by the control plane (the Deployment row id).
+	// The control plane reconciles a still-"building" deploy to error on restart even
+	// though Part A is otherwise fire-and-forget.
 	DeployId string `protobuf:"bytes,1,opt,name=deploy_id,json=deployId,proto3" json:"deploy_id,omitempty"`
 	// Project identity. `slug` keys the stack file, compose project, container
 	// name and labels on the agent; `project_id` goes into the deplo.* labels.
@@ -1394,27 +1283,20 @@ type DeployRequest struct {
 	// control plane does not tar a context for git sources targeting a remote
 	// agent — only the descriptor crosses the wire (D3).
 	Git *GitSource `protobuf:"bytes,13,opt,name=git,proto3" json:"git,omitempty"`
-	// The fully-rendered compose YAML (D2): renderCompose stays the single TS
-	// source of truth; the agent receives opaque YAML and never re-implements
-	// routing/label logic in Go. The agent writes it to <stack_dir>/<slug>.yml and
-	// `docker compose up`s it.
+	// The fully-rendered compose YAML (D2): renderCompose stays the single TS source of
+	// truth; the agent receives opaque YAML and never re-implements routing/label logic
+	// in Go.
 	ComposeYaml string `protobuf:"bytes,8,opt,name=compose_yaml,json=composeYaml,proto3" json:"compose_yaml,omitempty"`
-	// The resolved, DECRYPTED env map (D4). The control plane decrypts via
-	// revealEnv and sends plaintext over mTLS; the agent writes it to a 0600
-	// env-file and never holds the encryption key. For the single-image path this
-	// is already baked into compose_yaml's `environment:`; it is sent separately
-	// too so a future compose-stack path can use it as the --env-file.
+	// The resolved, DECRYPTED env map (D4). The control plane decrypts via revealEnv and
+	// sends plaintext over mTLS; the agent writes it to a 0600 env-file and never holds
+	// the encryption key.
 	Env map[string]string `protobuf:"bytes,9,rep,name=env,proto3" json:"env,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	// How long to wait for the container to report running before declaring the
 	// deploy errored, in milliseconds. 0 => the agent's default.
 	ReadyTimeoutMs int64 `protobuf:"varint,10,opt,name=ready_timeout_ms,json=readyTimeoutMs,proto3" json:"ready_timeout_ms,omitempty"`
-	// The streamed build context, used iff source_kind == UPLOAD. The FIRST
-	// DeployRequest on the stream carries all the fields above; SUBSEQUENT
-	// messages on the stream carry ONLY context_chunk frames (every other field
-	// empty) until an empty/final marker. (Deploy is currently a unary request +
-	// server stream; the upload is chunked via repeated client messages once the
-	// RPC is made client-streaming in Part B. For Part A the archive is small
-	// enough to ride in a single bytes field.)
+	// The streamed build context, used iff source_kind == UPLOAD. The FIRST DeployRequest
+	// on the stream carries all the fields above; SUBSEQUENT messages on the stream carry
+	// ONLY context_chunk frames (every other field empty) until an empty/final marker.
 	ContextTar []byte `protobuf:"bytes,11,opt,name=context_tar,json=contextTar,proto3" json:"context_tar,omitempty"`
 	// True when image_ref must be pulled before running (SOURCE_KIND_IMAGE with a
 	// remote registry ref). The agent `docker pull`s it, streaming progress.
@@ -1423,56 +1305,26 @@ type DeployRequest struct {
 	// (SOURCE_KIND_COMPOSE). Written under <stack_dir>/files/<slug>/ before
 	// `compose up`. Empty for every other source kind.
 	Mounts []*MountFile `protobuf:"bytes,14,rep,name=mounts,proto3" json:"mounts,omitempty"`
-	// The rootDirectory subdir within the dev workspace to build from, relative to
-	// the workspace root (SOURCE_KIND_DEV_WORKSPACE, Part D). Empty => the workspace
-	// root. Re-validated against the materialised build dir inside the agent
-	// (anti-escape, like the GIT subdir). Mirrors how the git arm passes
-	// project.build.rootDirectory as GitSource.subdir.
+	// The rootDirectory subdir within the dev workspace to build from, relative to the
+	// workspace root (SOURCE_KIND_DEV_WORKSPACE, Part D).
 	DevWorkspaceSubdir string `protobuf:"bytes,15,opt,name=dev_workspace_subdir,json=devWorkspaceSubdir,proto3" json:"dev_workspace_subdir,omitempty"`
-	// The heavy build method's settings — present iff build_kind is STATIC /
-	// NIXPACKS / BUILDPACKS / RAILPACK. The agent reads the fields its method uses
-	// and ignores the rest. Absent for BUILD_KIND_DOCKERFILE (which uses
-	// `dockerfile` above) and BUILD_KIND_NONE.
+	// The heavy build method's settings — present iff build_kind is STATIC / NIXPACKS /
+	// BUILDPACKS / RAILPACK.
 	BuildSpec *BuildSpec `protobuf:"bytes,16,opt,name=build_spec,json=buildSpec,proto3" json:"build_spec,omitempty"`
-	// Build this deploy WITHOUT the host's layer cache: every `docker build` runs
-	// with --no-cache, and nixpacks is left on its default (per-build-dir) cache
-	// key so its BuildKit cache mounts start empty too. Set when the app's Build
-	// cache setting is off, or for the one build that follows a manual "Clear
-	// build cache". Capability: "deploy.nocache" (an older agent silently caches).
+	// Build this deploy WITHOUT the host's layer cache: every `docker build` runs with
+	// --no-cache, and nixpacks is left on its default (per-build-dir) cache key so its
+	// BuildKit cache mounts start empty too.
 	NoBuildCache bool `protobuf:"varint,17,opt,name=no_build_cache,json=noBuildCache,proto3" json:"no_build_cache,omitempty"`
-	// Replace the running containers even when the rendered stack is unchanged
-	// (`docker compose up --force-recreate`). `up -d` alone is a no-op for a
-	// compose stack or a prebuilt image whose config hash did not move, which is
-	// exactly the case the "Rebuild container" action exists for. Ordinary deploys
-	// leave it false so an unchanged reroute still causes no restart.
-	// Capability: "deploy.force-recreate".
+	// Replace the running containers even when the rendered stack is unchanged (`docker
+	// compose up --force-recreate`).
 	ForceRecreate bool `protobuf:"varint,18,opt,name=force_recreate,json=forceRecreate,proto3" json:"force_recreate,omitempty"`
-	// Extra flags APPENDED to the `docker compose … up -d --remove-orphans` the
-	// agent already assembles (e.g. ["--pull", "always"]). One token per element,
-	// already split by the control plane; never a whole command — the project name,
-	// the stack file and the env-file stay the agent's to choose, so a flag can
-	// never repoint compose at another project. The agent re-validates and drops
+	// Extra flags APPENDED to the `docker compose … up -d --remove-orphans` the agent
+	// already assembles (e.g. ["--pull", "always"]). The agent re-validates and drops
 	// anything that would (see sanitizeComposeArgs).
-	// Capability: "deploy.compose-args" (an older agent silently ignores them).
 	ComposeUpArgs []string `protobuf:"bytes,19,rep,name=compose_up_args,json=composeUpArgs,proto3" json:"compose_up_args,omitempty"`
-	// Build the image and STOP: no stack file is written, nothing is brought up,
-	// and this host runs no container for the app. Set when the app builds on a
-	// BUILD SERVER - a host that compiles for machines it does not run on. The
-	// caller then streams the image off with ExportImage and releases it on the
-	// target host with an ordinary SOURCE_KIND_IMAGE deploy (pull_image=false),
-	// which is byte for byte what a rollback already does.
-	//
-	// Everything else about the stream is unchanged: the same PhaseChange/LogLine
-	// events, the same seq numbering, the same ReattachDeploy replay - a build
-	// server's logs are the app's build logs and belong in the same deployment.
-	// The terminal DeployResult reports the BUILD's outcome; `ready` means the
-	// image exists and is tagged, not that anything is running.
-	//
-	// Only meaningful for a request that actually builds: BUILD_KIND_NONE and
-	// SOURCE_KIND_COMPOSE are rejected outright rather than silently producing an
-	// empty success (a compose stack has no single image to move).
-	// Capability: "deploy.build-only" - an older agent would IGNORE this field and
-	// deploy the app on the build server, so the control plane must preflight it.
+	// Build the image and STOP: no stack file is written, nothing is brought up, and this
+	// host runs no container for the app. Set when the app builds on a BUILD SERVER - a
+	// host that compiles for machines it does not run on.
 	BuildOnly     bool `protobuf:"varint,20,opt,name=build_only,json=buildOnly,proto3" json:"build_only,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1658,10 +1510,7 @@ type DeployEvent struct {
 	//	*DeployEvent_Result
 	Event isDeployEvent_Event `protobuf_oneof:"event"`
 	// Monotonic per-deploy sequence number (1-based), the REPLAY CURSOR for
-	// ReattachDeploy (D5). The agent stamps every event it emits and keeps a
-	// bounded buffer of them keyed by deploy_id; a reconnecting control plane
-	// asks for everything after the last seq it saw. 0 on a fresh Deploy stream's
-	// events is also fine — the control plane only needs ordering on reattach.
+	// ReattachDeploy (D5).
 	Seq           uint64 `protobuf:"varint,4,opt,name=seq,proto3" json:"seq,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1760,10 +1609,7 @@ func (*DeployEvent_Phase) isDeployEvent_Event() {}
 
 func (*DeployEvent_Result) isDeployEvent_Event() {}
 
-// Reconnect to an in-flight or recently-finished deploy and replay from a
-// cursor (D5). The agent replays buffered events with seq > from_seq, then (if
-// the deploy is still running) continues streaming live events; if it already
-// finished, it replays through the terminal DeployResult and ends the stream.
+// Reconnect to an in-flight or recently-finished deploy and replay from a cursor (D5).
 type ReattachRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The deploy to reattach to (the same stable id from DeployRequest.deploy_id).
@@ -1923,10 +1769,8 @@ type DeployResult struct {
 	Ready bool `protobuf:"varint,1,opt,name=ready,proto3" json:"ready,omitempty"`
 	// A human-readable reason on failure (empty on success).
 	Error string `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
-	// The git commit sha the agent resolved when it materialised a GIT source
-	// (Part B): the control plane writes it back to the Deployment row. Empty for
-	// UPLOAD/IMAGE sources (the control plane already knows the sha, or there is
-	// none).
+	// The git commit sha the agent resolved when it materialised a GIT source (Part B):
+	// the control plane writes it back to the Deployment row.
 	CommitSha     string `protobuf:"bytes,3,opt,name=commit_sha,json=commitSha,proto3" json:"commit_sha,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1986,21 +1830,12 @@ func (x *DeployResult) GetCommitSha() string {
 type StackRef struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Slug  string                 `protobuf:"bytes,1,opt,name=slug,proto3" json:"slug,omitempty"`
-	// Tear down the stack's named volumes too (`docker compose down -v`) and remove
-	// the on-disk compose file. Only DestroyStack honours it; StopStack/StartStack/
-	// ReadStack ignore it. Used by database deletion so a DB's data volume is
-	// reclaimed rather than orphaned. Added after the agent's initial release —
-	// forward-compatible: an older agent ignores the unknown field and falls back to
-	// a volume-orphaning `down`. Defaults to false, so app teardown is unchanged.
+	// Tear down the stack's named volumes too (`docker compose down -v`) and remove the
+	// on-disk compose file.
 	RemoveVolumes bool `protobuf:"varint,2,opt,name=remove_volumes,json=removeVolumes,proto3" json:"remove_volumes,omitempty"`
-	// DestroyStack only: named volumes to reclaim BY NAME, on top of whatever the
-	// `down -v` finds. `down` can only reclaim what the on-disk compose file
-	// declares, and a stack that was never deployed has no file — which is exactly
-	// the state a migrated app is in between "the data arrived" and "somebody
-	// deployed it". Deleting that app used to leave its imported data on the disk
-	// with nothing left that could name it. Every entry must start with `deplo-`
-	// (the agent refuses the rest), so this can only ever reclaim volumes Deplo
-	// itself creates. Ignored by an older agent, which is the pre-existing leak.
+	// DestroyStack only: named volumes to reclaim BY NAME, on top of whatever the `down
+	// -v` finds. Every entry must start with `deplo-` (the agent refuses the rest), so
+	// this can only ever reclaim volumes Deplo itself creates.
 	ReclaimVolumes []string `protobuf:"bytes,3,rep,name=reclaim_volumes,json=reclaimVolumes,proto3" json:"reclaim_volumes,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
@@ -2061,12 +1896,8 @@ type StackResult struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Ok    bool                   `protobuf:"varint,1,opt,name=ok,proto3" json:"ok,omitempty"`
 	Error string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
-	// ImportVolume / ImportFiles only: how many bytes of the COMPRESSED stream this
-	// host actually consumed, and their sha256. The control plane relays the stream,
-	// so it knows both for the sending side and cross-checks them here — the same
-	// digest check the backup relay makes. Zero/empty from an agent older than the
-	// fields, and from every other RPC that answers with a StackResult: treat them as
-	// "not reported", never as "nothing arrived".
+	// ImportVolume / ImportFiles only: how many bytes of the COMPRESSED stream this host
+	// actually consumed, and their sha256.
 	BytesWritten  int64  `protobuf:"varint,3,opt,name=bytes_written,json=bytesWritten,proto3" json:"bytes_written,omitempty"`
 	Sha256        string `protobuf:"bytes,4,opt,name=sha256,proto3" json:"sha256,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -2262,11 +2093,8 @@ func (*HostPathChunk_Data) isHostPathChunk_Frame() {}
 
 type ExportVolumeRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The FULL Docker named volume to tar out (e.g. `deplo-db-mydb_db-mydb-data`).
-	// Re-validated agent-side against the docker-volume-name pattern before it is
-	// interpolated into `-v <name>:/v` — a value like "/" or "/etc" that would
-	// bind-mount a host path is rejected (defence in depth behind the control
-	// plane's own naming). The volume must already exist on this host.
+	// The FULL Docker named volume to tar out (e.g. `deplo-db-mydb_db-mydb-data`). The
+	// volume must already exist on this host.
 	VolumeName    string `protobuf:"bytes,1,opt,name=volume_name,json=volumeName,proto3" json:"volume_name,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -2531,9 +2359,7 @@ func (*FilesChunk_Data) isFilesChunk_Frame() {}
 type ExportImageRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The image tag to `docker save`, always the control plane's own
-	// `deplo/<deploy_key>:<deployment id[:12]>`. Re-validated agent-side with the
-	// same guard the build output uses, so a ref carrying shell or CSV metacharacters
-	// never reaches argv.
+	// `deplo/<deploy_key>:<deployment id[:12]>`.
 	ImageRef string `protobuf:"bytes,1,opt,name=image_ref,json=imageRef,proto3" json:"image_ref,omitempty"`
 	// `docker rmi` the image here once the stream completes successfully. True for
 	// every build-server transfer: the builder holds no app images, only cache. A
@@ -3217,26 +3043,16 @@ func (x *ProbeHttpResponse) GetLocation() string {
 	return ""
 }
 
-// In-place agent binary update (SelfUpdate). The control plane resolves the
-// latest release and sends EVERY published per-arch asset (its download URL + the
-// sha256 from the release's checksums.txt — the same integrity source install-
-// agent.sh pins). The AGENT selects the asset matching its OWN architecture
-// (runtime.GOARCH), exactly as install-agent.sh selects by `uname -m`: the agent
-// is the authority on its own host's arch, and the control plane never has to
-// learn or store it. The agent stays otherwise dumb — it does not talk to the
-// GitHub API or know the release repo, it just fetches the chosen URL, checks the
-// digest, and swaps itself. Trust material is NOT in this message and is never
-// touched by the update.
+// In-place agent binary update (SelfUpdate). The agent stays otherwise dumb — it does
+// not talk to the GitHub API or know the release repo, it just fetches the chosen URL,
+// checks the digest, and swaps itself.
 type SelfUpdateRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The target version, normalized without a leading v (e.g. "1.2.0"). Used only
 	// for logging + the response echo; the agent does not gate on it (the control
 	// plane already decided this is the version to install).
 	Version string `protobuf:"bytes,1,opt,name=version,proto3" json:"version,omitempty"`
-	// The published binaries, keyed by Go arch ("amd64" | "arm64"). The agent picks
-	// the entry for its own runtime.GOARCH; if its arch is absent (the release
-	// didn't publish it), the update fails with FAILED_PRECONDITION and the running
-	// binary is untouched. At least one entry is always present.
+	// The published binaries, keyed by Go arch ("amd64" | "arm64").
 	Binaries      map[string]*ArchBinary `protobuf:"bytes,2,rep,name=binaries,proto3" json:"binaries,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -3344,10 +3160,8 @@ func (x *ArchBinary) GetSha256() string {
 	return ""
 }
 
-// What SelfUninstall removes. Empty: the agent knows every path involved — the
-// binary from os.Executable(), the state dir from its own --agent-dir flag, the
-// unit from the fixed systemd path the installer writes. Taking any of them from
-// the caller would be handing a remote peer an `rm -rf` argument.
+// What SelfUninstall removes. Taking any of them from the caller would be handing a
+// remote peer an `rm -rf` argument.
 type SelfUninstallRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -3386,10 +3200,8 @@ func (*SelfUninstallRequest) Descriptor() ([]byte, []int) {
 
 type SelfUninstallResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The absolute paths actually removed, for the control plane's activity trail
-	// and for the operator to see what was on the box. A path the agent never
-	// found (no unit file, e.g. an agent run in a container) is simply absent —
-	// that is a skip, not a failure.
+	// The absolute paths actually removed, for the control plane's activity trail and for
+	// the operator to see what was on the box.
 	Removed []string `protobuf:"bytes,1,rep,name=removed,proto3" json:"removed,omitempty"`
 	// True once every removal has happened and the process is about to exit. The
 	// reply is sent FIRST and the exit follows after a short grace period, so this
@@ -3447,12 +3259,7 @@ type SelfUpdateResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The version now staged on disk (echoes the request's version on success).
 	Version string `protobuf:"bytes,1,opt,name=version,proto3" json:"version,omitempty"`
-	// True once the new binary is in place and the agent is about to restart to
-	// exec it. The control plane uses this as the "update applied" signal; shortly
-	// after replying the agent re-execs ITSELF via syscall.Exec — the process is
-	// REPLACED in place (same PID, same argv, same env), it does NOT exit, so no
-	// supervisor (systemd Restart=on-failure) is involved. The freshly-swapped
-	// binary reuses the existing mTLS materials.
+	// True once the new binary is in place and the agent is about to restart to exec it.
 	Restarting    bool `protobuf:"varint,2,opt,name=restarting,proto3" json:"restarting,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -3502,13 +3309,10 @@ func (x *SelfUpdateResponse) GetRestarting() bool {
 	return false
 }
 
-// The S3 destination the agent reads/writes with — the DECRYPTED creds (the
-// control plane decrypts via decryptSecret and sends plaintext over mTLS; the
-// agent never holds the encryption key, mirroring Deploy's env handling) plus
-// the bucket coordinates and the exact object key. `object_key` is built by the
-// control plane (deplo/<teamId>/<kind>/<targetId>/<ISO-timestamp>.<ext>) and is
-// opaque to the agent. For S3Check it may be empty (a bucket-level probe); for
-// S3Delete `object_key` is the key/prefix to remove.
+// The S3 destination the agent reads/writes with — the DECRYPTED creds (the control
+// plane decrypts via decryptSecret and sends plaintext over mTLS; the agent never holds
+// the encryption key, mirroring Deploy's env handling) plus the bucket coordinates and
+// the exact object key.
 type S3Target struct {
 	state     protoimpl.MessageState `protogen:"open.v1"`
 	Endpoint  string                 `protobuf:"bytes,1,opt,name=endpoint,proto3" json:"endpoint,omitempty"` // e.g. s3.amazonaws.com or a MinIO host:port
@@ -3522,30 +3326,11 @@ type S3Target struct {
 	// The control plane decides from the destination's provider.
 	PathStyle bool `protobuf:"varint,7,opt,name=path_style,json=pathStyle,proto3" json:"path_style,omitempty"`
 	// Opt OUT of the SSRF guard that refuses an endpoint resolving to a loopback,
-	// link-local or private address. Default false, and it stays false for every
-	// destination anyone can create from the normal form: the endpoint arrives off
-	// the wire and the agent dials it as root, so 169.254.169.254 must not be
-	// reachable by accident.
-	//
-	// It exists because deplo is a SELF-HOSTING platform and "my MinIO is at
-	// 10.0.0.5" is the ordinary case, not the attack. The control plane gates the
-	// flag on instance admin - the same bar as a custom store path - so the person
-	// turning it on is the person who owns the network.
+	// link-local or private address. It exists because deplo is a SELF-HOSTING platform
+	// and "my MinIO is at 10.0.0.5" is the ordinary case, not the attack.
 	AllowPrivateEndpoint bool `protobuf:"varint,8,opt,name=allow_private_endpoint,json=allowPrivateEndpoint,proto3" json:"allow_private_endpoint,omitempty"`
 	// Per-destination quirks of ONE S3-compatible store, as `--flag=value` tokens
 	// (`--s3-sign-accept-encoding=false`, `--s3-force-path-style=true`, …).
-	//
-	// Every S3-compatible gateway is S3-compatible in its own way, and the ones
-	// that need a workaround need a different one each. Rather than grow a bool per
-	// gateway on this message - each of which then has to be understood by every
-	// agent that ever sees it - the control plane sends the operator's tokens and
-	// the agent maps the ones it knows onto minio-go options.
-	//
-	// Both sides validate against an allowlist and BOTH sides drop what they do not
-	// recognise: an unknown flag must never fail a backup, because the alternative
-	// is a fleet where the same destination works on one host and refuses on the
-	// next. Capability: "backup-s3-args" (an older agent ignores the field
-	// entirely, and the control plane says so rather than pretending it applied).
 	ExtraArgs     []string `protobuf:"bytes,9,rep,name=extra_args,json=extraArgs,proto3" json:"extra_args,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -3645,27 +3430,8 @@ func (x *S3Target) GetExtraArgs() []string {
 }
 
 // A directory on THIS host's filesystem that holds backup artifacts — the second
-// destination shape, for a user who would rather keep backups on a VPS they
-// already pay for than sign up for a bucket.
-//
-// `root` is the one field in this whole contract that is a host path arriving off
-// the wire, and it is treated accordingly. The agent NEVER writes or deletes
-// under a root just because it was asked to:
-//
-//   - Empty root => the agent's OWN managed store (<data-base>/backups, i.e. the
-//     sibling of --stack-dir), which it creates 0700 on first use. This is the
-//     default and the only shape a non-admin can produce.
-//   - Non-empty root => accepted ONLY if it is absolute AND contains the sentinel
-//     file `.deplo-backups` that the agent itself wrote during an S3Check on an
-//     empty (or already-marked) directory. A typo'd `/var/lib/docker` therefore
-//     fails closed instead of becoming a remote `rm -rf` on the next retention
-//     sweep — which is exactly what an unguarded root plus S3Delete(prefix) is.
-//
-// `object_key` is the control plane's usual key
-// (deplo/<teamId>/<kind>/<targetId>/<stamp>-<runId>.<ext>.age), resolved under the
-// root with the same containment guard the file RPCs use: relative, no "..", and
-// realpath-confirmed inside. The team segment is what keeps two teams sharing one
-// storage host out of each other's artifacts.
+// destination shape, for a user who would rather keep backups on a VPS they already pay
+// for than sign up for a bucket.
 type StoreTarget struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Root          string                 `protobuf:"bytes,1,opt,name=root,proto3" json:"root,omitempty"`
@@ -3734,15 +3500,7 @@ type DatabaseDescriptor struct {
 	DbName string `protobuf:"bytes,3,opt,name=db_name,json=dbName,proto3" json:"db_name,omitempty"`
 	// The superuser the dump tool authenticates as inside the container.
 	User string `protobuf:"bytes,4,opt,name=user,proto3" json:"user,omitempty"`
-	// The engine password, decrypted by the control plane. The agent keeps it OFF
-	// the host docker-client's argv (which is world-readable via ps/proc) wherever
-	// the engine's tool can read it from an env var instead: postgres PGPASSWORD,
-	// mysql/mariadb MYSQL_PWD, redis REDISCLI_AUTH — forwarded into the container
-	// via a valueless `docker exec -e NAME`, so the value rides only in the host
-	// process's env. mongodump/mongorestore have no password env var, so for mongo
-	// the password is still passed as `-p <pw>` on argv (a bounded, host-local
-	// residual; the agent masks it out of any error string it logs). Empty when the
-	// container trusts local socket auth.
+	// The engine password, decrypted by the control plane.
 	Password      string `protobuf:"bytes,5,opt,name=password,proto3" json:"password,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -3822,9 +3580,8 @@ type ProjectDescriptor struct {
 	// stack the restore re-Reroutes.
 	Slug string `protobuf:"bytes,1,opt,name=slug,proto3" json:"slug,omitempty"`
 	// The host volume names to tar: the named-volume shape (hostVolumeName =
-	// deplo-<slug>-<name>) AND the compose-stack volumes the control plane parsed
-	// out of the rendered YAML. Host bind mounts are NOT here (excluded). A helper
-	// container mounts each read-only to tar it.
+	// deplo-<slug>-<name>) AND the compose-stack volumes the control plane parsed out of
+	// the rendered YAML.
 	VolumeNames []string `protobuf:"bytes,2,rep,name=volume_names,json=volumeNames,proto3" json:"volume_names,omitempty"`
 	// Whether to include the project files dir (<stack-dir>/files/<slug>) in the
 	// archive. False when the project has no files dir.
@@ -3926,18 +3683,13 @@ type BackupRequest struct {
 	Database *DatabaseDescriptor `protobuf:"bytes,3,opt,name=database,proto3" json:"database,omitempty"`
 	Project  *ProjectDescriptor  `protobuf:"bytes,4,opt,name=project,proto3" json:"project,omitempty"`
 	Store    *StoreTarget        `protobuf:"bytes,5,opt,name=store,proto3" json:"store,omitempty"`
-	// The age recipient ("age1…", an X25519 public key) the artifact is encrypted
-	// to. REQUIRED whenever the artifact is not going to S3 — a store write or a
-	// stream_out relay with an empty recipient is an ERROR, never a silent
-	// plaintext write. The matching identity stays in the control plane and only
-	// ever travels on a RestoreRequest, so this host can write backups it cannot
-	// itself read, and a compromised storage box yields nothing.
+	// The age recipient ("age1…", an X25519 public key) the artifact is encrypted to.
+	// REQUIRED whenever the artifact is not going to S3 — a store write or a stream_out
+	// relay with an empty recipient is an ERROR, never a silent plaintext write.
 	AgeRecipient string `protobuf:"bytes,6,opt,name=age_recipient,json=ageRecipient,proto3" json:"age_recipient,omitempty"`
-	// Emit the artifact as BackupEvent.data frames instead of writing it anywhere.
-	// Set by the control plane when the destination is a store on ANOTHER server:
-	// it relays these frames into WriteStoreFile there. `s3`/`store` are ignored.
-	// The BackupResult still reports the size this host produced — the durable
-	// number is the destination's StoreResult.bytes_written.
+	// Emit the artifact as BackupEvent.data frames instead of writing it anywhere. The
+	// BackupResult still reports the size this host produced — the durable number is the
+	// destination's StoreResult.bytes_written.
 	StreamOut     bool `protobuf:"varint,7,opt,name=stream_out,json=streamOut,proto3" json:"stream_out,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -4114,10 +3866,7 @@ type BackupEvent_Result struct {
 }
 
 type BackupEvent_Data struct {
-	// A slice of the finished artifact, emitted only under
-	// BackupRequest.stream_out. Interleaves freely with `log` frames — the arms
-	// are a oneof, so a consumer that predates this field decodes an unknown
-	// field and drops it rather than mis-reading a log line.
+	// A slice of the finished artifact, emitted only under BackupRequest.stream_out.
 	Data []byte `protobuf:"bytes,3,opt,name=data,proto3,oneof"`
 }
 
@@ -4137,24 +3886,11 @@ type BackupResult struct {
 	// its size in bytes — recorded on the control plane's BackupRun.
 	ObjectKey string `protobuf:"bytes,3,opt,name=object_key,json=objectKey,proto3" json:"object_key,omitempty"`
 	SizeBytes int64  `protobuf:"varint,4,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
-	// Hex sha256 of the artifact as written. Empty for an S3 upload (the bucket
-	// has its own ETag); set for a store write and for a stream_out relay, where
-	// it is the source's half of the integrity check against the destination's
-	// StoreResult.sha256.
+	// Hex sha256 of the artifact as written.
 	Sha256 string `protobuf:"bytes,5,opt,name=sha256,proto3" json:"sha256,omitempty"`
-	// How big the artifact is once DECRYPTED — i.e. exactly how many bytes
-	// ReadStoreFile emits when it is handed an age identity, which is what a
-	// download hands to a browser.
-	//
-	// It is not derivable from size_bytes: age adds a header plus a tag per 64 KiB
-	// chunk, so the stored artifact is always a little larger than the .tar.gz /
-	// .dump.gz inside it, and only the writer ever sees both numbers. Without it
-	// the download can send no Content-Length, and a browser with no
-	// Content-Length shows a download with no size, no percentage and no estimate
-	// — it looks like it is running forever.
-	//
-	// Zero means an agent from before this field: the control plane records
-	// nothing and the download stays length-less, exactly as it was.
+	// How big the artifact is once DECRYPTED — i.e. exactly how many bytes ReadStoreFile
+	// emits when it is handed an age identity, which is what a download hands to a
+	// browser.
 	DecryptedSizeBytes int64 `protobuf:"varint,6,opt,name=decrypted_size_bytes,json=decryptedSizeBytes,proto3" json:"decrypted_size_bytes,omitempty"`
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
@@ -4239,22 +3975,12 @@ type RestoreRequest struct {
 	Database *DatabaseDescriptor    `protobuf:"bytes,3,opt,name=database,proto3" json:"database,omitempty"`
 	Project  *ProjectDescriptor     `protobuf:"bytes,4,opt,name=project,proto3" json:"project,omitempty"`
 	Store    *StoreTarget           `protobuf:"bytes,5,opt,name=store,proto3" json:"store,omitempty"` // object_key points at the artifact to restore FROM
-	// The age identity ("AGE-SECRET-KEY-1…") the artifact was encrypted to.
-	// REQUIRED for a store restore. Kept on THIS message and never on
-	// BackupRequest so a private key cannot ride a routine nightly backup out to a
-	// storage host.
+	// The age identity ("AGE-SECRET-KEY-1…") the artifact was encrypted to. Kept on THIS
+	// message and never on BackupRequest so a private key cannot ride a routine nightly
+	// backup out to a storage host.
 	AgeIdentity string `protobuf:"bytes,6,opt,name=age_identity,json=ageIdentity,proto3" json:"age_identity,omitempty"`
-	// The hex sha256 the control plane recorded when it WROTE this artifact, so
-	// the agent can prove the bytes it is about to act on are that artifact. Empty
-	// means "no recorded digest" - a run taken before integrity checking shipped -
-	// and the check is skipped rather than failing every old restore point.
-	//
-	// It matters because an artifact is not trusted input: a bucket object is
-	// replaceable by anyone with write access, and a store artifact is forgeable by
-	// a compromised storage host (age gives confidentiality, not authenticity - the
-	// recipient is a public key that host is handed on every backup). The digest is
-	// verified as the stream is consumed, so a mismatch aborts the restore before
-	// the stack configuration is ever re-applied.
+	// The hex sha256 the control plane recorded when it WROTE this artifact, so the agent
+	// can prove the bytes it is about to act on are that artifact.
 	ExpectedSha256 string `protobuf:"bytes,7,opt,name=expected_sha256,json=expectedSha256,proto3" json:"expected_sha256,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
@@ -4477,10 +4203,10 @@ type S3CheckRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Bucket coordinates + creds; object_key is ignored (this is a bucket probe).
 	S3 *S3Target `protobuf:"bytes,1,opt,name=s3,proto3" json:"s3,omitempty"`
-	// Set instead of `s3` to probe a STORE root on this host: resolve it, honour
-	// the sentinel rule, create the managed root if that is what was asked for,
-	// round-trip a probe file, sweep stale `.partial` artifacts, and report
-	// headroom. object_key is ignored.
+	// Set instead of `s3` to probe a STORE root on this host: resolve it, honour the
+	// sentinel rule, create the managed root if that is what was asked for, round-trip a
+	// probe file, sweep stale `.partial` artifacts, and report headroom. object_key is
+	// ignored.
 	Store         *StoreTarget `protobuf:"bytes,2,opt,name=store,proto3" json:"store,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -4537,10 +4263,8 @@ type S3CheckResponse struct {
 	// "" on success; a human-readable reason otherwise (bad creds, no bucket,
 	// unmarked root, read-only mount) — surfaced as the destination's status detail.
 	Error string `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`
-	// Store probes only (0 for S3): the resolved root's filesystem headroom, so the
-	// UI can show how much room a destination has left without a second RPC. The
-	// dump's size is not knowable before it exists, so this is information for the
-	// operator, never a pre-flight gate.
+	// Store probes only (0 for S3): the resolved root's filesystem headroom, so the UI
+	// can show how much room a destination has left without a second RPC.
 	FreeBytes  int64 `protobuf:"varint,3,opt,name=free_bytes,json=freeBytes,proto3" json:"free_bytes,omitempty"`
 	TotalBytes int64 `protobuf:"varint,4,opt,name=total_bytes,json=totalBytes,proto3" json:"total_bytes,omitempty"`
 	// The root the agent actually resolved (the managed one when the request left
@@ -4747,42 +4471,14 @@ type ReadStoreFileRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The artifact to stream out. Same root rules as every other StoreTarget.
 	Store *StoreTarget `protobuf:"bytes,1,opt,name=store,proto3" json:"store,omitempty"`
-	// When set, DECRYPT on the way out (but do not decompress): the caller gets
-	// the .tar.gz / .dump.gz the user actually wants to download. Empty means ship
-	// the bytes verbatim, which is what a cross-host relay wants — there the
-	// control plane must never see plaintext.
-	//
-	// Decryption lives here rather than in the control plane because age is a
-	// STREAM: the agent decrypts chunk by chunk at constant memory, while a
-	// control plane doing it would have to hold a multi-GB artifact to do the same
-	// job.
+	// When set, DECRYPT on the way out (but do not decompress): the caller gets the
+	// .tar.gz / .dump.gz the user actually wants to download.
 	AgeIdentity string `protobuf:"bytes,2,opt,name=age_identity,json=ageIdentity,proto3" json:"age_identity,omitempty"`
-	// The hex sha256 the control plane recorded when it WROTE this artifact, so
-	// the agent can prove the bytes it is about to act on are that artifact. Empty
-	// means "no recorded digest" - a run taken before integrity checking shipped -
-	// and the check is skipped rather than failing every old restore point.
-	//
-	// It matters because an artifact is not trusted input: a bucket object is
-	// replaceable by anyone with write access, and a store artifact is forgeable by
-	// a compromised storage host (age gives confidentiality, not authenticity - the
-	// recipient is a public key that host is handed on every backup). The digest is
-	// verified as the stream is consumed, so a mismatch aborts the restore before
-	// the stack configuration is ever re-applied.
+	// The hex sha256 the control plane recorded when it WROTE this artifact, so the agent
+	// can prove the bytes it is about to act on are that artifact.
 	ExpectedSha256 string `protobuf:"bytes,3,opt,name=expected_sha256,json=expectedSha256,proto3" json:"expected_sha256,omitempty"`
-	// Set INSTEAD of `store` to read the artifact out of a BUCKET. Same job, same
-	// framing, same decryption: the only difference is where the bytes come from.
-	//
-	// It exists because a backup a user cannot get their hands on is half a
-	// backup. Without this the panel could only offer Download for artifacts kept
-	// on a server's disk, and a bucket artifact came with instructions: fetch the
-	// object with your own S3 credentials, then decrypt it yourself with age.
-	// That is the sort of answer this platform exists not to give.
-	//
-	// One difference the caller must know about: a file on disk can be hashed
-	// before a single byte is sent, but a bucket object can only be checked AS IT
-	// GOES PAST. So an S3 read that fails its digest fails at the END, after bytes
-	// have already been handed over, and the stream closes in error rather than
-	// completing. Gated by the `backup-s3-read` capability.
+	// Set INSTEAD of `store` to read the artifact out of a BUCKET. It exists because a
+	// backup a user cannot get their hands on is half a backup.
 	S3            *S3Target `protobuf:"bytes,4,opt,name=s3,proto3" json:"s3,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -5096,20 +4792,12 @@ type FollowLogsRequest struct {
 	Container string `protobuf:"bytes,2,opt,name=container,proto3" json:"container,omitempty"`
 	// Seed the stream with the last N lines before following live. 0 => 500.
 	Tail int32 `protobuf:"varint,3,opt,name=tail,proto3" json:"tail,omitempty"`
-	// Time window, in Unix SECONDS. 0 means unset on both ends: no lower bound,
-	// and follow live forever. They map straight onto `docker logs --since/--until`.
-	//
-	// Why the agent and not the control plane: the log stream is raw bytes with no
-	// per-line clock, so a control plane holding one end of the pipe cannot filter
-	// by time at all — the only thing that knows when a line was written is the
-	// log file docker is reading. Gated behind the `logs.timerange` capability;
-	// an agent without it ignores these and streams `--tail` as before.
+	// Time window, in Unix SECONDS. 0 means unset on both ends: no lower bound, and
+	// follow live forever. Gated behind the `logs.timerange` capability; an agent without
+	// it ignores these and streams `--tail` as before.
 	SinceUnix int64 `protobuf:"varint,4,opt,name=since_unix,json=sinceUnix,proto3" json:"since_unix,omitempty"`
 	UntilUnix int64 `protobuf:"varint,5,opt,name=until_unix,json=untilUnix,proto3" json:"until_unix,omitempty"`
-	// Prefix every line with its RFC3339Nano write time (`docker logs
-	// --timestamps`). Off by default: the prefix costs ~30 bytes a line and the
-	// viewer strips it back off, so it is only paid for when the timestamp column
-	// is actually shown.
+	// Prefix every line with its RFC3339Nano write time (`docker logs --timestamps`).
 	Timestamps    bool `protobuf:"varint,6,opt,name=timestamps,proto3" json:"timestamps,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -5797,9 +5485,6 @@ func (x *ConsoleInstance) GetRestartCount() int32 {
 type ListInstancesResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Exposed/running first (the agent applies the same sort as listInstances).
-	// Empty when the project has no containers — NO synthetic fallback entry (a
-	// fabricated container would be the "stored status that lies"; the localhost-
-	// only synthetic entry stays control-plane-side).
 	Instances     []*ConsoleInstance `protobuf:"bytes,1,rep,name=instances,proto3" json:"instances,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -7305,31 +6990,19 @@ type StartDevRequest struct {
 	Slug      string `protobuf:"bytes,1,opt,name=slug,proto3" json:"slug,omitempty"`
 	ProjectId string `protobuf:"bytes,2,opt,name=project_id,json=projectId,proto3" json:"project_id,omitempty"`
 	// The fully-rendered dev compose YAML (renderDevCompose) — opaque to the agent,
-	// written to <stack-dir>/dev-<slug>.yml (0600: it holds decrypted `development`
-	// env). The bind sources inside already point at the agent's <dev-dir>/<slug>,
-	// the entry script, and the clone-secret path (the agent uses the SAME data dir
-	// layout as the control plane did, so the host paths line up).
+	// written to <stack-dir>/dev-<slug>.yml (0600: it holds decrypted `development` env).
 	ComposeYaml string `protobuf:"bytes,3,opt,name=compose_yaml,json=composeYaml,proto3" json:"compose_yaml,omitempty"`
-	// The dev entrypoint script (DEV_ENTRY_SCRIPT) the compose bind-mounts. Written
-	// 0755 to <dev-dir>/_entry/deplo-dev-entry, idempotently (rewritten each start
-	// so a Deplo upgrade ships a new entrypoint without a rebuild). Rendered by the
-	// control plane so the agent stays dumb about its contents.
+	// The dev entrypoint script (DEV_ENTRY_SCRIPT) the compose bind-mounts.
 	EntryScript string `protobuf:"bytes,4,opt,name=entry_script,json=entryScript,proto3" json:"entry_script,omitempty"`
-	// Source seeding (mirrors lib/deploy/dev.ts). Exactly one applies:
-	//   - GIT: the control plane minted a tokenized clone URL; the agent stages it
-	//     to a root-owned 0600 file the compose bind-mounts at /run/deplo/clone-url
-	//     (never env / inspect-able). Empty => not a git source (clear any stale one).
-	//   - UPLOAD: the archive is streamed in `upload_tar` and the agent extracts it
-	//     into the (empty) workspace host-side before the container starts (the
-	//     archive isn't mounted in the container). Empty => nothing to seed.
+	// Source seeding (mirrors lib/deploy/dev.ts). Exactly one applies: - GIT: the control
+	// plane minted a tokenized clone URL; the agent stages it to a root-owned 0600 file
+	// the compose bind-mounts at /run/deplo/clone-url (never env / inspect-able).
 	CloneSecretUrl string `protobuf:"bytes,5,opt,name=clone_secret_url,json=cloneSecretUrl,proto3" json:"clone_secret_url,omitempty"`
 	UploadTar      []byte `protobuf:"bytes,6,opt,name=upload_tar,json=uploadTar,proto3" json:"upload_tar,omitempty"`
 	// The `-v <host>:/workspace` source for the pre-chown helper container, already
-	// host-path-translated by the control plane (its container's data mount differs
-	// from the in-container /data path; renderDevCompose does the same translation
-	// for the compose binds). For a bare-host remote agent this equals the plain
-	// workspace path (no translation), since the agent's own /data IS the host
-	// path. Empty => the agent pre-chowns its plain <dev-dir>/<slug>.
+	// host-path-translated by the control plane (its container's data mount differs from
+	// the in-container /data path; renderDevCompose does the same translation for the
+	// compose binds).
 	WorkspaceHostPath string `protobuf:"bytes,7,opt,name=workspace_host_path,json=workspaceHostPath,proto3" json:"workspace_host_path,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
@@ -7502,19 +7175,13 @@ func (x *TeardownDevRequest) GetSlug() string {
 	return ""
 }
 
-// The rendered SSH-gateway config files + the user projection. The control plane
-// keeps gateway-config.ts / gateway-projection.ts as the single source of truth
-// (snapshot-tested) and ships the rendered strings here; the agent writes them to
-// <data-dir>/ssh-gateway/ and brings the 2-service stack up. The agent never
+// The rendered SSH-gateway config files + the user projection. The agent never
 // re-implements the security-critical wrapper / sshd_config / allowlist in Go.
 type GatewayConfig struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The rendered docker-compose for the 2-service gateway (proxy + gateway),
-	// already host-path-translated by the control plane (renderGatewayCompose) so
-	// the bind mount works whatever the agent's data layout is. NOTE: the control
-	// plane translates against ITS OWN data mount; for a remote agent the agent's
-	// own GW dir is used (the agent owns the path), so the agent re-renders the
-	// compose's bind path locally — see the agent impl. Carried for localhost parity.
+	// The rendered docker-compose for the 2-service gateway (proxy + gateway), already
+	// host-path-translated by the control plane (renderGatewayCompose) so the bind mount
+	// works whatever the agent's data layout is.
 	ComposeYaml      string `protobuf:"bytes,1,opt,name=compose_yaml,json=composeYaml,proto3" json:"compose_yaml,omitempty"`
 	SshdConfig       string `protobuf:"bytes,2,opt,name=sshd_config,json=sshdConfig,proto3" json:"sshd_config,omitempty"`                   // -> ssh-gateway/sshd_config
 	WrapperScript    string `protobuf:"bytes,3,opt,name=wrapper_script,json=wrapperScript,proto3" json:"wrapper_script,omitempty"`          // -> ssh-gateway/deplo-dev-shell (0755)
@@ -7590,11 +7257,9 @@ func (x *GatewayConfig) GetSocketFilterCfg() string {
 }
 
 // One control-plane-computed gateway exec step the agent runs verbatim inside the
-// gateway container: `docker exec -i <gateway> <argv...>`, optionally piping
-// `input` to the command's stdin (chpasswd / file writes — the secret never hits
-// argv/env that `docker inspect` could surface). Mirrors GatewayStep in
-// lib/infra/gateway-projection.ts; the control plane decrypts the password
-// just-in-time and bakes the cleartext into the right step's `input`.
+// gateway container: `docker exec -i <gateway> <argv...>`, optionally piping `input` to
+// the command's stdin (chpasswd / file writes — the secret never hits argv/env that
+// `docker inspect` could surface).
 type GatewayStep struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Argv          []string               `protobuf:"bytes,1,rep,name=argv,proto3" json:"argv,omitempty"`
@@ -7647,10 +7312,10 @@ func (x *GatewayStep) GetInput() string {
 	return ""
 }
 
-// Ensure the gateway is up, then reconcile EVERY supplied user into it (the
-// store is the sole source of truth — ADR-0002; the control plane sends the full
-// provision plan for every DevSshUser of this server so a fresh gateway rebuilds
-// its whole projection).
+// Ensure the gateway is up, then reconcile EVERY supplied user into it (the store is
+// the sole source of truth — ADR-0002; the control plane sends the full provision plan
+// for every DevSshUser of this server so a fresh gateway rebuilds its whole
+// projection).
 type EnsureGatewayRequest struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
 	Config *GatewayConfig         `protobuf:"bytes,1,opt,name=config,proto3" json:"config,omitempty"`
@@ -7969,41 +7634,21 @@ type DockerCleanupRequest struct {
 	// CleanupScopeResult is populated as if the removal had happened. This is what
 	// the UI calls to render its confirm dialog.
 	DryRun bool `protobuf:"varint,2,opt,name=dry_run,json=dryRun,proto3" json:"dry_run,omitempty"`
-	// Only reclaim objects older than this. 0 => no age filter. Maps to docker's
-	// `--filter until=<n>h` on the prune scopes, and to a created-at comparison on
-	// the enumerated ones. An object whose age the agent cannot determine is never
-	// a candidate while an age filter is set (fail closed).
+	// Only reclaim objects older than this. 0 => no age filter. An object whose age the
+	// agent cannot determine is never a candidate while an age filter is set (fail
+	// closed).
 	MinAgeHours int32 `protobuf:"varint,3,opt,name=min_age_hours,json=minAgeHours,proto3" json:"min_age_hours,omitempty"`
 	// UNUSED_APP_IMAGES only: how many of the newest images to keep per deplo.slug.
 	// 0 => 1 — the current tag is always kept, even when no container references it
 	// (a stopped app must stay redeployable without a rebuild).
 	KeepImagesPerApp int32 `protobuf:"varint,4,opt,name=keep_images_per_app,json=keepImagesPerApp,proto3" json:"keep_images_per_app,omitempty"`
-	// UNUSED_APP_IMAGES only: a PER-SLUG override of keep_images_per_app, keyed by
-	// the deplo.slug label. A slug absent from the map falls back to the scalar, and
-	// every value floors at 1 for the same reason the scalar does.
-	//
-	// This is how an app's own ROLLBACK DEPTH is enforced. Retention decides how far
-	// back an app can be rolled, and that is a per-app product decision: one number
-	// for the whole host would either starve the app that wants five rollbacks or
-	// make every other app on the box pay for it in disk. The control plane sends
-	// one entry per app on this host; a preview stack (`<slug>__pr-<n>`) is never in
-	// the map and keeps falling back to the scalar, which is correct - a preview is
-	// not a rollback target.
-	//
-	// Gated by the "cleanup.keep-per-slug" Hello capability: an agent without it
-	// ignores this field entirely, so the control plane compensates by RAISING the
-	// scalar to the map's maximum. That over-keeps on an old host rather than
-	// under-keeping - a rollback still works, it just costs more disk until the
-	// agent is updated.
+	// UNUSED_APP_IMAGES only: a PER-SLUG override of keep_images_per_app, keyed by the
+	// deplo.slug label. That over-keeps on an old host rather than under-keeping - a
+	// rollback still works, it just costs more disk until the agent is updated.
 	KeepPerSlug map[string]int32 `protobuf:"bytes,5,rep,name=keep_per_slug,json=keepPerSlug,proto3" json:"keep_per_slug,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
-	// LEFTOVER_APP_FILES only: every stack slug the control plane still knows —
-	// Apps, their preview stacks (`<slug>__pr-<n>`) and databases — INSTANCE-WIDE,
-	// not just the ones placed on this host. Instance-wide because a stack that is
-	// moving between hosts exists on both for a moment and on neither in the
-	// records of one; a per-host list would delete the files of an app mid-move.
-	//
-	// Empty (or absent, which is what an older control plane sends) means the scope
-	// is SKIPPED, never "remove everything".
+	// LEFTOVER_APP_FILES only: every stack slug the control plane still knows — Apps,
+	// their preview stacks (`<slug>__pr-<n>`) and databases — INSTANCE-WIDE, not just the
+	// ones placed on this host.
 	LiveSlugs     []string `protobuf:"bytes,6,rep,name=live_slugs,json=liveSlugs,proto3" json:"live_slugs,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -8084,10 +7729,7 @@ func (x *DockerCleanupRequest) GetLiveSlugs() []string {
 type CleanupScopeResult struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Scope CleanupScope           `protobuf:"varint,1,opt,name=scope,proto3,enum=deplo.agent.v1.CleanupScope" json:"scope,omitempty"`
-	// Bytes reclaimed by this scope. Where docker reports its own total after a
-	// prune that total is authoritative; otherwise it is the summed size of the
-	// objects actually removed (which is also what a dry_run reports, since nothing
-	// has been removed yet to measure). Never an invented number.
+	// Bytes reclaimed by this scope.
 	ReclaimedBytes int64 `protobuf:"varint,2,opt,name=reclaimed_bytes,json=reclaimedBytes,proto3" json:"reclaimed_bytes,omitempty"`
 	ItemsRemoved   int32 `protobuf:"varint,3,opt,name=items_removed,json=itemsRemoved,proto3" json:"items_removed,omitempty"`
 	// The image ids / volume names / cache-record ids removed — or, under dry_run,
@@ -8304,11 +7946,11 @@ func (x *ContainerStatsRequest) GetContainers() []string {
 	return nil
 }
 
-// One container's live resource usage, parsed from `docker stats --no-stream`.
-// net_* / block_* are CUMULATIVE totals since container start (that is what
-// `docker stats` reports), NOT rates — the control plane derives bytes/sec from
-// the delta between consecutive samples, which also survives a counter reset on
-// restart. cpu_pct and mem_* are already instantaneous.
+// One container's live resource usage, parsed from `docker stats --no-stream`. net_* /
+// block_* are CUMULATIVE totals since container start (that is what `docker stats`
+// reports), NOT rates — the control plane derives bytes/sec from the delta between
+// consecutive samples, which also survives a counter reset on restart. cpu_pct and
+// mem_* are already instantaneous.
 type ContainerStat struct {
 	state      protoimpl.MessageState `protogen:"open.v1"`
 	Name       string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
@@ -8324,10 +7966,8 @@ type ContainerStat struct {
 	// False for a container that exists in the project but is not running (stats
 	// are zeroed) — so the tab can distinguish "stopped" from "no such container".
 	Running bool `protobuf:"varint,11,opt,name=running,proto3" json:"running,omitempty"`
-	// The deplo.project label (an App id, prj_*, or a Database id) this container
-	// belongs to — the demux key for the host-wide stream. Identity comes from the
-	// LABEL, never from parsing the container name: name-mangling is how Dokploy
-	// collapses every sibling Compose container of an App into one series.
+	// The deplo.project label (an App id, prj_*, or a Database id) this container belongs
+	// to — the demux key for the host-wide stream.
 	ProjectId string `protobuf:"bytes,12,opt,name=project_id,json=projectId,proto3" json:"project_id,omitempty"`
 	// The full 64-hex Docker id. Stable for a container's lifetime and CHANGES on
 	// recreation, which is exactly what the rate calculator needs in order to drop
@@ -8606,14 +8246,10 @@ type MetricsSample struct {
 	state      protoimpl.MessageState `protogen:"open.v1"`
 	Host       *HostMetrics           `protobuf:"bytes,1,opt,name=host,proto3" json:"host,omitempty"`
 	Containers []*ContainerStat       `protobuf:"bytes,2,rep,name=containers,proto3" json:"containers,omitempty"`
-	// The AGENT's clock at sample time. The control plane stamps its OWN receive
-	// time into the ring buffer — clock skew between hosts must never move a point
-	// on a chart — but this makes agent-side sampling gaps diagnosable after the
-	// fact, which a receive timestamp alone cannot do.
+	// The AGENT's clock at sample time.
 	SampledAtUnixMs int64 `protobuf:"varint,3,opt,name=sampled_at_unix_ms,json=sampledAtUnixMs,proto3" json:"sampled_at_unix_ms,omitempty"`
-	// Which backend produced this frame: "cgroup2" | "docker-stats". Diagnostic
-	// only — the numbers mean the same thing either way. It lets the control plane
-	// surface "this host is on the slow path" (~18x the CPU cost) without a second
+	// Which backend produced this frame: "cgroup2" | "docker-stats". It lets the control
+	// plane surface "this host is on the slow path" (~18x the CPU cost) without a second
 	// RPC, and makes an automatic demotion visible instead of silent.
 	Source        string `protobuf:"bytes,4,opt,name=source,proto3" json:"source,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -8683,12 +8319,7 @@ type HostInfoRequest struct {
 	// The path whose filesystem to measure, same contract as MetricsRequest.
 	// Empty => the agent's own --data-dir.
 	DataDir string `protobuf:"bytes,1,opt,name=data_dir,json=dataDir,proto3" json:"data_dir,omitempty"`
-	// The caller's own hostname. Inside a container that IS the short container
-	// id, which is how the agent can tell whether the control plane runs HERE and
-	// hand back a restartable container id. Empty => control_plane_container is
-	// left empty; it is never guessed from the image name, because "a container
-	// built from the deplo image" and "the container you are talking to me from"
-	// are different claims and only the second one is safe to restart.
+	// The caller's own hostname.
 	ControlPlaneHint string `protobuf:"bytes,2,opt,name=control_plane_hint,json=controlPlaneHint,proto3" json:"control_plane_hint,omitempty"`
 	unknownFields    protoimpl.UnknownFields
 	sizeCache        protoimpl.SizeCache
@@ -8738,10 +8369,7 @@ func (x *HostInfoRequest) GetControlPlaneHint() string {
 	return ""
 }
 
-// What this host IS, as opposed to what it is currently doing. Every field is
-// best-effort: a value the agent could not read comes back empty/zero rather
-// than failing the call, because a missing /etc/os-release must not cost the
-// operator their CPU model too.
+// What this host IS, as opposed to what it is currently doing.
 type HostInfoResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// e.g. "AMD Ryzen 5 5600X 6-Core Processor" (/proc/cpuinfo "model name").
@@ -9286,14 +8914,9 @@ type VolumeChunk_Header struct {
 	// on demand by the untar helper container if absent; re-validated like
 	// ExportVolumeRequest.volume_name.
 	VolumeName string `protobuf:"bytes,1,opt,name=volume_name,json=volumeName,proto3" json:"volume_name,omitempty"`
-	// Empty the target volume before untarring (default true for a move, so the
-	// import overwrites rather than merges into whatever the freshly-provisioned
-	// stack initialised). A false value appends onto existing contents.
-	//
-	// The wipe happens when the FIRST DATA FRAME ARRIVES, never on this header
-	// alone: a header followed by nothing is what a failed or empty export looks
-	// like, and emptying a volume for one of those destroys the data the copy was
-	// supposed to protect. No data, no wipe.
+	// Empty the target volume before untarring (default true for a move, so the import
+	// overwrites rather than merges into whatever the freshly-provisioned stack
+	// initialised).
 	WipeFirst     bool `protobuf:"varint,2,opt,name=wipe_first,json=wipeFirst,proto3" json:"wipe_first,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -9399,10 +9022,7 @@ func (x *FilesChunk_Header) GetWipeFirst() bool {
 
 type ImageChunk_Header struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The tag the stream is expected to carry. `docker load` restores whatever
-	// tags the archive names, so this is not what the load keys on - it is the
-	// caller's DECLARATION, and the agent enforces it: any other tag the archive
-	// brings is removed and the import fails. Must be `deplo/<name>:<tag>`; the
+	// The tag the stream is expected to carry. Must be `deplo/<name>:<tag>`; the
 	// namespace is re-validated agent-side because this RPC also deletes images.
 	ImageRef      string `protobuf:"bytes,1,opt,name=image_ref,json=imageRef,proto3" json:"image_ref,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -9510,32 +9130,12 @@ type RestoreChunk_Header struct {
 	// The age identity the artifact was encrypted to. Always required: this RPC
 	// exists only for store artifacts, and those are always encrypted.
 	AgeIdentity string `protobuf:"bytes,4,opt,name=age_identity,json=ageIdentity,proto3" json:"age_identity,omitempty"`
-	// The hex sha256 the control plane recorded when it WROTE this artifact, so
-	// the agent can prove the bytes it is about to act on are that artifact. Empty
-	// means "no recorded digest" - a run taken before integrity checking shipped -
-	// and the check is skipped rather than failing every old restore point.
-	//
-	// It matters because an artifact is not trusted input: a bucket object is
-	// replaceable by anyone with write access, and a store artifact is forgeable by
-	// a compromised storage host (age gives confidentiality, not authenticity - the
-	// recipient is a public key that host is handed on every backup). The digest is
-	// verified as the stream is consumed, so a mismatch aborts the restore before
-	// the stack configuration is ever re-applied.
+	// The hex sha256 the control plane recorded when it WROTE this artifact, so the
+	// agent can prove the bytes it is about to act on are that artifact.
 	ExpectedSha256 string `protobuf:"bytes,5,opt,name=expected_sha256,json=expectedSha256,proto3" json:"expected_sha256,omitempty"`
-	// The artifact came from OUTSIDE the fleet - a file somebody uploaded - so
-	// nothing in it may ever configure what comes back up.
-	//
-	// Without this the archive is still a fallback. `restoreConfig` prefers the
-	// control plane's compose/env/mounts for an unproven artifact, but falls back
-	// to the archive's whenever the control plane sent none: an app never
-	// deployed on this host has no stack file, an app with no variables has no
-	// env. That fallback exists for artifacts Deplo itself wrote, before it
-	// recorded digests. For an uploaded one it means the uploader chooses what
-	// `docker compose up` runs and what environment it runs with.
-	//
-	// Default false, so every existing caller keeps the behaviour it has. Gated
-	// by the `backup-untrusted-config` capability, because an agent that ignores
-	// this field would silently restore exactly what the flag exists to prevent.
+	// The artifact came from OUTSIDE the fleet - a file somebody uploaded - so nothing
+	// in it may ever configure what comes back up. That fallback exists for artifacts
+	// Deplo itself wrote, before it recorded digests.
 	UntrustedConfig bool `protobuf:"varint,6,opt,name=untrusted_config,json=untrustedConfig,proto3" json:"untrusted_config,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
