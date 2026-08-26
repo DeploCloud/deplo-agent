@@ -82,14 +82,21 @@ func TestSampler_counterResetClampsToZero(t *testing.T) {
 		t.Errorf("after counter reset: NetRx = %d, NetTx = %d, want 0/0", m.NetRx, m.NetTx)
 	}
 
-	// Recovery: the following window must report a plausible rate. An idle test
-	// host moves a few KB in 100ms; a baseline that was not re-adopted would
-	// instead report the whole since-boot byte count divided by that window.
+	// Recovery: the live counters the sampler just adopted as its baseline. A tick
+	// that adopted ZERO instead would report this whole since-boot total divided by
+	// the window, so a rate at or above it is the bug - and unlike a fixed ceiling,
+	// that holds on a runner busy pulling images in another package's tests.
+	rawRx, rawTx := s.prevRx, s.prevTx
 	time.Sleep(2 * minWindow)
 	m = s.Sample()
-	const sane = 100 << 20 // 100 MB/s, generous for an idle runner
-	if m.NetRx < 0 || m.NetRx > sane || m.NetTx < 0 || m.NetTx > sane {
-		t.Errorf("after recovery: NetRx = %d, NetTx = %d, want a plausible rate in [0,%d]", m.NetRx, m.NetTx, sane)
+	if m.NetRx < 0 || m.NetTx < 0 {
+		t.Errorf("after recovery: negative rate NetRx = %d, NetTx = %d", m.NetRx, m.NetTx)
+	}
+	if rawRx > 0 && m.NetRx >= rawRx {
+		t.Errorf("after recovery: NetRx = %d, want well under the since-boot %d", m.NetRx, rawRx)
+	}
+	if rawTx > 0 && m.NetTx >= rawTx {
+		t.Errorf("after recovery: NetTx = %d, want well under the since-boot %d", m.NetTx, rawTx)
 	}
 }
 
