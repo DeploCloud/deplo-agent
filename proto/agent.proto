@@ -490,6 +490,15 @@ message MountFile {
   string content = 2;
 }
 
+// One container-registry credential. `host` is the docker config key the CLI
+// matches an image against ("ghcr.io", "https://index.docker.io/v1/" for the Hub);
+// the control plane normalises it, the agent writes it verbatim.
+message RegistryAuth {
+  string host = 1;
+  string username = 2;
+  string password = 3;
+}
+
 message DeployRequest {
   // A stable id for this deploy, minted by the control plane (the Deployment row id).
   // The control plane reconciles a still-"building" deploy to error on restart even
@@ -568,6 +577,12 @@ message DeployRequest {
   // host runs no container for the app. Set when the app builds on a BUILD SERVER - a
   // host that compiles for machines it does not run on.
   bool build_only = 20;
+
+  // The team's registry credentials, DECRYPTED by the control plane (same discipline
+  // as `env`). The agent writes them to a 0600 docker config used for this deploy
+  // only, so every pull it makes - image ref, compose images, a Dockerfile's base
+  // image - can authenticate. Empty for a team that connected no registry.
+  repeated RegistryAuth registry_auth = 21;
 }
 
 // One event in the deploy stream. Exactly one of the oneof arms is set.

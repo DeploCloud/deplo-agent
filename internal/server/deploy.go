@@ -79,6 +79,14 @@ func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitt
 		e.result(false, "ensure network: "+err.Error(), "")
 		return
 	}
+	// The team's registry credentials, for every pull below (image ref, compose
+	// images, a Dockerfile's base image). No-op when none were sent.
+	dropAuth, err := writeDockerConfig(req)
+	if err != nil {
+		e.result(false, "write registry credentials: "+err.Error(), "")
+		return
+	}
+	defer dropAuth()
 
 	imageRef := req.GetImageRef()
 	// commitSha is reported in the terminal result for a GIT source (the agent
@@ -92,7 +100,8 @@ func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitt
 	case pb.SourceKind_SOURCE_KIND_IMAGE:
 		if req.GetPullImage() {
 			e.log("command", "docker pull "+imageRef)
-			code, err := dockercli.Stream(ctx, 10*time.Minute, func(l string) { e.log("info", l) }, "", "pull", imageRef)
+			code, err := dockercli.StreamEnv(ctx, 10*time.Minute, func(l string) { e.log("info", l) },
+				dockerConfigEnv(req), "pull", imageRef)
 			if err != nil {
 				e.result(false, "docker pull: "+err.Error(), "")
 				return
@@ -207,7 +216,8 @@ func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitt
 	e.log("command", upLog)
 	// A multi-service compose stack pulls SEVERAL images here (and an IMAGE deploy with
 	// pullImage=false pulls at up time too).
-	code, err := dockercli.Stream(ctx, 15*time.Minute, func(l string) { e.log("info", l) }, "", composeArgs...)
+	code, err := dockercli.StreamEnv(ctx, 15*time.Minute, func(l string) { e.log("info", l) },
+		dockerConfigEnv(req), composeArgs...)
 	if err != nil {
 		e.result(false, "compose up: "+err.Error(), "")
 		return
@@ -356,7 +366,7 @@ func (s *Service) buildDockerfile(ctx context.Context, req *pb.DeployRequest, bu
 		args = append(args, imageOutputArgs(ctx, req.GetImageRef())...)
 		args = append(args, labels...)
 		args = append(args, buildDir)
-		return s.runBuild(ctx, args, envKV(req.GetEnv(), envKeys), e)
+		return s.runBuild(ctx, req, args, envKV(req.GetEnv(), envKeys), e)
 	}
 
 	// Explicit Dockerfile path + context, each re-validated to stay inside the
@@ -401,7 +411,7 @@ func (s *Service) buildDockerfile(ctx context.Context, req *pb.DeployRequest, bu
 	args = append(args, imageOutputArgs(ctx, req.GetImageRef())...)
 	args = append(args, labels...)
 	args = append(args, contextDir)
-	return s.runBuild(ctx, args, envKV(req.GetEnv(), envKeys), e)
+	return s.runBuild(ctx, req, args, envKV(req.GetEnv(), envKeys), e)
 }
 
 // dockerfileBuildEnv reads the Dockerfile about to build and returns the env
@@ -510,7 +520,8 @@ func buildArgv(req *pb.DeployRequest, rest ...string) []string {
 
 // runBuild streams a `docker build`; extraEnv carries build-env VALUES (bare
 // `--build-arg KEY` flags in args resolve from it) and may be nil.
-func (s *Service) runBuild(ctx context.Context, args []string, extraEnv []string, e *emitter) bool {
+func (s *Service) runBuild(ctx context.Context, req *pb.DeployRequest, args []string, extraEnv []string, e *emitter) bool {
+	extraEnv = append(extraEnv, dockerConfigEnv(req)...)
 	// A containerd image store can only be built into by BuildKit, and the `--output
 	// type=image,…` flag imageOutputArgs adds on those hosts is a BuildKit-only flag, so
 	// force BuildKit on rather than trust whatever DOCKER_BUILDKIT the agent's unit

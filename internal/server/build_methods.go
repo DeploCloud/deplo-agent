@@ -182,7 +182,7 @@ CMD ["nginx", "-g", "daemon off;"]
 	args = append(args, imageOutputArgs(ctx, req.GetImageRef())...)
 	args = append(args, labelArgs(req)...)
 	args = append(args, buildDir)
-	return s.runBuild(ctx, args, envKV(req.GetEnv(), envKeys), e)
+	return s.runBuild(ctx, req, args, envKV(req.GetEnv(), envKeys), e)
 }
 
 // argEnvLines renders one `ARG KEY` + `ENV KEY=$KEY` pair per line for a
@@ -289,7 +289,7 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 
 	e.log("command", "nixpacks "+strings.Join(prepArgs, " "))
 	code, err := dockercli.SpawnEnv(ctx, 5*time.Minute, func(l string) { e.log("info", l) },
-		envKV(req.GetEnv(), envKeys), nixpacks, prepArgs...)
+		append(envKV(req.GetEnv(), envKeys), dockerConfigEnv(req)...), nixpacks, prepArgs...)
 	if err != nil {
 		e.result(false, "nixpacks: "+err.Error(), "")
 		return false
@@ -333,7 +333,7 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 		args = append(args, imageOutputArgs(ctx, req.GetImageRef())...)
 		args = append(args, labelArgs(req)...)
 		args = append(args, buildDir)
-		return s.runBuildKit(ctx, 15*time.Minute, args, buildEnv, e)
+		return s.runBuildKit(ctx, req, 15*time.Minute, args, buildEnv, e)
 	}
 
 	// Static publish dir: build a staging image, then nginx-wrap its output.
@@ -342,7 +342,7 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 	stageArgs = appendBuildArgKeys(stageArgs, envKeys)
 	stageArgs = append(stageArgs, imageOutputArgs(ctx, staging)...)
 	stageArgs = append(stageArgs, buildDir)
-	if !s.runBuildKit(ctx, 15*time.Minute, stageArgs, buildEnv, e) {
+	if !s.runBuildKit(ctx, req, 15*time.Minute, stageArgs, buildEnv, e) {
 		return false
 	}
 	defer func() { _, _ = dockercli.Run(ctx, 30*time.Second, "rmi", staging) }()
@@ -379,7 +379,7 @@ CMD ["nginx", "-g", "daemon off;"]
 	args = append(args, labelArgs(req)...)
 	args = append(args, buildDir)
 	// The wrapper only copies files out of the built image, no build env needed.
-	return s.runBuild(ctx, args, nil, e)
+	return s.runBuild(ctx, req, args, nil, e)
 }
 
 // ---------------------------------------------------------------------------
@@ -441,7 +441,7 @@ func (s *Service) buildBuildpacks(ctx context.Context, req *pb.DeployRequest, bu
 	}
 	e.log("command", "docker "+strings.Join(args, " "))
 	code, err := dockercli.StreamEnv(ctx, 20*time.Minute, func(l string) { e.log("info", l) },
-		envKV(req.GetEnv(), envKeys), args...)
+		append(envKV(req.GetEnv(), envKeys), dockerConfigEnv(req)...), args...)
 	if err != nil {
 		e.result(false, "pack build: "+err.Error(), "")
 		return false
@@ -527,7 +527,7 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 
 	e.log("command", "railpack "+strings.Join(prepareArgs, " "))
 	code, err := dockercli.SpawnEnv(ctx, 5*time.Minute, func(l string) { e.log("info", l) },
-		prepareEnv, railpack, prepareArgs...)
+		append(prepareEnv, dockerConfigEnv(req)...), railpack, prepareArgs...)
 	if err != nil {
 		e.result(false, "railpack prepare: "+err.Error(), "")
 		return false
@@ -567,7 +567,7 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 
 	args := railpackBuildArgs(frontend, planPath, buildDir, secretNames,
 		imageOutputArgs(ctx, req.GetImageRef()), req.GetNoBuildCache())
-	if !s.runBuildKit(ctx, 20*time.Minute, args, secretEnv, e) {
+	if !s.runBuildKit(ctx, req, 20*time.Minute, args, secretEnv, e) {
 		return false
 	}
 	// The railpack frontend builds the image config itself and DROPS the `--label` flags
@@ -598,7 +598,8 @@ func railpackBuildArgs(frontend, planPath, contextDir string, secretNames, outpu
 // flags, or a railpack plan's `--secret env=NAME` values (may be nil). timeout is
 // explicit because the methods deserve different budgets: railpack kept the 20 minutes
 // its old buildctl path had, nixpacks the 15 it always had.
-func (s *Service) runBuildKit(ctx context.Context, timeout time.Duration, args []string, extraEnv []string, e *emitter) bool {
+func (s *Service) runBuildKit(ctx context.Context, req *pb.DeployRequest, timeout time.Duration, args []string, extraEnv []string, e *emitter) bool {
+	extraEnv = append(extraEnv, dockerConfigEnv(req)...)
 	e.log("command", "docker "+strings.Join(args, " "))
 	code, err := dockercli.StreamEnv(ctx, timeout, func(l string) { e.log("info", l) },
 		append([]string{"DOCKER_BUILDKIT=1"}, extraEnv...), args...)

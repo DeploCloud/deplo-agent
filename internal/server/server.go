@@ -115,6 +115,9 @@ var Capabilities = []string{
 	// ExportImage/ImportImage: a built image streams host-to-host through the control
 	// plane, the third sibling of the volume and files-dir relays.
 	"image-copy",
+	// DeployRequest.registry_auth is honoured: every pull this deploy makes reads the
+	// team's registry credentials, so a private image works without a host `docker login`.
+	"deploy.registry-auth",
 }
 
 // AgentVersion is the version this agent reports over Hello. "dev" for a build that
@@ -171,6 +174,8 @@ func New(stackDir, buildTmpDir, dataDir, dataBase string) *Service {
 	if dataBase == "" {
 		dataBase = filepath.Dir(stackDir)
 	}
+	// Credentials an agent that died mid-deploy left behind.
+	sweepDockerConfigs()
 	return &Service{
 		stackDir:    stackDir,
 		buildTmpDir: buildTmpDir,
