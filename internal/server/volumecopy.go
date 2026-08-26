@@ -88,8 +88,8 @@ func (s *Service) ExportVolume(req *pb.ExportVolumeRequest, stream pb.Agent_Expo
 	// Producer: the helper container tars the volume's contents to stdout; PipeOut
 	// copies that into gz (→ chunkWriter → stream.Send).
 	code, err := dockercli.PipeOut(ctx, volumeCopyTimeout, gz, nil,
-		"run", "--rm", "-v", vol+":/v:ro", volumeHelperImage,
-		"tar", "-C", "/v", "-cf", "-", ".")
+		volumeHelperRun(ctx, "-v", vol+":/v:ro", volumeHelperImage,
+			"tar", "-C", "/v", "-cf", "-", ".")...)
 	// Flush + finish the gzip trailer BEFORE reporting, so the destination sees a
 	// complete stream. A Close error trumps a benign producer exit.
 	if cerr := gz.Close(); cerr != nil && err == nil {
@@ -193,8 +193,8 @@ func (s *Service) ImportVolume(stream pb.Agent_ImportVolumeServer) error {
 		// `tar -C /v -xf -` reads the tar we feed on stdin and extracts into the
 		// volume (created on demand if absent). -i for interactive stdin.
 		code, perr := dockercli.PipeIn(ctx, volumeCopyTimeout, pr, nil,
-			"run", "--rm", "-i", "--name", helper, "-v", vol+":/v", volumeHelperImage,
-			"tar", "-C", "/v", "-xf", "-")
+			volumeHelperRun(ctx, "-i", "--name", helper, "-v", vol+":/v", volumeHelperImage,
+				"tar", "-C", "/v", "-xf", "-")...)
 		if perr == nil && code != 0 {
 			perr = fmt.Errorf("volume extract exited %d", code)
 		}

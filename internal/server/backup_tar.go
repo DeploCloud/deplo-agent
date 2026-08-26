@@ -153,8 +153,8 @@ func wipeVolume(ctx context.Context, vol string) error {
 	// `sh -c` with a glob that also catches dotfiles; `|| true` so an empty volume
 	// (nothing to remove) is not a non-zero exit.
 	code, err := dockercli.Stream(ctx, 5*time.Minute, func(string) {}, "",
-		"run", "--rm", "-v", vol+":/v", volumeHelperImage,
-		"sh", "-c", "rm -rf /v/..?* /v/.[!.]* /v/* 2>/dev/null || true")
+		volumeHelperRun(ctx, "-v", vol+":/v", volumeHelperImage,
+			"sh", "-c", "rm -rf /v/..?* /v/.[!.]* /v/* 2>/dev/null || true")...)
 	if err != nil {
 		return err
 	}
@@ -211,8 +211,8 @@ func newVolumeStreams(ctx context.Context, vols []string) *volumeStreams {
 		go func(v string, reader *io.PipeReader) {
 			// `tar -C /v -xf -` reads the tar we feed on stdin into the volume.
 			code, err := dockercli.PipeIn(ctx, 10*time.Minute, reader, nil,
-				"run", "--rm", "-i", "-v", v+":/v", volumeHelperImage,
-				"tar", "-C", "/v", "-xf", "-")
+				volumeHelperRun(ctx, "-i", "-v", v+":/v", volumeHelperImage,
+					"tar", "-C", "/v", "-xf", "-")...)
 			if err == nil && code != 0 {
 				err = fmt.Errorf("volume extract exited %d", code)
 			}

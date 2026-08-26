@@ -100,8 +100,8 @@ func (s *Service) ExportHostPath(
 	gz := gzip.NewWriter(cw)
 
 	code, runErr := dockercli.PipeOut(ctx, volumeCopyTimeout, gz, nil,
-		"run", "--rm", "-v", path+":/v:ro", volumeHelperImage,
-		"tar", "-C", "/v", "-cf", "-", ".")
+		volumeHelperRun(ctx, "-v", path+":/v:ro", volumeHelperImage,
+			"tar", "-C", "/v", "-cf", "-", ".")...)
 	if cerr := gz.Close(); cerr != nil && runErr == nil {
 		return fmt.Errorf("export host path %q: finish gzip: %w", path, cerr)
 	}
@@ -149,8 +149,8 @@ func (s *Service) ImportHostPath(stream pb.Agent_ImportHostPathServer) error {
 	helper := importHelperName()
 	go func() {
 		code, perr := dockercli.PipeIn(ctx, volumeCopyTimeout, pr, nil,
-			"run", "--rm", "-i", "--name", helper, "-v", path+":/v", volumeHelperImage,
-			"tar", "-C", "/v", "-xf", "-")
+			volumeHelperRun(ctx, "-i", "--name", helper, "-v", path+":/v", volumeHelperImage,
+				"tar", "-C", "/v", "-xf", "-")...)
 		if perr == nil && code != 0 {
 			perr = fmt.Errorf("host path extract exited %d", code)
 		}

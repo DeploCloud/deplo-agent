@@ -604,8 +604,8 @@ func (s *Service) archiveVolume(ctx context.Context, vol string, tw *tar.Writer,
 	go func() {
 		// `tar -C /v -cf - .` streams the volume's contents (no leading /v prefix).
 		code, err := dockercli.PipeOut(ctx, backupStepTimeout, pw, nil,
-			"run", "--rm", "-v", vol+":/v:ro", volumeHelperImage,
-			"tar", "-C", "/v", "-cf", "-", ".")
+			volumeHelperRun(ctx, "-v", vol+":/v:ro", volumeHelperImage,
+				"tar", "-C", "/v", "-cf", "-", ".")...)
 		if err == nil && code != 0 {
 			err = fmt.Errorf("volume tar exited %d", code)
 		}
