@@ -37,6 +37,10 @@ var Capabilities = []string{
 	"deploy.buildpacks", // Cloud Native Buildpacks (heroku + paketo) via pack
 	"deploy.railpack",   // railpack via buildkitd/buildctl
 	"deploy.buildenv",   // req.env reaches BUILDS too (build args / plan secrets), not just the runtime stack
+	// A pinned runtime version reaches nixpacks as a file in the build dir, not only
+	// as NIXPACKS_NODE_VERSION - which picks the nodejs package but not the nixpkgs
+	// archive, so every unpinned Node app failed on "undefined variable 'nodejs_24'".
+	"deploy.nixpacks-runtime-pin",
 	// The two "give me a genuinely fresh one" switches on DeployRequest.
 	"deploy.nocache",
 	"deploy.force-recreate",

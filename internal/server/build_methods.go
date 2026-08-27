@@ -273,11 +273,24 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 		if lang == "" || lang == "none" {
 			lang = "node"
 		}
+		pin := true
 		if lang == "node" {
 			version = majorVersion(version, version)
+			// The env var alone picks the package and not the archive - see
+			// nixpacks_node_pin.go. Write the version where BOTH are read from.
+			wrote, wErr := writeNodeVersionPin(buildDir, version)
+			if wErr != nil {
+				e.log("warn", "could not pin the Node version: "+wErr.Error())
+			}
+			if !wrote && wErr == nil {
+				pin = false
+				e.log("info", "This repository pins its own Node version, so that is the one being built")
+			}
 		}
-		prepArgs = append(prepArgs, "--env",
-			fmt.Sprintf("NIXPACKS_%s_VERSION=%s", strings.ToUpper(lang), version))
+		if pin {
+			prepArgs = append(prepArgs, "--env",
+				fmt.Sprintf("NIXPACKS_%s_VERSION=%s", strings.ToUpper(lang), version))
+		}
 	}
 	// Each user var as a BARE `--env KEY` (nixpacks os.LookupEnvs bare names from its
 	// process env - SpawnEnv below): the generated Dockerfile then declares `ARG KEY` +
