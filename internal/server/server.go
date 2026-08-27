@@ -76,6 +76,9 @@ var Capabilities = []string{
 	// before the deny-list judges it, and the result always carries its sha256.
 	"volume-copy-hardened",
 	"files-copy", // cross-host files-dir copy for a service move (ExportFiles/ImportFiles)
+	// On-disk size of a named volume (VolumeUsage) - what a database's Data card
+	// reports, measured rather than stored.
+	"volume-usage",
 	// Backup artifacts held on THIS host's filesystem instead of an S3 bucket: the
 	// StoreTarget arms of Backup/Restore/S3Check/S3Delete, plus the relay primitives
 	// ReadStoreFile / WriteStoreFile / RestoreFrom.

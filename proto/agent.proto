@@ -62,6 +62,10 @@ service Agent {
   // the untar.
   rpc ImportVolume(stream VolumeChunk) returns (StackResult);
 
+  // How much disk a named volume occupies. The caller supplies the names (Deplo's
+  // volume-naming scheme stays control-plane-side, as for backup and move).
+  rpc VolumeUsage(VolumeUsageRequest) returns (VolumeUsageResponse);
+
   // Copy a service's host-side FILES DIR (<stack_dir>/files/<slug>) across hosts, for a
   // server move - the sibling of ExportVolume/ImportVolume for the one piece of a
   // service's state that is NOT a Docker volume.
@@ -692,6 +696,23 @@ message ExportVolumeRequest {
   string volume_name = 1;
 }
 
+message VolumeUsageRequest {
+  // FULL Docker named volumes, validated like ExportVolumeRequest.volume_name.
+  repeated string volume_names = 1;
+}
+
+message VolumeUsage {
+  string volume_name = 1;
+  // On-disk bytes (allocated blocks, so a sparse file counts what it occupies).
+  int64 bytes = 2;
+}
+
+message VolumeUsageResponse {
+  // One entry per volume that EXISTS; an absent name is simply omitted, never
+  // reported as zero - "no such volume" is not "an empty volume".
+  repeated VolumeUsage volumes = 1;
+}
+
 // A framed chunk of a cross-host volume transfer. ExportVolume emits a sequence of
 // `data` chunks (no header). ImportVolume expects the FIRST message to be a
 // `header` and all following messages to be `data`.
@@ -1288,6 +1309,9 @@ message ConsoleInstance {
   // How many times docker has restarted this container. The number that turns
   // "it is starting" into "it has been dying for an hour".
   int32 restart_count = 12;
+  // When the container last started, epoch seconds. 0 = never started, or an
+  // agent too old to send it - both mean "no uptime to show", never 1970.
+  int64 started_at_unix = 13;
 }
 
 message ListInstancesResponse {

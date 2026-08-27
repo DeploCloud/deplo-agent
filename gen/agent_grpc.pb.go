@@ -35,6 +35,7 @@ const (
 	Agent_Reroute_FullMethodName             = "/deplo.agent.v1.Agent/Reroute"
 	Agent_ExportVolume_FullMethodName        = "/deplo.agent.v1.Agent/ExportVolume"
 	Agent_ImportVolume_FullMethodName        = "/deplo.agent.v1.Agent/ImportVolume"
+	Agent_VolumeUsage_FullMethodName         = "/deplo.agent.v1.Agent/VolumeUsage"
 	Agent_ExportFiles_FullMethodName         = "/deplo.agent.v1.Agent/ExportFiles"
 	Agent_ImportFiles_FullMethodName         = "/deplo.agent.v1.Agent/ImportFiles"
 	Agent_ExportHostPath_FullMethodName      = "/deplo.agent.v1.Agent/ExportHostPath"
@@ -129,6 +130,9 @@ type AgentClient interface {
 	// MUST have stopped the destination stack first so nothing writes the volume under
 	// the untar.
 	ImportVolume(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[VolumeChunk, StackResult], error)
+	// How much disk a named volume occupies. The caller supplies the names (Deplo's
+	// volume-naming scheme stays control-plane-side, as for backup and move).
+	VolumeUsage(ctx context.Context, in *VolumeUsageRequest, opts ...grpc.CallOption) (*VolumeUsageResponse, error)
 	// Copy a service's host-side FILES DIR (<stack_dir>/files/<slug>) across hosts, for a
 	// server move - the sibling of ExportVolume/ImportVolume for the one piece of a
 	// service's state that is NOT a Docker volume.
@@ -449,6 +453,16 @@ func (c *agentClient) ImportVolume(ctx context.Context, opts ...grpc.CallOption)
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Agent_ImportVolumeClient = grpc.ClientStreamingClient[VolumeChunk, StackResult]
+
+func (c *agentClient) VolumeUsage(ctx context.Context, in *VolumeUsageRequest, opts ...grpc.CallOption) (*VolumeUsageResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(VolumeUsageResponse)
+	err := c.cc.Invoke(ctx, Agent_VolumeUsage_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
 
 func (c *agentClient) ExportFiles(ctx context.Context, in *ExportFilesRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[FilesChunk], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
@@ -1109,6 +1123,9 @@ type AgentServer interface {
 	// MUST have stopped the destination stack first so nothing writes the volume under
 	// the untar.
 	ImportVolume(grpc.ClientStreamingServer[VolumeChunk, StackResult]) error
+	// How much disk a named volume occupies. The caller supplies the names (Deplo's
+	// volume-naming scheme stays control-plane-side, as for backup and move).
+	VolumeUsage(context.Context, *VolumeUsageRequest) (*VolumeUsageResponse, error)
 	// Copy a service's host-side FILES DIR (<stack_dir>/files/<slug>) across hosts, for a
 	// server move - the sibling of ExportVolume/ImportVolume for the one piece of a
 	// service's state that is NOT a Docker volume.
@@ -1306,6 +1323,9 @@ func (UnimplementedAgentServer) ExportVolume(*ExportVolumeRequest, grpc.ServerSt
 }
 func (UnimplementedAgentServer) ImportVolume(grpc.ClientStreamingServer[VolumeChunk, StackResult]) error {
 	return status.Error(codes.Unimplemented, "method ImportVolume not implemented")
+}
+func (UnimplementedAgentServer) VolumeUsage(context.Context, *VolumeUsageRequest) (*VolumeUsageResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method VolumeUsage not implemented")
 }
 func (UnimplementedAgentServer) ExportFiles(*ExportFilesRequest, grpc.ServerStreamingServer[FilesChunk]) error {
 	return status.Error(codes.Unimplemented, "method ExportFiles not implemented")
@@ -1660,6 +1680,24 @@ func _Agent_ImportVolume_Handler(srv interface{}, stream grpc.ServerStream) erro
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Agent_ImportVolumeServer = grpc.ClientStreamingServer[VolumeChunk, StackResult]
+
+func _Agent_VolumeUsage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VolumeUsageRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).VolumeUsage(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_VolumeUsage_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).VolumeUsage(ctx, req.(*VolumeUsageRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
 
 func _Agent_ExportFiles_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(ExportFilesRequest)
@@ -2502,6 +2540,10 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Reroute",
 			Handler:    _Agent_Reroute_Handler,
+		},
+		{
+			MethodName: "VolumeUsage",
+			Handler:    _Agent_VolumeUsage_Handler,
 		},
 		{
 			MethodName: "ReadStack",

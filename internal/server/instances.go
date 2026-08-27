@@ -50,18 +50,19 @@ func (s *Service) ListInstances(ctx context.Context, req *pb.ListInstancesReques
 		}
 		service := serviceOf(req.GetSlug(), c.Name)
 		out = append(out, &pb.ConsoleInstance{
-			Name:         c.Name,
-			Service:      service,
-			Image:        c.Image,
-			Running:      state == "running",
-			Exposed:      isExposed(service, req.GetExposeService()),
-			User:         d.User,
-			Workdir:      d.Workdir,
-			OpenStdin:    d.OpenStdin,
-			Tty:          d.Tty,
-			State:        state,
-			Health:       d.Health,
-			RestartCount: d.RestartCount,
+			Name:          c.Name,
+			Service:       service,
+			Image:         c.Image,
+			Running:       state == "running",
+			Exposed:       isExposed(service, req.GetExposeService()),
+			User:          d.User,
+			Workdir:       d.Workdir,
+			OpenStdin:     d.OpenStdin,
+			Tty:           d.Tty,
+			State:         state,
+			Health:        d.Health,
+			RestartCount:  d.RestartCount,
+			StartedAtUnix: startedAtUnix(d.StartedAt),
 		})
 	}
 	// Exposed app first, then running, then alphabetical by service - the same
@@ -120,6 +121,17 @@ func listProjectContainers(ctx context.Context, projectID string) ([]containerRo
 	return rows, nil
 }
 
+// startedAtUnix turns docker's .State.StartedAt into epoch seconds. A container that
+// has never run carries the zero time ("0001-01-01T00:00:00Z"), which must answer 0 -
+// its epoch is negative, and the panel would render it as decades of uptime.
+func startedAtUnix(ts string) int64 {
+	t, ok := parseDockerTime(ts)
+	if !ok || t.IsZero() || t.Unix() <= 0 {
+		return 0
+	}
+	return t.Unix()
+}
+
 // containerDetail is everything one `docker inspect` pass yields per container.
 type containerDetail struct {
 	Name         string `json:"name"`
@@ -130,6 +142,7 @@ type containerDetail struct {
 	State        string `json:"state"`
 	Health       string `json:"health"`
 	RestartCount int32  `json:"restartCount"`
+	StartedAt    string `json:"startedAt"`
 }
 
 // The inspect template emits one JSON object per container.
@@ -140,6 +153,7 @@ const inspectTemplate = `{"name":{{json .Name}},` +
 	`"tty":{{json .Config.Tty}},` +
 	`"state":{{json .State.Status}},` +
 	`"restartCount":{{json .RestartCount}},` +
+	`"startedAt":{{json .State.StartedAt}},` +
 	`"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}""{{end}}}`
 
 // inspectContainers inspects every named container in ONE call, keyed by name.
