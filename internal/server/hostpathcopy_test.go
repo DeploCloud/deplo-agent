@@ -233,3 +233,39 @@ func TestE2E_HostPathCopyRoundTrip(t *testing.T) {
 		t.Errorf("the copy must report what it consumed: %+v", im.result)
 	}
 }
+
+// TestValidateHostPath_judgesTheResolvedPath pins the symlink half of the guardrail:
+// the mount and the wipe both follow links, so the deny-list has to judge where the
+// path lands, not how it is spelled.
+func TestValidateHostPath_judgesTheResolvedPath(t *testing.T) {
+	tmp := t.TempDir()
+	real := filepath.Join(tmp, "real")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, filepath.Join(tmp, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/", filepath.Join(tmp, "poison")); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := validateHostPath(filepath.Join(tmp, "link"))
+	if err != nil {
+		t.Fatalf("a symlink to a legitimate directory must be copyable: %v", err)
+	}
+	if want, _ := filepath.EvalSymlinks(real); got != want {
+		t.Errorf("validateHostPath returned %q, want the resolved %q", got, want)
+	}
+
+	if _, err := validateHostPath(filepath.Join(tmp, "poison")); err == nil {
+		t.Error("a symlink to / passed the deny-list - that path wipes the host")
+	} else if status.Code(err) != codes.PermissionDenied {
+		t.Errorf("want PermissionDenied, got %v", err)
+	}
+
+	// A target that does not exist yet still resolves the parents it lands under.
+	if _, err := validateHostPath(filepath.Join(tmp, "poison", "proc", "new")); err == nil {
+		t.Error("a not-yet-created path under a poisoned parent passed the deny-list")
+	}
+}

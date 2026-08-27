@@ -52,9 +52,29 @@ func validateHostPath(p string) (string, error) {
 	if strings.Contains(clean, "..") {
 		return "", status.Errorf(codes.InvalidArgument, "host path %q climbs out of itself", p)
 	}
+	if err := refuseSystemPath(clean); err != nil {
+		return "", err
+	}
+	// The deny-list has to judge where the path LANDS, not how it is spelled: the
+	// mount and the wipe both follow symlinks, so `/srv/data -> /` was a lexical
+	// pass and a real root wipe.
+	real, err := resolveHostPath(clean)
+	if err != nil {
+		return "", status.Errorf(codes.InvalidArgument, "host path %q cannot be resolved: %v", p, err)
+	}
+	if real != clean {
+		if err := refuseSystemPath(real); err != nil {
+			return "", err
+		}
+	}
+	return real, nil
+}
+
+// refuseSystemPath is the deny-list itself, applied to a cleaned absolute path.
+func refuseSystemPath(clean string) error {
 	for _, root := range deniedHostRoots {
 		if clean == root {
-			return "", status.Errorf(
+			return status.Errorf(
 				codes.PermissionDenied,
 				"%q is a system directory and is not something Deplo will copy", clean,
 			)
@@ -62,13 +82,35 @@ func validateHostPath(p string) (string, error) {
 	}
 	for _, root := range deniedHostSubtrees {
 		if clean == root || strings.HasPrefix(clean, root+"/") {
-			return "", status.Errorf(
+			return status.Errorf(
 				codes.PermissionDenied,
 				"%q is under %s, which is never a service's own data", clean, root,
 			)
 		}
 	}
-	return clean, nil
+	return nil
+}
+
+// resolveHostPath follows symlinks on the deepest EXISTING prefix of p and re-attaches
+// the rest, so an import target that does not exist yet still resolves the parents it
+// will be created under.
+func resolveHostPath(p string) (string, error) {
+	cur, rest := p, ""
+	for {
+		real, err := filepath.EvalSymlinks(cur)
+		if err == nil {
+			return filepath.Join(real, rest), nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return p, nil
+		}
+		rest = filepath.Join(filepath.Base(cur), rest)
+		cur = parent
+	}
 }
 
 // ExportHostPath tars a host directory out of this machine, gzipped, as raw byte
@@ -158,7 +200,7 @@ func (s *Service) ImportHostPath(stream pb.Agent_ImportHostPathServer) error {
 		done <- perr
 	}()
 
-	gz, gzErr := newGunzipPump(pw)
+	gz, gzErr := newSanitizingGunzipPump(pw)
 	if gzErr != nil {
 		_ = pw.CloseWithError(gzErr)
 		<-done
