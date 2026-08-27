@@ -3,12 +3,15 @@ package server
 // https://deplo.build/docs/guides/move-from-dokploy
 
 import (
+	"archive/tar"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"io"
+	"path"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -204,7 +207,7 @@ func (s *Service) ImportVolume(stream pb.Agent_ImportVolumeServer) error {
 	}()
 
 	// Gunzip the incoming compressed frames into the pipe the untar reads.
-	gz, gzErr := newGunzipPump(pw)
+	gz, gzErr := newSanitizingGunzipPump(pw)
 	if gzErr != nil {
 		_ = pw.CloseWithError(gzErr)
 		<-done
@@ -284,6 +287,17 @@ func (s *Service) ImportVolume(stream pb.Agent_ImportVolumeServer) error {
 // as Writes off the gRPC stream, so we bridge with an internal pipe: caller Writes
 // compressed bytes → gzip.Reader pulls from the pipe → decompressed bytes go to dst.
 func newGunzipPump(dst io.Writer) (io.WriteCloser, error) {
+	return newTarPump(dst, false)
+}
+
+// newSanitizingGunzipPump is newGunzipPump for an archive that came off ANOTHER
+// platform's host: the tar is rewritten by sanitizeTar on the way through, because
+// what it feeds is `tar -x` running as root.
+func newSanitizingGunzipPump(dst io.Writer) (io.WriteCloser, error) {
+	return newTarPump(dst, true)
+}
+
+func newTarPump(dst io.Writer, sanitize bool) (io.WriteCloser, error) {
 	pr, pw := io.Pipe()
 	gp := &gunzipPump{pw: pw, done: make(chan error, 1)}
 	go func() {
@@ -294,7 +308,12 @@ func newGunzipPump(dst io.Writer) (io.WriteCloser, error) {
 			gp.done <- err
 			return
 		}
-		_, cerr := io.Copy(dst, zr)
+		var cerr error
+		if sanitize {
+			cerr = sanitizeTar(dst, zr)
+		} else {
+			_, cerr = io.Copy(dst, zr)
+		}
 		if zerr := zr.Close(); zerr != nil && cerr == nil {
 			cerr = zerr
 		}
@@ -302,6 +321,67 @@ func newGunzipPump(dst io.Writer) (io.WriteCloser, error) {
 		gp.done <- cerr
 	}()
 	return gp, nil
+}
+
+// sanitizeTar copies a tar stream, dropping what a foreign archive has no business
+// putting where a root helper extracts it: the setuid/setgid/sticky bits, every
+// device/fifo/socket entry, and any link pointing outside the archive. Same rule the
+// backup restore already applies (backup.go), which this half was missing.
+func sanitizeTar(dst io.Writer, src io.Reader) error {
+	tw := tar.NewWriter(dst)
+	tr := tar.NewReader(src)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+		if hasDotDot(hdr.Name) {
+			return fmt.Errorf("archive entry %q contains a path traversal", hdr.Name)
+		}
+		switch hdr.Typeflag {
+		case tar.TypeReg, tar.TypeDir:
+		case tar.TypeSymlink, tar.TypeLink:
+			// A relative link inside the tree is ordinary data (a certbot `live/`
+			// dir is nothing else); one that leaves it is not.
+			if !linkStaysInside(hdr.Name, hdr.Linkname, hdr.Typeflag == tar.TypeLink) {
+				continue
+			}
+		default:
+			continue // char/block/fifo/socket: never a service's own data
+		}
+		// Ownership is kept (a database volume must stay owned by its engine's uid);
+		// only the bits above 0777 go.
+		hdr.Mode &= 0o777
+		if err := tw.WriteHeader(hdr); err != nil {
+			return err
+		}
+		if hdr.Typeflag == tar.TypeReg {
+			if _, err := io.Copy(tw, tr); err != nil {
+				return err
+			}
+		}
+	}
+	return tw.Close()
+}
+
+// linkStaysInside answers whether a link's target is still under the archive root.
+// A hardlink names another archive entry directly; a symlink resolves against the
+// directory the link itself sits in.
+func linkStaysInside(name, link string, hard bool) bool {
+	if link == "" || strings.HasPrefix(link, "/") {
+		return false
+	}
+	target := link
+	if !hard {
+		// Relative on purpose: anchoring at "/" would let Clean swallow a leading
+		// ".." and turn an escape into a pass.
+		rel := strings.TrimPrefix(path.Clean(filepath.ToSlash(name)), "/")
+		target = path.Join(path.Dir(rel), link)
+	}
+	return !hasDotDot(path.Clean(target))
 }
 
 // gunzipPump bridges Writes of compressed bytes to a gzip.Reader draining into the

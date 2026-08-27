@@ -1,6 +1,8 @@
 package server
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -394,5 +396,78 @@ func TestImportVolume_truncatedStreamLeavesNothing(t *testing.T) {
 	}
 	if strings.TrimSpace(res.Stdout) != "0" {
 		t.Errorf("a failed import must leave the destination empty, it holds %s entries", strings.TrimSpace(res.Stdout))
+	}
+}
+
+// TestSanitizeTar keeps the import half as strict as the restore half: the archive
+// comes off another platform's host and is extracted by a helper running as root.
+func TestSanitizeTar(t *testing.T) {
+	var in bytes.Buffer
+	tw := tar.NewWriter(&in)
+	write := func(h *tar.Header, body string) {
+		h.Size = int64(len(body))
+		if err := tw.WriteHeader(h); err != nil {
+			t.Fatal(err)
+		}
+		if body != "" {
+			if _, err := tw.Write([]byte(body)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	write(&tar.Header{Name: "./data", Typeflag: tar.TypeDir, Mode: 0o2755}, "")
+	write(&tar.Header{Name: "./data/pg.conf", Typeflag: tar.TypeReg, Mode: 0o600, Uid: 999, Gid: 999}, "listen=*")
+	write(&tar.Header{Name: "./rooted", Typeflag: tar.TypeReg, Mode: 0o4755}, "#!/bin/sh")
+	write(&tar.Header{Name: "./data/rel", Typeflag: tar.TypeSymlink, Linkname: "../data/pg.conf"}, "")
+	write(&tar.Header{Name: "./data/out", Typeflag: tar.TypeSymlink, Linkname: "../../../etc/hostname"}, "")
+	write(&tar.Header{Name: "./data/abs", Typeflag: tar.TypeSymlink, Linkname: "/etc/hostname"}, "")
+	write(&tar.Header{Name: "./data/sda", Typeflag: tar.TypeBlock, Mode: 0o660, Devmajor: 8}, "")
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := sanitizeTar(&out, &in); err != nil {
+		t.Fatalf("sanitizeTar: %v", err)
+	}
+
+	kept := map[string]*tar.Header{}
+	tr := tar.NewReader(&out)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		kept[h.Name] = h
+	}
+	for _, gone := range []string{"./data/out", "./data/abs", "./data/sda"} {
+		if _, ok := kept[gone]; ok {
+			t.Errorf("%s survived the import", gone)
+		}
+	}
+	if _, ok := kept["./data/rel"]; !ok {
+		t.Error("a relative in-tree symlink was dropped - a certbot live/ dir is nothing else")
+	}
+	if h := kept["./rooted"]; h == nil {
+		t.Fatal("./rooted was dropped; it should arrive without its setuid bit")
+	} else if h.Mode&^0o777 != 0 {
+		t.Errorf("./rooted kept mode %o - setuid/setgid/sticky must go", h.Mode)
+	}
+	if h := kept["./data"]; h == nil || h.Mode&^0o777 != 0 {
+		t.Errorf("the setgid directory kept mode %v", h)
+	}
+	if h := kept["./data/pg.conf"]; h == nil || h.Uid != 999 || h.Gid != 999 || h.Mode != 0o600 {
+		t.Errorf("ownership must survive (a DB volume is owned by its engine's uid): %v", h)
+	}
+}
+
+// The control plane stops tolerating a missing digest once this is advertised, and
+// only advertises the hardened import behind it.
+func TestCapabilities_advertisesHardenedCopy(t *testing.T) {
+	if !containsString(Capabilities, "volume-copy-hardened") {
+		t.Error("Capabilities must advertise \"volume-copy-hardened\"")
 	}
 }

@@ -71,7 +71,11 @@ var Capabilities = []string{
 	// (StartJob/PollJob/KillJob) - the Cron jobs feature.
 	"cron",
 	"volume-copy", // cross-host named-volume copy for a server move (ExportVolume/ImportVolume)
-	"files-copy",  // cross-host files-dir copy for a service move (ExportFiles/ImportFiles)
+	// The import half of a copy is hardened: the incoming tar is sanitised (setuid
+	// bits, device nodes and escaping links dropped), a host path is symlink-resolved
+	// before the deny-list judges it, and the result always carries its sha256.
+	"volume-copy-hardened",
+	"files-copy", // cross-host files-dir copy for a service move (ExportFiles/ImportFiles)
 	// Backup artifacts held on THIS host's filesystem instead of an S3 bucket: the
 	// StoreTarget arms of Backup/Restore/S3Check/S3Delete, plus the relay primitives
 	// ReadStoreFile / WriteStoreFile / RestoreFrom.
