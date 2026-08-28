@@ -41,6 +41,26 @@ func TestRenderEnvFile_collapsesNewlinesInValues(t *testing.T) {
 	}
 }
 
+func TestRenderComposeEnvFile_quotesAndEscapes(t *testing.T) {
+	// `docker compose` interpolates a bare $VAR from the env-file and cannot carry a
+	// newline, so every value is double-quoted and escaped.
+	got := renderComposeEnvFile(map[string]string{
+		"PLAIN":  "ordinary",
+		"DOLLAR": "pa$HOME/x",
+		"BRACE":  "pre${MISSING}post",
+		"MULTI":  "line1\nline2",
+		"QUOTES": `he said "hi" and \ backslash`,
+	})
+	want := "BRACE=\"pre\\${MISSING}post\"\n" +
+		"DOLLAR=\"pa\\$HOME/x\"\n" +
+		"MULTI=\"line1\\nline2\"\n" +
+		"PLAIN=\"ordinary\"\n" +
+		"QUOTES=\"he said \\\"hi\\\" and \\\\ backslash\"\n"
+	if got != want {
+		t.Fatalf("renderComposeEnvFile =\n%q\nwant\n%q", got, want)
+	}
+}
+
 func TestRenderEnvFile_empty(t *testing.T) {
 	if got := renderEnvFile(map[string]string{}); got != "" {
 		t.Fatalf("expected empty string, got %q", got)

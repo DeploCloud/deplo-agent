@@ -254,6 +254,33 @@ func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitt
 // --env-file. Mirrors the control plane's renderEnvFile (build.ts): values are literal
 // and any newline (which would break the env-file format) collapses to a space.
 func renderEnvFile(env map[string]string) string {
+	return sortedEnvLines(env, func(v string) string {
+		v = strings.ReplaceAll(v, "\r\n", " ")
+		return strings.ReplaceAll(v, "\n", " ")
+	})
+}
+
+// renderComposeEnvFile writes what `docker compose --env-file` reads. Every value is
+// DOUBLE-QUOTED and escaped, because compose's dotenv EXPANDS a bare `$VAR` (a
+// password came out holding this host's own environment instead) and cannot carry a
+// newline at all (a PEM key arrived as one line of spaces).
+func renderComposeEnvFile(env map[string]string) string {
+	return sortedEnvLines(env, func(v string) string {
+		return `"` + dotenvEscape.Replace(v) + `"`
+	})
+}
+
+var dotenvEscape = strings.NewReplacer(
+	`\`, `\\`,
+	`"`, `\"`,
+	`$`, `\$`,
+	"\n", `\n`,
+	"\r", `\r`,
+)
+
+// sortedEnvLines writes one `KEY=<encode(value)>` line per key, keys sorted so the
+// file is deterministic.
+func sortedEnvLines(env map[string]string, encode func(string) string) string {
 	keys := make([]string, 0, len(env))
 	for k := range env {
 		keys = append(keys, k)
@@ -261,11 +288,9 @@ func renderEnvFile(env map[string]string) string {
 	sort.Strings(keys)
 	var b strings.Builder
 	for _, k := range keys {
-		v := strings.ReplaceAll(env[k], "\r\n", " ")
-		v = strings.ReplaceAll(v, "\n", " ")
 		b.WriteString(k)
 		b.WriteByte('=')
-		b.WriteString(v)
+		b.WriteString(encode(env[k]))
 		b.WriteByte('\n')
 	}
 	return b.String()
@@ -433,7 +458,7 @@ func (s *Service) writeComposeEnv(slug string, env map[string]string) (string, s
 		return "", "", err
 	}
 	envFile := filepath.Join(projectDir, ".env")
-	if err := os.WriteFile(envFile, []byte(renderEnvFile(env)), 0o600); err != nil {
+	if err := os.WriteFile(envFile, []byte(renderComposeEnvFile(env)), 0o600); err != nil {
 		return "", "", err
 	}
 	// The pre-project-directory location. Left behind it would go on being the
