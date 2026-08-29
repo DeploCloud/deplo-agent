@@ -142,6 +142,12 @@ func newContainerSampler(ctx context.Context) *containerSampler {
 	cs := &containerSampler{ros: newRoster(ctx)}
 	if cgroup2Available() {
 		cs.cg = newCgroupSampler()
+		// Prime the CPU baseline NOW, so the stream's first frame already spans a real
+		// window. Without this every container reported 0% on the opening frame, and the
+		// 55-minute deadline rotation dropped that zero onto every app's chart hourly.
+		if entries, _ := cs.ros.Snapshot(); len(entries) > 0 {
+			cs.cg.Sample(entries, time.Now())
+		}
 	} else {
 		// cgroup v1 or a hybrid hierarchy. Deliberately NOT solved - the fallback
 		// is code that has been in production since ContainerStats shipped.
