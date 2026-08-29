@@ -12,6 +12,7 @@ import (
 	"time"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
+	"github.com/DeploCloud/deplo-agent/internal/hostmetrics"
 )
 
 // cgroupstats.go is the zero-subprocess data source for container metrics: it reads
@@ -98,6 +99,11 @@ func (c *cgroupSampler) Sample(entries []rosterEntry, now time.Time) []*pb.Conta
 	prev := c.prev
 	c.mu.Unlock()
 
+	// The agent's own network namespace, resolved once per tick: a container whose
+	// namespace matches it is on `network_mode: host` and its /proc/<pid>/net/dev is
+	// the WHOLE MACHINE's counters, not its own.
+	hostNetNs := netNsOf(c.procRoot, os.Getpid())
+
 	next := make(map[string]cgroupPrevCPU, len(entries))
 	out := make([]*pb.ContainerStat, 0, len(entries))
 
@@ -122,7 +128,7 @@ func (c *cgroupSampler) Sample(entries []rosterEntry, now time.Time) []*pb.Conta
 			carryCPUBaseline(next, prev, e.ID)
 			continue
 		}
-		r, ok := c.readOne(e, now, prev)
+		r, ok := c.readOne(e, now, prev, hostNetNs)
 		if !ok {
 			failed++
 			carryCPUBaseline(next, prev, e.ID)
@@ -176,7 +182,7 @@ type cgroupRead struct {
 // readOne reads one container's files. ok=false means the container could not be read
 // at all and must be omitted from the tick entirely. Dropping the whole container would
 // blank a rootless host's charts entirely over one optional file.
-func (c *cgroupSampler) readOne(e rosterEntry, now time.Time, prev map[string]cgroupPrevCPU) (cgroupRead, bool) {
+func (c *cgroupSampler) readOne(e rosterEntry, now time.Time, prev map[string]cgroupPrevCPU, hostNetNs uint64) (cgroupRead, bool) {
 	cpuRaw, cpuOK := readFileTrimmed(filepath.Join(e.CgroupPath, "cpu.stat"))
 	memRaw, memOK := readFileTrimmed(filepath.Join(e.CgroupPath, "memory.current"))
 
@@ -236,9 +242,18 @@ func (c *cgroupSampler) readOne(e rosterEntry, now time.Time, prev map[string]cg
 	// through the target task's netns, so no setns, no nsenter and no privileged helper is
 	// involved.
 	var netRx, netTx int64
+	var netNs uint64
+	netNsHost := false
 	if e.PID > 0 {
-		if raw, ok := readFileTrimmed(filepath.Join(c.procRoot, strconv.Itoa(e.PID), "net", "dev")); ok {
-			netRx, netTx = parseNetDev(raw)
+		netNs = netNsOf(c.procRoot, e.PID)
+		// Reading the host namespace would hand this container the machine's whole
+		// traffic - measured at 51 GB on an idle `alpine sleep`. Report nothing and
+		// let the flag point the panel at the host chart.
+		netNsHost = netNs != 0 && netNs == hostNetNs
+		if !netNsHost {
+			if raw, ok := readFileTrimmed(filepath.Join(c.procRoot, strconv.Itoa(e.PID), "net", "dev")); ok {
+				netRx, netTx = parseNetDev(raw)
+			}
 		}
 	}
 
@@ -261,7 +276,24 @@ func (c *cgroupSampler) readOne(e rosterEntry, now time.Time, prev map[string]cg
 		BlockRead:    blockRead,
 		BlockWrite:   blockWrite,
 		Pids:         pids,
+		NetNsId:      netNs,
+		NetNsHost:    netNsHost,
 	}, usageUsec: usage, haveUsage: haveUsage}, true
+}
+
+// netNsOf is the inode of a process's network namespace. Two containers reporting
+// the same one share a namespace (a compose sidecar on `network_mode: service:x`)
+// and their identical counters must be summed ONCE. 0 means unreadable.
+func netNsOf(procRoot string, pid int) uint64 {
+	fi, err := os.Stat(filepath.Join(procRoot, strconv.Itoa(pid), "ns", "net"))
+	if err != nil {
+		return 0
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0
+	}
+	return st.Ino
 }
 
 // cpuPercentFromUsage converts two cumulative usage_usec readings into a percent.
@@ -393,12 +425,11 @@ func parseNetDev(content string) (rx, tx int64) {
 }
 
 // skipNetIface drops the interfaces that would misreport a container's traffic: `lo` is
-// intra-container chatter that `docker stats` never counts, and a veth*/docker* device
-// can only appear if we are reading the HOST namespace by mistake - counting those
-// would attribute the entire host bridge's throughput to one container, which looks
-// plausible enough that nobody would question it.
+// intra-container chatter that `docker stats` never counts, and a veth/bridge device
+// can only appear if we are reading the HOST namespace by mistake. Shared with the
+// host gauge (hostmetrics.SkipNetIface) so the rule cannot be fixed on one side only.
 func skipNetIface(name string) bool {
-	return name == "lo" || strings.HasPrefix(name, "veth") || strings.HasPrefix(name, "docker")
+	return hostmetrics.SkipNetIface(name)
 }
 
 // parseMemTotal pulls MemTotal out of /proc/meminfo, converting its kB to bytes.

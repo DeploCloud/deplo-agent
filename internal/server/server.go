@@ -251,6 +251,8 @@ func hostMetricsPB(m hostmetrics.Metrics, runningContainers int) *pb.HostMetrics
 		Load15:            m.Load15,
 		UptimeSec:         m.UptimeSec,
 		RunningContainers: int32(runningContainers),
+		MemFree:           m.MemFree,
+		MemCache:          m.MemCache,
 	}
 }
 

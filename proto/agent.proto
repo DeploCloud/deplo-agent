@@ -370,6 +370,12 @@ message HostMetrics {
   double load15 = 13;
   int64 uptime_sec = 14;
   int32 running_containers = 15;
+
+  // Fields 16-17 are ADDITIVE (contract stays V1). mem_used is total-available,
+  // the same figure `free` prints as "used"; these two let the panel also show
+  // the reclaimable half rather than leaving the gap with htop unexplained.
+  int64 mem_free = 16;   // MemFree
+  int64 mem_cache = 17;  // Buffers + Cached + SReclaimable
 }
 
 // ---------------------------------------------------------------------------
@@ -1745,6 +1751,17 @@ message ContainerStat {
   // How many times docker has restarted this container. The number that turns
   // "it is starting" into "it has been dying for an hour".
   int32 restart_count = 16;
+
+  // Fields 17-18 are ADDITIVE (contract stays V1). net_* is read out of the
+  // container's network NAMESPACE, and a namespace can have several containers
+  // in it: a compose sidecar on `network_mode: service:x` reports the SAME
+  // counters as its host container, so summing a stack double-counted them.
+  // 0 from an agent too old to send it, or when the namespace is unreadable.
+  uint64 net_ns_id = 17;
+  // True when that namespace is the HOST's - `network_mode: host`. net_rx/net_tx
+  // are then the whole machine's counters, so the agent reports them as 0 and
+  // the panel points at the host chart instead.
+  bool net_ns_host = 18;
 }
 
 message ContainerStatsResponse {
