@@ -59,6 +59,10 @@ var Capabilities = []string{
 	// ONE long-lived host+container telemetry stream (StreamMetrics), sampled on the
 	// agent's own ticker.
 	"metrics-stream",
+	// ContainerStat carries net_ns_id / net_ns_host, so the control plane can count a
+	// shared network namespace once and recognise `network_mode: host`. Also marks the
+	// build whose host counters skip bridges and veths - the rollout's check.
+	"metrics.netns",
 	"dev",         // dev container lifecycle (StartDev/StopDev/Reset/Teardown) - Part D
 	"ssh-gateway", // the per-host SSH gateway singleton (Ensure/Provision/Deprovision)
 	"tunnel",      // the VS Code remote tunnel (Start/Get/Stop)

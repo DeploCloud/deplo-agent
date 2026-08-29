@@ -61,6 +61,10 @@ func TestHello_reportsContractAndCapabilities(t *testing.T) {
 	if !containsString(resp.GetCapabilities(), "metrics-stream") {
 		t.Errorf("capabilities %v do not advertise metrics-stream", resp.GetCapabilities())
 	}
+	// The rollout is verified against this one, not against a version string.
+	if !containsString(resp.GetCapabilities(), "metrics.netns") {
+		t.Errorf("capabilities %v do not advertise metrics.netns", resp.GetCapabilities())
+	}
 	// docker_available may be true or false depending on the test host; the
 	// point is Hello answers without error (the deploy pre-flight, PLAN P5).
 }
