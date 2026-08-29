@@ -57,18 +57,21 @@ func (s *Sampler) Sample() Metrics {
 	cpu, cpuOK := s.readCPU()
 	rx, tx, netOK := s.readNet()
 
-	memTotal, memAvail := readMem()
-	memUsed := memTotal - memAvail
+	mem := readMem()
+	memUsed := mem.total - mem.available
 	if memUsed < 0 {
 		memUsed = 0
 	}
-	diskUsed, diskTotal := diskBytes(s.dataDir)
+	memTotal := mem.total
+	diskUsed, diskTotal, diskAvail := diskBytes(s.dataDir)
 	l1, l5, l15 := loadavg()
 
 	m := Metrics{
 		CPUCores:  numCPU(),
 		MemUsed:   memUsed,
 		MemTotal:  memTotal,
+		MemFree:   mem.free,
+		MemCache:  mem.cache,
 		DiskUsed:  diskUsed,
 		DiskTotal: diskTotal,
 		Load1:     l1,
@@ -79,9 +82,7 @@ func (s *Sampler) Sample() Metrics {
 	if memTotal > 0 {
 		m.MemPct = round1(float64(memUsed) / float64(memTotal) * 100)
 	}
-	if diskTotal > 0 {
-		m.DiskPct = round1(float64(diskUsed) / float64(diskTotal) * 100)
-	}
+	m.DiskPct = diskPercent(diskUsed, diskAvail)
 
 	// Degenerate window - two calls effectively back-to-back.
 	window := now.Sub(s.prevAt)

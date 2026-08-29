@@ -4,6 +4,7 @@ package hostmetrics
 
 import (
 	"bufio"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -18,6 +19,8 @@ type Metrics struct {
 	MemUsed   int64
 	MemTotal  int64
 	MemPct    float64
+	MemFree   int64 // MemFree, so the panel can show htop's split
+	MemCache  int64 // Buffers + Cached + SReclaimable
 	DiskUsed  int64
 	DiskTotal int64
 	DiskPct   float64
@@ -43,12 +46,13 @@ func Collect(dataDir string) Metrics {
 	cpu1 := readCPUTimes()
 	rx1, tx1 := readNetCounters()
 
-	memTotal, memAvail := readMem()
-	memUsed := memTotal - memAvail
+	mem := readMem()
+	memUsed := mem.total - mem.available
 	if memUsed < 0 {
 		memUsed = 0
 	}
-	diskUsed, diskTotal := diskBytes(dataDir)
+	memTotal := mem.total
+	diskUsed, diskTotal, diskAvail := diskBytes(dataDir)
 	l1, l5, l15 := loadavg()
 
 	m := Metrics{
@@ -56,6 +60,8 @@ func Collect(dataDir string) Metrics {
 		CPUCores:  numCPU(),
 		MemUsed:   memUsed,
 		MemTotal:  memTotal,
+		MemFree:   mem.free,
+		MemCache:  mem.cache,
 		DiskUsed:  diskUsed,
 		DiskTotal: diskTotal,
 		NetRx:     max64(0, rx1-rx0),
@@ -68,12 +74,13 @@ func Collect(dataDir string) Metrics {
 	if memTotal > 0 {
 		m.MemPct = round1(float64(memUsed) / float64(memTotal) * 100)
 	}
-	if diskTotal > 0 {
-		m.DiskPct = round1(float64(diskUsed) / float64(diskTotal) * 100)
-	}
+	m.DiskPct = diskPercent(diskUsed, diskAvail)
 	return m
 }
 
+// cpuTimes is one /proc/stat reading. `idle` is idle PLUS iowait, and `total`
+// stops before guest/guest_nice, which /proc already counts inside user/nice -
+// both so the percentage matches what htop's meter shows by default.
 type cpuTimes struct{ idle, total uint64 }
 
 // readCPUTimes keeps the lossy shape Collect was written against: a failed read is
@@ -92,7 +99,12 @@ func readCPUTimesOK() (cpuTimes, bool) {
 		return cpuTimes{}, false
 	}
 	defer f.Close()
-	sc := bufio.NewScanner(f)
+	return parseCPUTimes(f)
+}
+
+// parseCPUTimes reads the aggregate "cpu " line of a /proc/stat.
+func parseCPUTimes(r io.Reader) (cpuTimes, bool) {
+	sc := bufio.NewScanner(r)
 	for sc.Scan() {
 		line := sc.Text()
 		if !strings.HasPrefix(line, "cpu ") {
@@ -101,10 +113,14 @@ func readCPUTimesOK() (cpuTimes, bool) {
 		fields := strings.Fields(line)[1:]
 		var total, idle uint64
 		for i, fld := range fields {
+			// user nice system idle iowait irq softirq steal | guest guest_nice
+			if i > 7 {
+				break
+			}
 			v, _ := strconv.ParseUint(fld, 10, 64)
 			total += v
-			if i == 3 { // idle
-				idle = v
+			if i == 3 || i == 4 { // idle, iowait
+				idle += v
 			}
 		}
 		return cpuTimes{idle: idle, total: total}, true
@@ -130,12 +146,19 @@ func cpuPercent(a, b cpuTimes) float64 {
 	return round1(pct)
 }
 
-func readMem() (total, avail int64) {
+// memInfo is the slice of /proc/meminfo the panel reports. `available` drives
+// MemUsed (total-available, the same figure `free` calls used); free + cache are
+// carried so the UI can also show the reclaimable half instead of leaving the
+// difference from htop unexplained.
+type memInfo struct{ total, available, free, cache int64 }
+
+func readMem() memInfo {
 	f, err := os.Open("/proc/meminfo")
 	if err != nil {
-		return 0, 0
+		return memInfo{}
 	}
 	defer f.Close()
+	var m memInfo
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		fields := strings.Fields(sc.Text())
@@ -145,27 +168,44 @@ func readMem() (total, avail int64) {
 		kb, _ := strconv.ParseInt(fields[1], 10, 64)
 		switch fields[0] {
 		case "MemTotal:":
-			total = kb * 1024
+			m.total = kb * 1024
 		case "MemAvailable:":
-			avail = kb * 1024
+			m.available = kb * 1024
+		case "MemFree:":
+			m.free = kb * 1024
+		case "Buffers:", "Cached:", "SReclaimable:":
+			m.cache += kb * 1024
 		}
 	}
-	return total, avail
+	return m
 }
 
-func diskBytes(path string) (used, total int64) {
+// diskBytes reports the same three numbers `df` does: Size, Used and Avail.
+// Used counts the root-reserved blocks (Bfree, not Bavail) and the percentage
+// divides by used+avail, both so a full filesystem reads identically in the
+// panel and in a shell.
+func diskBytes(path string) (used, total, avail int64) {
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(path, &st); err != nil {
-		return 0, 0
+		return 0, 0, 0
 	}
 	bsize := int64(st.Bsize)
 	total = int64(st.Blocks) * bsize
-	free := int64(st.Bavail) * bsize
-	used = total - free
+	avail = int64(st.Bavail) * bsize
+	used = total - int64(st.Bfree)*bsize
 	if used < 0 {
 		used = 0
 	}
-	return used, total
+	return used, total, avail
+}
+
+// diskPercent is df's Use%: the reserved blocks are neither used nor available.
+func diskPercent(used, avail int64) float64 {
+	denom := used + avail
+	if denom <= 0 {
+		return 0
+	}
+	return round1(float64(used) / float64(denom) * 100)
 }
 
 // readNetCounters is the lossy form, kept for Collect - see readCPUTimes for
@@ -182,7 +222,13 @@ func readNetCountersOK() (rx, tx int64, ok bool) {
 		return 0, 0, false
 	}
 	defer f.Close()
-	sc := bufio.NewScanner(f)
+	return parseNetCounters(f)
+}
+
+// parseNetCounters sums the byte counters of a /proc/net/dev, skipping every
+// interface whose traffic is already counted elsewhere - see SkipNetIface.
+func parseNetCounters(r io.Reader) (rx, tx int64, ok bool) {
+	sc := bufio.NewScanner(r)
 	for sc.Scan() {
 		line := sc.Text()
 		idx := strings.IndexByte(line, ':')
@@ -190,7 +236,7 @@ func readNetCountersOK() (rx, tx int64, ok bool) {
 			continue
 		}
 		iface := strings.TrimSpace(line[:idx])
-		if iface == "lo" {
+		if SkipNetIface(iface) {
 			continue
 		}
 		fields := strings.Fields(line[idx+1:])
@@ -206,6 +252,17 @@ func readNetCountersOK() (rx, tx int64, ok bool) {
 		return 0, 0, false
 	}
 	return rx, tx, true
+}
+
+// SkipNetIface drops the interfaces whose bytes are a second copy of somebody
+// else's: `lo` never leaves the box, and a Docker bridge (docker0, br-<id>) plus
+// the host end of each container veth all mirror what the physical NIC counted.
+// Summing them made a 10 MB download read as a 10 MB upload.
+func SkipNetIface(name string) bool {
+	return name == "lo" ||
+		strings.HasPrefix(name, "veth") ||
+		strings.HasPrefix(name, "docker") ||
+		strings.HasPrefix(name, "br-")
 }
 
 func loadavg() (l1, l5, l15 float64) {
