@@ -103,7 +103,7 @@ func TestReroute_writesStackEnvAndMountFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read env file: %v", err)
 	}
-	if want := "BAZ=qux\nFOO=bar\n"; string(envGot) != want {
+	if want := "BAZ=\"qux\"\nFOO=\"bar\"\n"; string(envGot) != want {
 		t.Fatalf("env file = %q, want %q", envGot, want)
 	}
 	if info, err := os.Stat(envFile); err != nil {

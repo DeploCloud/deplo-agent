@@ -113,7 +113,7 @@ func TestWriteComposeEnvIsPerStack(t *testing.T) {
 		t.Fatalf("env file = %q, want %q", envFile, want)
 	}
 	body, err := os.ReadFile(envFile)
-	if err != nil || !strings.Contains(string(body), "A=1") {
+	if err != nil || !strings.Contains(string(body), `A="1"`) {
 		t.Fatalf("env body = %q, err %v", body, err)
 	}
 	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
