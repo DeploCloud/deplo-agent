@@ -44,9 +44,15 @@ func TestE2E_ForceRecreateReplacesAnUnchangedContainer(t *testing.T) {
 	}
 
 	t.Cleanup(func() {
-		_, _ = dockercli.Run(context.Background(), 60*time.Second, "rm", "-f", name)
-		_, _ = dockercli.Run(context.Background(), 20*time.Second, "network", "disconnect", "-f", testNetwork, traefikContainer)
-		_, _ = dockercli.Run(context.Background(), 20*time.Second, "network", "rm", testNetwork)
+		ctx := context.Background()
+		_, _ = dockercli.Run(ctx, 60*time.Second, "rm", "-f", name)
+		_, _ = dockercli.Run(ctx, 20*time.Second, "network", "disconnect", "-f", testNetwork, traefikContainer)
+		_, _ = dockercli.Run(ctx, 20*time.Second, "network", "rm", testNetwork)
+		// Compose mints a `<project>_default` alongside whatever the file names, and
+		// it is NOT a tenant network - so the cleanup scope will never reclaim it and
+		// it sits on the host that ran the suite forever. One from 2 Aug was still
+		// here when this was written.
+		_, _ = dockercli.Run(ctx, 20*time.Second, "network", "rm", "deplo-"+slug+"_default")
 	})
 
 	deploy := func(step string) string {
