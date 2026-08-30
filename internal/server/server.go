@@ -116,6 +116,14 @@ var Capabilities = []string{
 	// CLEANUP_SCOPE_LEFTOVER_APP_FILES is implemented: the files/<slug> directories of
 	// deleted stacks are reclaimed, judged against the live-slug list the request carries.
 	"cleanup.leftover-files",
+	// CLEANUP_SCOPE_LEFTOVER_NETWORKS is implemented: the networks of Environments and
+	// previews that are gone are reclaimed, judged against live_networks.
+	"cleanup.leftover-networks",
+	// DeployRequest.network / RerouteRequest.network are honoured: a stack joins the
+	// network its Environment owns instead of one shared network, and the agent puts
+	// Traefik on it. There is no shared-network fallback - this agent cannot serve a
+	// control plane that does not send it.
+	"deploy.network",
 	// mTLS leaf renewal over the existing pinned channel (RenewalCSR +
 	// InstallRenewedCert): the control plane re-signs a fresh CSR before the ~365d cert
 	// expires and the agent hot-reloads it WITHOUT a restart.
@@ -467,10 +475,10 @@ func (s *Service) Reroute(ctx context.Context, req *pb.RerouteRequest) (*pb.Stac
 	if err := os.MkdirAll(s.stackDir, 0o755); err != nil {
 		return &pb.StackResult{Ok: false, Error: "create stack dir: " + err.Error()}, nil
 	}
-	// Same opener as Deploy, and for the same reason: every stack joins the shared `deplo`
-	// network, declared `external: true` in the rendered compose, so `compose up` fails
-	// outright if it does not exist yet.
-	if err := dockercli.EnsureNetwork(ctx, "deplo"); err != nil {
+	// Same opener as Deploy, and for the same reason: the stack's network is declared
+	// `external: true` in the rendered compose, so `compose up` fails outright if it does
+	// not exist yet - and Traefik has to be on it for the re-rendered routers to resolve.
+	if err := ensureTenantNetwork(ctx, req.GetNetwork()); err != nil {
 		return &pb.StackResult{Ok: false, Error: "ensure network: " + err.Error()}, nil
 	}
 

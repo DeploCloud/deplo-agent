@@ -11,8 +11,13 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
+// testNetwork is the throwaway tenant network these tests deploy onto. Never a name
+// a real Environment could mint, and torn down with the stack - a leftover would have
+// this host's live Traefik still attached to it.
+const testNetwork = "deplo-env-agent-selftest"
+
 // teardownStack removes whatever the real `docker compose up` inside Reroute brought
-// up.
+// up, plus the throwaway network and Traefik's attachment to it.
 func teardownStack(t *testing.T, s *Service, slug string) {
 	t.Helper()
 	t.Cleanup(func() {
@@ -20,6 +25,8 @@ func teardownStack(t *testing.T, s *Service, slug string) {
 		defer cancel()
 		_, _ = dockercli.Run(ctx, 60*time.Second,
 			"compose", "-p", "deplo-"+slug, "-f", s.stackPath(slug), "down", "-v", "--remove-orphans")
+		_, _ = dockercli.Run(ctx, 20*time.Second, "network", "disconnect", "-f", testNetwork, traefikContainer)
+		_, _ = dockercli.Run(ctx, 20*time.Second, "network", "rm", testNetwork)
 	})
 }
 
@@ -62,6 +69,7 @@ func TestReroute_writesStackEnvAndMountFiles(t *testing.T) {
 	const yaml = "services:\n  web:\n    image: nginx\n"
 	_, _ = s.Reroute(ctx, &pb.RerouteRequest{
 		Slug:        slug,
+		Network:     testNetwork,
 		ComposeYaml: yaml,
 		Env:         map[string]string{"FOO": "bar", "BAZ": "qux"},
 		Mounts: []*pb.MountFile{
@@ -134,6 +142,7 @@ func TestReroute_noEnvWritesNoEnvFile(t *testing.T) {
 
 	_, _ = s.Reroute(ctx, &pb.RerouteRequest{
 		Slug:        "deplo-agent-test-reroute",
+		Network:     testNetwork,
 		ComposeYaml: "services:\n  web:\n    image: nginx\n",
 	})
 

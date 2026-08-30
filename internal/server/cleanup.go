@@ -97,6 +97,9 @@ type cleanupParams struct {
 	// liveSlugs is every stack the control plane still knows about, instance-wide.
 	// Nil/empty means it could not tell us, which SKIPS the scope that reads it.
 	liveSlugs map[string]bool
+	// liveNetworks is every tenant network the control plane still knows about, same
+	// contract and same fail-closed rule as liveSlugs.
+	liveNetworks map[string]bool
 	// cutoff is the newest a CACHE-type object (build cache, dangling image, orphan
 	// buildkit volume) may be to qualify. ZERO means "no age filter".
 	cutoff time.Time
@@ -139,6 +142,12 @@ func (s *Service) DockerCleanup(ctx context.Context, req *pb.DockerCleanupReques
 		params.liveSlugs = make(map[string]bool, len(live))
 		for _, slug := range live {
 			params.liveSlugs[slug] = true
+		}
+	}
+	if live := req.GetLiveNetworks(); len(live) > 0 {
+		params.liveNetworks = make(map[string]bool, len(live))
+		for _, n := range live {
+			params.liveNetworks[n] = true
 		}
 	}
 	if params.minAgeHours < 0 {
@@ -212,6 +221,8 @@ func (s *Service) DockerCleanup(ctx context.Context, req *pb.DockerCleanupReques
 			// No container index here: the proof is the control plane's own list of
 			// live stacks, and an absent list skips the scope rather than guessing.
 			r = cleanLeftoverAppFiles(params)
+		case pb.CleanupScope_CLEANUP_SCOPE_LEFTOVER_NETWORKS:
+			r = cleanLeftoverNetworks(ctx, params)
 		default:
 			return nil, status.Errorf(codes.InvalidArgument,
 				"unknown cleanup scope %q (this agent only implements the allow-listed scopes)", scope.String())
@@ -1076,4 +1087,80 @@ func cleanLeftoverAppFiles(p cleanupParams) *pb.CleanupScopeResult {
 		}
 	}
 	return r
+}
+
+// cleanLeftoverNetworks removes the tenant networks of Environments and previews that
+// are gone. It reclaims no bytes - it reclaims ADDRESS SPACE, which is the scarce
+// thing: Docker's default pool tops out at ~31 networks per host.
+func cleanLeftoverNetworks(ctx context.Context, p cleanupParams) *pb.CleanupScopeResult {
+	r := &pb.CleanupScopeResult{Scope: pb.CleanupScope_CLEANUP_SCOPE_LEFTOVER_NETWORKS}
+	if len(p.liveNetworks) == 0 {
+		return skippedScope(r.Scope, errors.New(
+			"the control plane sent no list of live networks, and an empty list is not a reason to remove every app's network"))
+	}
+	res, err := dockercli.Run(ctx, 20*time.Second, "network", "ls", "--format", "{{.Name}}")
+	if err != nil {
+		r.Error = err.Error()
+		return r
+	}
+	if res.Code != 0 {
+		r.Error = dockerErr("network ls", res)
+		return r
+	}
+	names := strings.Split(res.Stdout, "\n")
+	sort.Strings(names)
+	for _, raw := range names {
+		name := strings.TrimSpace(raw)
+		// Only ever ours, and only ever a TENANT one: the platform's own networks are
+		// not in this namespace and could never be candidates.
+		if !dockercli.IsTenantNetwork(name) || p.liveNetworks[name] {
+			continue
+		}
+		attached, created, ok := networkState(ctx, name)
+		if !ok || attached > 0 {
+			continue // unknown state fails closed; an attached network is in use
+		}
+		// A network created moments ago belongs to a deploy the control plane's list
+		// may predate. Same grace, and the same reason, as the files scope.
+		if created.After(p.filesCutoff) {
+			continue
+		}
+		if !p.dryRun {
+			rm, err := dockercli.Run(ctx, 20*time.Second, "network", "rm", name)
+			if err != nil || rm.Code != 0 {
+				if r.Error == "" {
+					r.Error = fmt.Sprintf("remove %s: %s", name, dockerErr("network rm", rm))
+				}
+				continue
+			}
+		}
+		r.ItemsRemoved++
+		if len(r.Items) < cleanupMaxItems {
+			r.Items = append(r.Items, name)
+		}
+	}
+	return r
+}
+
+// networkState reports how many containers are attached to a network and when it was
+// created. ok=false when docker could not answer - which makes the caller skip it.
+func networkState(ctx context.Context, name string) (attached int, created time.Time, ok bool) {
+	res, err := dockercli.Run(ctx, 10*time.Second,
+		"network", "inspect", "-f", "{{len .Containers}}|{{.Created}}", name)
+	if err != nil || res.Code != 0 {
+		return 0, time.Time{}, false
+	}
+	part := strings.SplitN(strings.TrimSpace(res.Stdout), "|", 2)
+	if len(part) != 2 {
+		return 0, time.Time{}, false
+	}
+	n, err := strconv.Atoi(part[0])
+	if err != nil {
+		return 0, time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339Nano, part[1])
+	if err != nil {
+		return 0, time.Time{}, false
+	}
+	return n, t, true
 }

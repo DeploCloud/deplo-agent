@@ -75,7 +75,7 @@ func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitt
 		e.result(false, "create stack dir: "+err.Error(), "")
 		return
 	}
-	if err := dockercli.EnsureNetwork(ctx, "deplo"); err != nil {
+	if err := ensureTenantNetwork(ctx, req.GetNetwork()); err != nil {
 		e.result(false, "ensure network: "+err.Error(), "")
 		return
 	}

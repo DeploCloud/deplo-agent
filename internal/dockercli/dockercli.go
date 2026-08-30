@@ -420,7 +420,7 @@ func resetPruneCapProbe() {
 	pruneCapKnown, pruneCapMode = false, ""
 }
 
-// EnsureNetwork creates the shared external `deplo` network if it is missing.
+// EnsureNetwork creates the named external network if it is missing.
 func EnsureNetwork(ctx context.Context, name string) error {
 	if res, err := Run(ctx, 10*time.Second, "network", "inspect", name); err == nil && res.Code == 0 {
 		return nil
@@ -433,6 +433,47 @@ func EnsureNetwork(ctx context.Context, name string) error {
 		return fmt.Errorf("docker network create %s failed: %s", name, res.Stderr)
 	}
 	return nil
+}
+
+// ConnectNetwork attaches a container to a network. Already being on it is success,
+// not an error - every deploy re-asserts this and Docker answers with a message
+// rather than a code we can distinguish.
+func ConnectNetwork(ctx context.Context, network, container string) error {
+	res, err := Run(ctx, 15*time.Second, "network", "connect", network, container)
+	if err != nil {
+		return err
+	}
+	if res.Code == 0 || strings.Contains(res.Stderr, "already exists in network") {
+		return nil
+	}
+	return fmt.Errorf("docker network connect %s %s failed: %s", network, container, res.Stderr)
+}
+
+// DeploNetworks lists the tenant networks Deplo manages on this host - the ones a
+// recreated Traefik has to be put back on. The platform's own (`deplo`,
+// `deplo-internal`, `deplo-socket`) are declared in Traefik's compose file and are
+// deliberately NOT in this list.
+func DeploNetworks(ctx context.Context) []string {
+	res, err := Run(ctx, 10*time.Second, "network", "ls", "--format", "{{.Name}}")
+	if err != nil || res.Code != 0 {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(res.Stdout, "\n") {
+		n := strings.TrimSpace(line)
+		if IsTenantNetwork(n) {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// IsTenantNetwork reports whether a network name is one Deplo mints for an
+// Environment, a team or a preview - never the platform's own.
+func IsTenantNetwork(name string) bool {
+	return strings.HasPrefix(name, "deplo-env-") ||
+		strings.HasPrefix(name, "deplo-team-") ||
+		strings.HasPrefix(name, "deplo-preview-")
 }
 
 // RunningContainers counts containers in the running state. Best-effort: returns

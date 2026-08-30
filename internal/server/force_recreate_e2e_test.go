@@ -38,12 +38,15 @@ func TestE2E_ForceRecreateReplacesAnUnchangedContainer(t *testing.T) {
 		SourceKind:     pb.SourceKind_SOURCE_KIND_IMAGE,
 		BuildKind:      pb.BuildKind_BUILD_KIND_NONE,
 		ComposeYaml:    yaml,
+		Network:        testNetwork,
 		PullImage:      true,
 		ReadyTimeoutMs: 60_000,
 	}
 
 	t.Cleanup(func() {
 		_, _ = dockercli.Run(context.Background(), 60*time.Second, "rm", "-f", name)
+		_, _ = dockercli.Run(context.Background(), 20*time.Second, "network", "disconnect", "-f", testNetwork, traefikContainer)
+		_, _ = dockercli.Run(context.Background(), 20*time.Second, "network", "rm", testNetwork)
 	})
 
 	deploy := func(step string) string {

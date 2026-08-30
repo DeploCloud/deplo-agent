@@ -24,6 +24,23 @@ import (
 // traefikContainer is the name install-agent.sh gives the Traefik it installs.
 const traefikContainer = "deplo-traefik"
 
+// ensureTenantNetwork creates the stack's own network and puts Traefik on it. Every
+// deploy re-asserts both: the network may be new, and Traefik may have been recreated
+// (which drops every attachment not in its compose file).
+func ensureTenantNetwork(ctx context.Context, network string) error {
+	if network == "" {
+		return fmt.Errorf("no network was sent for this stack")
+	}
+	if err := dockercli.EnsureNetwork(ctx, network); err != nil {
+		return err
+	}
+	// Traefik is absent on a host that runs no proxy; that is not a deploy failure.
+	if exists, _ := dockercli.State(ctx, traefikContainer); !exists {
+		return nil
+	}
+	return dockercli.ConnectNetwork(ctx, network, traefikContainer)
+}
+
 // SetAgentDir tells the service where the agent's own data lives (the installer's
 // $AGENT_DATA, i.e. --agent-dir) - the parent of the Traefik stack this manages.
 func (s *Service) SetAgentDir(dir string) { s.agentDir = dir }
@@ -238,6 +255,14 @@ func (s *Service) bringUpTraefik(ctx context.Context, path string, restartOnly b
 	}
 	if res.Code != 0 {
 		return fmt.Errorf("could not apply the Traefik configuration: %s", firstLine(res.Stderr))
+	}
+	// The recreated container only has the networks its compose file names, so every
+	// tenant network a deploy attached it to is gone. Put them back before returning,
+	// or every site on this host 404s until its app is deployed again.
+	for _, n := range dockercli.DeploNetworks(ctx) {
+		if err := dockercli.ConnectNetwork(ctx, n, traefikContainer); err != nil {
+			return fmt.Errorf("could not reconnect Traefik to %s: %v", n, err)
+		}
 	}
 	return nil
 }
