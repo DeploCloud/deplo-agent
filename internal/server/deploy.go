@@ -75,9 +75,16 @@ func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitt
 		e.result(false, "create stack dir: "+err.Error(), "")
 		return
 	}
-	if err := ensureTenantNetwork(ctx, req.GetNetwork()); err != nil {
-		e.result(false, "ensure network: "+err.Error(), "")
-		return
+	// A BUILD-ONLY deploy compiles for a machine it is not: it writes no stack and
+	// brings nothing up here, so it needs no network. Creating one anyway left a
+	// build server holding an empty network per Environment it ever built for -
+	// permanently, because the live-network list is by NAME and instance-wide, so
+	// the copy on the machine that runs the app keeps this one alive too.
+	if !req.GetBuildOnly() {
+		if err := ensureTenantNetwork(ctx, req.GetNetwork()); err != nil {
+			e.result(false, "ensure network: "+err.Error(), "")
+			return
+		}
 	}
 	// The team's registry credentials, for every pull below (image ref, compose
 	// images, a Dockerfile's base image). No-op when none were sent.

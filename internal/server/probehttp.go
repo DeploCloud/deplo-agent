@@ -23,9 +23,6 @@ import (
 // stack, from the host, over Docker's network. It exists because a compose app's icon
 // is not a file. The security property is the address: the CALLER never supplies one.
 
-// The network Deplo attaches routed services to.
-const deploNetwork = "deplo"
-
 const (
 	// Default and ceiling for the returned body. The ceiling is what makes the
 	// RPC bounded no matter what a caller asks for; it comfortably clears the
@@ -222,8 +219,17 @@ func pickContainerIP(stdout string) (string, error) {
 		}
 		return n.GlobalIPv6Address
 	}
-	if ip := addrOf(deploNetwork); ip != "" {
-		return ip, nil
+	// Prefer the network the app is ROUTED on - the one Traefik forwards to - so a
+	// probe reads the same address a visitor's request lands on. Since ADR-0028 that
+	// is a tenant network; `deplo` is the platform's own and no app is on it, which
+	// left this preference matching nothing and the choice falling to whichever name
+	// sorted first.
+	for name := range nets {
+		if dockercli.IsTenantNetwork(name) {
+			if ip := addrOf(name); ip != "" {
+				return ip, nil
+			}
+		}
 	}
 	names := make([]string, 0, len(nets))
 	for name := range nets {

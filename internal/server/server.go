@@ -122,6 +122,12 @@ var Capabilities = []string{
 	// Its own string because the first cut of the scope advertised the name and
 	// reclaimed nothing - and a moved tag makes the version no proof of which is running.
 	"cleanup.leftover-networks.reclaims",
+	// A BUILD-ONLY deploy no longer creates the app's network on a machine that
+	// runs nothing of it, and an HTTP probe reads the address the app is ROUTED on
+	// rather than whichever network name sorted first. Its own string because the
+	// tag is moved rather than bumped, so the version proves nothing about which
+	// binary a host is running.
+	"deploy.network.build-only-skips",
 	"cleanup.leftover-networks",
 	// DeployRequest.network / RerouteRequest.network are honoured: a stack joins the
 	// network its Environment owns instead of one shared network, and the agent puts

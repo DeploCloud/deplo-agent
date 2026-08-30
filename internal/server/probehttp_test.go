@@ -166,10 +166,20 @@ func TestProbeOnce_aDeadPortIsUnavailableNotAnError(t *testing.T) {
 }
 
 func TestPickContainerIP(t *testing.T) {
-	// The deplo network wins: it is the address Traefik itself reaches the app on.
-	ip, err := pickContainerIP(`{"deplo":{"IPAddress":"172.18.0.4"},"app_default":{"IPAddress":"172.19.0.2"}}`)
-	if err != nil || ip != "172.18.0.4" {
+	// The TENANT network wins: it is the address Traefik itself reaches the app on.
+	// It used to be the one literally named `deplo`, which no app has been on since
+	// ADR-0028 - so that preference matched nothing and the pick fell to whichever
+	// name sorted first, which can be the stack's private network.
+	ip, err := pickContainerIP(
+		`{"deplo-env-environ_x":{"IPAddress":"10.200.5.2"},"app_default":{"IPAddress":"172.19.0.2"}}`)
+	if err != nil || ip != "10.200.5.2" {
 		t.Fatalf("got %q, %v", ip, err)
+	}
+	// A team network is a tenant network too, and sorts AFTER the private one.
+	ip, err = pickContainerIP(
+		`{"a_default":{"IPAddress":"172.19.0.2"},"deplo-team-team_x":{"IPAddress":"10.200.7.3"}}`)
+	if err != nil || ip != "10.200.7.3" {
+		t.Fatalf("team network should win, got %q, %v", ip, err)
 	}
 	// Without it, the choice must not depend on Go's random map order.
 	for i := 0; i < 20; i++ {
@@ -179,7 +189,7 @@ func TestPickContainerIP(t *testing.T) {
 		}
 	}
 	// IPv6-only container.
-	ip, err = pickContainerIP(`{"deplo":{"IPAddress":"","GlobalIPv6Address":"fd00::2"}}`)
+	ip, err = pickContainerIP(`{"deplo-env-e":{"IPAddress":"","GlobalIPv6Address":"fd00::2"}}`)
 	if err != nil || ip != "fd00::2" {
 		t.Fatalf("got %q, %v", ip, err)
 	}

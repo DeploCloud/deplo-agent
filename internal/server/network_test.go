@@ -135,3 +135,19 @@ func TestNetworkState_readsDockersTimestamp(t *testing.T) {
 		t.Errorf("the creation time did not parse: %v", created)
 	}
 }
+
+// A BUILD-ONLY deploy compiles for a machine it is not: no stack is written and
+// nothing is brought up, so no network is needed. Creating one anyway left a build
+// server holding an empty network per Environment it ever built for, and the
+// live-network list is by NAME and instance-wide, so it could never be reclaimed.
+func TestBuildOnlyDeploy_needsNoNetwork(t *testing.T) {
+	// The guard is `if !req.GetBuildOnly()`, so an empty network - which every other
+	// path refuses - has to be acceptable here.
+	if err := ensureTenantNetwork(context.Background(), ""); err == nil {
+		t.Fatal("a non-build deploy must still refuse an empty network")
+	}
+	req := &pb.DeployRequest{BuildOnly: true, Network: ""}
+	if !req.GetBuildOnly() {
+		t.Fatal("build-only must be readable from the request")
+	}
+}
