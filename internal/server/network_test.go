@@ -108,3 +108,30 @@ func TestRestoreConfig_carriesTheNetwork(t *testing.T) {
 		t.Fatalf("restore would be refused for having no network, got %q", rr.GetNetwork())
 	}
 }
+
+// The scope reclaimed nothing for a reason no unit test could see: `{{.Created}}`
+// renders Go's default layout, not RFC3339, so every network failed to parse and
+// fell to the fail-closed branch. This pins the format the template must produce.
+func TestNetworkState_readsDockersTimestamp(t *testing.T) {
+	ctx := context.Background()
+	if !dockercli.Available(ctx) {
+		t.Skip("docker not available")
+	}
+	const n = "deplo-env-agent-timetest"
+	if err := dockercli.EnsureNetwork(ctx, n); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = dockercli.Run(context.Background(), 20*time.Second, "network", "rm", n)
+	})
+	attached, created, ok := networkState(ctx, n)
+	if !ok {
+		t.Fatal("networkState could not read the network - every network would be skipped")
+	}
+	if attached != 0 {
+		t.Errorf("a fresh network has no tenant on it, got %d", attached)
+	}
+	if created.IsZero() || time.Since(created) > time.Hour {
+		t.Errorf("the creation time did not parse: %v", created)
+	}
+}

@@ -1174,9 +1174,13 @@ func attachedExcludingProxy(names string) int {
 // to every tenant network and nothing detaches it, so counting it would make an
 // emptied network look busy forever.
 func networkState(ctx context.Context, name string) (attached int, created time.Time, ok bool) {
+	// `{{.Created}}` renders Go's DEFAULT time layout ("2026-08-30 18:50:12 +0200
+	// CEST"), which is not RFC3339 - parsing it as RFC3339 failed for every network,
+	// so every one of them fell to the fail-closed branch and this scope reclaimed
+	// nothing at all. `json` marshals the same value as RFC3339Nano.
 	res, err := dockercli.Run(ctx, 10*time.Second,
 		"network", "inspect", "-f",
-		"{{range .Containers}}{{.Name}} {{end}}|{{.Created}}", name)
+		"{{range .Containers}}{{.Name}} {{end}}|{{json .Created}}", name)
 	if err != nil || res.Code != 0 {
 		return 0, time.Time{}, false
 	}
@@ -1185,7 +1189,7 @@ func networkState(ctx context.Context, name string) (attached int, created time.
 		return 0, time.Time{}, false
 	}
 	n := attachedExcludingProxy(part[0])
-	t, err := time.Parse(time.RFC3339Nano, part[1])
+	t, err := time.Parse(time.RFC3339Nano, strings.Trim(part[1], `"`))
 	if err != nil {
 		return 0, time.Time{}, false
 	}
