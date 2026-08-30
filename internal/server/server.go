@@ -116,8 +116,12 @@ var Capabilities = []string{
 	// CLEANUP_SCOPE_LEFTOVER_APP_FILES is implemented: the files/<slug> directories of
 	// deleted stacks are reclaimed, judged against the live-slug list the request carries.
 	"cleanup.leftover-files",
-	// CLEANUP_SCOPE_LEFTOVER_NETWORKS is implemented: the networks of Environments and
-	// previews that are gone are reclaimed, judged against live_networks.
+	// CLEANUP_SCOPE_LEFTOVER_NETWORKS is implemented AND actually reclaims: the proxy
+	// is not counted as a live attachment and is disconnected before the removal, so an
+	// emptied Environment's network is a candidate instead of being pinned forever.
+	// Its own string because the first cut of the scope advertised the name and
+	// reclaimed nothing - and a moved tag makes the version no proof of which is running.
+	"cleanup.leftover-networks.reclaims",
 	"cleanup.leftover-networks",
 	// DeployRequest.network / RerouteRequest.network are honoured: a stack joins the
 	// network its Environment owns instead of one shared network, and the agent puts
