@@ -31,6 +31,12 @@ func ensureTenantNetwork(ctx context.Context, network string) error {
 	if network == "" {
 		return fmt.Errorf("no network was sent for this stack")
 	}
+	// Only ever a name Deplo mints for a tenant. The control plane is trusted, but
+	// this is what a stack joins: a `deplo` arriving here would put a tenant beside
+	// the panel, and nothing else on this side would say so.
+	if !dockercli.IsTenantNetwork(network) {
+		return fmt.Errorf("%q is not a tenant network", network)
+	}
 	if err := dockercli.EnsureNetwork(ctx, network); err != nil {
 		return err
 	}

@@ -151,3 +151,13 @@ func TestBuildOnlyDeploy_needsNoNetwork(t *testing.T) {
 		t.Fatal("build-only must be readable from the request")
 	}
 }
+
+// The refusal is BEFORE docker: a platform name arriving here would put a tenant
+// beside the panel, so it never reaches `network create`.
+func TestEnsureTenantNetwork_refusesWhatIsNotATenantNetwork(t *testing.T) {
+	for _, n := range []string{"", "deplo", "deplo-internal", "deplo-socket", "bridge"} {
+		if err := ensureTenantNetwork(context.Background(), n); err == nil {
+			t.Errorf("ensureTenantNetwork(%q) must refuse", n)
+		}
+	}
+}
