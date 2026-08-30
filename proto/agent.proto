@@ -1029,6 +1029,10 @@ message ProjectDescriptor {
   // Compose mount files (template config) to re-materialise on restore, mirroring
   // RerouteRequest.mounts. Empty for single-image projects.
   repeated MountFile mounts = 6;
+  // The app's CURRENT tenant network, for the Reroute a restore ends in. Set on the
+  // RESTORE path only: a backup does not need it, and the network the app is on today
+  // is not necessarily the one the snapshot was taken on.
+  string network = 7;
 }
 
 message BackupRequest {

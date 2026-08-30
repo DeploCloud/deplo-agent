@@ -1121,18 +1121,31 @@ func cleanLeftoverNetworks(ctx context.Context, p cleanupParams) *pb.CleanupScop
 			continue // unknown state fails closed; an attached network is in use
 		}
 		// A network created moments ago belongs to a deploy the control plane's list
-		// may predate. Same grace, and the same reason, as the files scope.
+		// may predate. Same grace, and the same reason, as the files scope. BEFORE the
+		// dry-run branch, or the confirm dialog would promise removals the real sweep
+		// then skips.
 		if created.After(p.filesCutoff) {
 			continue
 		}
-		if !p.dryRun {
-			rm, err := dockercli.Run(ctx, 20*time.Second, "network", "rm", name)
-			if err != nil || rm.Code != 0 {
-				if r.Error == "" {
-					r.Error = fmt.Sprintf("remove %s: %s", name, dockerErr("network rm", rm))
-				}
-				continue
+		if p.dryRun {
+			r.ItemsRemoved++
+			if len(r.Items) < cleanupMaxItems {
+				r.Items = append(r.Items, name)
 			}
+			continue
+		}
+		// Traefik is on every tenant network because a deploy put it there, and it
+		// never leaves. Left counted, no tenant network is EVER a candidate and this
+		// scope reclaims nothing; left attached, `docker network rm` refuses outright.
+		// So it is taken off first, and only once nothing else is on the network.
+		_, _ = dockercli.Run(ctx, 20*time.Second,
+			"network", "disconnect", "-f", name, traefikContainer)
+		rm, err := dockercli.Run(ctx, 20*time.Second, "network", "rm", name)
+		if err != nil || rm.Code != 0 {
+			if r.Error == "" {
+				r.Error = fmt.Sprintf("remove %s: %s", name, dockerErr("network rm", rm))
+			}
+			continue
 		}
 		r.ItemsRemoved++
 		if len(r.Items) < cleanupMaxItems {
@@ -1144,9 +1157,26 @@ func cleanLeftoverNetworks(ctx context.Context, p cleanupParams) *pb.CleanupScop
 
 // networkState reports how many containers are attached to a network and when it was
 // created. ok=false when docker could not answer - which makes the caller skip it.
+// attachedExcludingProxy counts the containers on a network that are not Traefik.
+// Counting Traefik is what made every tenant network look permanently in use.
+func attachedExcludingProxy(names string) int {
+	n := 0
+	for _, c := range strings.Fields(names) {
+		if c != traefikContainer {
+			n++
+		}
+	}
+	return n
+}
+
+// networkState reports how many containers OTHER THAN THE PROXY are attached, and
+// when the network was created. Traefik is excluded on purpose: a deploy attaches it
+// to every tenant network and nothing detaches it, so counting it would make an
+// emptied network look busy forever.
 func networkState(ctx context.Context, name string) (attached int, created time.Time, ok bool) {
 	res, err := dockercli.Run(ctx, 10*time.Second,
-		"network", "inspect", "-f", "{{len .Containers}}|{{.Created}}", name)
+		"network", "inspect", "-f",
+		"{{range .Containers}}{{.Name}} {{end}}|{{.Created}}", name)
 	if err != nil || res.Code != 0 {
 		return 0, time.Time{}, false
 	}
@@ -1154,10 +1184,7 @@ func networkState(ctx context.Context, name string) (attached int, created time.
 	if len(part) != 2 {
 		return 0, time.Time{}, false
 	}
-	n, err := strconv.Atoi(part[0])
-	if err != nil {
-		return 0, time.Time{}, false
-	}
+	n := attachedExcludingProxy(part[0])
 	t, err := time.Parse(time.RFC3339Nano, part[1])
 	if err != nil {
 		return 0, time.Time{}, false

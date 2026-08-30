@@ -755,7 +755,13 @@ func restoreConfig(
 		mounts = snap.mounts
 	}
 
-	return &pb.RerouteRequest{Slug: slug, ComposeYaml: compose, Env: env, Mounts: mounts}
+	// Without this the Reroute a restore ends in is refused for having no network,
+	// which would leave the data restored and the stack down - the one moment that
+	// must not fail.
+	return &pb.RerouteRequest{
+		Slug: slug, ComposeYaml: compose, Env: env, Mounts: mounts,
+		Network: p.GetNetwork(),
+	}
 }
 
 // projectSnapshot is the config recovered from the archive's snapshot/ entries.

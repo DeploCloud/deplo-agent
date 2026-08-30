@@ -429,7 +429,9 @@ func EnsureNetwork(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
-	if res.Code != 0 {
+	// Two deploys of the same Environment start at once, both look and both create.
+	// The loser is not a failure: the network it wanted now exists.
+	if res.Code != 0 && !strings.Contains(res.Stderr, "already exists") {
 		return fmt.Errorf("docker network create %s failed: %s", name, res.Stderr)
 	}
 	return nil
