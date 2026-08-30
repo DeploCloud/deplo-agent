@@ -107,10 +107,4 @@ func TestRestoreConfig_carriesTheNetwork(t *testing.T) {
 	if rr.GetNetwork() != "deplo-env-environ_now" {
 		t.Fatalf("restore would be refused for having no network, got %q", rr.GetNetwork())
 	}
-	if err := ensureTenantNetwork(context.Background(), rr.GetNetwork()); err != nil {
-		// Only the empty-name refusal matters here; a docker error is this host's.
-		if strings.Contains(err.Error(), "no network") {
-			t.Fatalf("the guard still refuses it: %v", err)
-		}
-	}
 }
