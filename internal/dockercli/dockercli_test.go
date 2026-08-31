@@ -189,3 +189,21 @@ func TestRedactArgs(t *testing.T) {
 		}
 	}
 }
+
+// A pool of its own is not the same as ROOM: reading daemon.json for the presence of
+// the key called one /24 - a single network - "widened", and never saw a pool passed
+// as a daemon flag at all.
+func TestParseAddressPools(t *testing.T) {
+	for doc, want := range map[string]int{
+		"null":                                 0,
+		"[]":                                   0,
+		"not json":                             0,
+		`[{"Base":"10.200.0.0/13","Size":24}]`: 2048,
+		`[{"Base":"172.20.0.0/24","Size":24}]`: 1,
+		`[{"Base":"10.0.0.0/8","Size":16},{"Base":"192.168.0.0/16","Size":24}]`: 512,
+	} {
+		if got := parseAddressPools(doc); got != want {
+			t.Errorf("parseAddressPools(%s) = %d, want %d", doc, got, want)
+		}
+	}
+}
