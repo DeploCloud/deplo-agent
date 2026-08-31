@@ -133,6 +133,10 @@ var Capabilities = []string{
 	// sent the platform's own name cannot put a stack beside the panel. Its own
 	// string for the usual reason: the tag moves, so the version proves nothing.
 	"deploy.network.tenant-only",
+	// Nothing new in the agent for the control plane's second network audit - the
+	// fixes were all control-plane side. Its own string so a fleet rolled onto THAT
+	// release can be told apart from one still on the previous binary.
+	"deploy.network.audit2",
 	"cleanup.leftover-networks",
 	// DeployRequest.network / RerouteRequest.network are honoured: a stack joins the
 	// network its Environment owns instead of one shared network, and the agent puts
