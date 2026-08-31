@@ -545,3 +545,46 @@ func StackRunning(ctx context.Context, slug string) bool {
 	}
 	return strings.TrimSpace(res.Stdout) != ""
 }
+
+// NetworkHeadroom reports how close this host is to running out of docker
+// networks, as a warning to print, or "" when there is room.
+//
+// Docker's built-in pools give about 31 networks. Deplo now spends one per
+// Environment, plus each network a compose file declares and one per open preview,
+// so a host installed before the installer began widening the pools reaches that
+// ceiling quietly - and the first sign is a deploy failing with an address-pool
+// error nobody can act on after the fact.
+func NetworkHeadroom(ctx context.Context) string {
+	if pools := configuredAddressPools(); pools {
+		return "" // widened, and the ceiling is then thousands
+	}
+	res, err := Run(ctx, 10*time.Second, "network", "ls", "-q")
+	if err != nil || res.Code != 0 {
+		return ""
+	}
+	count := 0
+	for _, l := range strings.Split(strings.TrimSpace(res.Stdout), "\n") {
+		if strings.TrimSpace(l) != "" {
+			count++
+		}
+	}
+	// 31 is the practical ceiling; warn with a few to spare so there is time to act.
+	if count < 24 {
+		return ""
+	}
+	return fmt.Sprintf(
+		"this server has %d docker networks and no widened address pool, so it is near "+
+			"the built-in ceiling of about 31. Set \"default-address-pools\" in "+
+			"/etc/docker/daemon.json and restart docker, or the next deploy that needs a "+
+			"new network will fail.", count)
+}
+
+// configuredAddressPools reports whether the daemon has been given pools of its
+// own. Read from the file rather than `docker info`, which does not print them.
+func configuredAddressPools() bool {
+	b, err := os.ReadFile("/etc/docker/daemon.json")
+	if err != nil {
+		return false
+	}
+	return strings.Contains(string(b), "default-address-pools")
+}

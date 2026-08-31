@@ -142,6 +142,11 @@ var Capabilities = []string{
 	// which by then may have been reclaimed, leaving the data restored and the
 	// stack down.
 	"restore.network-retarget",
+	// Two things this binary does that the previous one did not: it warns while
+	// there is still address space left instead of failing a deploy on an exhausted
+	// pool, and it puts Traefik back on EVERY tenant network at each deploy, healing
+	// a proxy recreated outside the config-apply path.
+	"deploy.network.headroom",
 	"cleanup.leftover-networks",
 	// DeployRequest.network / RerouteRequest.network are honoured: a stack joins the
 	// network its Environment owns instead of one shared network, and the agent puts

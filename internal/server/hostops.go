@@ -47,6 +47,34 @@ func ensureTenantNetwork(ctx context.Context, network string) error {
 	return dockercli.ConnectNetwork(ctx, network, traefikContainer)
 }
 
+// ensureTenantNetworkWarned is ensureTenantNetwork plus the one thing the operator
+// cannot find out for themselves: that this host is nearly out of docker networks.
+// Said BEFORE the deploy that would fail, which is the whole point.
+func ensureTenantNetworkWarned(ctx context.Context, network string) (string, error) {
+	if err := ensureTenantNetwork(ctx, network); err != nil {
+		return "", err
+	}
+	// Traefik is put back on EVERY tenant network here, not just this deploy's.
+	// `applyTraefik` reconnects them after its own `--force-recreate`, but a proxy
+	// recreated any other way - the installer, a hand-run `compose up` in the
+	// traefik dir - comes back attached to nothing, and every site on the host 404s
+	// until each app happens to be deployed again. A deploy is the natural moment
+	// to heal that, and reconnecting is a no-op when it is already on.
+	reconnectTraefikToTenantNetworks(ctx)
+	return dockercli.NetworkHeadroom(ctx), nil
+}
+
+// reconnectTraefikToTenantNetworks puts the proxy back on every tenant network it
+// is missing. Best-effort and quiet: a failure here must never fail a deploy.
+func reconnectTraefikToTenantNetworks(ctx context.Context) {
+	if exists, _ := dockercli.State(ctx, traefikContainer); !exists {
+		return
+	}
+	for _, n := range dockercli.DeploNetworks(ctx) {
+		_ = dockercli.ConnectNetwork(ctx, n, traefikContainer)
+	}
+}
+
 // SetAgentDir tells the service where the agent's own data lives (the installer's
 // $AGENT_DATA, i.e. --agent-dir) - the parent of the Traefik stack this manages.
 func (s *Service) SetAgentDir(dir string) { s.agentDir = dir }

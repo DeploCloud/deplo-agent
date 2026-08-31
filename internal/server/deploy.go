@@ -81,9 +81,13 @@ func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitt
 	// permanently, because the live-network list is by NAME and instance-wide, so
 	// the copy on the machine that runs the app keeps this one alive too.
 	if !req.GetBuildOnly() {
-		if err := ensureTenantNetwork(ctx, req.GetNetwork()); err != nil {
+		warning, err := ensureTenantNetworkWarned(ctx, req.GetNetwork())
+		if err != nil {
 			e.result(false, "ensure network: "+err.Error(), "")
 			return
+		}
+		if warning != "" {
+			e.log("warn", warning)
 		}
 	}
 	// The team's registry credentials, for every pull below (image ref, compose

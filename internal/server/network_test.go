@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -159,5 +160,22 @@ func TestEnsureTenantNetwork_refusesWhatIsNotATenantNetwork(t *testing.T) {
 		if err := ensureTenantNetwork(context.Background(), n); err == nil {
 			t.Errorf("ensureTenantNetwork(%q) must refuse", n)
 		}
+	}
+}
+
+// The ceiling is invisible until a deploy fails on it, and the hosts that hit it
+// are the ones installed before the installer began widening the pools.
+func TestNetworkHeadroom_silentWhenPoolsAreWidened(t *testing.T) {
+	// This host has widened pools (the installer wrote them), so there is nothing
+	// to warn about however many networks exist.
+	if _, err := os.Stat("/etc/docker/daemon.json"); err != nil {
+		t.Skip("no daemon.json on this host")
+	}
+	b, err := os.ReadFile("/etc/docker/daemon.json")
+	if err != nil || !strings.Contains(string(b), "default-address-pools") {
+		t.Skip("pools not configured here; the warning path is the one under test elsewhere")
+	}
+	if got := dockercli.NetworkHeadroom(context.Background()); got != "" {
+		t.Errorf("a widened pool must warn about nothing, got: %q", got)
 	}
 }
