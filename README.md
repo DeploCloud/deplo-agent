@@ -130,4 +130,6 @@ DeploCloud also offers deplo under commercial terms, so a contribution has to ar
 the right to do both. A bot asks you to sign the
 **[CLA](https://github.com/DeploCloud/deplo/blob/main/CLA.md)** on your first pull request:
 one comment, once per person. It is a license grant, not a copyright assignment - you keep
-what you wrote.
+what you wrote. What we promise in return is
+[here](https://github.com/DeploCloud/deplo/blob/main/CONTRIBUTING.md#what-we-will-not-do):
+the core stays AGPL and nothing that works on a machine you own moves behind a paywall.
