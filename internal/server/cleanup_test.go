@@ -31,7 +31,7 @@ type hostFixture struct {
 	buildCacheJSON  string            // `docker system df -v --format {{json .BuildCache}}`
 	danglingImages  []string          // `docker image ls --filter dangling=true -q` (short ids)
 	managedImages   []string          // `docker image ls --filter label=deplo.managed=true -q`
-	imageRows       map[string]string // short id -> "<fullID>|<slug>|<service>|<created>|<sizeBytes>"
+	imageRows       map[string]string // short id -> "<fullID>|<slug>|<service>|<created>|<sizeBytes>[|<ref>]"
 	danglingVolumes []string          // `docker volume ls --filter dangling=true -q`
 	volumeMounts    map[string]string // volume name -> mountpoint on disk
 	volumeCreated   string            // every volume's CreatedAt (RFC3339)
@@ -454,6 +454,52 @@ func TestDockerCleanup_unusedAppImages_skipsUnslugged(t *testing.T) {
 	}
 	if got := h.argv(); len(got) != 0 {
 		t.Fatalf("argv = %q, want none - an image with no deplo.slug is not a candidate", got)
+	}
+}
+
+// An image's deplo labels are not proof of whose image it is: any tenant can pull one
+// carrying `deplo.slug=<someone else>` and a Created of their choosing. Ranked with
+// that app's own images it would push their oldest generation past keep-N, and their
+// rollback with it. The REPOSITORY is what deplo names, so a foreign image groups
+// alone.
+func TestDockerCleanup_unusedAppImages_forgedSlugCannotEvict(t *testing.T) {
+	h := newFixture(t)
+	now := time.Now()
+	gen := func(hoursAgo int) string {
+		return now.Add(-time.Duration(hoursAgo) * time.Hour).Format(time.RFC3339Nano)
+	}
+	h.managedImages = []string{"real1", "real2", "fake1"}
+	h.imageRows = map[string]string{
+		"real1": "sha256:real1|shop||" + gen(2) + "|100000000|deplo/shop:dpl_two",
+		"real2": "sha256:real2|shop||" + gen(4) + "|100000000|deplo/shop:dpl_one",
+		// Pulled by another tenant, labelled with the victim's slug and newer than
+		// both of the victim's own images.
+		"fake1": "sha256:fake1|shop||" + gen(1) + "|100000000|evil/foo:latest",
+	}
+	h.install(t)
+
+	if _, err := newService(t).DockerCleanup(context.Background(), &pb.DockerCleanupRequest{
+		Scopes:           []pb.CleanupScope{pb.CleanupScope_CLEANUP_SCOPE_UNUSED_APP_IMAGES},
+		KeepImagesPerApp: 2,
+	}); err != nil {
+		t.Fatalf("DockerCleanup: %v", err)
+	}
+	if got := h.argv(); len(got) != 0 {
+		t.Fatalf("argv = %q, want none - a foreign image evicted the app's own generation", got)
+	}
+}
+
+func TestRepoOf(t *testing.T) {
+	for ref, want := range map[string]string{
+		"deplo/shop:dpl_abc123":            "deplo/shop",
+		"deplo-shop-web:latest":            "deplo-shop-web",
+		"registry.acme.com:5000/team/x:v2": "registry.acme.com:5000/team/x",
+		"evil/foo@sha256:abc":              "evil/foo",
+		"":                                 "",
+	} {
+		if got := repoOf(ref); got != want {
+			t.Errorf("repoOf(%q) = %q, want %q", ref, got, want)
+		}
 	}
 }
 

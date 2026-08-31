@@ -668,7 +668,13 @@ func cleanUnusedAppImages(ctx context.Context, p cleanupParams, idx *containerIn
 			// keep-N to it. Leave it alone.
 			continue
 		}
-		key := im.slug + "\x00" + im.service
+		// The REPOSITORY is part of the group, because the labels are not proof of
+		// whose image this is: a tenant can pull one carrying `deplo.managed=true
+		// deplo.slug=<victim>` and a Created of its choosing, and ranked with the
+		// victim's it pushes their rollback images past keep-N. Deplo names every
+		// image it builds (`deplo/<slug>`, or the stack's own project prefix), so a
+		// foreign one lands in a group of its own and reaches nobody else's.
+		key := im.repo + "\x00" + im.slug + "\x00" + im.service
 		byGroup[key] = append(byGroup[key], im)
 	}
 
@@ -734,6 +740,7 @@ type imageInfo struct {
 	id      string // FULL sha256 - the form the container index is keyed by
 	slug    string // deplo.slug label, "" when absent
 	service string // deplo.service label (compose-built images), "" when absent
+	repo    string // repository of its first tag/digest, "" when it has neither
 	created string
 	size    int64 // bytes
 }
@@ -746,7 +753,8 @@ func inspectImages(ctx context.Context, ids []string) ([]imageInfo, error) {
 		return nil, nil
 	}
 	args := append([]string{"image", "inspect", "--format",
-		`{{.Id}}|{{index .Config.Labels "deplo.slug"}}|{{index .Config.Labels "deplo.service"}}|{{.Created}}|{{.Size}}`}, ids...)
+		`{{.Id}}|{{index .Config.Labels "deplo.slug"}}|{{index .Config.Labels "deplo.service"}}|{{.Created}}|{{.Size}}|` +
+			`{{if .RepoTags}}{{index .RepoTags 0}}{{else if .RepoDigests}}{{index .RepoDigests 0}}{{end}}`}, ids...)
 	res, err := dockerQuery(ctx, cleanupQueryTimeout, args...)
 	if err != nil {
 		return nil, err
@@ -763,17 +771,22 @@ func inspectImages(ctx context.Context, ids []string) ([]imageInfo, error) {
 	var out []imageInfo
 	for _, line := range splitLines(res.Stdout) {
 		parts := strings.Split(line, "|")
-		if len(parts) != 5 {
+		if len(parts) < 5 {
 			continue
 		}
 		size, err := strconv.ParseInt(strings.TrimSpace(parts[4]), 10, 64)
 		if err != nil {
 			continue
 		}
+		repo := ""
+		if len(parts) > 5 {
+			repo = repoOf(strings.TrimSpace(parts[5]))
+		}
 		out = append(out, imageInfo{
 			id:      strings.TrimSpace(parts[0]),
 			slug:    label(parts[1]),
 			service: label(parts[2]),
+			repo:    repo,
 			created: strings.TrimSpace(parts[3]),
 			size:    size,
 		})
@@ -782,6 +795,19 @@ func inspectImages(ctx context.Context, ids []string) ([]imageInfo, error) {
 		return nil, errors.New(dockerErr("image inspect", res))
 	}
 	return out, nil
+}
+
+// repoOf strips the tag or digest off an image reference, so every generation of one
+// app shares a repository. A registry host may carry a port, so only a colon AFTER
+// the last slash is a tag.
+func repoOf(ref string) string {
+	if i := strings.Index(ref, "@"); i >= 0 {
+		ref = ref[:i]
+	}
+	if i := strings.LastIndex(ref, ":"); i > strings.LastIndex(ref, "/") {
+		ref = ref[:i]
+	}
+	return strings.TrimSpace(ref)
 }
 
 // scopeFailures collects the per-object failures of a scope that removes objects
