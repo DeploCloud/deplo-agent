@@ -212,6 +212,21 @@ type Service struct {
 	certMgr    *CertManager
 	pendingMu  sync.Mutex
 	pendingKey ed25519.PrivateKey
+
+	// One compose project is one lock. Two `docker compose` runs on the same `-p`
+	// interleave their own create/remove steps, and a move racing a start is exactly
+	// that. Deploy is deliberately out: the control plane single-flights it, and
+	// holding this across a ten-minute build would block the stop that cancels it.
+	stackLocks sync.Map // slug -> *sync.Mutex
+}
+
+// lockStack serializes the compose operations on one stack. The returned func
+// unlocks; call it with defer.
+func (s *Service) lockStack(slug string) func() {
+	v, _ := s.stackLocks.LoadOrStore(slug, &sync.Mutex{})
+	mu := v.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
 // New builds the service. stackDir/buildTmpDir are created lazily by the deploy
@@ -370,6 +385,7 @@ func (s *Service) StopStack(ctx context.Context, ref *pb.StackRef) (*pb.StackRes
 	if err := validateSlug(slug); err != nil {
 		return nil, err
 	}
+	defer s.lockStack(slug)()
 	res, err := dockercli.Run(ctx, time.Minute, s.composeCtl(slug, "stop")...)
 	if err == nil && res.Code == 0 {
 		return &pb.StackResult{Ok: true}, nil
@@ -387,6 +403,7 @@ func (s *Service) StartStack(ctx context.Context, ref *pb.StackRef) (*pb.StackRe
 	if err := validateSlug(slug); err != nil {
 		return nil, err
 	}
+	defer s.lockStack(slug)()
 	res, err := dockercli.Run(ctx, time.Minute, s.composeCtl(slug, "start")...)
 	if err == nil && res.Code == 0 {
 		return &pb.StackResult{Ok: true}, nil
@@ -406,6 +423,7 @@ func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.Stack
 	if err := validateSlug(slug); err != nil {
 		return nil, err
 	}
+	defer s.lockStack(slug)()
 	downArgs := s.composeCtl(slug, "down", "--remove-orphans")
 	if ref.GetRemoveVolumes() {
 		downArgs = append(downArgs, "-v")
@@ -490,6 +508,7 @@ func (s *Service) Reroute(ctx context.Context, req *pb.RerouteRequest) (*pb.Stac
 	if err := validateSlug(slug); err != nil {
 		return nil, err
 	}
+	defer s.lockStack(slug)()
 	name := "deplo-" + slug
 
 	if req.GetComposeYaml() == "" {
