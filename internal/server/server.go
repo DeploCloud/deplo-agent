@@ -137,6 +137,11 @@ var Capabilities = []string{
 	// fixes were all control-plane side. Its own string so a fleet rolled onto THAT
 	// release can be told apart from one still on the previous binary.
 	"deploy.network.audit2",
+	// A restore re-points the archived stack file at the network the request names,
+	// instead of bringing it up on the one the app had on the day of the backup -
+	// which by then may have been reclaimed, leaving the data restored and the
+	// stack down.
+	"restore.network-retarget",
 	"cleanup.leftover-networks",
 	// DeployRequest.network / RerouteRequest.network are honoured: a stack joins the
 	// network its Environment owns instead of one shared network, and the agent puts

@@ -739,7 +739,11 @@ func restoreConfig(
 		}
 		return fromArchive
 	}
-	compose := pick(snap.compose, p.GetComposeYaml())
+	// The ARCHIVE's compose names the network the app had on the day of the backup,
+	// and that network may since have been reclaimed - `compose up` then fails with
+	// "declared as external, but could not be found" AFTER the data is back and the
+	// stack is down. Point it at the one the request carries, which is today's.
+	compose := retargetStackNetwork(pick(snap.compose, p.GetComposeYaml()), p.GetNetwork())
 
 	env := p.GetEnvSnapshot()
 	if proven && len(snap.env) > 0 {
@@ -974,4 +978,37 @@ func (s *Service) S3Delete(ctx context.Context, req *pb.S3DeleteRequest) (*pb.S3
 		return &pb.S3DeleteResponse{Ok: false, Error: err.Error()}, nil
 	}
 	return &pb.S3DeleteResponse{Ok: true, Deleted: n}, nil
+}
+
+// retargetStackNetwork rewrites the `name:` of every tenant network declared in a
+// rendered stack file, leaving every other byte alone.
+//
+// Textual on purpose: this file is compared byte for byte against what is on disk
+// to decide whether a reroute has anything to do, so a YAML round-trip would
+// reorder keys and make every start look like a change.
+func retargetStackNetwork(composeYaml, network string) string {
+	if composeYaml == "" || network == "" {
+		return composeYaml
+	}
+	lines := strings.Split(composeYaml, "\n")
+	inNetworks := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// A top-level key ends the block; `networks:` at column 0 opens it.
+		if line != "" && !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
+			inNetworks = trimmed == "networks:"
+			continue
+		}
+		if !inNetworks || !strings.HasPrefix(trimmed, "name:") {
+			continue
+		}
+		value := strings.TrimSpace(strings.TrimPrefix(trimmed, "name:"))
+		value = strings.Trim(value, `"'`)
+		if !dockercli.IsTenantNetwork(value) || value == network {
+			continue
+		}
+		indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+		lines[i] = indent + "name: " + network
+	}
+	return strings.Join(lines, "\n")
 }
