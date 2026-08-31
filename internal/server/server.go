@@ -170,6 +170,12 @@ var Capabilities = []string{
 	// DeployRequest.registry_auth is honoured: every pull this deploy makes reads the
 	// team's registry credentials, so a private image works without a host `docker login`.
 	"deploy.registry-auth",
+	// Two things this binary does that the previous one did not: it ranks an app's
+	// images within their REPOSITORY (a pulled image labelled with someone else's slug
+	// can no longer evict their rollback), and it reads the daemon's address pools from
+	// `docker info` and measures them instead of looking for a key in daemon.json. Its
+	// own string because the tag moves, so the version proves nothing.
+	"cleanup.images.by-repository",
 }
 
 // AgentVersion is the version this agent reports over Hello. "dev" for a build that
