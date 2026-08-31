@@ -128,6 +128,11 @@ var Capabilities = []string{
 	// tag is moved rather than bumped, so the version proves nothing about which
 	// binary a host is running.
 	"deploy.network.build-only-skips",
+	// The network a Deploy/Reroute names is REFUSED unless it is a tenant's
+	// (`deplo-env-` / `deplo-team-` / `deplo-preview-`), so a control-plane bug that
+	// sent the platform's own name cannot put a stack beside the panel. Its own
+	// string for the usual reason: the tag moves, so the version proves nothing.
+	"deploy.network.tenant-only",
 	"cleanup.leftover-networks",
 	// DeployRequest.network / RerouteRequest.network are honoured: a stack joins the
 	// network its Environment owns instead of one shared network, and the agent puts
