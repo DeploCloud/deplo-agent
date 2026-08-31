@@ -125,3 +125,9 @@ the same system, and a closed fork of it would route around the copyleft on both
 
 The name "deplo" and the logo are not covered by the license. Fork freely, rename your
 fork.
+
+DeploCloud also offers deplo under commercial terms, so a contribution has to arrive with
+the right to do both. A bot asks you to sign the
+**[CLA](https://github.com/DeploCloud/deplo/blob/main/CLA.md)** on your first pull request:
+one comment, once per person. It is a license grant, not a copyright assignment - you keep
+what you wrote.

@@ -5,6 +5,9 @@ name: ci
 on:
   push:
     branches: ["main"]
+    # The CLA bot commits a signature here on every new contributor. No Go code
+    # changes, so nothing to test.
+    paths-ignore: ["signatures/**"]
   pull_request:
   # Weekly, so an advisory published against a dependency we already ship turns
   # the repo red on its own instead of waiting for the next commit. Mirrors the
