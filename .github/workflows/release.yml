@@ -20,6 +20,10 @@ on:
 
 permissions:
   contents: write # create the release + upload assets
+  # Sigstore keyless signing: the OIDC token is the identity, so there is no key
+  # to store or rotate.
+  id-token: write
+  attestations: write
 
 jobs:
   release:
@@ -59,6 +63,29 @@ jobs:
           echo "--- checksums.txt ---"
           cat checksums.txt
 
+      # Proves this workflow built these exact binaries, so `gh attestation verify`
+      # answers "did this come from our CI" without trusting the release page.
+      - name: Attest the binaries' provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/deplo-agent-linux-*
+
+      # Read off the SHIPPED binary, not go.mod, so "are we affected by this CVE?"
+      # is a query. Both arches build from one module graph, so one list covers them.
+      - name: Generate the SBOM
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
+        with:
+          file: dist/deplo-agent-linux-amd64
+          format: spdx-json
+          output-file: dist/deplo-agent-${{ github.ref_name }}.spdx.json
+          upload-artifact: false
+
+      - name: Attest the SBOM
+        uses: actions/attest-sbom@v4
+        with:
+          subject-path: dist/deplo-agent-linux-*
+          sbom-path: dist/deplo-agent-${{ github.ref_name }}.spdx.json
+
       - name: Publish release
         uses: softprops/action-gh-release@v3
         with:
@@ -66,4 +93,5 @@ jobs:
             dist/deplo-agent-linux-amd64
             dist/deplo-agent-linux-arm64
             dist/checksums.txt
+            dist/deplo-agent-${{ github.ref_name }}.spdx.json
           generate_release_notes: true
