@@ -6,17 +6,19 @@ on:
   pull_request_target:
     types: [opened, closed, synchronize]
 
-# pull_request_target runs with write access, so the action is pinned to a commit,
-# not a tag: upstream is archived and a tag can still be moved.
 permissions:
-  actions: write
-  contents: write
-  pull-requests: write
-  statuses: write
+  contents: read
 
 jobs:
   cla:
     runs-on: ubuntu-latest
+    # pull_request_target runs with write access, so the action is pinned to a
+    # commit, not a tag: upstream is archived and a tag can still be moved.
+    permissions:
+      actions: write
+      contents: write
+      pull-requests: write
+      statuses: write
     steps:
       - name: Check the contributor has signed the CLA
         if: (github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA') || github.event_name == 'pull_request_target'

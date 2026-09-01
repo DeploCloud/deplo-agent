@@ -19,15 +19,17 @@ on:
       - "v*"
 
 permissions:
-  contents: write # create the release + upload assets
-  # Sigstore keyless signing: the OIDC token is the identity, so there is no key
-  # to store or rotate.
-  id-token: write
-  attestations: write
+  contents: read
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release + upload assets
+      # Sigstore keyless signing: the OIDC token is the identity, so there is no
+      # key to store or rotate.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
