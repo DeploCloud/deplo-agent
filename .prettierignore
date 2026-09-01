@@ -3,3 +3,6 @@ gen/
 
 bin/
 node_modules/
+
+# Written by the CLA bot, one line per signature.
+signatures/
