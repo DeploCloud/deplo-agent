@@ -176,6 +176,10 @@ var Capabilities = []string{
 	// `docker info` and measures them instead of looking for a key in daemon.json. Its
 	// own string because the tag moves, so the version proves nothing.
 	"cleanup.images.by-repository",
+	// A volume or host-path copy gets a 6h wall clock instead of 30 minutes, so a large
+	// volume over a slow link is no longer killed mid-transfer. Its own string because
+	// the tag moves, so the version proves nothing.
+	"volume-copy-6h",
 }
 
 // AgentVersion is the version this agent reports over Hello. "dev" for a build that
