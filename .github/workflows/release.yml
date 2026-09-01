@@ -29,9 +29,9 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version-file: go.mod
           cache: true
@@ -66,7 +66,7 @@ jobs:
       # Proves this workflow built these exact binaries, so `gh attestation verify`
       # answers "did this come from our CI" without trusting the release page.
       - name: Attest the binaries' provenance
-        uses: actions/attest-build-provenance@v4
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
         with:
           subject-path: dist/deplo-agent-linux-*
 
@@ -81,13 +81,13 @@ jobs:
           upload-artifact: false
 
       - name: Attest the SBOM
-        uses: actions/attest-sbom@v4
+        uses: actions/attest-sbom@c604332985a26aa8cf1bdc465b92731239ec6b9e # v4.1.0
         with:
           subject-path: dist/deplo-agent-linux-*
           sbom-path: dist/deplo-agent-${{ github.ref_name }}.spdx.json
 
       - name: Publish release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           files: |
             dist/deplo-agent-linux-amd64
