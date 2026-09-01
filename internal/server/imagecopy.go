@@ -21,8 +21,9 @@ import (
 // imagecopy.go implements the cross-host BUILT IMAGE copy that backs a build server: a
 // host that compiles for machines it does not run on.
 
-// imageCopyTimeout bounds a single export/import. A multi-GB image over a slow
-// link is the case to survive; this matches the volume relay's budget.
+// imageCopyTimeout bounds a single export/import. Deliberately shorter than
+// volumeCopyTimeout: this one runs inside a deploy holding the app-lifecycle lock,
+// so a wedged relay must let go long before a volume move has to.
 const imageCopyTimeout = 30 * time.Minute
 
 // imageRemoveTimeout bounds the `docker rmi` that follows a successful export.

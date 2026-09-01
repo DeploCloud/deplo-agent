@@ -25,10 +25,10 @@ import (
 // volumecopy.go implements the cross-host named-volume copy that backs a server MOVE (a
 // database or project relocating to another server).
 
-// volumeCopyTimeout bounds a single export/import. A move of a large DB volume can
-// take a while; this matches the generous per-step budget the project backup path
-// uses for the same helper-container tar of a volume.
-const volumeCopyTimeout = 30 * time.Minute
+// volumeCopyTimeout bounds a single export/import. It is a wall clock, not an idle
+// timer: at 30 minutes a volume that was still copying died, so the budget is what
+// a large volume over a slow link actually needs.
+const volumeCopyTimeout = 6 * time.Hour
 
 // chunkBytes is the payload size of one VolumeChunk data frame. Comfortably under
 // the gRPC max message size (the control plane dials with a 256 MiB cap), while big
