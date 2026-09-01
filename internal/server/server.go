@@ -83,6 +83,10 @@ var Capabilities = []string{
 	// bits, device nodes and escaping links dropped), a host path is symlink-resolved
 	// before the deny-list judges it, and the result always carries its sha256.
 	"volume-copy-hardened",
+	// ExportHostPath/ImportHostPath carry a single FILE, not only a directory: a
+	// stack that binds `/srv/site/nginx.conf` moves the file instead of failing the
+	// copy and coming back up on an empty directory of that name.
+	"host-path-copy.file",
 	"files-copy", // cross-host files-dir copy for a service move (ExportFiles/ImportFiles)
 	// On-disk size of a named volume (VolumeUsage) - what a database's Data card
 	// reports, measured rather than stored.

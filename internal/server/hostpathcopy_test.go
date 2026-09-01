@@ -269,3 +269,107 @@ func TestValidateHostPath_judgesTheResolvedPath(t *testing.T) {
 		t.Error("a not-yet-created path under a poisoned parent passed the deny-list")
 	}
 }
+
+// TestExportHostPath_fileNeedsSayingSo pins the discriminator the control plane
+// relies on: without allow_file a file is still refused, and that refusal is what
+// tells the caller which of the two this path is.
+func TestExportHostPath_fileNeedsSayingSo(t *testing.T) {
+	svc := New(t.TempDir(), t.TempDir(), "/", "")
+	f := filepath.Join(t.TempDir(), "nginx.conf")
+	if err := os.WriteFile(f, []byte("server {}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := svc.ExportHostPath(&pb.ExportHostPathRequest{Path: f}, &fakeExportStream{})
+	if status.Code(err) != codes.InvalidArgument ||
+		!strings.Contains(err.Error(), "is a file, not a directory") {
+		t.Fatalf("a file must be refused verbatim when not allowed: %v", err)
+	}
+}
+
+// TestExportHostPath_fileInheritsItsDirectorysBan pins the widening a per-file export
+// would otherwise be: /etc is refused as a directory, so /etc/shadow must be refused
+// as a file. A file never reaches further than the directory holding it would.
+func TestExportHostPath_fileInheritsItsDirectorysBan(t *testing.T) {
+	svc := New(t.TempDir(), t.TempDir(), "/", "")
+	for _, bad := range []string{"/etc/shadow", "/etc/passwd", "/root/.bashrc"} {
+		if _, err := os.Stat(bad); err != nil {
+			continue
+		}
+		err := svc.ExportHostPath(
+			&pb.ExportHostPathRequest{Path: bad, AllowFile: true},
+			&fakeExportStream{},
+		)
+		if status.Code(err) != codes.PermissionDenied {
+			t.Errorf("%s: want PermissionDenied, got %v", bad, err)
+		}
+	}
+}
+
+// TestE2E_HostPathCopyFileRoundTrip is the bug this whole path exists for: a stack
+// that binds a config FILE used to fail the copy, and the target then came up on an
+// empty DIRECTORY of that name.
+func TestE2E_HostPathCopyFileRoundTrip(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if !dockercli.Available(ctx) {
+		t.Skip("docker not available")
+	}
+	svc := New(t.TempDir(), t.TempDir(), "/", "")
+
+	srcDir := filepath.Join(t.TempDir(), "site")
+	dstDir := filepath.Join(t.TempDir(), "landing")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(srcDir, "nginx.conf")
+	if err := os.WriteFile(src, []byte("server { listen 8080; }"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A sibling that must NOT travel: the file is what the stack mounts.
+	if err := os.WriteFile(filepath.Join(srcDir, "secrets.env"), []byte("KEY=1"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// What an older agent left at the target: a DIRECTORY where a file belongs.
+	dst := filepath.Join(dstDir, "nginx.conf")
+	if err := os.MkdirAll(filepath.Join(dst, "junk"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	ex := &fakeExportStream{ctx: ctx}
+	if err := svc.ExportHostPath(
+		&pb.ExportHostPathRequest{Path: src, AllowFile: true}, ex,
+	); err != nil {
+		t.Fatalf("ExportHostPath: %v", err)
+	}
+
+	in := []*pb.HostPathChunk{{Frame: &pb.HostPathChunk_Header_{
+		Header: &pb.HostPathChunk_Header{Path: dst, WipeFirst: true, File: true},
+	}}}
+	for _, c := range ex.chunks {
+		in = append(in, &pb.HostPathChunk{Frame: &pb.HostPathChunk_Data{Data: c.GetData()}})
+	}
+	im := &fakeHostPathImportStream{in: in, ctx: ctx}
+	if err := svc.ImportHostPath(im); err != nil {
+		t.Fatalf("ImportHostPath transport error: %v", err)
+	}
+	if im.result == nil || !im.result.Ok {
+		t.Fatalf("ImportHostPath failed: %+v", im.result)
+	}
+
+	st, err := os.Stat(dst)
+	if err != nil || st.IsDir() {
+		t.Fatalf("the target must be the FILE, not a directory: %v / %+v", err, st)
+	}
+	got, err := os.ReadFile(dst)
+	if err != nil || string(got) != "server { listen 8080; }" {
+		t.Errorf("the file did not arrive intact: %q / %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(dstDir, "secrets.env")); err == nil {
+		t.Error("only the file named may travel, never its siblings")
+	}
+	// Nothing of the staging directory is left beside it.
+	entries, _ := os.ReadDir(dstDir)
+	if len(entries) != 1 {
+		t.Errorf("the staging directory must be gone: %v", entries)
+	}
+}

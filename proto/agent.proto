@@ -683,6 +683,10 @@ message ExportHostPathRequest {
   // not a directory, climbs with "..", or names one of the system roots the agent
   // will not hand over wholesale.
   string path = 1;
+  // Accept a plain FILE at `path` too, streamed as a one-entry tar. Its DIRECTORY
+  // is deny-listed as well, so a file never reaches further than the directory
+  // holding it would.
+  bool allow_file = 2;
 }
 
 message HostPathChunk {
@@ -694,6 +698,10 @@ message HostPathChunk {
     // Empty the target first. Applied on the FIRST DATA FRAME, never on the header
     // alone - see VolumeChunk.Header.wipe_first for why.
     bool wipe_first = 2;
+    // `path` names a FILE, not a directory: the archive holds its single entry and
+    // replaces it in place. Without this the agent creates a DIRECTORY at `path`,
+    // which is what a stack that binds a config file comes back up on.
+    bool file = 3;
   }
   oneof frame {
     Header header = 1;

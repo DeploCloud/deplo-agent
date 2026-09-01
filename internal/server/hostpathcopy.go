@@ -131,8 +131,18 @@ func (s *Service) ExportHostPath(
 	if statErr != nil {
 		return status.Errorf(codes.NotFound, "no such directory on this host: %s", path)
 	}
+	// A stack that binds `./nginx.conf` or `/srv/site/app.yml` names a FILE, and the
+	// directory export cannot carry one. Mount the directory holding it and tar that
+	// one entry - so the file travels without its siblings.
+	mount, entry := path, "."
 	if !info.IsDir() {
-		return status.Errorf(codes.InvalidArgument, "%s is a file, not a directory", path)
+		if !req.GetAllowFile() {
+			return status.Errorf(codes.InvalidArgument, "%s is a file, not a directory", path)
+		}
+		mount, entry = filepath.Dir(path), filepath.Base(path)
+		if err := refuseSystemPath(mount); err != nil {
+			return err
+		}
 	}
 
 	ctx := stream.Context()
@@ -142,8 +152,8 @@ func (s *Service) ExportHostPath(
 	gz := gzip.NewWriter(cw)
 
 	code, runErr := dockercli.PipeOut(ctx, volumeCopyTimeout, gz, nil,
-		volumeHelperRun(ctx, "-v", path+":/v:ro", volumeHelperImage,
-			"tar", "-C", "/v", "-cf", "-", ".")...)
+		volumeHelperRun(ctx, "-v", mount+":/v:ro", volumeHelperImage,
+			"tar", "-C", "/v", "-cf", "-", entry)...)
 	if cerr := gz.Close(); cerr != nil && runErr == nil {
 		return fmt.Errorf("export host path %q: finish gzip: %w", path, cerr)
 	}
@@ -176,10 +186,31 @@ func (s *Service) ImportHostPath(stream pb.Agent_ImportHostPathServer) error {
 	if verr != nil {
 		return sendHostPathResult(stream, false, 0, "", verr.Error())
 	}
-	// The whole path is materialised, parents included. The deny-list above is what keeps
-	// a wrong path from being a dangerous one; a missing parent only ever meant "this host
-	// has not run that platform".
-	if mkErr := os.MkdirAll(path, 0o755); mkErr != nil {
+	// A FILE target is extracted BESIDE itself and moved into place at the end, so the
+	// one that is there survives a copy that does not finish - and so `path` never
+	// becomes the empty DIRECTORY that `MkdirAll` would leave a stack mounting.
+	isFile := hdr.GetFile()
+	extractInto := path
+	if isFile {
+		dir := filepath.Dir(path)
+		if err := refuseSystemPath(dir); err != nil {
+			return sendHostPathResult(stream, false, 0, "", err.Error())
+		}
+		if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
+			return sendHostPathResult(stream, false, 0, "",
+				fmt.Sprintf("create %s: %v", dir, mkErr))
+		}
+		tmp, tmpErr := os.MkdirTemp(dir, ".deplo-import-")
+		if tmpErr != nil {
+			return sendHostPathResult(stream, false, 0, "",
+				fmt.Sprintf("create a staging directory beside %s: %v", path, tmpErr))
+		}
+		defer os.RemoveAll(tmp)
+		extractInto = tmp
+	} else if mkErr := os.MkdirAll(path, 0o755); mkErr != nil {
+		// The whole path is materialised, parents included. The deny-list above is what keeps
+		// a wrong path from being a dangerous one; a missing parent only ever meant "this host
+		// has not run that platform".
 		return sendHostPathResult(stream, false, 0, "",
 			fmt.Sprintf("create %s: %v", path, mkErr))
 	}
@@ -191,7 +222,7 @@ func (s *Service) ImportHostPath(stream pb.Agent_ImportHostPathServer) error {
 	helper := importHelperName()
 	go func() {
 		code, perr := dockercli.PipeIn(ctx, volumeCopyTimeout, pr, nil,
-			volumeHelperRun(ctx, "-i", "--name", helper, "-v", path+":/v", volumeHelperImage,
+			volumeHelperRun(ctx, "-i", "--name", helper, "-v", extractInto+":/v", volumeHelperImage,
 				"tar", "-C", "/v", "-xf", "-")...)
 		if perr == nil && code != 0 {
 			perr = fmt.Errorf("host path extract exited %d", code)
@@ -222,7 +253,7 @@ func (s *Service) ImportHostPath(stream pb.Agent_ImportHostPathServer) error {
 			break
 		}
 		if data := msg.GetData(); len(data) > 0 {
-			if hdr.GetWipeFirst() && !wiped {
+			if hdr.GetWipeFirst() && !isFile && !wiped {
 				if werr := wipeHostPath(path); werr != nil {
 					wipeErr = werr
 					break
@@ -266,7 +297,34 @@ func (s *Service) ImportHostPath(stream pb.Agent_ImportHostPathServer) error {
 		}
 		return sendHostPathResult(stream, false, 0, "", failure)
 	}
+	if isFile {
+		if mvErr := moveStagedFile(extractInto, path); mvErr != nil {
+			return sendHostPathResult(stream, false, 0, "",
+				fmt.Sprintf("import host path %q: %v", path, mvErr))
+		}
+	}
 	return sendHostPathResult(stream, true, received, hex.EncodeToString(digest.Sum(nil)), "")
+}
+
+// moveStagedFile puts the ONE entry a file import extracted where the caller asked
+// for it, replacing whatever is there - a stale file, or the empty directory an
+// older agent created at that path.
+func moveStagedFile(staging, target string) error {
+	entries, err := os.ReadDir(staging)
+	if err != nil {
+		return err
+	}
+	if len(entries) != 1 {
+		return fmt.Errorf("expected one file in the archive, got %d", len(entries))
+	}
+	from := filepath.Join(staging, entries[0].Name())
+	if entries[0].IsDir() {
+		return fmt.Errorf("%s is a directory, and %s names a file", entries[0].Name(), target)
+	}
+	if err := os.RemoveAll(target); err != nil {
+		return err
+	}
+	return os.Rename(from, target)
 }
 
 // wipeHostPath empties a directory in place, keeping the directory itself (it may
