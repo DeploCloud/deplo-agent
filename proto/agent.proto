@@ -672,6 +672,15 @@ message StackResult {
   // actually consumed, and their sha256.
   int64 bytes_written = 3;
   string sha256 = 4;
+  // ImportVolume / ImportHostPath only: entries the sanitising import refused to write -
+  // here, links whose target leaves the archive. Left empty by an agent without the
+  // "volume-copy.drop-report" capability, which reads as "not reported", never "none".
+  int32 dropped_links = 5;
+  // Device, fifo and socket entries dropped. Stripped mode bits are not counted: they
+  // change no content.
+  int32 dropped_special = 6;
+  // The first few dropped entry names, truncated, so a message can name them.
+  repeated string dropped_names = 7;
 }
 
 // ---------------------------------------------------------------------------

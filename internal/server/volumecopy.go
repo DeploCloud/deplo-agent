@@ -277,27 +277,28 @@ func (s *Service) ImportVolume(stream pb.Agent_ImportVolumeServer) error {
 				return wipeVolume(c, vol)
 			})
 		}
-		return sendImportResult(stream, false, 0, "", failure)
+		return stream.SendAndClose(importResult(false, 0, "", failure, &gz.drops))
 	}
-	return sendImportResult(stream, true, received, hex.EncodeToString(digest.Sum(nil)), "")
+	return stream.SendAndClose(
+		importResult(true, received, hex.EncodeToString(digest.Sum(nil)), "", &gz.drops))
 }
 
 // newGunzipPump returns a WriteCloser that decompresses everything written to it and
 // forwards the plaintext to `dst`. gzip.NewReader needs a Reader, but our data arrives
 // as Writes off the gRPC stream, so we bridge with an internal pipe: caller Writes
 // compressed bytes → gzip.Reader pulls from the pipe → decompressed bytes go to dst.
-func newGunzipPump(dst io.Writer) (io.WriteCloser, error) {
+func newGunzipPump(dst io.Writer) (*gunzipPump, error) {
 	return newTarPump(dst, false)
 }
 
 // newSanitizingGunzipPump is newGunzipPump for an archive that came off ANOTHER
 // platform's host: the tar is rewritten by sanitizeTar on the way through, because
 // what it feeds is `tar -x` running as root.
-func newSanitizingGunzipPump(dst io.Writer) (io.WriteCloser, error) {
+func newSanitizingGunzipPump(dst io.Writer) (*gunzipPump, error) {
 	return newTarPump(dst, true)
 }
 
-func newTarPump(dst io.Writer, sanitize bool) (io.WriteCloser, error) {
+func newTarPump(dst io.Writer, sanitize bool) (*gunzipPump, error) {
 	pr, pw := io.Pipe()
 	gp := &gunzipPump{pw: pw, done: make(chan error, 1)}
 	go func() {
@@ -310,7 +311,7 @@ func newTarPump(dst io.Writer, sanitize bool) (io.WriteCloser, error) {
 		}
 		var cerr error
 		if sanitize {
-			cerr = sanitizeTar(dst, zr)
+			cerr = sanitizeTar(dst, zr, &gp.drops)
 		} else {
 			_, cerr = io.Copy(dst, zr)
 		}
@@ -323,11 +324,38 @@ func newTarPump(dst io.Writer, sanitize bool) (io.WriteCloser, error) {
 	return gp, nil
 }
 
+// tarDrops counts what sanitizeTar refused to write and keeps the first few names, so
+// a copy that arrived short says so instead of reporting a clean run.
+type tarDrops struct {
+	links   int32
+	special int32
+	names   []string
+}
+
+const (
+	droppedNamesMax = 5
+	droppedNameMax  = 80
+)
+
+func (d *tarDrops) add(name string, link bool) {
+	if link {
+		d.links++
+	} else {
+		d.special++
+	}
+	if len(d.names) < droppedNamesMax {
+		if len(name) > droppedNameMax {
+			name = name[:droppedNameMax] + "~"
+		}
+		d.names = append(d.names, name)
+	}
+}
+
 // sanitizeTar copies a tar stream, dropping what a foreign archive has no business
 // putting where a root helper extracts it: the setuid/setgid/sticky bits, every
 // device/fifo/socket entry, and any link pointing outside the archive. Same rule the
 // backup restore already applies (backup.go), which this half was missing.
-func sanitizeTar(dst io.Writer, src io.Reader) error {
+func sanitizeTar(dst io.Writer, src io.Reader, drops *tarDrops) error {
 	tw := tar.NewWriter(dst)
 	tr := tar.NewReader(src)
 	for {
@@ -347,9 +375,11 @@ func sanitizeTar(dst io.Writer, src io.Reader) error {
 			// A relative link inside the tree is ordinary data (a certbot `live/`
 			// dir is nothing else); one that leaves it is not.
 			if !linkStaysInside(hdr.Name, hdr.Linkname, hdr.Typeflag == tar.TypeLink) {
+				drops.add(hdr.Name, true)
 				continue
 			}
 		default:
+			drops.add(hdr.Name, false)
 			continue // char/block/fifo/socket: never a service's own data
 		}
 		// Ownership is kept (a database volume must stay owned by its engine's uid);
@@ -389,6 +419,8 @@ func linkStaysInside(name, link string, hard bool) bool {
 type gunzipPump struct {
 	pw   *io.PipeWriter
 	done chan error
+	// Written by the pump goroutine, read only after Close.
+	drops tarDrops
 }
 
 func (g *gunzipPump) Write(p []byte) (int, error) { return g.pw.Write(p) }
@@ -410,10 +442,22 @@ func sendImportResult(
 	sha256Hex string,
 	errMsg string,
 ) error {
-	return stream.SendAndClose(&pb.StackResult{
+	return stream.SendAndClose(importResult(ok, bytesWritten, sha256Hex, errMsg, nil))
+}
+
+// importResult builds the terminal StackResult of an import. `drops` is nil when the
+// sanitising pump never ran, which reports nothing rather than a clean zero.
+func importResult(ok bool, bytesWritten int64, sha256Hex, errMsg string, drops *tarDrops) *pb.StackResult {
+	res := &pb.StackResult{
 		Ok:           ok,
 		Error:        errMsg,
 		BytesWritten: bytesWritten,
 		Sha256:       sha256Hex,
-	})
+	}
+	if drops != nil {
+		res.DroppedLinks = drops.links
+		res.DroppedSpecial = drops.special
+		res.DroppedNames = drops.names
+	}
+	return res
 }

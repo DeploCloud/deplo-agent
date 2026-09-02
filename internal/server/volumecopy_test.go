@@ -3,6 +3,7 @@ package server
 import (
 	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -427,8 +428,17 @@ func TestSanitizeTar(t *testing.T) {
 	}
 
 	var out bytes.Buffer
-	if err := sanitizeTar(&out, &in); err != nil {
+	var drops tarDrops
+	if err := sanitizeTar(&out, &in, &drops); err != nil {
 		t.Fatalf("sanitizeTar: %v", err)
+	}
+	if drops.links != 2 || drops.special != 1 {
+		t.Errorf("drops = %d links / %d special, want 2 / 1", drops.links, drops.special)
+	}
+	for _, want := range []string{"./data/out", "./data/abs", "./data/sda"} {
+		if !containsString(drops.names, want) {
+			t.Errorf("%s was dropped but not named: %v", want, drops.names)
+		}
 	}
 
 	kept := map[string]*tar.Header{}
@@ -461,6 +471,84 @@ func TestSanitizeTar(t *testing.T) {
 	}
 	if h := kept["./data/pg.conf"]; h == nil || h.Uid != 999 || h.Gid != 999 || h.Mode != 0o600 {
 		t.Errorf("ownership must survive (a DB volume is owned by its engine's uid): %v", h)
+	}
+}
+
+// TestImportReportsDrops is the wire half of the tally: an import that silently
+// arrived short reported "0 failed", so the pump's count has to reach StackResult.
+func TestImportReportsDrops(t *testing.T) {
+	var raw bytes.Buffer
+	tw := tar.NewWriter(&raw)
+	for _, h := range []*tar.Header{
+		{Name: "./keep", Typeflag: tar.TypeReg, Mode: 0o644},
+		{Name: "./escape", Typeflag: tar.TypeSymlink, Linkname: "/etc/shadow"},
+		{Name: "./pipe", Typeflag: tar.TypeFifo, Mode: 0o600},
+	} {
+		if err := tw.WriteHeader(h); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var gzipped bytes.Buffer
+	zw := gzip.NewWriter(&gzipped)
+	if _, err := zw.Write(raw.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	pump, err := newSanitizingGunzipPump(io.Discard)
+	if err != nil {
+		t.Fatalf("pump: %v", err)
+	}
+	if _, err := pump.Write(gzipped.Bytes()); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := pump.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	res := importResult(true, 1, "abc", "", &pump.drops)
+	if res.GetDroppedLinks() != 1 || res.GetDroppedSpecial() != 1 {
+		t.Errorf("StackResult = %d links / %d special, want 1 / 1", res.GetDroppedLinks(), res.GetDroppedSpecial())
+	}
+	if !containsString(res.GetDroppedNames(), "./escape") || !containsString(res.GetDroppedNames(), "./pipe") {
+		t.Errorf("the dropped entries must be named: %v", res.GetDroppedNames())
+	}
+	// An import whose pump never ran reports nothing, which the control plane must
+	// not read as a clean run.
+	if bare := importResult(false, 0, "", "boom", nil); bare.GetDroppedLinks() != 0 || bare.GetDroppedNames() != nil {
+		t.Errorf("a result with no pump must carry no tally: %+v", bare)
+	}
+}
+
+// TestDroppedNamesAreBounded keeps the tally an RPC field, not a log: it rides a
+// response, so both the count of names and each name are capped.
+func TestDroppedNamesAreBounded(t *testing.T) {
+	var drops tarDrops
+	long := strings.Repeat("a", droppedNameMax+50)
+	for i := 0; i < droppedNamesMax+3; i++ {
+		drops.add(long, i%2 == 0)
+	}
+	if len(drops.names) != droppedNamesMax {
+		t.Errorf("kept %d names, want at most %d", len(drops.names), droppedNamesMax)
+	}
+	if got := len(drops.names[0]); got > droppedNameMax+1 {
+		t.Errorf("a name survived at %d chars, want it truncated to %d", got, droppedNameMax)
+	}
+	if drops.links+drops.special != int32(droppedNamesMax+3) {
+		t.Errorf("the COUNT must not stop at the name cap: %d + %d", drops.links, drops.special)
+	}
+}
+
+// The control plane can tell "this agent does not report drops" from "it reported
+// none" only if the capability is advertised.
+func TestCapabilities_advertisesDropReport(t *testing.T) {
+	if !containsString(Capabilities, "volume-copy.drop-report") {
+		t.Error("Capabilities must advertise \"volume-copy.drop-report\"")
 	}
 }
 

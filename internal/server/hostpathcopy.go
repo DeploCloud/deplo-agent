@@ -295,7 +295,7 @@ func (s *Service) ImportHostPath(stream pb.Agent_ImportHostPathServer) error {
 				return wipeHostPath(path)
 			})
 		}
-		return sendHostPathResult(stream, false, 0, "", failure)
+		return stream.SendAndClose(importResult(false, 0, "", failure, &gz.drops))
 	}
 	if isFile {
 		if mvErr := moveStagedFile(extractInto, path); mvErr != nil {
@@ -303,7 +303,8 @@ func (s *Service) ImportHostPath(stream pb.Agent_ImportHostPathServer) error {
 				fmt.Sprintf("import host path %q: %v", path, mvErr))
 		}
 	}
-	return sendHostPathResult(stream, true, received, hex.EncodeToString(digest.Sum(nil)), "")
+	return stream.SendAndClose(
+		importResult(true, received, hex.EncodeToString(digest.Sum(nil)), "", &gz.drops))
 }
 
 // moveStagedFile puts the ONE entry a file import extracted where the caller asked
@@ -350,10 +351,5 @@ func sendHostPathResult(
 	sha256Hex string,
 	errMsg string,
 ) error {
-	return stream.SendAndClose(&pb.StackResult{
-		Ok:           ok,
-		Error:        errMsg,
-		BytesWritten: bytesWritten,
-		Sha256:       sha256Hex,
-	})
+	return stream.SendAndClose(importResult(ok, bytesWritten, sha256Hex, errMsg, nil))
 }

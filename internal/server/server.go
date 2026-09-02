@@ -87,6 +87,10 @@ var Capabilities = []string{
 	// stack that binds `/srv/site/nginx.conf` moves the file instead of failing the
 	// copy and coming back up on an empty directory of that name.
 	"host-path-copy.file",
+	// ImportVolume / ImportHostPath report what the sanitising pump dropped
+	// (StackResult.dropped_*). Absent means the agent does not report it, never that
+	// nothing was dropped.
+	"volume-copy.drop-report",
 	"files-copy", // cross-host files-dir copy for a service move (ExportFiles/ImportFiles)
 	// On-disk size of a named volume (VolumeUsage) - what a database's Data card
 	// reports, measured rather than stored.
