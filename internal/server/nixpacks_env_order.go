@@ -229,3 +229,65 @@ func deferAppEnvBelowInstall(path string, envKeys []string, buildDir, installCmd
 	}
 	return moved, nil
 }
+
+// stripAppEnv drops the app's own variables from every `ENV KEY=$KEY` line Nixpacks
+// wrote. The matching `ARG` still puts the value in each RUN's environment, so the
+// build is unchanged while the image stops carrying it in its config.
+func stripAppEnv(lines []string, app map[string]bool) ([]string, []string) {
+	var dropped []string
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		body, ok := strings.CutPrefix(line, "ENV ")
+		if !ok {
+			out = append(out, line)
+			continue
+		}
+		// Only the plain `KEY=$KEY` form Nixpacks generates. A literal or an
+		// interpolation (`ENV NIXPACKS_PATH=/app/bin:$NIXPACKS_PATH`) is a value
+		// the build itself needs, so the line is left byte-identical.
+		pairs := strings.Fields(body)
+		keep, gone := make([]string, 0, len(pairs)), []string(nil)
+		plain := len(pairs) > 0
+		for _, pair := range pairs {
+			name, _, _ := strings.Cut(pair, "=")
+			if name == "" || pair != name+"=$"+name {
+				plain = false
+				break
+			}
+			if app[name] {
+				gone = append(gone, name)
+			} else {
+				keep = append(keep, name)
+			}
+		}
+		switch {
+		case !plain || len(gone) == 0:
+			out = append(out, line)
+		case len(keep) > 0:
+			out = append(out, envLine(keep))
+		}
+		dropped = append(dropped, gone...)
+	}
+	return out, dropped
+}
+
+// stripAppEnvFromDockerfile applies stripAppEnv to the Dockerfile at path. Run it
+// AFTER deferAppEnvBelowInstall, which needs the `ARG`/`ENV` pair still intact.
+func stripAppEnvFromDockerfile(path string, envKeys []string) ([]string, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	app := make(map[string]bool, len(envKeys))
+	for _, k := range envKeys {
+		app[k] = true
+	}
+	rewritten, dropped := stripAppEnv(strings.Split(string(body), "\n"), app)
+	if len(dropped) == 0 {
+		return nil, nil
+	}
+	if err := os.WriteFile(path, []byte(strings.Join(rewritten, "\n")), 0o644); err != nil {
+		return nil, err
+	}
+	return dropped, nil
+}

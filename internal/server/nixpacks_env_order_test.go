@@ -246,3 +246,84 @@ func TestDeferAppEnvBelowInstall_noopKeepsBytes(t *testing.T) {
 		t.Fatal("the file was rewritten even though nothing moved")
 	}
 }
+
+// The app's variables lose their ENV (the ARG still feeds every RUN) while Nixpacks'
+// own declarations, and any line that is not the plain KEY=$KEY form, stay put.
+func TestStripAppEnv_dropsOnlyTheAppsOwn(t *testing.T) {
+	lines := strings.Split(nixpacksGenerated, "\n")
+	app := map[string]bool{"DATABASE_URL": true, "PAYLOAD_SECRET": true, "RESEND_API_KEY": true}
+
+	out, dropped := stripAppEnv(lines, app)
+	if !slices.Equal(dropped, []string{"DATABASE_URL", "PAYLOAD_SECRET", "RESEND_API_KEY"}) {
+		t.Fatalf("dropped = %v", dropped)
+	}
+	topArg := out[lineIndex(t, out, "ARG CI ")]
+	if topArg != lines[lineIndex(t, lines, "ARG CI ")] {
+		t.Errorf("the ARG line must be untouched, got %q", topArg)
+	}
+	topEnv := out[lineIndex(t, out, "ENV CI=")]
+	if topEnv != "ENV CI=$CI NIXPACKS_METADATA=$NIXPACKS_METADATA NODE_ENV=$NODE_ENV NPM_CONFIG_PRODUCTION=$NPM_CONFIG_PRODUCTION PORT=$PORT" {
+		t.Errorf("top ENV line = %q", topEnv)
+	}
+	joined := strings.Join(out, "\n")
+	if !strings.Contains(joined, "ENV NIXPACKS_PATH=/app/node_modules/.bin:$NIXPACKS_PATH") {
+		t.Error("an ENV holding a real value must survive")
+	}
+	for name := range app {
+		if strings.Contains(joined, "ENV "+name) || strings.Contains(joined, " "+name+"=$") {
+			t.Errorf("%s is still declared as ENV:\n%s", name, joined)
+		}
+	}
+}
+
+// An ENV line made up entirely of the app's variables - what the deferred block below
+// the install step is - goes away rather than being left empty.
+func TestStripAppEnv_dropsAWhollyAppEnvLine(t *testing.T) {
+	out, dropped := stripAppEnv([]string{"ENV A=$A B=$B", "RUN true"}, map[string]bool{"A": true, "B": true})
+	if !slices.Equal(out, []string{"RUN true"}) || len(dropped) != 2 {
+		t.Fatalf("out = %v, dropped = %v", out, dropped)
+	}
+}
+
+// Ordering contract: the deferred block keeps its ARG and loses its ENV.
+func TestStripAppEnv_afterDeferLeavesTheMovedBlockArgOnly(t *testing.T) {
+	app := map[string]bool{"DATABASE_URL": true, "PAYLOAD_SECRET": true, "RESEND_API_KEY": true}
+	moved, _ := deferEnvBelowInstall(strings.Split(nixpacksGenerated, "\n"), app)
+	out, _ := stripAppEnv(moved, app)
+
+	joined := strings.Join(out, "\n")
+	if !strings.Contains(joined, "ARG DATABASE_URL PAYLOAD_SECRET RESEND_API_KEY") {
+		t.Errorf("the moved ARG must survive:\n%s", joined)
+	}
+	if strings.Contains(joined, "ENV DATABASE_URL") {
+		t.Errorf("the moved ENV must be gone:\n%s", joined)
+	}
+	argIdx := lineIndex(t, out, "ARG DATABASE_URL ")
+	installRun := lineIndex(t, out, "RUN --mount=type=cache,id=app-/root/bun")
+	buildRun := lineIndex(t, out, "RUN --mount=type=cache,id=app-node_modules/cache")
+	if argIdx < installRun || argIdx > buildRun {
+		t.Errorf("the moved ARG must stay between the install and build RUNs (%d, %d, %d)", installRun, argIdx, buildRun)
+	}
+}
+
+// The rewrite on disk: the Dockerfile is written back without the app's ENV.
+func TestStripAppEnvFromDockerfile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "Dockerfile")
+	if err := os.WriteFile(path, []byte(nixpacksGenerated), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dropped, err := stripAppEnvFromDockerfile(path, []string{"PAYLOAD_SECRET", "NOT_IN_THE_FILE"})
+	if err != nil || !slices.Equal(dropped, []string{"PAYLOAD_SECRET"}) {
+		t.Fatalf("dropped = %v, err = %v", dropped, err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(body), "PAYLOAD_SECRET=$PAYLOAD_SECRET") {
+		t.Errorf("still declared as ENV:\n%s", body)
+	}
+	if !strings.Contains(string(body), "ARG CI DATABASE_URL NIXPACKS_METADATA NODE_ENV NPM_CONFIG_PRODUCTION PAYLOAD_SECRET PORT RESEND_API_KEY") {
+		t.Errorf("the ARG line must be untouched:\n%s", body)
+	}
+}

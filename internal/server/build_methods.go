@@ -133,7 +133,7 @@ func (s *Service) buildStatic(ctx context.Context, req *pb.DeployRequest, buildD
 
 	buildCmd := strings.TrimSpace(spec.GetBuildCommand())
 	// Build-time env (build_env.go): the builder stage declares every resolved var as
-	// ARG+ENV so the install/build commands see them (a static site's env is build-time by
+	// an ARG so the install/build commands see them (a static site's env is build-time by
 	// definition - there is no runtime to inject into).
 	envKeys := dropReservedBuildEnv(buildEnvKeys(req.GetEnv()))
 	var dockerfile string
@@ -159,7 +159,7 @@ COPY deplo-nginx.conf /etc/nginx/conf.d/deplo.conf
 COPY --from=builder /app/%s/ /usr/share/nginx/html/
 EXPOSE %d
 CMD ["nginx", "-g", "daemon off;"]
-`, node, argEnvLines(envKeys), install, buildCmd, outputDir, port)
+`, node, buildArgLines(envKeys), install, buildCmd, outputDir, port)
 	} else {
 		// No build command runs, so no build env is consumed - pass none.
 		envKeys = nil
@@ -185,12 +185,14 @@ CMD ["nginx", "-g", "daemon off;"]
 	return s.runBuild(ctx, req, args, envKV(req.GetEnv(), envKeys), e)
 }
 
-// argEnvLines renders one `ARG KEY` + `ENV KEY=$KEY` pair per line for a
-// generated builder stage - single-name forms for classic-builder compatibility.
-func argEnvLines(keys []string) string {
+// buildArgLines renders one `ARG KEY` per line for a generated builder stage -
+// single-name forms for classic-builder compatibility. No matching `ENV`: a build
+// arg is already in every RUN's environment, so the ENV would only bake the value
+// into the image config.
+func buildArgLines(keys []string) string {
 	var b strings.Builder
 	for _, k := range keys {
-		b.WriteString("ARG " + k + "\nENV " + k + "=$" + k + "\n")
+		b.WriteString("ARG " + k + "\n")
 	}
 	return b.String()
 }
@@ -346,6 +348,13 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 		case len(moved) > 0:
 			e.log("info", "Applying the app's variables after the install step, so changing one leaves the installed dependencies cached")
 		}
+	}
+
+	// Nixpacks pairs every ARG with an ENV, which persists the value in the built
+	// image's config. The ARG alone already reaches each RUN, so drop the ENV. Runs
+	// AFTER the move above, which needs the ARG/ENV pair intact.
+	if _, sErr := stripAppEnvFromDockerfile(generated, envKeys); sErr != nil {
+		e.log("warn", "could not drop the app variables from the image config: "+sErr.Error())
 	}
 
 	publishDir := strings.TrimSpace(spec.GetNixpacksPublishDirectory())

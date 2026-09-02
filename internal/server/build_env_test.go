@@ -89,7 +89,7 @@ func TestAppendBuildArgKeysBareNames(t *testing.T) {
 	}
 }
 
-// The static builder's generated Dockerfile must declare each env var as ARG+ENV in the
+// The static builder's generated Dockerfile must declare each env var as an ARG in the
 // BUILDER stage (so the build command sees it) and leave the nginx stage untouched.
 func TestBuildStatic_declaresBuildEnvInBuilderStage(t *testing.T) {
 	s := New(t.TempDir(), t.TempDir(), "/", "")
@@ -112,8 +112,13 @@ func TestBuildStatic_declaresBuildEnvInBuilderStage(t *testing.T) {
 	}
 	df := string(body)
 	builderStage := strings.Split(df, "FROM nginx:alpine")[0]
-	if !strings.Contains(builderStage, "ARG NEXT_PUBLIC_API\nENV NEXT_PUBLIC_API=$NEXT_PUBLIC_API") {
-		t.Errorf("builder stage missing ARG/ENV pair:\n%s", df)
+	if !strings.Contains(builderStage, "ARG NEXT_PUBLIC_API\n") {
+		t.Errorf("builder stage missing the ARG:\n%s", df)
+	}
+	// No ENV: the ARG already reaches the RUN steps, and the ENV would bake the
+	// value into the image config.
+	if strings.Contains(df, "ENV NEXT_PUBLIC_API") {
+		t.Errorf("the build var must not be declared as ENV:\n%s", df)
 	}
 	if strings.Contains(df, "https://api.example.com") {
 		t.Errorf("env VALUE must not be baked into the Dockerfile text:\n%s", df)
