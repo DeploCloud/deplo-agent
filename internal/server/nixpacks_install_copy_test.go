@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -104,7 +105,7 @@ func TestManifestOnlyInstallFiles_refusesUnsafeRepos(t *testing.T) {
 // inside it would change the very context whose stability this exists to protect.
 func TestWriteInstallScopeConfig(t *testing.T) {
 	tmp := t.TempDir()
-	path, err := writeInstallScopeConfig(tmp, "blinkmypc", []string{"package.json", "bun.lock"})
+	path, err := writeNixpacksConfig(tmp, "blinkmypc", []string{"package.json", "bun.lock"}, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,5 +126,79 @@ func TestWriteInstallScopeConfig(t *testing.T) {
 	}
 	if !slices.Equal(got.Phases["install"].OnlyIncludeFiles, []string{"package.json", "bun.lock"}) {
 		t.Fatalf("install scope = %v", got.Phases["install"].OnlyIncludeFiles)
+	}
+}
+
+// A phase is emptied with `cmds: []`. Passing `-b ""` sets ONE empty command
+// instead, which nixpacks happily runs - measured against nixpacks 1.41.0.
+func TestNixpacksConfigEmptiesASkippedPhase(t *testing.T) {
+	tmp := t.TempDir()
+	path, err := writeNixpacksConfig(tmp, "app", nil, true, true)
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	var got struct {
+		Phases map[string]struct {
+			Cmds             *[]string `json:"cmds"`
+			OnlyIncludeFiles []string  `json:"onlyIncludeFiles"`
+		} `json:"phases"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, phase := range []string{"install", "build"} {
+		p, ok := got.Phases[phase]
+		if !ok {
+			t.Fatalf("%s phase missing from %s", phase, body)
+		}
+		if p.Cmds == nil || len(*p.Cmds) != 0 {
+			t.Fatalf("%s must carry an empty cmds array, got %s", phase, body)
+		}
+	}
+}
+
+// Nothing to say means no config at all, so the ordinary detection runs.
+func TestNixpacksConfigIsOmittedWhenThereIsNothingToSay(t *testing.T) {
+	path, err := writeNixpacksConfig(t.TempDir(), "app", nil, false, false)
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if path != "" {
+		t.Fatalf("expected no config file, got %q", path)
+	}
+}
+
+// railpack ignores an empty RAILPACK_BUILD_CMD, so the skip rides a config file -
+// under a Deplo name, because a repo may own railpack.json itself.
+func TestRailpackSkipConfigDoesNotClobberTheRepoOwnConfig(t *testing.T) {
+	dir := t.TempDir()
+	mine := filepath.Join(dir, "railpack.json")
+	if err := os.WriteFile(mine, []byte(`{"steps":{"build":{"commands":["keep me"]}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	name, err := writeRailpackSkipConfig(dir, false, true)
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if name == "railpack.json" {
+		t.Fatal("must not write over the repo's own railpack.json")
+	}
+	kept, err := os.ReadFile(mine)
+	if err != nil || !strings.Contains(string(kept), "keep me") {
+		t.Fatalf("the repo's own config was touched: %s (%v)", kept, err)
+	}
+	body, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), `"build":{"commands":[]}`) {
+		t.Fatalf("build step not emptied: %s", body)
+	}
+	if strings.Contains(string(body), `"install"`) {
+		t.Fatalf("install must be untouched when only the build is skipped: %s", body)
 	}
 }

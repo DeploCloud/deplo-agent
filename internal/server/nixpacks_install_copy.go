@@ -86,19 +86,38 @@ func manifestOnlyInstallFiles(dir string) ([]string, bool) {
 	return files, true
 }
 
-// writeInstallScopeConfig writes a Nixpacks config restricting the install phase
-// to `files`, OUTSIDE the build context (a file inside it would change the very
-// context whose stability this exists to protect), and returns its path.
-func writeInstallScopeConfig(tmpDir, slug string, files []string) (string, error) {
-	cfg := struct {
-		Phases map[string]struct {
-			OnlyIncludeFiles []string `json:"onlyIncludeFiles"`
-		} `json:"phases"`
-	}{Phases: map[string]struct {
-		OnlyIncludeFiles []string `json:"onlyIncludeFiles"`
-	}{"install": {OnlyIncludeFiles: files}}}
+// nixpacksPhase is the slice of a Nixpacks config Deplo writes. `cmds: []` is
+// how a phase is emptied - passing `-b ""` sets ONE empty command instead, which
+// is not the same thing.
+type nixpacksPhase struct {
+	OnlyIncludeFiles []string  `json:"onlyIncludeFiles,omitempty"`
+	Cmds             *[]string `json:"cmds,omitempty"`
+}
 
-	body, err := json.Marshal(cfg)
+// writeNixpacksConfig writes the Nixpacks config OUTSIDE the build context (a
+// file inside it would change the very context whose stability the install scope
+// exists to protect) and returns its path. Returns "" when there is nothing to
+// say. `files` restricts the install phase; the skips empty a phase outright.
+func writeNixpacksConfig(tmpDir, slug string, files []string, skipInstall, skipBuild bool) (string, error) {
+	phases := map[string]nixpacksPhase{}
+	if len(files) > 0 {
+		phases["install"] = nixpacksPhase{OnlyIncludeFiles: files}
+	}
+	if skipInstall {
+		empty := []string{}
+		phases["install"] = nixpacksPhase{Cmds: &empty}
+	}
+	if skipBuild {
+		empty := []string{}
+		phases["build"] = nixpacksPhase{Cmds: &empty}
+	}
+	if len(phases) == 0 {
+		return "", nil
+	}
+
+	body, err := json.Marshal(struct {
+		Phases map[string]nixpacksPhase `json:"phases"`
+	}{Phases: phases})
 	if err != nil {
 		return "", err
 	}
@@ -107,4 +126,35 @@ func writeInstallScopeConfig(tmpDir, slug string, files []string) (string, error
 		return "", err
 	}
 	return path, nil
+}
+
+// railpackSkipConfigName is written into the build context because railpack's
+// --config-file takes a path RELATIVE to it. The Deplo name keeps a repo's own
+// railpack.json intact, and the caller removes the file after the prepare.
+const railpackSkipConfigName = "deplo-railpack.json"
+
+// writeRailpackSkipConfig empties a railpack step. `commands: []` is what railpack
+// reads as "nothing to run"; an empty RAILPACK_BUILD_CMD is IGNORED (measured
+// against railpack 0.35.0), which is why this file exists at all.
+func writeRailpackSkipConfig(buildDir string, skipInstall, skipBuild bool) (string, error) {
+	type step struct {
+		Commands []string `json:"commands"`
+	}
+	steps := map[string]step{}
+	if skipInstall {
+		steps["install"] = step{Commands: []string{}}
+	}
+	if skipBuild {
+		steps["build"] = step{Commands: []string{}}
+	}
+	body, err := json.Marshal(struct {
+		Steps map[string]step `json:"steps"`
+	}{Steps: steps})
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(buildDir, railpackSkipConfigName), body, 0o644); err != nil {
+		return "", err
+	}
+	return railpackSkipConfigName, nil
 }

@@ -51,6 +51,10 @@ var Capabilities = []string{
 	// directory, and its env-file is `.env` inside it. Gated because a stack imported from
 	// a platform that writes its own `.env` simply will not start on an agent without it.
 	"deploy.compose.projectdir",
+	// BuildSpec.skip_install / skip_build are honoured: a step is emptied rather
+	// than detected. Without this the control plane must not offer the choice -
+	// the command strings alone cannot carry it, and detecting is the safe read.
+	"build.skip_steps",
 	// FollowLogsRequest carries a time window and a timestamp prefix
 	// (`--since`/`--until`/`--timestamps`).
 	"logs.timerange",

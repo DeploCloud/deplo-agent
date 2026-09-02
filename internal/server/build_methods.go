@@ -248,20 +248,35 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 	// a code change stops rebuilding (and re-exporting) the dependency layer. See
 	// nixpacks_install_copy.go for the gate and the escape hatch.
 	pureInstall := false
-	if files, ok := manifestOnlyInstallFiles(buildDir); ok {
-		if cfg, cErr := writeInstallScopeConfig(s.buildTmpDir, req.GetSlug(), files); cErr == nil {
-			defer func() { _ = os.Remove(cfg) }()
-			prepArgs = append(prepArgs, "--config", cfg)
+	scopeFiles, scoped := manifestOnlyInstallFiles(buildDir)
+	if !scoped {
+		scopeFiles = nil
+	}
+	skipInstall, skipBuild := spec.GetSkipInstall(), spec.GetSkipBuild()
+	// A scoped install and an emptied one are the same key, so a skip wins.
+	if skipInstall {
+		scopeFiles = nil
+	}
+	if cfg, cErr := writeNixpacksConfig(s.buildTmpDir, req.GetSlug(), scopeFiles, skipInstall, skipBuild); cErr != nil {
+		e.log("warn", "could not write the nixpacks config: "+cErr.Error())
+	} else if cfg != "" {
+		defer func() { _ = os.Remove(cfg) }()
+		prepArgs = append(prepArgs, "--config", cfg)
+		if len(scopeFiles) > 0 {
 			pureInstall = true
 			e.log("info", "Installing dependencies from the manifests only, so unchanged dependencies stay cached")
-		} else {
-			e.log("warn", "could not scope the install phase: "+cErr.Error())
+		}
+		if skipInstall {
+			e.log("info", "Skipping the install step, as asked")
+		}
+		if skipBuild {
+			e.log("info", "Skipping the build step, as asked")
 		}
 	}
-	if c := strings.TrimSpace(spec.GetInstallCommand()); c != "" {
+	if c := strings.TrimSpace(spec.GetInstallCommand()); c != "" && !skipInstall {
 		prepArgs = append(prepArgs, "-i", c)
 	}
-	if c := strings.TrimSpace(spec.GetBuildCommand()); c != "" {
+	if c := strings.TrimSpace(spec.GetBuildCommand()); c != "" && !skipBuild {
 		prepArgs = append(prepArgs, "-b", c)
 	}
 	if c := strings.TrimSpace(spec.GetStartCommand()); c != "" {
@@ -506,6 +521,9 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 	// back to satisfy those secret mounts.
 	nodeVer := majorVersion(strings.TrimSpace(spec.GetRuntimeVersion()), "")
 	buildCmd := strings.TrimSpace(spec.GetBuildCommand())
+	if spec.GetSkipBuild() {
+		buildCmd = ""
+	}
 	startCmd := strings.TrimSpace(spec.GetStartCommand())
 	// Build-time env (build_env.go): each user var reaches `railpack prepare` the same way
 	// the overrides do - its VALUE in the process env, its NAME as a bare `--env KEY`.
@@ -523,6 +541,25 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 	prepareArgs = append(prepareArgs,
 		"--plan-out", planPath,
 		"--info-out", filepath.Join(planDir, "railpack-info.json"))
+
+	// railpack IGNORES an empty RAILPACK_BUILD_CMD (measured), so a skip has to go
+	// through its config file. Written under a Deplo name and passed explicitly, so
+	// a repo's own railpack.json is never overwritten.
+	if spec.GetSkipInstall() || spec.GetSkipBuild() {
+		name, cErr := writeRailpackSkipConfig(buildDir, spec.GetSkipInstall(), spec.GetSkipBuild())
+		if cErr != nil {
+			e.result(false, "write railpack config: "+cErr.Error(), "")
+			return false
+		}
+		defer func() { _ = os.Remove(filepath.Join(buildDir, name)) }()
+		prepareArgs = append(prepareArgs, "--config-file", name)
+		if spec.GetSkipInstall() {
+			e.log("info", "Skipping the install step, as asked")
+		}
+		if spec.GetSkipBuild() {
+			e.log("info", "Skipping the build step, as asked")
+		}
+	}
 
 	// Only EXPORT an override that was actually set. railpack reads these with
 	// os.LookupEnv, so an empty-but-present var still counts as supplied: it declares the

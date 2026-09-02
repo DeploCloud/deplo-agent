@@ -456,6 +456,13 @@ message BuildSpec {
   // static / nixpacks-static: serve as an SPA (history-API fallback to
   // index.html) (methodSettings.staticSinglePageApp).
   bool static_single_page_app = 12;
+  // Run NO install / build step, as opposed to letting the method detect one.
+  // The command strings above cannot carry this: "" already means "detect", so
+  // the control plane's NULL and its empty string would arrive identical.
+  // Advertised as the `build.skip_steps` capability in Hello; an agent without
+  // it detects, which is the safe direction.
+  bool skip_install = 13;
+  bool skip_build = 14;
 }
 
 // A git source the agent clones itself (SOURCE_KIND_GIT, D3). The token is the only
