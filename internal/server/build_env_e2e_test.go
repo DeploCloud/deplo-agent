@@ -25,12 +25,11 @@ func TestE2E_BuildEnvReachesDockerfileBuild(t *testing.T) {
 	const image = "deplo-test/buildenv:e2e"
 	const value = "https://api.example.test/v1"
 
-	// What the control plane's generateDockerfile now renders: ARG+ENV per var,
-	// then build steps that consume it. `RUN` writes the var to a file, if the
+	// What the control plane's generateDockerfile renders: one ARG per var and no
+	// ENV, then build steps that consume it. `RUN` writes the var to a file, if the
 	// value survives into the file, it was present AT BUILD TIME.
 	df := `FROM busybox
 ARG NEXT_PUBLIC_API
-ENV NEXT_PUBLIC_API=$NEXT_PUBLIC_API
 RUN printf '%s' "$NEXT_PUBLIC_API" > /baked
 CMD ["cat", "/baked"]
 `
@@ -69,6 +68,16 @@ CMD ["cat", "/baked"]
 	}
 	if res.Stdout != value {
 		t.Errorf("baked build-time value = %q; want %q", res.Stdout, value)
+	}
+
+	// ...and must not survive into the image config, where `docker inspect` would
+	// hand it back in plaintext long after the build.
+	insp, err := dockercli.Run(ctx, 30*time.Second, "inspect", "-f", "{{range .Config.Env}}{{println .}}{{end}}", image)
+	if err != nil {
+		t.Fatalf("docker inspect: %v", err)
+	}
+	if strings.Contains(insp.Stdout, value) {
+		t.Errorf("the build value is stored in the image config:\n%s", insp.Stdout)
 	}
 
 	mu.Lock()
