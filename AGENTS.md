@@ -19,13 +19,6 @@ control plane never touches a Docker socket; everything host-coupled arrives her
 - `proto/agent.proto` - the wire contract, owned here.
 - `gen/` - generated. Never hand-edit; `make proto` owns it.
 
-## Reporting your work
-
-**Say what you are about to do, then recap.** Before you start, one line on what you are about
-to do; brief updates while you work help the user follow along. Close with a short recap that
-stands on its own - what you found, what you did, and what is next - so a reader who only sees the
-last message has the full picture.
-
 ## Comments
 
 Few and short. **Hard cap about 3 lines per block.** No file-header essays, no design narratives, no
