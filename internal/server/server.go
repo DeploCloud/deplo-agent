@@ -55,6 +55,10 @@ var Capabilities = []string{
 	// than detected. Without this the control plane must not offer the choice -
 	// the command strings alone cannot carry it, and detecting is the safe read.
 	"build.skip_steps",
+	// A build var is declared ARG-only in a generated Dockerfile: the arg already
+	// reaches every RUN, and the paired ENV persisted the value in the image config
+	// where `docker inspect` handed it back in plaintext.
+	"build.env-not-baked",
 	// FollowLogsRequest carries a time window and a timestamp prefix
 	// (`--since`/`--until`/`--timestamps`).
 	"logs.timerange",

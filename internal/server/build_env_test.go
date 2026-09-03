@@ -127,3 +127,11 @@ func TestBuildStatic_declaresBuildEnvInBuilderStage(t *testing.T) {
 		t.Errorf("non-identifier key must be dropped:\n%s", df)
 	}
 }
+
+// The tag is moved rather than bumped, so the version proves nothing about which
+// binary a host runs - the capability is what a rollout verifies against.
+func TestCapabilities_advertisesEnvNotBaked(t *testing.T) {
+	if !containsString(Capabilities, "build.env-not-baked") {
+		t.Error("Capabilities must advertise \"build.env-not-baked\"")
+	}
+}
