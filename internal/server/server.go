@@ -199,6 +199,10 @@ var Capabilities = []string{
 	// Every export gzips at BestSpeed: the default level was CPU-bound on the source
 	// agent and capped a relay at ~7 MiB/s. Its own string because the tag moves.
 	"copy.gzip-bestspeed",
+	// A sanitised import reads on to the gzip EOF after the tar's end, so a tar sized
+	// on a 32 KiB flate boundary no longer dies on a closed pipe. Its own string
+	// because the tag moves.
+	"copy.drain-eof",
 }
 
 // AgentVersion is the version this agent reports over Hello. "dev" for a build that

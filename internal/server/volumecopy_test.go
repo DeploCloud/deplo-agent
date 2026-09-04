@@ -567,3 +567,60 @@ func TestCapabilities_advertisesBestSpeedGzip(t *testing.T) {
 		t.Error("Capabilities must advertise \"copy.gzip-bestspeed\"")
 	}
 }
+
+// A tar whose size is an exact multiple of 32 KiB hands its EOF marker over on a
+// flate window flush, before the gzip trailer arrives: the pump has to read on to
+// the gzip EOF or the sender's last frames hit a closed pipe.
+func TestSanitizeTar_drainsToGzipEOF(t *testing.T) {
+	for _, fileSize := range []int{31232, 31232 + 512} {
+		var frames [][]byte
+		cw := &chunkWriter{send: func(b []byte) error { frames = append(frames, b); return nil }}
+		gz, _ := gzip.NewWriterLevel(cw, gzip.BestSpeed)
+		tw := tar.NewWriter(gz)
+		if err := tw.WriteHeader(&tar.Header{Name: "./f", Mode: 0o600, Size: int64(fileSize)}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write(bytes.Repeat([]byte("x"), fileSize)); err != nil {
+			t.Fatal(err)
+		}
+		if err := tw.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if err := gz.Close(); err != nil {
+			t.Fatal(err)
+		}
+		tarSize := 512 + fileSize + 1024
+
+		pump, err := newSanitizingGunzipPump(io.Discard)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i, f := range frames {
+			if _, err := pump.Write(f); err != nil {
+				t.Fatalf("tar of %d bytes: frame %d of %d: %v", tarSize, i, len(frames), err)
+			}
+		}
+		if err := pump.Close(); err != nil {
+			t.Fatalf("tar of %d bytes: close: %v", tarSize, err)
+		}
+
+		// Reading to the gzip EOF is also what checks the trailer.
+		last := frames[len(frames)-1]
+		last[len(last)-1] ^= 0xff
+		pump, _ = newSanitizingGunzipPump(io.Discard)
+		for _, f := range frames {
+			if _, err := pump.Write(f); err != nil {
+				break
+			}
+		}
+		if err := pump.Close(); err == nil {
+			t.Fatalf("tar of %d bytes: a corrupt gzip trailer must fail the import", tarSize)
+		}
+	}
+}
+
+func TestCapabilities_advertisesDrainEOF(t *testing.T) {
+	if !containsString(Capabilities, "copy.drain-eof") {
+		t.Error("Capabilities must advertise \"copy.drain-eof\"")
+	}
+}

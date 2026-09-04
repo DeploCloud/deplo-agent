@@ -396,6 +396,12 @@ func sanitizeTar(dst io.Writer, src io.Reader, drops *tarDrops) error {
 			}
 		}
 	}
+	// Read on to the gzip EOF: a tar sized on a 32 KiB flate boundary hands its end
+	// over before the trailer, and stopping here left the sender's last frames
+	// writing into a closed pipe. This also verifies the gzip checksum.
+	if _, err := io.Copy(io.Discard, src); err != nil {
+		return err
+	}
 	return tw.Close()
 }
 
