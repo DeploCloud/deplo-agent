@@ -26,7 +26,9 @@ func (s *Service) ExportFiles(req *pb.ExportFilesRequest, stream pb.Agent_Export
 	cw := &chunkWriter{send: func(b []byte) error {
 		return stream.Send(&pb.FilesChunk{Frame: &pb.FilesChunk_Data{Data: b}})
 	}}
-	gz := gzip.NewWriter(cw)
+	// BestSpeed: a copy is CPU-bound on the source agent at the default level -
+	// measured at 6 MiB/s on incompressible data, an hour for 20 GB.
+	gz, _ := gzip.NewWriterLevel(cw, gzip.BestSpeed)
 	tw := tar.NewWriter(gz)
 
 	// A missing dir (or a non-directory at that path) yields an empty (header-only) tar -

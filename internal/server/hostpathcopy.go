@@ -149,7 +149,9 @@ func (s *Service) ExportHostPath(
 	cw := &chunkWriter{send: func(b []byte) error {
 		return stream.Send(&pb.VolumeChunk{Frame: &pb.VolumeChunk_Data{Data: b}})
 	}}
-	gz := gzip.NewWriter(cw)
+	// BestSpeed: a copy is CPU-bound on the source agent at the default level -
+	// measured at 6 MiB/s on incompressible data, an hour for 20 GB.
+	gz, _ := gzip.NewWriterLevel(cw, gzip.BestSpeed)
 
 	code, runErr := dockercli.PipeOut(ctx, volumeCopyTimeout, gz, nil,
 		volumeHelperRun(ctx, "-v", mount+":/v:ro", volumeHelperImage,

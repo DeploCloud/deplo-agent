@@ -86,7 +86,9 @@ func (s *Service) ExportVolume(req *pb.ExportVolumeRequest, stream pb.Agent_Expo
 	cw := &chunkWriter{send: func(b []byte) error {
 		return stream.Send(&pb.VolumeChunk{Frame: &pb.VolumeChunk_Data{Data: b}})
 	}}
-	gz := gzip.NewWriter(cw)
+	// BestSpeed: a copy is CPU-bound on the source agent at the default level -
+	// measured at 6 MiB/s on incompressible data, an hour for 20 GB.
+	gz, _ := gzip.NewWriterLevel(cw, gzip.BestSpeed)
 
 	// Producer: the helper container tars the volume's contents to stdout; PipeOut
 	// copies that into gz (→ chunkWriter → stream.Send).
