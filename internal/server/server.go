@@ -196,6 +196,9 @@ var Capabilities = []string{
 	// volume over a slow link is no longer killed mid-transfer. Its own string because
 	// the tag moves, so the version proves nothing.
 	"volume-copy-6h",
+	// Every export gzips at BestSpeed: the default level was CPU-bound on the source
+	// agent and capped a relay at ~7 MiB/s. Its own string because the tag moves.
+	"copy.gzip-bestspeed",
 }
 
 // AgentVersion is the version this agent reports over Hello. "dev" for a build that

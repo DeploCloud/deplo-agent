@@ -559,3 +559,11 @@ func TestCapabilities_advertisesHardenedCopy(t *testing.T) {
 		t.Error("Capabilities must advertise \"volume-copy-hardened\"")
 	}
 }
+
+// The tag is moved rather than bumped, so the version proves nothing about which
+// binary a host runs - the capability is what a rollout verifies against.
+func TestCapabilities_advertisesBestSpeedGzip(t *testing.T) {
+	if !containsString(Capabilities, "copy.gzip-bestspeed") {
+		t.Error("Capabilities must advertise \"copy.gzip-bestspeed\"")
+	}
+}
