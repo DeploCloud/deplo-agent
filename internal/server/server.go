@@ -89,6 +89,9 @@ var Capabilities = []string{
 	// A cron job runs in a plain `sh -c`, not a login shell: the container's PATH
 	// reaches the command unchanged.
 	"cron.plain-shell",
+	// A stopped or timed-out job's process tree is killed on the host by the
+	// DEPLO_JOB_ID marker it inherited, not left running behind a dead exec.
+	"cron.kill-tree",
 	"volume-copy", // cross-host named-volume copy for a server move (ExportVolume/ImportVolume)
 	// The import half of a copy is hardened: the incoming tar is sanitised (setuid
 	// bits, device nodes and escaping links dropped), a host path is symlink-resolved

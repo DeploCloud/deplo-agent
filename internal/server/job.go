@@ -37,6 +37,9 @@ const (
 	// Default when the caller names no timeout. Matches the control plane's own
 	// default so the two agree on what "unset" means.
 	cronDefaultTimeout = time.Hour
+
+	// How long a stopped job's processes get to exit on TERM before KILL.
+	jobKillGrace = 3 * time.Second
 )
 
 // tailBuf keeps the LAST n bytes written to it and nothing else.
@@ -168,7 +171,7 @@ func (s *Service) driveJob(ctx context.Context, id string, req *pb.StartJobReque
 				s.finishJob(j, -1, false, "", fmt.Sprintf("cron job panicked: %v", r))
 			}
 		}()
-		s.runJob(ctx, req, j)
+		s.runJob(ctx, id, req, j)
 	}()
 	time.AfterFunc(cronRetainFinished, func() {
 		s.mu.Lock()
@@ -179,7 +182,7 @@ func (s *Service) driveJob(ctx context.Context, id string, req *pb.StartJobReque
 	})
 }
 
-func (s *Service) runJob(ctx context.Context, req *pb.StartJobRequest, j *job) {
+func (s *Service) runJob(ctx context.Context, id string, req *pb.StartJobRequest, j *job) {
 	container := req.GetContainer()
 	if err := assertOwned(ctx, container, req.GetProjectId()); err != nil {
 		s.finishJob(j, -1, false, "", status.Convert(err).Message())
@@ -234,6 +237,9 @@ func (s *Service) runJob(ctx context.Context, req *pb.StartJobRequest, j *job) {
 		args = append(args, "-e", name)
 		extraEnv = append(extraEnv, name+"="+e.GetValue())
 	}
+	// The marker the whole process tree inherits, so a stop can find it later.
+	args = append(args, "-e", jobMarkerEnv)
+	extraEnv = append(extraEnv, jobMarkerEnv+"="+id)
 	args = append(args, container)
 	args = append(args, prefix...)
 	args = append(args, req.GetCommand())
@@ -255,8 +261,12 @@ func (s *Service) runJob(ctx context.Context, req *pb.StartJobRequest, j *job) {
 		// docker never produced an exit status.
 		switch {
 		case ctx.Err() != nil:
+			killMarkedProcesses(id, jobKillGrace)
 			s.finishJob(j, -1, false, "", "The job was stopped.")
 		case time.Since(execStart) >= timeout:
+			// Killing the exec client left the command running; the marker
+			// finds it. Without this a "timed out" job kept burning CPU.
+			killMarkedProcesses(id, jobKillGrace)
 			s.finishJob(j, -1, true, "",
 				fmt.Sprintf("The command was still running after %s and was stopped.", timeout))
 		default:
@@ -335,14 +345,8 @@ func (s *Service) KillJob(_ context.Context, req *pb.KillJobRequest) (*pb.KillJo
 	if !live {
 		return &pb.KillJobResponse{Found: false}, nil
 	}
-	// Cancelling the job context kills the `docker exec` client. The process
-	// INSIDE the container gets its stdin/stdout closed and normally dies with
-	// it, but docker has no "kill the exec'd process" API, so a command that
-	// ignores the disconnect can outlive this.
-	//
-	// ponytail: a killed job's in-container process may survive the exec client.
-	//   Reaping it needs the exec's in-container PID (docker inspect on the exec
-	//   id) plus a second exec to `kill` it. Add if anyone reports a zombie.
+	// Cancelling the job context kills the `docker exec` client; runJob then
+	// stops the command itself by its marker (docker has no kill-exec API).
 	j.cancel()
 	return &pb.KillJobResponse{Found: true}, nil
 }
