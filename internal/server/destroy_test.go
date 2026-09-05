@@ -278,3 +278,24 @@ func TestDestroyStack_removesThePreviewNetwork(t *testing.T) {
 		t.Error("Capabilities must advertise \"teardown.preview-network\"")
 	}
 }
+
+// The file only ever goes on a successful `down`, so a destroy that finds no file
+// has nothing left to remove: it must say so, or every retry of it fails forever.
+func TestDestroyStack_missingFileWithRemoveVolumesReportsOk(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if !dockercli.Available(ctx) {
+		t.Skip("docker not available")
+	}
+	s := New(t.TempDir(), t.TempDir(), "/", "")
+	res, err := s.DestroyStack(ctx, &pb.StackRef{Slug: "agenttest-nofile-xyz__pr-3", RemoveVolumes: true})
+	if err != nil {
+		t.Fatalf("DestroyStack rpc error: %v", err)
+	}
+	if !res.GetOk() {
+		t.Errorf("no file and no container is a finished destroy, got Ok=false err=%q", res.GetError())
+	}
+	if !containsString(Capabilities, "teardown.missing-file-ok") {
+		t.Error("Capabilities must advertise \"teardown.missing-file-ok\"")
+	}
+}

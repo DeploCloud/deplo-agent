@@ -217,6 +217,10 @@ var Capabilities = []string{
 	// off first). Before, every closed pull request left one network behind until
 	// the nightly cleanup, against a default address pool of about thirty.
 	"teardown.preview-network",
+	// A destroy of a stack whose file is already gone reports Ok once `rm -f` has
+	// found nothing, `removeVolumes` or not: the file only ever went on a successful
+	// `down`, so nothing of it is left to reclaim.
+	"teardown.missing-file-ok",
 }
 
 // AgentVersion is the version this agent reports over Hello. "dev" for a build that
@@ -478,6 +482,21 @@ func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.Stack
 	defer s.lockStack(slug)()
 	// Read BEFORE the down: once the containers are gone nothing names the network.
 	previewNets := stackPreviewNetworks(ctx, slug)
+	// No stack file ⇒ no project for `down` to act on. The file only goes on a
+	// successful `down`, so what that run removed is gone; left to the fallback, a
+	// `down -v` here reported failure forever for a stack that no longer existed.
+	if !isFile(s.stackPath(slug)) {
+		r2, err := dockercli.Run(ctx, 30*time.Second, "rm", "-f", "deplo-"+slug)
+		if err != nil {
+			return &pb.StackResult{Ok: false, Error: err.Error()}, nil
+		}
+		reclaimed := s.reclaimVolumes(ctx, ref.GetReclaimVolumes())
+		if r2.Code == 0 {
+			removePreviewNetworks(ctx, previewNets)
+			return &pb.StackResult{Ok: true, Error: reclaimed}, nil
+		}
+		return &pb.StackResult{Ok: false, Error: strings.TrimSpace(r2.Stderr)}, nil
+	}
 	downArgs := s.composeCtl(slug, "down", "--remove-orphans")
 	if ref.GetRemoveVolumes() {
 		downArgs = append(downArgs, "-v")
