@@ -186,7 +186,9 @@ func (s *Service) runJob(ctx context.Context, req *pb.StartJobRequest, j *job) {
 		return
 	}
 
-	// The shell prefix.
+	// The shell prefix. NOT a login shell: /etc/profile on Debian and Alpine
+	// resets PATH, which drops the image's own additions (a venv, mise shims) and
+	// makes a command that works in the console fail here with "not found".
 	var prefix []string
 	switch req.GetShell() {
 	case "bash":
@@ -195,14 +197,14 @@ func (s *Service) runJob(ctx context.Context, req *pb.StartJobRequest, j *job) {
 				"This container has no bash. Switch the job to sh.")
 			return
 		}
-		prefix = []string{"bash", "-lc"}
+		prefix = []string{"bash", "-c"}
 	case "sh":
 		if !hasShell(ctx, container, "sh") {
 			s.finishJob(j, -1, false, "",
 				"This container has no shell, so it cannot run a cron job.")
 			return
 		}
-		prefix = []string{"sh", "-lc"}
+		prefix = []string{"sh", "-c"}
 	default:
 		plan := resolveShellPlan(ctx, container, req.GetImage())
 		if plan.raw() {

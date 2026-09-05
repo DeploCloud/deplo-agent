@@ -86,6 +86,9 @@ var Capabilities = []string{
 	// Scheduled `docker exec` the agent owns for its whole lifetime
 	// (StartJob/PollJob/KillJob) - the Cron jobs feature.
 	"cron",
+	// A cron job runs in a plain `sh -c`, not a login shell: the container's PATH
+	// reaches the command unchanged.
+	"cron.plain-shell",
 	"volume-copy", // cross-host named-volume copy for a server move (ExportVolume/ImportVolume)
 	// The import half of a copy is hardened: the incoming tar is sanitised (setuid
 	// bits, device nodes and escaping links dropped), a host path is symlink-resolved
