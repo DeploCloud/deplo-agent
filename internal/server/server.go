@@ -209,6 +209,10 @@ var Capabilities = []string{
 	// on a 32 KiB flate boundary no longer dies on a closed pipe. Its own string
 	// because the tag moves.
 	"copy.drain-eof",
+	// A destroyed stack takes its `deplo-preview-*` network with it (Traefik taken
+	// off first). Before, every closed pull request left one network behind until
+	// the nightly cleanup, against a default address pool of about thirty.
+	"teardown.preview-network",
 }
 
 // AgentVersion is the version this agent reports over Hello. "dev" for a build that
@@ -468,6 +472,8 @@ func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.Stack
 		return nil, err
 	}
 	defer s.lockStack(slug)()
+	// Read BEFORE the down: once the containers are gone nothing names the network.
+	previewNets := stackPreviewNetworks(ctx, slug)
 	downArgs := s.composeCtl(slug, "down", "--remove-orphans")
 	if ref.GetRemoveVolumes() {
 		downArgs = append(downArgs, "-v")
@@ -482,6 +488,7 @@ func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.Stack
 		// host that is dozens of files nothing will ever read again, each holding the env the
 		// app was running with.
 		s.removeStackFiles(slug)
+		removePreviewNetworks(ctx, previewNets)
 		return &pb.StackResult{Ok: true, Error: reclaimed}, nil
 	}
 	// `rm -f` is idempotent for a missing container (exit 0), so the common already-gone
@@ -489,6 +496,9 @@ func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.Stack
 	r2, err := dockercli.Run(ctx, 30*time.Second, "rm", "-f", "deplo-"+slug)
 	if err != nil {
 		return &pb.StackResult{Ok: false, Error: err.Error()}, nil
+	}
+	if r2.Code == 0 {
+		removePreviewNetworks(ctx, previewNets)
 	}
 	// A removeVolumes destroy that fell through to `rm -f` did NOT run a successful `down
 	// -v`, and `rm -f` only removes a container - it can never reclaim a named volume.

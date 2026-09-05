@@ -344,3 +344,45 @@ func firstLine(s string) string {
 	}
 	return s
 }
+
+// stackPreviewNetworks lists the `deplo-preview-*` networks a stack's containers are
+// on. A preview's network holds that one stack and nothing else, so once the stack is
+// gone the network is litter - and address space, which is the scarce thing. An
+// Environment's network is shared and is never in this list.
+func stackPreviewNetworks(ctx context.Context, slug string) []string {
+	res, err := dockercli.Run(ctx, 15*time.Second, "ps", "-a",
+		"--filter", "label=com.docker.compose.project=deplo-"+slug,
+		"--format", "{{.Names}}")
+	if err != nil || res.Code != 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, name := range strings.Fields(res.Stdout) {
+		ins, err := dockercli.Run(ctx, 15*time.Second, "inspect", "-f",
+			"{{range $k, $_ := .NetworkSettings.Networks}}{{$k}} {{end}}", name)
+		if err != nil || ins.Code != 0 {
+			continue
+		}
+		for _, n := range strings.Fields(ins.Stdout) {
+			if strings.HasPrefix(n, "deplo-preview-") && !seen[n] {
+				seen[n] = true
+				out = append(out, n)
+			}
+		}
+	}
+	return out
+}
+
+// removePreviewNetworks takes Traefik off each network and removes it. Best-effort:
+// a network that still holds a container is refused by docker and left for the
+// leftover-networks cleanup scope, never a reason to fail a destroy that succeeded.
+func removePreviewNetworks(ctx context.Context, names []string) {
+	for _, n := range names {
+		if !strings.HasPrefix(n, "deplo-preview-") {
+			continue
+		}
+		_, _ = dockercli.Run(ctx, 20*time.Second, "network", "disconnect", "-f", n, traefikContainer)
+		_, _ = dockercli.Run(ctx, 20*time.Second, "network", "rm", n)
+	}
+}

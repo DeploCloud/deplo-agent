@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -226,5 +227,54 @@ func TestDestroyStack_reclaimsNamedVolumesAndOnlyDeploOnes(t *testing.T) {
 	}
 	if !exists(foreign) {
 		t.Errorf("%s is not Deplo's to remove and must survive", foreign)
+	}
+}
+
+// A pull request preview lives on a network of its own, and the row for it goes
+// away with the pull request: if the destroy does not take the network too, every
+// closed pull request leaves one behind against Docker's address pool.
+func TestDestroyStack_removesThePreviewNetwork(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	if !dockercli.Available(ctx) {
+		t.Skip("docker not available")
+	}
+	// A slug no real stack could carry, so nothing on a shared host is touched.
+	slug := fmt.Sprintf("agenttest-prvnet-%d__pr-1", time.Now().UnixNano()%1_000_000)
+	network := "deplo-preview-" + slug
+	if r, err := dockercli.Run(ctx, 20*time.Second, "network", "create", network); err != nil || r.Code != 0 {
+		t.Skipf("cannot create a scratch network: %v %s", err, r.Stderr)
+	}
+	stackDir := t.TempDir()
+	s := New(stackDir, t.TempDir(), "/", "")
+	// The shape the control plane renders: the stack's own network, declared external.
+	yml := "services:\n  app:\n    image: alpine:3.20\n    command: [\"sleep\", \"300\"]\n" +
+		"    networks: [deplo]\nnetworks:\n  deplo:\n    name: " + network + "\n    external: true\n"
+	if err := os.WriteFile(s.stackPath(slug), []byte(yml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = dockercli.Run(context.Background(), 60*time.Second, s.composeCtl(slug, "down", "-v")...)
+		_, _ = dockercli.Run(context.Background(), 20*time.Second, "network", "rm", network)
+	})
+	if r, err := dockercli.Run(ctx, 90*time.Second, s.composeCtl(slug, "up", "-d")...); err != nil || r.Code != 0 {
+		t.Fatalf("compose up: %v %s", err, r.Stderr)
+	}
+
+	res, err := s.DestroyStack(ctx, &pb.StackRef{Slug: slug, RemoveVolumes: true})
+	if err != nil {
+		t.Fatalf("DestroyStack rpc error: %v", err)
+	}
+	if !res.GetOk() {
+		t.Fatalf("destroy should succeed, got err=%q", res.GetError())
+	}
+	ls, _ := dockercli.Run(ctx, 20*time.Second, "network", "ls", "--format", "{{.Name}}")
+	for _, n := range strings.Fields(ls.Stdout) {
+		if n == network {
+			t.Fatalf("the preview network %s survived the destroy", network)
+		}
+	}
+	if !containsString(Capabilities, "teardown.preview-network") {
+		t.Error("Capabilities must advertise \"teardown.preview-network\"")
 	}
 }
