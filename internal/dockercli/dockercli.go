@@ -159,6 +159,43 @@ func StreamOut(ctx context.Context, timeout time.Duration, dst io.Writer, onLine
 	return 0, nil
 }
 
+// StreamPipes runs docker with stdout and stderr each copied straight into a
+// writer - no line scanner in the way, so a single line longer than a scanner
+// buffer (a 9 MB JSON dump on stderr) cannot stall the process on a full pipe.
+func StreamPipes(ctx context.Context, timeout time.Duration, stdout, stderr io.Writer, extraEnv []string, args ...string) (int, error) {
+	cctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	cmd := exec.CommandContext(cctx, "docker", args...)
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
+	return runPipes(cctx, timeout, cmd, stdout, stderr, redactArgs(args))
+}
+
+// runPipes is StreamPipes minus the docker argv, so a test can drive it with
+// a plain shell.
+func runPipes(cctx context.Context, timeout time.Duration, cmd *exec.Cmd, stdout, stderr io.Writer, label string) (int, error) {
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		return -1, fmt.Errorf("docker %s: %w", label, err)
+	}
+	err := cmd.Wait()
+	if err != nil {
+		if cctx.Err() == context.DeadlineExceeded {
+			return -1, fmt.Errorf("docker %s timed out after %s", label, timeout)
+		}
+		if cctx.Err() == context.Canceled {
+			return -1, fmt.Errorf("docker %s canceled", label)
+		}
+		if ee, ok := err.(*exec.ExitError); ok && ee.ProcessState.Exited() {
+			return ee.ExitCode(), nil
+		}
+		return -1, err
+	}
+	return 0, nil
+}
+
 // streamCmd is the shared core of Stream/StreamEnv/Spawn: start an already-built
 // command, fan its stdout+stderr into onLine line-by-line, and map the exit /
 // timeout / cancellation outcome the same way for every caller.

@@ -245,3 +245,12 @@ func TestStartJobReturnsBeforeTouchingDocker(t *testing.T) {
 	}
 	t.Fatal("job never settled")
 }
+
+func TestTailBufKeepsTextAroundAStrayByte(t *testing.T) {
+	b := newTailBuf(64)
+	b.Write([]byte("ok\xff\xfe\xfdend\n"))
+	got := b.String()
+	if !utf8.ValidString(got) || !strings.HasPrefix(got, "ok") || !strings.HasSuffix(got, "end\n") {
+		t.Fatalf("tail = %q, want ok...end with the stray bytes replaced", got)
+	}
+}

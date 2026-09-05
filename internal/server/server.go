@@ -92,6 +92,10 @@ var Capabilities = []string{
 	// A stopped or timed-out job's process tree is killed on the host by the
 	// DEPLO_JOB_ID marker it inherited, not left running behind a dead exec.
 	"cron.kill-tree",
+	// stderr is a byte stream into its ring, not a line scanner (a huge single
+	// line no longer stalls the job), and a stray non-UTF-8 byte is replaced
+	// instead of costing the output before it.
+	"cron.output-hardened",
 	"volume-copy", // cross-host named-volume copy for a server move (ExportVolume/ImportVolume)
 	// The import half of a copy is hardened: the incoming tar is sanitised (setuid
 	// bits, device nodes and escaping links dropped), a host path is symlink-resolved

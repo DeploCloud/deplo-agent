@@ -71,19 +71,23 @@ func (t *tailBuf) Write(p []byte) (int, error) {
 }
 
 // String returns the retained tail, prefixed with a note when anything was dropped.
+// The cut may land inside a rune: those leading continuation bytes go. Anything
+// else that is not UTF-8 (a stray binary byte in the middle) is replaced, never
+// used as a reason to throw the text before it away.
 func (t *tailBuf) String() string {
 	b := t.buf
-	for len(b) > 0 && !utf8.Valid(b) {
+	for len(b) > 0 && !utf8.RuneStart(b[0]) {
 		b = b[1:]
 	}
+	text := strings.ToValidUTF8(string(b), "\uFFFD")
 	if !t.over {
-		return string(b)
+		return text
 	}
 	kept := fmt.Sprintf("%d KiB", t.max>>10)
 	if t.max < 1<<10 {
 		kept = fmt.Sprintf("%d bytes", t.max)
 	}
-	return fmt.Sprintf("[deplo] earlier output trimmed - showing the last %s\n%s", kept, string(b))
+	return fmt.Sprintf("[deplo] earlier output trimmed - showing the last %s\n%s", kept, text)
 }
 
 // job is one cron execution the agent is running or has recently finished.
@@ -249,13 +253,10 @@ func (s *Service) runJob(ctx context.Context, id string, req *pb.StartJobRequest
 		timeout = cronDefaultTimeout
 	}
 
-	// StreamOut writes stdout to the ring and hands stderr lines to the callback
-	// (which writes to the other ring), so neither buffer ever holds more than
-	// its ceiling - the output is trimmed as it arrives, not after.
+	// Both streams go straight into their rings, so neither buffer ever holds
+	// more than its ceiling and no line length can stall the command.
 	execStart := time.Now()
-	code, err := dockercli.StreamOut(ctx, timeout, j.stdout, func(line string) {
-		_, _ = j.stderr.Write([]byte(line + "\n"))
-	}, extraEnv, args...)
+	code, err := dockercli.StreamPipes(ctx, timeout, j.stdout, j.stderr, extraEnv, args...)
 
 	if err != nil {
 		// docker never produced an exit status.
