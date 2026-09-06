@@ -94,6 +94,9 @@ type cleanupParams struct {
 	// stackDir is where the rendered stacks and their files/<slug> directories
 	// live - the only thing LEFTOVER_APP_FILES looks at.
 	stackDir string
+	// buildTmpDir is where build contexts are extracted; a crash mid-build leaves
+	// a `deplo-git-*` / `deplo-build-*` directory there that BUILD_CACHE sweeps.
+	buildTmpDir string
 	// liveSlugs is every stack the control plane still knows about, instance-wide.
 	// Nil/empty means it could not tell us, which SKIPS the scope that reads it.
 	liveSlugs map[string]bool
@@ -137,6 +140,7 @@ func (s *Service) DockerCleanup(ctx context.Context, req *pb.DockerCleanupReques
 		keepImagesPerApp: int(req.GetKeepImagesPerApp()),
 		dataDir:          s.dataDir,
 		stackDir:         s.stackDir,
+		buildTmpDir:      s.buildTmpDir,
 	}
 	if live := req.GetLiveSlugs(); len(live) > 0 {
 		params.liveSlugs = make(map[string]bool, len(live))
@@ -223,6 +227,20 @@ func (s *Service) DockerCleanup(ctx context.Context, req *pb.DockerCleanupReques
 			r = cleanLeftoverAppFiles(params)
 		case pb.CleanupScope_CLEANUP_SCOPE_LEFTOVER_NETWORKS:
 			r = cleanLeftoverNetworks(ctx, params)
+		case pb.CleanupScope_CLEANUP_SCOPE_ORPHAN_VOLUMES:
+			index, err := requireIndex()
+			if err != nil {
+				r = skippedScope(scope, err)
+			} else {
+				r = cleanOrphanVolumes(ctx, params, index)
+			}
+		case pb.CleanupScope_CLEANUP_SCOPE_UNUSED_PULLED_IMAGES:
+			index, err := requireIndex()
+			if err != nil {
+				r = skippedScope(scope, err)
+			} else {
+				r = cleanUnusedPulledImages(ctx, params, index)
+			}
 		default:
 			return nil, status.Errorf(codes.InvalidArgument,
 				"unknown cleanup scope %q (this agent only implements the allow-listed scopes)", scope.String())
@@ -329,8 +347,54 @@ type buildCacheRecord struct {
 	LastUsedAt string `json:"LastUsedAt"`
 }
 
-// cleanBuildCache reclaims the daemon's own BuildKit cache.
+// cleanBuildCache reclaims the daemon's own BuildKit cache, then the build
+// directories a dead agent left in the temp dir.
 func cleanBuildCache(ctx context.Context, p cleanupParams) *pb.CleanupScopeResult {
+	r := pruneBuildCache(ctx, p)
+	sweepStaleBuildDirs(p, r)
+	return r
+}
+
+// staleBuildDirAfter is how old a build directory must be to count as abandoned: no
+// build outlives its 20-minute budget, so an hour-old one belongs to nobody.
+const staleBuildDirAfter = 2 * time.Hour
+
+// sweepStaleBuildDirs removes `deplo-git-*` / `deplo-build-*` directories older than
+// staleBuildDirAfter. The deploy path removes its own on every exit; only a process
+// that died mid-build leaves one, and nothing else ever looked for them.
+func sweepStaleBuildDirs(p cleanupParams, r *pb.CleanupScopeResult) {
+	if p.buildTmpDir == "" {
+		return
+	}
+	entries, err := os.ReadDir(p.buildTmpDir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-staleBuildDirAfter)
+	for _, e := range entries {
+		name := e.Name()
+		if !e.IsDir() || !(strings.HasPrefix(name, "deplo-git-") || strings.HasPrefix(name, "deplo-build-")) {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		dir := filepath.Join(p.buildTmpDir, name)
+		size := dirSize(dir)
+		if !p.dryRun {
+			if err := os.RemoveAll(dir); err != nil {
+				continue
+			}
+		}
+		r.ReclaimedBytes += size
+		addItem(r, name)
+		r.ItemsRemoved++
+	}
+}
+
+// pruneBuildCache is the `docker builder prune` half of the scope.
+func pruneBuildCache(ctx context.Context, p cleanupParams) *pb.CleanupScopeResult {
 	r := &pb.CleanupScopeResult{Scope: pb.CleanupScope_CLEANUP_SCOPE_BUILD_CACHE}
 
 	var estimate int64
@@ -574,7 +638,29 @@ func cleanDanglingImages(ctx context.Context, p cleanupParams) *pb.CleanupScopeR
 // starts gets an anonymous volume, and (before the `docker rm -f -v` fix in
 // build_methods.go) it was orphaned when the container was removed.
 func cleanOrphanBuildkitCache(ctx context.Context, p cleanupParams, idx *containerIndex) *pb.CleanupScopeResult {
-	r := &pb.CleanupScopeResult{Scope: pb.CleanupScope_CLEANUP_SCOPE_ORPHAN_BUILDKIT_CACHE}
+	return cleanDanglingVolumes(ctx, p, idx, pb.CleanupScope_CLEANUP_SCOPE_ORPHAN_BUILDKIT_CACHE,
+		func(_, mountpoint string) bool {
+			_, err := os.Stat(filepath.Join(mountpoint, buildkitSentinel))
+			return err == nil // THE proof. No sentinel, no removal - whatever else it looks like.
+		})
+}
+
+// anonymousVolume is the 64-hex name docker mints for a volume nobody named: the
+// data dir an image declared as VOLUME, left behind when its container was removed
+// without `-v`. Nothing can mount it again by name, so nothing can come back to it.
+var anonymousVolume = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// cleanOrphanVolumes removes dangling ANONYMOUS volumes. A named volume is never a
+// candidate: its name is how an app comes back to its data.
+func cleanOrphanVolumes(ctx context.Context, p cleanupParams, idx *containerIndex) *pb.CleanupScopeResult {
+	return cleanDanglingVolumes(ctx, p, idx, pb.CleanupScope_CLEANUP_SCOPE_ORPHAN_VOLUMES,
+		func(name, _ string) bool { return anonymousVolume.MatchString(name) })
+}
+
+// cleanDanglingVolumes is the loop both volume scopes share: every dangling volume
+// no container references, older than the cutoff, that `proof` vouches for.
+func cleanDanglingVolumes(ctx context.Context, p cleanupParams, idx *containerIndex, scope pb.CleanupScope, proof func(name, mountpoint string) bool) *pb.CleanupScopeResult {
+	r := &pb.CleanupScopeResult{Scope: scope}
 
 	res, err := dockerQuery(ctx, cleanupQueryTimeout, "volume", "ls", "--filter", "dangling=true", "--quiet")
 	if err != nil {
@@ -602,8 +688,8 @@ func cleanOrphanBuildkitCache(ctx context.Context, p cleanupParams, idx *contain
 		if mountpoint == "" {
 			continue
 		}
-		if _, err := os.Stat(filepath.Join(mountpoint, buildkitSentinel)); err != nil {
-			continue // THE proof. No sentinel, no removal - whatever else it looks like.
+		if !proof(name, mountpoint) {
+			continue
 		}
 		if !olderThan(created, p.cutoff) {
 			continue
@@ -691,8 +777,12 @@ func cleanUnusedAppImages(ctx context.Context, p cleanupParams, idx *containerIn
 		})
 
 		// How deep this app keeps its history. A compose stack's services each keep the APP's
-		// number, which is what the scalar did before there was a per-app one.
+		// number, which is what the scalar did before there was a per-app one. An app the
+		// control plane no longer knows keeps nothing: its newest image was pinned forever.
 		keep := p.keepImagesFor(group[0].slug)
+		if p.liveSlugs != nil && !p.liveSlugs[group[0].slug] {
+			keep = 0
+		}
 
 		for rank, im := range group {
 			if rank < keep {
@@ -732,17 +822,111 @@ func cleanUnusedAppImages(ctx context.Context, p cleanupParams, idx *containerIn
 }
 
 // ---------------------------------------------------------------------------
+// Scope: unused pulled images - an explicit `docker rmi <tag>` per tag, never a prune
+// ---------------------------------------------------------------------------
+
+// buildToolingImages are the repositories the build path itself runs or builds FROM.
+// Reclaiming one only costs the next build a pull, but that is one pull per app per
+// night against a registry rate limit, so they stay.
+var buildToolingImages = []string{
+	"buildpacksio/pack", "heroku/builder", "paketobuildpacks/", "moby/buildkit",
+	"ghcr.io/railwayapp/nixpacks", "ghcr.io/railwayapp/railpack", "docker/dockerfile",
+}
+
+func isBuildTooling(repo string) bool {
+	for _, prefix := range buildToolingImages {
+		if strings.HasPrefix(repo, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// cleanUnusedPulledImages removes tagged images Deplo did not build and no container
+// references: what a deleted compose stack pulled, the tag a redeploy moved past.
+// Aged on when the image was last pulled or tagged HERE - its Created is the
+// publisher's build date and says nothing about this host.
+func cleanUnusedPulledImages(ctx context.Context, p cleanupParams, idx *containerIndex) *pb.CleanupScopeResult {
+	r := &pb.CleanupScopeResult{Scope: pb.CleanupScope_CLEANUP_SCOPE_UNUSED_PULLED_IMAGES}
+
+	res, err := dockerQuery(ctx, cleanupQueryTimeout,
+		"image", "ls", "--filter", "dangling=false", "--quiet")
+	if err != nil {
+		r.Error = err.Error()
+		return r
+	}
+	if res.Code != 0 {
+		r.Error = dockerErr("image ls", res)
+		return r
+	}
+	images, err := inspectImages(ctx, uniqueLines(res.Stdout))
+	if err != nil {
+		r.Error = err.Error()
+		return r
+	}
+	sort.Slice(images, func(i, j int) bool { return images[i].id < images[j].id })
+
+	var failures scopeFailures
+	for _, im := range images {
+		if im.managed || idx.images[im.id] || isBuildTooling(im.repo) || len(im.tags) == 0 {
+			continue
+		}
+		// A zero LastTagTime is "docker does not know", and unknown age fails closed.
+		// Then both gates: the policy's age AND the deploy grace, so an image pulled
+		// for a stack that is starting right now is never a candidate.
+		if t, ok := parseDockerTime(im.lastTag); !ok || t.IsZero() {
+			continue
+		}
+		if !olderThan(im.lastTag, p.cutoff) || !olderThan(im.lastTag, p.appImageCutoff) {
+			continue
+		}
+		if !p.dryRun {
+			failed := false
+			// Untag one tag at a time: `rmi <id>` refuses an image with two tags, and
+			// `--force` would take an image a container was created on since the index.
+			for _, tag := range im.tags {
+				cctx, cancel := context.WithTimeout(ctx, cleanupRemoveTimeout)
+				rres, rerr := removeObject(cctx, "rmi", tag)
+				cancel()
+				if rerr != nil {
+					failures.add(tag, rerr.Error())
+					failed = true
+					break
+				}
+				if rres.Code != 0 {
+					failures.add(tag, dockerErr("rmi", rres))
+					failed = true
+					break
+				}
+			}
+			if failed {
+				continue
+			}
+		}
+		r.ReclaimedBytes += im.size
+		addItem(r, im.id)
+		r.ItemsRemoved++
+	}
+
+	r.Error = failures.summary()
+	return r
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-// imageInfo is the five things the allow-list needs about an image.
+// imageInfo is what the allow-lists need about an image.
 type imageInfo struct {
 	id      string // FULL sha256 - the form the container index is keyed by
 	slug    string // deplo.slug label, "" when absent
 	service string // deplo.service label (compose-built images), "" when absent
 	repo    string // repository of its first tag/digest, "" when it has neither
 	created string
-	size    int64 // bytes
+	size    int64    // bytes
+	managed bool     // deplo.managed=true: Deplo built it
+	lastTag string   // Metadata.LastTagTime, RFC3339 - when it was pulled or tagged HERE
+	tags    []string // every RepoTag; a pulled image is untagged one by one
 }
 
 // inspectImages reads those five fields for a batch of ids in ONE docker call. `image
@@ -752,9 +936,15 @@ func inspectImages(ctx context.Context, ids []string) ([]imageInfo, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
+	// Labels and Metadata are reached with `index`, never dotted: an image whose
+	// Config carries no Labels key at all (a dangling layer on the containerd store)
+	// makes `.Config.Labels` a template error that fails the inspect for the whole
+	// batch, while `index` on a missing key is just empty.
 	args := append([]string{"image", "inspect", "--format",
-		`{{.Id}}|{{index .Config.Labels "deplo.slug"}}|{{index .Config.Labels "deplo.service"}}|{{.Created}}|{{.Size}}|` +
-			`{{if .RepoTags}}{{index .RepoTags 0}}{{else if .RepoDigests}}{{index .RepoDigests 0}}{{end}}`}, ids...)
+		`{{.Id}}|{{with (index .Config "Labels")}}{{index . "deplo.slug"}}|{{index . "deplo.service"}}{{else}}|{{end}}|{{.Created}}|{{.Size}}|` +
+			`{{if .RepoTags}}{{index .RepoTags 0}}{{else if .RepoDigests}}{{index .RepoDigests 0}}{{end}}|` +
+			`{{with (index .Config "Labels")}}{{index . "deplo.managed"}}{{end}}|` +
+			`{{with (index . "Metadata")}}{{with (index . "LastTagTime")}}{{json .}}{{end}}{{end}}|{{join .RepoTags ","}}`}, ids...)
 	res, err := dockerQuery(ctx, cleanupQueryTimeout, args...)
 	if err != nil {
 		return nil, err
@@ -782,14 +972,28 @@ func inspectImages(ctx context.Context, ids []string) ([]imageInfo, error) {
 		if len(parts) > 5 {
 			repo = repoOf(strings.TrimSpace(parts[5]))
 		}
-		out = append(out, imageInfo{
+		im := imageInfo{
 			id:      strings.TrimSpace(parts[0]),
 			slug:    label(parts[1]),
 			service: label(parts[2]),
 			repo:    repo,
 			created: strings.TrimSpace(parts[3]),
 			size:    size,
-		})
+		}
+		if len(parts) > 6 {
+			im.managed = label(parts[6]) == "true"
+		}
+		if len(parts) > 7 {
+			im.lastTag = strings.Trim(strings.TrimSpace(parts[7]), `"`)
+		}
+		if len(parts) > 8 {
+			for _, t := range strings.Split(parts[8], ",") {
+				if t = strings.TrimSpace(t); t != "" {
+					im.tags = append(im.tags, t)
+				}
+			}
+		}
+		out = append(out, im)
 	}
 	if res.Code != 0 && len(out) == 0 {
 		return nil, errors.New(dockerErr("image inspect", res))
@@ -1107,15 +1311,16 @@ func cleanLeftoverAppFiles(p cleanupParams) *pb.CleanupScopeResult {
 }
 
 // cleanLeftoverNetworks removes the tenant networks of Environments and previews that
-// are gone. It reclaims no bytes - it reclaims ADDRESS SPACE, which is the scarce
-// thing: Docker's default pool tops out at ~31 networks per host.
+// are gone, and the `deplo-<slug>_*` project networks of stacks that are gone. It
+// reclaims no bytes - it reclaims ADDRESS SPACE, which is the scarce thing: Docker's
+// default pool tops out at ~31 networks per host.
 func cleanLeftoverNetworks(ctx context.Context, p cleanupParams) *pb.CleanupScopeResult {
 	r := &pb.CleanupScopeResult{Scope: pb.CleanupScope_CLEANUP_SCOPE_LEFTOVER_NETWORKS}
-	if len(p.liveNetworks) == 0 {
+	if len(p.liveNetworks) == 0 && len(p.liveSlugs) == 0 {
 		return skippedScope(r.Scope, errors.New(
 			"the control plane sent no list of live networks, and an empty list is not a reason to remove every app's network"))
 	}
-	res, err := dockercli.Run(ctx, 20*time.Second, "network", "ls", "--format", "{{.Name}}")
+	res, err := dockerQuery(ctx, cleanupQueryTimeout, "network", "ls", "--format", "{{.Name}}")
 	if err != nil {
 		r.Error = err.Error()
 		return r
@@ -1124,13 +1329,10 @@ func cleanLeftoverNetworks(ctx context.Context, p cleanupParams) *pb.CleanupScop
 		r.Error = dockerErr("network ls", res)
 		return r
 	}
-	names := strings.Split(res.Stdout, "\n")
+	names := splitLines(res.Stdout)
 	sort.Strings(names)
-	for _, raw := range names {
-		name := strings.TrimSpace(raw)
-		// Only ever ours, and only ever a TENANT one: the platform's own networks are
-		// not in this namespace and could never be candidates.
-		if !dockercli.IsTenantNetwork(name) || p.liveNetworks[name] {
+	for _, name := range names {
+		if !leftoverNetworkCandidate(name, p) {
 			continue
 		}
 		attached, created, ok := networkState(ctx, name)
@@ -1146,18 +1348,17 @@ func cleanLeftoverNetworks(ctx context.Context, p cleanupParams) *pb.CleanupScop
 		}
 		if p.dryRun {
 			r.ItemsRemoved++
-			if len(r.Items) < cleanupMaxItems {
-				r.Items = append(r.Items, name)
-			}
+			addItem(r, name)
 			continue
 		}
 		// Traefik is on every tenant network because a deploy put it there, and it
 		// never leaves. Left counted, no tenant network is EVER a candidate and this
 		// scope reclaims nothing; left attached, `docker network rm` refuses outright.
 		// So it is taken off first, and only once nothing else is on the network.
-		_, _ = dockercli.Run(ctx, 20*time.Second,
-			"network", "disconnect", "-f", name, traefikContainer)
-		rm, err := dockercli.Run(ctx, 20*time.Second, "network", "rm", name)
+		cctx, cancel := context.WithTimeout(ctx, cleanupRemoveTimeout)
+		_, _ = removeObject(cctx, "network", "disconnect", "-f", name, traefikContainer)
+		rm, err := removeObject(cctx, "network", "rm", name)
+		cancel()
 		if err != nil || rm.Code != 0 {
 			if r.Error == "" {
 				r.Error = fmt.Sprintf("remove %s: %s", name, dockerErr("network rm", rm))
@@ -1165,15 +1366,34 @@ func cleanLeftoverNetworks(ctx context.Context, p cleanupParams) *pb.CleanupScop
 			continue
 		}
 		r.ItemsRemoved++
-		if len(r.Items) < cleanupMaxItems {
-			r.Items = append(r.Items, name)
-		}
+		addItem(r, name)
 	}
 	return r
 }
 
-// networkState reports how many containers are attached to a network and when it was
-// created. ok=false when docker could not answer - which makes the caller skip it.
+// leftoverNetworkCandidate says whether a network name is one this scope may judge,
+// and whether the list that judges it says it is gone. Only ever ours: a tenant
+// network (judged against live_networks) or a stack's own `deplo-<slug>_<key>`
+// project network (judged against live_slugs). The platform's own networks are in
+// neither namespace and can never be candidates.
+func leftoverNetworkCandidate(name string, p cleanupParams) bool {
+	if dockercli.IsTenantNetwork(name) {
+		return len(p.liveNetworks) > 0 && !p.liveNetworks[name]
+	}
+	if len(p.liveSlugs) == 0 {
+		return false
+	}
+	project, _, ok := strings.Cut(name, "_")
+	if !ok {
+		return false
+	}
+	slug, ok := strings.CutPrefix(project, "deplo-")
+	if !ok || validateSlug(slug) != nil {
+		return false
+	}
+	return !p.liveSlugs[slug]
+}
+
 // attachedExcludingProxy counts the containers on a network that are not Traefik.
 // Counting Traefik is what made every tenant network look permanently in use.
 func attachedExcludingProxy(names string) int {
@@ -1187,15 +1407,16 @@ func attachedExcludingProxy(names string) int {
 }
 
 // networkState reports how many containers OTHER THAN THE PROXY are attached, and
-// when the network was created. Traefik is excluded on purpose: a deploy attaches it
-// to every tenant network and nothing detaches it, so counting it would make an
-// emptied network look busy forever.
+// when the network was created. ok=false when docker could not answer - which makes
+// the caller skip it. Traefik is excluded on purpose: a deploy attaches it to every
+// tenant network and nothing detaches it, so counting it would make an emptied
+// network look busy forever.
 func networkState(ctx context.Context, name string) (attached int, created time.Time, ok bool) {
 	// `{{.Created}}` renders Go's DEFAULT time layout ("2026-08-30 18:50:12 +0200
 	// CEST"), which is not RFC3339 - parsing it as RFC3339 failed for every network,
 	// so every one of them fell to the fail-closed branch and this scope reclaimed
 	// nothing at all. `json` marshals the same value as RFC3339Nano.
-	res, err := dockercli.Run(ctx, 10*time.Second,
+	res, err := dockerQuery(ctx, cleanupQueryTimeout,
 		"network", "inspect", "-f",
 		"{{range .Containers}}{{.Name}} {{end}}|{{json .Created}}", name)
 	if err != nil || res.Code != 0 {

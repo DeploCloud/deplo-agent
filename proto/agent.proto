@@ -1678,6 +1678,15 @@ enum CleanupScope {
   // attached and absent from live_networks: the networks of Environments and previews
   // that are gone. Never the platform's own (`deplo`, `deplo-internal`, `deplo-socket`).
   CLEANUP_SCOPE_LEFTOVER_NETWORKS = 6;
+  // ANONYMOUS volumes (a 64-hex name nothing can ever mount again by name) that NO
+  // container references, older than min_age_hours: the data dirs of removed
+  // containers. A NAMED volume is never a candidate, however dangling.
+  CLEANUP_SCOPE_ORPHAN_VOLUMES = 7;
+  // Tagged images Deplo did NOT build (no deplo.managed label) that NO container
+  // references, last pulled/tagged more than min_age_hours ago: the images of stacks
+  // that are gone and the tags a redeploy moved past. Build tooling is spared. A
+  // deploy that needs one again pulls it.
+  CLEANUP_SCOPE_UNUSED_PULLED_IMAGES = 8;
 }
 
 message DockerCleanupRequest {
@@ -1700,9 +1709,11 @@ message DockerCleanupRequest {
   // deplo.slug label. That over-keeps on an old host rather than under-keeping - a
   // rollback still works, it just costs more disk until the agent is updated.
   map<string, int32> keep_per_slug = 5;
-  // LEFTOVER_APP_FILES only: every stack slug the control plane still knows - Apps,
-  // their preview stacks (`<slug>__pr-<n>`) and databases - INSTANCE-WIDE, not just the
-  // ones placed on this host.
+  // Every stack slug the control plane still knows - Apps, their preview stacks
+  // (`<slug>__pr-<n>`) and databases - INSTANCE-WIDE, not just the ones placed on this
+  // host. Read by LEFTOVER_APP_FILES, by UNUSED_APP_IMAGES (an image of a slug absent
+  // from it keeps nothing) and by LEFTOVER_NETWORKS (a `deplo-<slug>_*` project
+  // network of one). Empty => none of those judgements is made.
   repeated string live_slugs = 6;
   // LEFTOVER_NETWORKS only: every tenant network the control plane still knows,
   // INSTANCE-WIDE. Empty list => the scope is skipped, never "remove everything".

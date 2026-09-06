@@ -174,6 +174,10 @@ var Capabilities = []string{
 	// a proxy recreated outside the config-apply path.
 	"deploy.network.headroom",
 	"cleanup.leftover-networks",
+	// CLEANUP_SCOPE_ORPHAN_VOLUMES and CLEANUP_SCOPE_UNUSED_PULLED_IMAGES are
+	// implemented; live_slugs also drives UNUSED_APP_IMAGES and LEFTOVER_NETWORKS.
+	"cleanup.orphan-volumes",
+	"cleanup.pulled-images",
 	// DeployRequest.network / RerouteRequest.network are honoured: a stack joins the
 	// network its Environment owns instead of one shared network, and the agent puts
 	// Traefik on it. There is no shared-network fallback - this agent cannot serve a
@@ -482,7 +486,7 @@ func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.Stack
 	// successful `down`, so what that run removed is gone; left to the fallback, a
 	// `down -v` here reported failure forever for a stack that no longer existed.
 	if !isFile(s.stackPath(slug)) {
-		r2, err := dockercli.Run(ctx, 30*time.Second, "rm", "-f", "deplo-"+slug)
+		r2, err := removeStackContainers(ctx, slug)
 		if err != nil {
 			return &pb.StackResult{Ok: false, Error: err.Error()}, nil
 		}
@@ -512,7 +516,7 @@ func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.Stack
 	}
 	// `rm -f` is idempotent for a missing container (exit 0), so the common already-gone
 	// case still reports Ok.
-	r2, err := dockercli.Run(ctx, 30*time.Second, "rm", "-f", "deplo-"+slug)
+	r2, err := removeStackContainers(ctx, slug)
 	if err != nil {
 		return &pb.StackResult{Ok: false, Error: err.Error()}, nil
 	}
@@ -532,6 +536,23 @@ func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.Stack
 		return &pb.StackResult{Ok: false, Error: msg}, nil
 	}
 	return &pb.StackResult{Ok: r2.Code == 0, Error: r2.Stderr}, nil
+}
+
+// removeStackContainers force-removes every container of the stack's compose project
+// plus the legacy single-container name. A compose stack's containers are
+// `deplo-<slug>-<service>-1`, and a DB stack's carry their own name, so the fixed
+// name alone left a failed `down` with its containers, pinning images and volumes.
+func removeStackContainers(ctx context.Context, slug string) (dockercli.Result, error) {
+	args := []string{"rm", "-f", "deplo-" + slug}
+	ls, err := dockercli.Run(ctx, 30*time.Second, "ps", "-aq",
+		"--filter", "label=com.docker.compose.project=deplo-"+slug)
+	if err != nil {
+		return ls, err
+	}
+	if ls.Code == 0 {
+		args = append(args, splitLines(ls.Stdout)...)
+	}
+	return dockercli.Run(ctx, 60*time.Second, args...)
 }
 
 // removeStackFiles deletes everything a destroyed stack leaves on disk: the compose

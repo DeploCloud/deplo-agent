@@ -35,6 +35,9 @@ type hostFixture struct {
 	danglingVolumes []string          // `docker volume ls --filter dangling=true -q`
 	volumeMounts    map[string]string // volume name -> mountpoint on disk
 	volumeCreated   string            // every volume's CreatedAt (RFC3339)
+	taggedImages    []string          // `docker image ls --filter dangling=false -q`
+	networks        []string          // `docker network ls --format {{.Name}}`
+	networkStates   map[string]string // network -> "<container> <container> |<created json>"
 
 	// psFails forces `docker ps -aq` to fail, so the container-reference index
 	// cannot be built.
@@ -71,6 +74,16 @@ func (h *hostFixture) query(args []string) (dockercli.Result, error) {
 		return okResult(strings.Join(h.danglingImages, "\n")), nil
 	case strings.HasPrefix(key, "image ls --filter label=deplo.managed=true"):
 		return okResult(strings.Join(h.managedImages, "\n")), nil
+	case strings.HasPrefix(key, "image ls --filter dangling=false"):
+		return okResult(strings.Join(h.taggedImages, "\n")), nil
+	case strings.HasPrefix(key, "network ls"):
+		return okResult(strings.Join(h.networks, "\n")), nil
+	case args[0] == "network" && args[1] == "inspect":
+		state, ok := h.networkStates[args[len(args)-1]]
+		if !ok {
+			return dockercli.Result{Code: 1, Stderr: "no such network"}, nil
+		}
+		return okResult(state), nil
 	case args[0] == "image" && args[1] == "inspect":
 		var rows []string
 		for _, id := range args[4:] { // image inspect --format <fmt> <ids...>
@@ -218,6 +231,16 @@ func allScopes() []pb.CleanupScope {
 		pb.CleanupScope_CLEANUP_SCOPE_ORPHAN_BUILDKIT_CACHE,
 		pb.CleanupScope_CLEANUP_SCOPE_UNUSED_APP_IMAGES,
 	}
+}
+
+// everyScope is the whole enum - what the allow-list proof has to cover.
+func everyScope() []pb.CleanupScope {
+	return append(allScopes(),
+		pb.CleanupScope_CLEANUP_SCOPE_LEFTOVER_APP_FILES,
+		pb.CleanupScope_CLEANUP_SCOPE_LEFTOVER_NETWORKS,
+		pb.CleanupScope_CLEANUP_SCOPE_ORPHAN_VOLUMES,
+		pb.CleanupScope_CLEANUP_SCOPE_UNUSED_PULLED_IMAGES,
+	)
 }
 
 func newService(t *testing.T) *Service {
@@ -846,7 +869,7 @@ func TestDockerCleanup_dryRun_removesNothing(t *testing.T) {
 	if got := h.argv(); len(got) != 0 {
 		t.Fatalf("dry run must not touch the host, but ran: %q", got)
 	}
-	if len(resp.GetResults()) != 4 {
+	if len(resp.GetResults()) != len(allScopes()) {
 		t.Fatalf("results = %d, want one per scope", len(resp.GetResults()))
 	}
 	var total int64
@@ -883,10 +906,12 @@ func TestDockerCleanup_neverEmitsAForbiddenPrune(t *testing.T) {
 				h := newFixture(t)
 				h.install(t)
 				if _, err := newService(t).DockerCleanup(context.Background(), &pb.DockerCleanupRequest{
-					Scopes:           allScopes(),
+					Scopes:           everyScope(),
 					DryRun:           dryRun,
 					MinAgeHours:      minAge,
 					KeepImagesPerApp: keep,
+					LiveSlugs:        []string{"web"},
+					LiveNetworks:     []string{"deplo-env-environ_x"},
 				}); err != nil {
 					t.Fatalf("DockerCleanup(dry=%v age=%d keep=%d): %v", dryRun, minAge, keep, err)
 				}
@@ -1353,5 +1378,281 @@ func TestDockerCleanup_leftoverAppFiles_dryRunRemovesNothing(t *testing.T) {
 	r := resultFor(t, resp, pb.CleanupScope_CLEANUP_SCOPE_LEFTOVER_APP_FILES)
 	if r.GetItemsRemoved() != 1 {
 		t.Errorf("dry_run must still report the candidate, got %d", r.GetItemsRemoved())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Dead slugs, orphan volumes, pulled images, project networks, stale build dirs
+// ---------------------------------------------------------------------------
+
+// An app the control plane no longer knows keeps NOTHING: before, its newest image
+// was pinned forever by keep-N. Without a live list the old behaviour stands.
+func TestDockerCleanup_unusedAppImages_deadSlugKeepsNothing(t *testing.T) {
+	for _, live := range [][]string{nil, {"other"}, {"web"}} {
+		h := newFixture(t)
+		h.install(t)
+		resp, err := newService(t).DockerCleanup(context.Background(), &pb.DockerCleanupRequest{
+			Scopes:           []pb.CleanupScope{pb.CleanupScope_CLEANUP_SCOPE_UNUSED_APP_IMAGES},
+			KeepImagesPerApp: 2,
+			LiveSlugs:        live,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := resultFor(t, resp, pb.CleanupScope_CLEANUP_SCOPE_UNUSED_APP_IMAGES)
+		removed := h.argv()
+		dead := len(live) > 0 && live[0] != "web"
+		// sha256:aaa is in use (kept regardless), ccc + eee are idle: keep-2 spares ccc.
+		wantRemoved := 1
+		if dead {
+			wantRemoved = 2
+		}
+		if int(r.GetItemsRemoved()) != wantRemoved || len(removed) != wantRemoved {
+			t.Fatalf("live=%v: removed %d (%v), want %d", live, r.GetItemsRemoved(), removed, wantRemoved)
+		}
+		for _, a := range removed {
+			if strings.Contains(a, "sha256:aaa") {
+				t.Fatalf("live=%v: the image a container runs was removed: %v", live, removed)
+			}
+		}
+	}
+}
+
+// Only a dangling ANONYMOUS volume is a candidate: a named one, however dangling,
+// is somebody's data and stays. The container index still wins over the filter.
+func TestDockerCleanup_orphanVolumes_anonymousOnly(t *testing.T) {
+	h := newFixture(t)
+	anon := strings.Repeat("ab", 32)
+	anonMount := filepath.Join(t.TempDir(), "_data")
+	if err := os.MkdirAll(anonMount, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(anonMount, "PG_VERSION"), []byte("18"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	held := strings.Repeat("cd", 32)
+	h.danglingVolumes = append(h.danglingVolumes, anon, held)
+	h.volumeMounts[anon] = anonMount
+	h.volumeMounts[held] = anonMount
+	h.inspectRows = append(h.inspectRows, "sha256:fff|"+held+",") // a container still lists it
+	h.install(t)
+
+	resp, err := newService(t).DockerCleanup(context.Background(), &pb.DockerCleanupRequest{
+		Scopes:      []pb.CleanupScope{pb.CleanupScope_CLEANUP_SCOPE_ORPHAN_VOLUMES},
+		MinAgeHours: 24,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := resultFor(t, resp, pb.CleanupScope_CLEANUP_SCOPE_ORPHAN_VOLUMES)
+	if got := h.argv(); len(got) != 1 || got[0] != "volume rm "+anon {
+		t.Fatalf("want exactly the anonymous dangling volume removed, got %v", got)
+	}
+	if r.GetItemsRemoved() != 1 || r.GetReclaimedBytes() == 0 {
+		t.Fatalf("result: %+v", r)
+	}
+}
+
+// Pulled images: unmanaged, unreferenced, old on THIS host, not build tooling - and
+// removed tag by tag. Everything else on the host is left alone.
+func TestDockerCleanup_unusedPulledImages_allowList(t *testing.T) {
+	h := newFixture(t)
+	old := time.Now().Add(-72 * time.Hour).Format(time.RFC3339Nano)
+	fresh := time.Now().Format(time.RFC3339Nano)
+	row := func(id, managed, lastTag, tags string) string {
+		return "sha256:" + id + "|<no value>|<no value>|" + old + "|300000000|" +
+			strings.Split(tags, ",")[0] + "|" + managed + "|\"" + lastTag + "\"|" + tags
+	}
+	h.taggedImages = []string{"p1", "p2", "p3", "p4", "p5", "p6"}
+	h.imageRows["p1"] = row("p1", "", old, "kanboard/kanboard:latest")                          // gone stack: candidate
+	h.imageRows["p2"] = row("p2", "", old, "louislam/uptime-kuma:2,louislam/uptime-kuma:2.1.0") // two tags: both untagged
+	h.imageRows["p3"] = row("p3", "true", old, "deplo/web:dpl_1")                               // Deplo built it: app scope's business
+	h.imageRows["p4"] = row("p4", "", fresh, "nginx:alpine")                                    // pulled just now: a deploy in flight
+	h.imageRows["p5"] = row("p5", "", old, "heroku/builder:24")                                 // build tooling
+	h.imageRows["p6"] = row("aaa", "", old, "postgres:16-alpine")                               // sha256:aaa runs a container
+	h.install(t)
+
+	resp, err := newService(t).DockerCleanup(context.Background(), &pb.DockerCleanupRequest{
+		Scopes:      []pb.CleanupScope{pb.CleanupScope_CLEANUP_SCOPE_UNUSED_PULLED_IMAGES},
+		MinAgeHours: 24,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := resultFor(t, resp, pb.CleanupScope_CLEANUP_SCOPE_UNUSED_PULLED_IMAGES)
+	want := []string{
+		"rmi kanboard/kanboard:latest",
+		"rmi louislam/uptime-kuma:2",
+		"rmi louislam/uptime-kuma:2.1.0",
+	}
+	if got := h.argv(); strings.Join(got, ";") != strings.Join(want, ";") {
+		t.Fatalf("removals:\n got %v\nwant %v", got, want)
+	}
+	if r.GetItemsRemoved() != 2 || r.GetReclaimedBytes() != 600000000 {
+		t.Fatalf("result: %+v", r)
+	}
+}
+
+// An unparseable LastTagTime fails closed, and a policy with no age filter still
+// keeps the deploy grace.
+func TestDockerCleanup_unusedPulledImages_unknownAgeNeverQualifies(t *testing.T) {
+	h := newFixture(t)
+	old := time.Now().Add(-72 * time.Hour).Format(time.RFC3339Nano)
+	h.taggedImages = []string{"p1", "p2"}
+	h.imageRows["p1"] = "sha256:p1|<no value>|<no value>|" + old + "|1|x:1||\"0001-01-01T00:00:00Z\"|x:1"
+	h.imageRows["p2"] = "sha256:p2|<no value>|<no value>|" + old + "|1|y:1||\"" +
+		time.Now().Add(-30*time.Minute).Format(time.RFC3339Nano) + "\"|y:1"
+	h.install(t)
+	resp, err := newService(t).DockerCleanup(context.Background(), &pb.DockerCleanupRequest{
+		Scopes: []pb.CleanupScope{pb.CleanupScope_CLEANUP_SCOPE_UNUSED_PULLED_IMAGES},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := resultFor(t, resp, pb.CleanupScope_CLEANUP_SCOPE_UNUSED_PULLED_IMAGES)
+	// p1's age is unknown (a zero time), p2 is inside the grace: neither goes.
+	if got := h.argv(); len(got) != 0 {
+		t.Fatalf("removals: %v", got)
+	}
+	if r.GetItemsRemoved() != 0 {
+		t.Fatalf("result: %+v", r)
+	}
+}
+
+// A stack's own `deplo-<slug>_<key>` network is litter once the slug is gone, judged
+// against live_slugs; a tenant network still needs live_networks; anything attached,
+// fresh, live or not ours stays.
+func TestDockerCleanup_leftoverNetworks_projectNetworksOfDeadSlugs(t *testing.T) {
+	h := newFixture(t)
+	old := `"` + time.Now().Add(-48*time.Hour).Format(time.RFC3339Nano) + `"`
+	fresh := `"` + time.Now().Format(time.RFC3339Nano) + `"`
+	h.networks = []string{
+		"deplo-minecraft_default", // dead slug, empty: candidate
+		"deplo-garage_default",    // live slug
+		"deplo-b4_backend",        // dead slug but a container is on it
+		"deplo-new_default",       // dead slug, created moments ago
+		"deplo-env-environ_1",     // tenant network, gone from the live list
+		"deplo-env-environ_2",     // tenant network, live
+		"deplo",                   // the platform's own
+		"traefik_deplo-socket",    // the platform's own
+		"bridge",
+	}
+	h.networkStates = map[string]string{
+		"deplo-minecraft_default": "deplo-traefik |" + old,
+		"deplo-garage_default":    "|" + old,
+		"deplo-b4_backend":        "deplo-b4-web-1 |" + old,
+		"deplo-new_default":       "|" + fresh,
+		"deplo-env-environ_1":     "deplo-traefik |" + old,
+		"deplo-env-environ_2":     "|" + old,
+		"deplo":                   "|" + old,
+		"traefik_deplo-socket":    "|" + old,
+		"bridge":                  "|" + old,
+	}
+	h.install(t)
+	resp, err := newService(t).DockerCleanup(context.Background(), &pb.DockerCleanupRequest{
+		Scopes:       []pb.CleanupScope{pb.CleanupScope_CLEANUP_SCOPE_LEFTOVER_NETWORKS},
+		LiveSlugs:    []string{"garage"},
+		LiveNetworks: []string{"deplo-env-environ_2"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := resultFor(t, resp, pb.CleanupScope_CLEANUP_SCOPE_LEFTOVER_NETWORKS)
+	want := []string{
+		"network disconnect -f deplo-env-environ_1 deplo-traefik",
+		"network rm deplo-env-environ_1",
+		"network disconnect -f deplo-minecraft_default deplo-traefik",
+		"network rm deplo-minecraft_default",
+	}
+	if got := h.argv(); strings.Join(got, ";") != strings.Join(want, ";") {
+		t.Fatalf("removals:\n got %v\nwant %v", got, want)
+	}
+	if r.GetItemsRemoved() != 2 {
+		t.Fatalf("result: %+v", r)
+	}
+
+	// Slugs only, no network list: the project network still goes, the tenant one is
+	// not judged at all.
+	h2 := newFixture(t)
+	h2.networks, h2.networkStates = h.networks, h.networkStates
+	h2.install(t)
+	if _, err := newService(t).DockerCleanup(context.Background(), &pb.DockerCleanupRequest{
+		Scopes:    []pb.CleanupScope{pb.CleanupScope_CLEANUP_SCOPE_LEFTOVER_NETWORKS},
+		LiveSlugs: []string{"garage"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := h2.argv(); len(got) != 2 || got[1] != "network rm deplo-minecraft_default" {
+		t.Fatalf("slugs only: %v", got)
+	}
+}
+
+// A build directory a dead agent left behind is swept with the build cache once it
+// is old enough to belong to nobody; a fresh one may be a build in flight.
+func TestDockerCleanup_buildCache_sweepsStaleBuildDirs(t *testing.T) {
+	h := newFixture(t)
+	h.install(t)
+	tmp := t.TempDir()
+	stale := filepath.Join(tmp, "deplo-git-web-123")
+	live := filepath.Join(tmp, "deplo-build-web-456")
+	other := filepath.Join(tmp, "somebody-else")
+	for _, d := range []string{stale, live, other} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "f"), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	past := time.Now().Add(-3 * time.Hour)
+	for _, d := range []string{stale, other} {
+		if err := os.Chtimes(d, past, past); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s := New(t.TempDir(), tmp, "/", "")
+	resp, err := s.DockerCleanup(context.Background(), &pb.DockerCleanupRequest{
+		Scopes:      []pb.CleanupScope{pb.CleanupScope_CLEANUP_SCOPE_BUILD_CACHE},
+		MinAgeHours: 24,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := resultFor(t, resp, pb.CleanupScope_CLEANUP_SCOPE_BUILD_CACHE)
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("stale build dir should be gone, stat err=%v", err)
+	}
+	for _, d := range []string{live, other} {
+		if _, err := os.Stat(d); err != nil {
+			t.Fatalf("%s should survive: %v", d, err)
+		}
+	}
+	found := false
+	for _, it := range r.GetItems() {
+		if it == "deplo-git-web-123" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the swept directory is not in the result: %+v", r)
+	}
+}
+
+// The inspect template must reach labels with `index`: an image whose Config has no
+// Labels key made a dotted `.Config.Labels` fail the whole batch on Docker 29.
+func TestInspectImages_labelsThroughWith(t *testing.T) {
+	var got []string
+	orig := dockerQuery
+	dockerQuery = func(_ context.Context, _ time.Duration, args ...string) (dockercli.Result, error) {
+		got = args
+		return okResult(""), nil
+	}
+	t.Cleanup(func() { dockerQuery = orig })
+	if _, err := inspectImages(context.Background(), []string{"x"}); err != nil {
+		t.Fatal(err)
+	}
+	format := got[3]
+	if strings.Contains(format, ".Config.Labels") || !strings.Contains(format, `(index .Config "Labels")`) {
+		t.Fatalf("labels must be reached with index, never dotted, got %q", format)
 	}
 }
