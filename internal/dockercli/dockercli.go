@@ -47,9 +47,7 @@ func capture(ctx context.Context, timeout time.Duration, extraEnv []string, reda
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, "docker", args...)
-	if len(extraEnv) > 0 {
-		cmd.Env = append(os.Environ(), extraEnv...)
-	}
+	cmd.Env = scopedEnv(extraEnv)
 	var out, errb strings.Builder
 	cmd.Stdout = &out
 	cmd.Stderr = &errb
@@ -75,7 +73,9 @@ func capture(ctx context.Context, timeout time.Duration, extraEnv []string, reda
 func Stream(ctx context.Context, timeout time.Duration, onLine LineFn, input string, args ...string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	return streamCmd(cctx, timeout, onLine, input, exec.CommandContext(cctx, "docker", args...))
+	cmd := exec.CommandContext(cctx, "docker", args...)
+	cmd.Env = scopedEnv(nil)
+	return streamCmd(cctx, timeout, onLine, input, cmd)
 }
 
 // StreamEnv is Stream with extra "KEY=VALUE" environment entries layered on top
@@ -85,7 +85,7 @@ func StreamEnv(ctx context.Context, timeout time.Duration, onLine LineFn, extraE
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, "docker", args...)
-	cmd.Env = append(os.Environ(), extraEnv...)
+	cmd.Env = scopedEnv(extraEnv)
 	return streamCmd(cctx, timeout, onLine, "", cmd)
 }
 
@@ -95,7 +95,9 @@ func StreamEnv(ctx context.Context, timeout time.Duration, onLine LineFn, extraE
 func Spawn(ctx context.Context, timeout time.Duration, onLine LineFn, input, name string, args ...string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	return streamCmd(cctx, timeout, onLine, input, exec.CommandContext(cctx, name, args...))
+	cmd := exec.CommandContext(cctx, name, args...)
+	cmd.Env = scopedEnv(nil)
+	return streamCmd(cctx, timeout, onLine, input, cmd)
 }
 
 // SpawnEnv is Spawn with extra "KEY=VALUE" env entries layered on top of the agent's
@@ -105,9 +107,7 @@ func SpawnEnv(ctx context.Context, timeout time.Duration, onLine LineFn, extraEn
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, name, args...)
-	if len(extraEnv) > 0 {
-		cmd.Env = append(os.Environ(), extraEnv...)
-	}
+	cmd.Env = scopedEnv(extraEnv)
 	return streamCmd(cctx, timeout, onLine, "", cmd)
 }
 
@@ -119,9 +119,7 @@ func StreamOut(ctx context.Context, timeout time.Duration, dst io.Writer, onLine
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, "docker", args...)
-	if len(extraEnv) > 0 {
-		cmd.Env = append(os.Environ(), extraEnv...)
-	}
+	cmd.Env = scopedEnv(extraEnv)
 	label := redactArgs(args)
 	cmd.Stdout = dst
 	stderr, err := cmd.StderrPipe()
@@ -161,9 +159,7 @@ func StreamPipes(ctx context.Context, timeout time.Duration, stdout, stderr io.W
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, "docker", args...)
-	if len(extraEnv) > 0 {
-		cmd.Env = append(os.Environ(), extraEnv...)
-	}
+	cmd.Env = scopedEnv(extraEnv)
 	return runPipes(cctx, timeout, cmd, stdout, stderr, redactArgs(args))
 }
 
@@ -262,9 +258,7 @@ func PipeOut(ctx context.Context, timeout time.Duration, dst io.Writer, extraEnv
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, "docker", args...)
-	if len(extraEnv) > 0 {
-		cmd.Env = append(os.Environ(), extraEnv...)
-	}
+	cmd.Env = scopedEnv(extraEnv)
 	var errb strings.Builder
 	cmd.Stdout = dst
 	cmd.Stderr = &errb
@@ -289,9 +283,7 @@ func PipeIn(ctx context.Context, timeout time.Duration, src io.Reader, extraEnv 
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, "docker", args...)
-	if len(extraEnv) > 0 {
-		cmd.Env = append(os.Environ(), extraEnv...)
-	}
+	cmd.Env = scopedEnv(extraEnv)
 	var errb strings.Builder
 	cmd.Stdin = src
 	cmd.Stderr = &errb
@@ -708,4 +700,40 @@ func parseAddressPools(out string) int {
 		total += 1 << bits
 	}
 	return total
+}
+
+// envAllowedPrefixes and envAllowedNames are what a spawned tool inherits from the
+// agent's own environment. Everything else stays out: `docker compose` interpolates
+// `${VAR}` in a tenant's stack from its process env, so a bootstrap token or an
+// operator's proxy credential would be one `environment:` line away.
+var envAllowedPrefixes = []string{"DOCKER_", "BUILDKIT_", "COMPOSE_", "XDG_", "LC_", "SSL_CERT_"}
+
+var envAllowedNames = map[string]bool{
+	"PATH": true, "HOME": true, "USER": true, "LOGNAME": true, "LANG": true,
+	"TMPDIR": true, "TZ": true, "TERM": true,
+}
+
+func envAllowed(key string) bool {
+	if envAllowedNames[key] {
+		return true
+	}
+	for _, p := range envAllowedPrefixes {
+		if strings.HasPrefix(key, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// scopedEnv is the environment a spawned tool gets: the allowed part of the agent's
+// own, plus extra. Never the whole of os.Environ (see envAllowedPrefixes).
+func scopedEnv(extra []string) []string {
+	out := make([]string, 0, len(extra)+16)
+	for _, kv := range os.Environ() {
+		k, _, _ := strings.Cut(kv, "=")
+		if envAllowed(k) {
+			out = append(out, kv)
+		}
+	}
+	return append(out, extra...)
 }

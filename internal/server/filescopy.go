@@ -140,7 +140,8 @@ func (s *Service) ImportFiles(stream pb.Agent_ImportFilesServer) error {
 
 	// Extract each entry into the files dir. extractToDir strips nothing, so pass the
 	// entry name minus the "files/" framing.
-	tr := tar.NewReader(pr)
+	// The same ceiling a project restore has: the files dir is not a place to fill a disk.
+	tr := tar.NewReader(&budgetReader{r: pr, budget: maxProjectRestoreBytes})
 	var extractErr error
 	for {
 		th, terr := tr.Next()

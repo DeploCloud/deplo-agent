@@ -78,10 +78,12 @@ func declaredArgNames(dockerfile string) map[string]struct{} {
 // that becomes bare `--build-arg KEY` flags.
 func dockerfileEnvKeys(dockerfile string, env map[string]string) []string {
 	declared := declaredArgNames(dockerfile)
-	return filterKeys(buildEnvKeys(env), func(k string) bool {
+	// The same blocklist every other build method applies: a repo Dockerfile
+	// declaring `ARG DOCKER_HOST` must not steer the root build elsewhere.
+	return dropReservedBuildEnv(filterKeys(buildEnvKeys(env), func(k string) bool {
 		_, ok := declared[k]
 		return ok
-	})
+	}))
 }
 
 // appendBuildArgKeys appends one bare `--build-arg KEY` per key (docker reads a

@@ -45,6 +45,11 @@ func main() {
 		advertisedHost = flag.String("advertised-host", envOr("DEPLO_AGENT_ADVERTISED_HOST", ""), "address the agent reports it is reachable at (informational)")
 	)
 	flag.Parse()
+	// Read once, above; nothing spawned later may find them (`docker compose`
+	// interpolates a tenant's `${VAR}` from this process's environment).
+	for _, k := range []string{"DEPLO_BOOTSTRAP_URL", "DEPLO_BOOTSTRAP_TOKEN", "DEPLO_BOOTSTRAP_FINGERPRINT"} {
+		_ = os.Unsetenv(k)
+	}
 
 	if err := os.MkdirAll(*buildTmpDir, 0o755); err != nil {
 		log.Fatalf("deplo-agent: build-tmp: %v", err)

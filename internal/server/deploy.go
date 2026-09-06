@@ -7,11 +7,14 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
@@ -300,20 +303,14 @@ func (s *Service) writeMountFiles(slug string, mounts []*pb.MountFile, e *emitte
 	if len(mounts) == 0 {
 		return nil
 	}
-	filesDir := filepath.Join(s.stackDir, "files", slug)
 	for _, m := range mounts {
-		// safepath.Join strips a leading "./"/"/", rejects any ".." segment, and returns the
-		// bare filesDir for an empty/"." path - all three of which are "no file to write
-		// here", so skip them rather than write outside or onto the dir itself.
-		target, ok := safepath.Join(filesDir, m.GetPath())
-		if !ok || target == filesDir {
-			e.log("warn", "Skipping unsafe mount path: "+m.GetPath())
-			continue
-		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(target, []byte(m.GetContent()), 0o644); err != nil {
+		// The same writer the file RPCs use: parent canonicalised inside the files
+		// dir, no writing through a symlink the container may have planted there.
+		if _, err := s.writeBytes(slug, m.GetPath(), []byte(m.GetContent())); err != nil {
+			if status.Code(err) == codes.InvalidArgument {
+				e.log("warn", "Skipping unsafe mount path: "+m.GetPath()+" ("+status.Convert(err).Message()+")")
+				continue
+			}
 			return err
 		}
 	}
@@ -456,7 +453,20 @@ func (s *Service) writeComposeEnv(slug string, env map[string]string) (string, s
 		return "", "", err
 	}
 	envFile := filepath.Join(projectDir, ".env")
-	if err := os.WriteFile(envFile, []byte(renderComposeEnvFile(env)), 0o600); err != nil {
+	// Never through a link: the files dir is bind-mounted into the tenant's own
+	// container, which could point `.env` at any file on the host.
+	if li, err := os.Lstat(envFile); err == nil && li.Mode()&os.ModeSymlink != 0 {
+		return "", "", fmt.Errorf("refusing to write %s through a symlink", envFile)
+	}
+	f, err := os.OpenFile(envFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return "", "", err
+	}
+	if _, err := f.Write([]byte(renderComposeEnvFile(env))); err != nil {
+		f.Close()
+		return "", "", err
+	}
+	if err := f.Close(); err != nil {
 		return "", "", err
 	}
 	// The pre-project-directory location. Left behind it would go on being the

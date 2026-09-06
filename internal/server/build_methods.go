@@ -497,6 +497,9 @@ func (s *Service) buildBuildpacks(ctx context.Context, req *pb.DeployRequest, bu
 // buildRailpack generates a railpack plan with the host railpack binary, then hands the
 // plan to `docker build` as its Dockerfile with the railpack BuildKit frontend selected
 // by BUILDKIT_SYNTAX.
+// toolVersionRe is the only shape a pinned build-tool version may take.
+var toolVersionRe = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
+
 func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buildDir string, e *emitter) bool {
 	spec := req.GetBuildSpec()
 	e.log("info", "Building with Railpack")
@@ -506,7 +509,14 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 	// that executes it.
 	version := railpackVersion
 	if v := strings.ToLower(strings.TrimSpace(spec.GetRailpackVersion())); v != "" && v != "latest" {
-		version = strings.TrimPrefix(v, "v")
+		v = strings.TrimPrefix(v, "v")
+		// It is pasted into a download URL and the download is executed as root: a
+		// `/` or `..` in it would fetch somebody else's release asset.
+		if !toolVersionRe.MatchString(v) {
+			e.result(false, "railpack version must look like 1.2.3", "")
+			return false
+		}
+		version = v
 	}
 	frontend := "ghcr.io/railwayapp/railpack-frontend:v" + version
 
