@@ -31,29 +31,19 @@ type Result struct {
 
 // Run runs `docker <args>` with a timeout, capturing output.
 func Run(ctx context.Context, timeout time.Duration, args ...string) (Result, error) {
-	cctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	cmd := exec.CommandContext(cctx, "docker", args...)
-	var out, errb strings.Builder
-	cmd.Stdout = &out
-	cmd.Stderr = &errb
-	err := cmd.Run()
-	res := Result{Stdout: out.String(), Stderr: errb.String()}
-	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
-			res.Code = ee.ExitCode()
-			return res, nil // ran, exited non-zero
-		}
-		// Spawn failure or timeout: docker never produced an exit status.
-		return res, fmt.Errorf("docker %s failed: %w (%s)", strings.Join(args, " "), err, errb.String())
-	}
-	return res, nil
+	return capture(ctx, timeout, nil, false, args...)
 }
 
 // RunEnv is Run with extra "KEY=VALUE" host-process env layered on (e.g. so a `docker
 // exec -e REDISCLI_AUTH <c> redis-cli …` can forward the password from the docker
 // client's env into the container without the value touching argv).
 func RunEnv(ctx context.Context, timeout time.Duration, extraEnv []string, args ...string) (Result, error) {
+	return capture(ctx, timeout, extraEnv, true, args...)
+}
+
+// capture is the shared body of Run and RunEnv. `redact` masks secret-bearing
+// tokens in the error label, which only RunEnv's callers ever pass.
+func capture(ctx context.Context, timeout time.Duration, extraEnv []string, redact bool, args ...string) (Result, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, "docker", args...)
@@ -65,14 +55,19 @@ func RunEnv(ctx context.Context, timeout time.Duration, extraEnv []string, args 
 	cmd.Stderr = &errb
 	err := cmd.Run()
 	res := Result{Stdout: out.String(), Stderr: errb.String()}
-	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
-			res.Code = ee.ExitCode()
-			return res, nil
-		}
-		return res, fmt.Errorf("docker %s failed: %w (%s)", redactArgs(args), err, errb.String())
+	if err == nil {
+		return res, nil
 	}
-	return res, nil
+	if ee, ok := err.(*exec.ExitError); ok {
+		res.Code = ee.ExitCode()
+		return res, nil // ran, exited non-zero
+	}
+	// Spawn failure: docker never produced an exit status.
+	label := strings.Join(args, " ")
+	if redact {
+		label = redactArgs(args)
+	}
+	return res, fmt.Errorf("docker %s failed: %w (%s)", label, err, errb.String())
 }
 
 // Stream runs `docker <args>` and forwards each line of merged stdout+stderr to onLine
@@ -349,19 +344,26 @@ func looksSecretKey(k string) bool {
 		k == "MONGODB_PASSWORD" || strings.Contains(k, "PASSWORD") || strings.Contains(k, "SECRET")
 }
 
+// Server asks the daemon once for both things Hello reports: its version, and
+// whether it answered at all. Never errors.
+func Server(ctx context.Context) (version string, available bool) {
+	res, err := Run(ctx, 5*time.Second, "version", "--format", "{{.Server.Version}}")
+	if err != nil || res.Code != 0 {
+		return "", false
+	}
+	return strings.TrimSpace(res.Stdout), true
+}
+
 // Available reports whether the Docker daemon is reachable. Never errors.
 func Available(ctx context.Context) bool {
-	res, err := Run(ctx, 5*time.Second, "version", "--format", "{{.Server.Version}}")
-	return err == nil && res.Code == 0
+	_, ok := Server(ctx)
+	return ok
 }
 
 // ServerVersion returns the Docker engine version, or "" if unreachable.
 func ServerVersion(ctx context.Context) string {
-	res, err := Run(ctx, 5*time.Second, "version", "--format", "{{.Server.Version}}")
-	if err != nil || res.Code != 0 {
-		return ""
-	}
-	return strings.TrimSpace(res.Stdout)
+	v, _ := Server(ctx)
+	return v
 }
 
 // --- build-export capability -----------------------------------------------
@@ -490,23 +492,49 @@ func ConnectNetwork(ctx context.Context, network, container string) error {
 	return fmt.Errorf("docker network connect %s %s failed: %s", network, container, res.Stderr)
 }
 
-// DeploNetworks lists the tenant networks Deplo manages on this host - the ones a
+// ListNetworks names every docker network on this host. ok is false when the
+// daemon could not answer, which no caller may read as "no networks".
+func ListNetworks(ctx context.Context) (names []string, ok bool) {
+	res, err := Run(ctx, 10*time.Second, "network", "ls", "--format", "{{.Name}}")
+	if err != nil || res.Code != 0 {
+		return nil, false
+	}
+	return nonEmptyLines(res.Stdout), true
+}
+
+// TenantNetworksOf keeps the tenant networks out of a listing - the ones a
 // recreated Traefik has to be put back on. The platform's own (`deplo`,
 // `deplo-internal`, `deplo-socket`) are declared in Traefik's compose file and are
 // deliberately NOT in this list.
-func DeploNetworks(ctx context.Context) []string {
-	res, err := Run(ctx, 10*time.Second, "network", "ls", "--format", "{{.Name}}")
-	if err != nil || res.Code != 0 {
-		return nil
-	}
+func TenantNetworksOf(names []string) []string {
 	var out []string
-	for _, line := range strings.Split(res.Stdout, "\n") {
-		n := strings.TrimSpace(line)
+	for _, n := range names {
 		if IsTenantNetwork(n) {
 			out = append(out, n)
 		}
 	}
 	return out
+}
+
+// DeploNetworks lists the tenant networks Deplo manages on this host.
+func DeploNetworks(ctx context.Context) []string {
+	names, _ := ListNetworks(ctx)
+	return TenantNetworksOf(names)
+}
+
+// ContainerNetworks is the set of networks a container is attached to. exists is
+// false when docker has no such container.
+func ContainerNetworks(ctx context.Context, name string) (on map[string]bool, exists bool) {
+	res, err := Run(ctx, 10*time.Second, "inspect", "-f",
+		"{{range $k, $_ := .NetworkSettings.Networks}}{{$k}} {{end}}", name)
+	if err != nil || res.Code != 0 {
+		return nil, false
+	}
+	on = map[string]bool{}
+	for _, n := range strings.Fields(res.Stdout) {
+		on[n] = true
+	}
+	return on, true
 }
 
 // IsTenantNetwork reports whether a network name is one Deplo mints for an
@@ -517,20 +545,32 @@ func IsTenantNetwork(name string) bool {
 		strings.HasPrefix(name, "deplo-preview-")
 }
 
-// RunningContainers counts containers in the running state. Best-effort: returns
-// 0 on any failure.
-func RunningContainers(ctx context.Context) int {
+// CountRunning counts EVERY running container on the host, returning ok=false
+// when the read itself failed - a caller keeping a gauge must not publish a 0 it
+// never measured.
+func CountRunning(ctx context.Context) (int, bool) {
 	res, err := Run(ctx, 10*time.Second, "ps", "-q")
 	if err != nil || res.Code != 0 {
-		return 0
+		return 0, false
 	}
-	n := 0
-	for _, l := range strings.Split(strings.TrimSpace(res.Stdout), "\n") {
-		if strings.TrimSpace(l) != "" {
-			n++
+	return len(nonEmptyLines(res.Stdout)), true
+}
+
+// RunningContainers is CountRunning for a one-shot reader: 0 on any failure.
+func RunningContainers(ctx context.Context) int {
+	n, _ := CountRunning(ctx)
+	return n
+}
+
+// nonEmptyLines splits command output into trimmed, non-empty lines.
+func nonEmptyLines(out string) []string {
+	var lines []string
+	for _, l := range strings.Split(out, "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			lines = append(lines, l)
 		}
 	}
-	return n
+	return lines
 }
 
 // TraefikRunning reports whether a Traefik reverse proxy container is running on this
@@ -594,16 +634,16 @@ func StackRunning(ctx context.Context, slug string) bool {
 // ceiling quietly - and the first sign is a deploy failing with an address-pool
 // error nobody can act on after the fact.
 func NetworkHeadroom(ctx context.Context) string {
-	res, err := Run(ctx, 10*time.Second, "network", "ls", "-q")
-	if err != nil || res.Code != 0 {
+	names, ok := ListNetworks(ctx)
+	if !ok {
 		return ""
 	}
-	count := 0
-	for _, l := range strings.Split(strings.TrimSpace(res.Stdout), "\n") {
-		if strings.TrimSpace(l) != "" {
-			count++
-		}
-	}
+	return NetworkHeadroomFor(ctx, len(names))
+}
+
+// NetworkHeadroomFor is NetworkHeadroom for a caller that has already listed the
+// networks, so a deploy pays for that listing once.
+func NetworkHeadroomFor(ctx context.Context, count int) string {
 	// A pool of its own says how many networks fit; without one, docker's built-in
 	// pools give about 31 in practice.
 	ceiling, widened := addressPoolCapacity(ctx), true

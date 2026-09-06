@@ -103,11 +103,11 @@ func (s *Sampler) Sample() Metrics {
 		m.CPU = cpuPercent(s.prevCPU, cpu)
 	}
 	if netOK && s.prevNetOK {
-		// max64 clamps a counter RESET (interface bounced, netns recreated) to 0
+		// max clamps a counter RESET (interface bounced, netns recreated) to 0
 		// instead of emitting a negative rate; the next window measures normally
 		// because the reset value below becomes the new baseline.
-		m.NetRx = perSecond(max64(0, rx-s.prevRx), elapsed)
-		m.NetTx = perSecond(max64(0, tx-s.prevTx), elapsed)
+		m.NetRx = perSecond(max(0, rx-s.prevRx), elapsed)
+		m.NetTx = perSecond(max(0, tx-s.prevTx), elapsed)
 	}
 
 	if cpuOK {

@@ -54,25 +54,43 @@ func ensureTenantNetworkWarned(ctx context.Context, network string) (string, err
 	if err := ensureTenantNetwork(ctx, network); err != nil {
 		return "", err
 	}
+	// One listing feeds both the reconnect and the headroom check.
+	names, ok := dockercli.ListNetworks(ctx)
+	if !ok {
+		return "", nil
+	}
 	// Traefik is put back on EVERY tenant network here, not just this deploy's.
 	// `applyTraefik` reconnects them after its own `--force-recreate`, but a proxy
 	// recreated any other way - the installer, a hand-run `compose up` in the
 	// traefik dir - comes back attached to nothing, and every site on the host 404s
 	// until each app happens to be deployed again. A deploy is the natural moment
-	// to heal that, and reconnecting is a no-op when it is already on.
-	reconnectTraefikToTenantNetworks(ctx)
-	return dockercli.NetworkHeadroom(ctx), nil
+	// to heal that.
+	reconnectTraefikToTenantNetworks(ctx, dockercli.TenantNetworksOf(names))
+	return dockercli.NetworkHeadroomFor(ctx, len(names)), nil
 }
 
 // reconnectTraefikToTenantNetworks puts the proxy back on every tenant network it
-// is missing. Best-effort and quiet: a failure here must never fail a deploy.
-func reconnectTraefikToTenantNetworks(ctx context.Context) {
-	if exists, _ := dockercli.State(ctx, traefikContainer); !exists {
+// is missing. Best-effort and quiet: a failure here must never fail a deploy. One
+// inspect says which it is already on, so the common deploy connects to nothing.
+func reconnectTraefikToTenantNetworks(ctx context.Context, tenant []string) {
+	on, exists := dockercli.ContainerNetworks(ctx, traefikContainer)
+	if !exists {
 		return
 	}
-	for _, n := range dockercli.DeploNetworks(ctx) {
+	for _, n := range missingNetworks(on, tenant) {
 		_ = dockercli.ConnectNetwork(ctx, n, traefikContainer)
 	}
+}
+
+// missingNetworks is the subset of `want` a container is not on yet.
+func missingNetworks(on map[string]bool, want []string) []string {
+	var out []string
+	for _, n := range want {
+		if !on[n] {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // SetAgentDir tells the service where the agent's own data lives (the installer's
@@ -110,8 +128,8 @@ func (s *Service) hostInfo(ctx context.Context, dataDir, cpHint string) *pb.Host
 	info := hostinfo.Collect(dataDir)
 
 	dockerVersion, dockerRoot := "", ""
-	if dockercli.Available(ctx) {
-		dockerVersion = dockercli.ServerVersion(ctx)
+	if v, available := dockercli.Server(ctx); available {
+		dockerVersion = v
 		dockerRoot = dockerRootDir(ctx)
 	}
 
@@ -350,25 +368,26 @@ func firstLine(s string) string {
 // gone the network is litter - and address space, which is the scarce thing. An
 // Environment's network is shared and is never in this list.
 func stackPreviewNetworks(ctx context.Context, slug string) []string {
+	// `docker ps` prints each container's networks itself, comma-joined: one call
+	// for the whole stack instead of an inspect per container.
 	res, err := dockercli.Run(ctx, 15*time.Second, "ps", "-a",
 		"--filter", "label=com.docker.compose.project=deplo-"+slug,
-		"--format", "{{.Names}}")
+		"--format", "{{.Networks}}")
 	if err != nil || res.Code != 0 {
 		return nil
 	}
+	return previewNetworksIn(res.Stdout)
+}
+
+// previewNetworksIn picks the distinct `deplo-preview-*` names out of a `docker ps
+// --format {{.Networks}}` listing (one comma-joined line per container).
+func previewNetworksIn(psOut string) []string {
 	seen := map[string]bool{}
 	var out []string
-	for _, name := range strings.Fields(res.Stdout) {
-		ins, err := dockercli.Run(ctx, 15*time.Second, "inspect", "-f",
-			"{{range $k, $_ := .NetworkSettings.Networks}}{{$k}} {{end}}", name)
-		if err != nil || ins.Code != 0 {
-			continue
-		}
-		for _, n := range strings.Fields(ins.Stdout) {
-			if strings.HasPrefix(n, "deplo-preview-") && !seen[n] {
-				seen[n] = true
-				out = append(out, n)
-			}
+	for _, n := range strings.FieldsFunc(psOut, func(r rune) bool { return r == ',' || r == '\n' || r == ' ' }) {
+		if strings.HasPrefix(n, "deplo-preview-") && !seen[n] {
+			seen[n] = true
+			out = append(out, n)
 		}
 	}
 	return out

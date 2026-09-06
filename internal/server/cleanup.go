@@ -950,15 +950,6 @@ func parsePrunedTotal(out string) (int64, bool) {
 	return 0, false
 }
 
-// pickReclaimed is parsePrunedTotal with the pre-flight estimate as the fallback
-// for output shapes with no recognisable total.
-func pickReclaimed(out string, estimate int64) int64 {
-	if n, ok := parsePrunedTotal(out); ok {
-		return n
-	}
-	return estimate
-}
-
 // cacheRecordID is what a BuildKit cache-record id (25-char base36) or a legacy
 // builder cache id (hex) looks like as the first token of a prune output line.
 // Headers ("ID  RECLAIMABLE …"), totals and warnings never match.

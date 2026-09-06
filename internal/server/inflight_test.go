@@ -216,3 +216,39 @@ func seqs(evs []*pb.DeployEvent) []uint64 {
 	}
 	return out
 }
+
+// subscribe finds the replay point by binary search, which rests on the buffer
+// staying sorted by seq through evictions. For every cursor a reattacher could
+// carry, the batch must equal what a linear scan of the trimmed buffer yields.
+func TestInflight_reattachAfterTrimMatchesLinearScan(t *testing.T) {
+	f := newInflight(func() {})
+	f.append(phaseEvent(pb.DeployPhase_DEPLOY_PHASE_BUILDING))
+	for i := 0; i < maxRetainedLogEvents+300; i++ {
+		f.append(logEvent(fmt.Sprintf("line %d", i)))
+	}
+	f.append(resultEvent(true))
+
+	f.mu.Lock()
+	events := append([]*pb.DeployEvent(nil), f.events...)
+	cursors := []uint64{0, 1, 2, f.noteSeq - 1, f.noteSeq, f.noteSeq + 1, f.lastSeq - 1, f.lastSeq}
+	f.mu.Unlock()
+
+	for _, cursor := range cursors {
+		var want []uint64
+		for _, ev := range events {
+			if ev.GetSeq() > cursor {
+				want = append(want, ev.GetSeq())
+			}
+		}
+		var got []*pb.DeployEvent
+		if err := f.subscribe(context.Background(), cursor, func(ev *pb.DeployEvent) error {
+			got = append(got, ev)
+			return nil
+		}); err != nil {
+			t.Fatalf("cursor %d: subscribe: %v", cursor, err)
+		}
+		if fmt.Sprint(seqs(got)) != fmt.Sprint(want) {
+			t.Fatalf("cursor %d: got seqs %v, want %v", cursor, seqs(got), want)
+		}
+	}
+}

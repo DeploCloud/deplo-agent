@@ -179,3 +179,38 @@ func TestNetworkHeadroom_silentWhenPoolsAreWidened(t *testing.T) {
 		t.Errorf("a widened pool must warn about nothing, got: %q", got)
 	}
 }
+
+// A deploy reconnects Traefik only to the tenant networks it is NOT on: on a host
+// with dozens of Environments the old "connect to all" paid one docker call per
+// network per deploy, every one answered "already exists".
+func TestMissingNetworks_onlyTheAbsentOnes(t *testing.T) {
+	on := map[string]bool{"deplo-env-a": true, "deplo": true}
+	got := missingNetworks(on, []string{"deplo-env-a", "deplo-env-b", "deplo-team-c"})
+	if strings.Join(got, ",") != "deplo-env-b,deplo-team-c" {
+		t.Fatalf("got %v", got)
+	}
+	if got := missingNetworks(nil, []string{"deplo-env-a"}); len(got) != 1 {
+		t.Fatalf("an unknown container is on nothing, got %v", got)
+	}
+	if got := missingNetworks(on, nil); got != nil {
+		t.Fatalf("nothing wanted, nothing missing, got %v", got)
+	}
+}
+
+// The preview networks of a stack are read off ONE `docker ps --format {{.Networks}}`
+// listing: one comma-joined line per container, duplicates collapsed, everything
+// that is not a preview network ignored.
+func TestPreviewNetworksIn_readsDockerPsNetworks(t *testing.T) {
+	out := "deplo-preview-web__pr-3,deplo\n" +
+		"deplo-preview-web__pr-3\n" +
+		"deplo-env-environ_abc\n" +
+		"\n" +
+		"bridge,deplo-preview-web__pr-4\n"
+	got := previewNetworksIn(out)
+	if strings.Join(got, ",") != "deplo-preview-web__pr-3,deplo-preview-web__pr-4" {
+		t.Fatalf("got %v", got)
+	}
+	if got := previewNetworksIn(""); got != nil {
+		t.Fatalf("no containers, no networks, got %v", got)
+	}
+}

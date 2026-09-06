@@ -307,11 +307,7 @@ func New(stackDir, buildTmpDir, dataDir, dataBase string) *Service {
 // Hello is the health + identity handshake and the mandatory deploy pre-flight (PLAN
 // P5).
 func (s *Service) Hello(ctx context.Context, req *pb.HelloRequest) (*pb.HelloResponse, error) {
-	available := dockercli.Available(ctx)
-	version := ""
-	if available {
-		version = dockercli.ServerVersion(ctx)
-	}
+	version, available := dockercli.Server(ctx)
 	return &pb.HelloResponse{
 		ContractVersion: pb.ContractVersion_CONTRACT_VERSION_V1,
 		AgentVersion:    AgentVersion,
@@ -542,7 +538,7 @@ func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.Stack
 // file, its env sidecar, and the app's own files directory.
 func (s *Service) removeStackFiles(slug string) {
 	_ = os.Remove(s.stackPath(slug))
-	_ = os.Remove(fmt.Sprintf("%s/%s.env", s.stackDir, slug))
+	_ = os.Remove(s.legacyEnvPath(slug))
 	// The env-file moved into the stack's own directory (writeComposeEnv); the
 	// whole directory goes with the stack, but remove the file explicitly first
 	// so a failure to remove the tree never leaves decrypted secrets behind.
@@ -702,7 +698,12 @@ func (s *Service) CheckPort(ctx context.Context, req *pb.CheckPortRequest) (*pb.
 }
 
 func (s *Service) stackPath(slug string) string {
-	return fmt.Sprintf("%s/%s.yml", s.stackDir, slug)
+	return filepath.Join(s.stackDir, slug+".yml")
+}
+
+// legacyEnvPath is the pre-project-directory env-file, beside the stack file.
+func (s *Service) legacyEnvPath(slug string) string {
+	return filepath.Join(s.stackDir, slug+".env")
 }
 
 // composeCtl builds the argv for a lifecycle verb (`stop`, `start`, `down`) on a stack
@@ -711,7 +712,7 @@ func (s *Service) composeCtl(slug string, verb ...string) []string {
 	args := []string{"compose", "-p", "deplo-" + slug, "-f", s.stackPath(slug)}
 	if dir := s.filesRoot(slug); isFile(filepath.Join(dir, ".env")) {
 		args = append(args, "--project-directory", dir, "--env-file", filepath.Join(dir, ".env"))
-	} else if legacy := fmt.Sprintf("%s/%s.env", s.stackDir, slug); isFile(legacy) {
+	} else if legacy := s.legacyEnvPath(slug); isFile(legacy) {
 		args = append(args, "--env-file", legacy)
 	}
 	return append(args, verb...)

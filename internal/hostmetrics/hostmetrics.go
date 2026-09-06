@@ -64,8 +64,8 @@ func Collect(dataDir string) Metrics {
 		MemCache:  mem.cache,
 		DiskUsed:  diskUsed,
 		DiskTotal: diskTotal,
-		NetRx:     max64(0, rx1-rx0),
-		NetTx:     max64(0, tx1-tx0),
+		NetRx:     max(0, rx1-rx0),
+		NetTx:     max(0, tx1-tx0),
 		Load1:     l1,
 		Load5:     l5,
 		Load15:    l15,
@@ -311,13 +311,6 @@ func numCPU() int {
 		return 1
 	}
 	return n
-}
-
-func max64(a, b int64) int64 {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 func round1(f float64) float64 { return float64(int64(f*10+0.5)) / 10 }

@@ -116,7 +116,7 @@ func newRosterDefaults() *roster {
 	}
 	r.listFn = listManagedContainers
 	r.inspectFn = inspectRosterContainers
-	r.hostCountFn = hostRunningCount
+	r.hostCountFn = dockercli.CountRunning
 	r.rebuildFn = r.rebuild
 	r.watchFn = r.watchEvents
 	return r
@@ -464,22 +464,6 @@ func listManagedContainers(ctx context.Context) ([]rosterPsRow, error) {
 		}
 	}
 	return rows, nil
-}
-
-// hostRunningCount counts EVERY running container on the host - the unfiltered `docker
-// ps -q` the host gauge is built from - returning ok=false when the read itself failed.
-func hostRunningCount(ctx context.Context) (int, bool) {
-	res, err := dockercli.Run(ctx, 10*time.Second, "ps", "-q")
-	if err != nil || res.Code != 0 {
-		return 0, false
-	}
-	n := 0
-	for _, l := range strings.Split(strings.TrimSpace(res.Stdout), "\n") {
-		if strings.TrimSpace(l) != "" {
-			n++
-		}
-	}
-	return n, true
 }
 
 type rosterCmdError struct {

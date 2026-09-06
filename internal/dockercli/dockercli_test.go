@@ -207,3 +207,55 @@ func TestParseAddressPools(t *testing.T) {
 		}
 	}
 }
+
+// Only the tenant namespace survives the filter, whatever else the daemon lists.
+func TestTenantNetworksOf(t *testing.T) {
+	got := TenantNetworksOf([]string{"bridge", "deplo", "deplo-env-x", "traefik_deplo-socket", "deplo-team-y", "deplo-preview-z__pr-1", "deplo-internal"})
+	if strings.Join(got, ",") != "deplo-env-x,deplo-team-y,deplo-preview-z__pr-1" {
+		t.Fatalf("got %v", got)
+	}
+	if got := TenantNetworksOf(nil); got != nil {
+		t.Fatalf("a failed listing filters to nothing, got %v", got)
+	}
+}
+
+func TestNonEmptyLines(t *testing.T) {
+	got := nonEmptyLines("a\n\n  b  \n\nc\n")
+	if strings.Join(got, ",") != "a,b,c" {
+		t.Fatalf("got %v", got)
+	}
+	if got := nonEmptyLines(""); len(got) != 0 {
+		t.Fatalf("empty output has no lines, got %v", got)
+	}
+}
+
+// Server is the ONE `docker version` Hello pays for; the two readers it replaced
+// must keep answering exactly what they did.
+func TestServer_matchesAvailableAndServerVersion(t *testing.T) {
+	ctx := context.Background()
+	if !Available(ctx) {
+		t.Skip("docker not available")
+	}
+	v, ok := Server(ctx)
+	if !ok || v == "" {
+		t.Fatalf("Server() = %q, %v on a host where docker answers", v, ok)
+	}
+	if got := ServerVersion(ctx); got != v {
+		t.Fatalf("ServerVersion() = %q, Server() = %q", got, v)
+	}
+	if strings.ContainsAny(v, " \n\t") {
+		t.Fatalf("version %q is not trimmed", v)
+	}
+}
+
+// A container docker does not know is reported as absent, never as "on no network".
+func TestContainerNetworks_missingContainerIsAbsent(t *testing.T) {
+	ctx := context.Background()
+	if !Available(ctx) {
+		t.Skip("docker not available")
+	}
+	on, exists := ContainerNetworks(ctx, "deplo-agent-test-no-such-container")
+	if exists || on != nil {
+		t.Fatalf("got on=%v exists=%v for a container that does not exist", on, exists)
+	}
+}

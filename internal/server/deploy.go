@@ -55,7 +55,7 @@ func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitt
 		return
 	}
 	name := "deplo-" + slug
-	stackFile := filepath.Join(s.stackDir, slug+".yml")
+	stackFile := s.stackPath(slug)
 
 	// A BUILD-ONLY deploy compiles for a host it is not: it must actually build something,
 	// and that something must be one image the caller can then stream away.
@@ -461,7 +461,7 @@ func (s *Service) writeComposeEnv(slug string, env map[string]string) (string, s
 	}
 	// The pre-project-directory location. Left behind it would go on being the
 	// file a `--env-file` never points at again, holding decrypted secrets.
-	_ = os.Remove(filepath.Join(s.stackDir, slug+".env"))
+	_ = os.Remove(s.legacyEnvPath(slug))
 	return envFile, projectDir, nil
 }
 

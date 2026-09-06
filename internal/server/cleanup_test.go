@@ -1067,23 +1067,24 @@ func TestParseHumanSize(t *testing.T) {
 // Docker's own printed total is authoritative INCLUDING ZERO: "Total reclaimed space:
 // 0B" means the prune freed nothing, and falling back to the pre-flight estimate there
 // is how the history once recorded a gigabyte that was never freed.
-func TestPickReclaimed_zeroTotalIsAuthoritative(t *testing.T) {
+func TestParsePrunedTotal_zeroTotalIsAuthoritative(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		out      string
-		estimate int64
-		want     int64
+		name   string
+		out    string
+		want   int64
+		wantOK bool
 	}{
-		{"image prune says 0B", "Deleted Images:\nuntagged: x\nTotal reclaimed space: 0B\n", 999, 0},
-		{"buildx says 0B", "Total:\t0B\n", 999, 0},
-		{"real total wins over estimate", "Total reclaimed space: 449.4MB\n", 1, 449400000},
-		{"no total line -> estimate", "nothing to see here\n", 777, 777},
-		{"unreadable total -> estimate", "Total: garbage\n", 555, 555},
-		{"empty output -> estimate", "", 42, 42},
+		{"image prune says 0B", "Deleted Images:\nuntagged: x\nTotal reclaimed space: 0B\n", 0, true},
+		{"buildx says 0B", "Total:\t0B\n", 0, true},
+		{"real total", "Total reclaimed space: 449.4MB\n", 449400000, true},
+		{"no total line", "nothing to see here\n", 0, false},
+		{"unreadable total", "Total: garbage\n", 0, false},
+		{"empty output", "", 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := pickReclaimed(tc.out, tc.estimate); got != tc.want {
-				t.Errorf("pickReclaimed(%q, %d) = %d, want %d", tc.out, tc.estimate, got, tc.want)
+			got, ok := parsePrunedTotal(tc.out)
+			if got != tc.want || ok != tc.wantOK {
+				t.Errorf("parsePrunedTotal(%q) = %d, %v, want %d, %v", tc.out, got, ok, tc.want, tc.wantOK)
 			}
 		})
 	}

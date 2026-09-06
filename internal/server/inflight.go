@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -174,13 +175,11 @@ func (f *inflight) subscribe(ctx context.Context, fromSeq uint64, send func(*pb.
 			return ctx.Err()
 		}
 		// Collect every retained event newer than the cursor, in order, then send outside the
-		// lock (send may block on the network).
-		var batch []*pb.DeployEvent
-		for _, ev := range f.events {
-			if ev.GetSeq() > cursor {
-				batch = append(batch, ev)
-			}
-		}
+		// lock (send may block on the network). The buffer stays sorted by seq through
+		// evictions (the note takes the first victim's seq), so this is a binary search;
+		// COPIED, because an eviction shifts the backing array under a released lock.
+		first := sort.Search(len(f.events), func(i int) bool { return f.events[i].GetSeq() > cursor })
+		batch := append([]*pb.DeployEvent(nil), f.events[first:]...)
 		if f.lastSeq > cursor {
 			cursor = f.lastSeq
 		}
@@ -196,10 +195,4 @@ func (f *inflight) subscribe(ctx context.Context, fromSeq uint64, send func(*pb.
 			return nil
 		}
 	}
-}
-
-func (f *inflight) isDone() bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.done
 }
