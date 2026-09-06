@@ -12,18 +12,34 @@ import (
 // on the docker build, force_recreate must put --force-recreate on the compose up.
 
 func TestBuildArgvNoCache(t *testing.T) {
-	plain := buildArgv(&pb.DeployRequest{}, "-f", "Dockerfile")
+	// Every build carries the app's cache namespace (cache_ns.go); strip it to
+	// judge the rest of the argv.
+	withoutNS := func(args []string) string {
+		var out []string
+		for i := 0; i < len(args); i++ {
+			if args[i] == "--build-arg" && i+1 < len(args) && strings.HasPrefix(args[i+1], "BUILDKIT_CACHE_MOUNT_NS=") {
+				i++
+				continue
+			}
+			out = append(out, args[i])
+		}
+		return strings.Join(out, " ")
+	}
+	plain := (&Service{}).buildArgv(&pb.DeployRequest{}, "-f", "Dockerfile")
 	if slices.Contains(plain, "--no-cache") {
 		t.Fatalf("an ordinary build must keep the cache: %v", plain)
 	}
-	if strings.Join(plain, " ") != "build -f Dockerfile" {
+	if !slices.ContainsFunc(plain, func(a string) bool { return strings.HasPrefix(a, "BUILDKIT_CACHE_MOUNT_NS=") }) {
+		t.Fatalf("every build carries its cache namespace: %v", plain)
+	}
+	if withoutNS(plain) != "build -f Dockerfile" {
 		t.Fatalf("argv = %v, want the unchanged `build -f Dockerfile`", plain)
 	}
 
-	fresh := buildArgv(&pb.DeployRequest{NoBuildCache: true}, "-f", "Dockerfile")
+	fresh := (&Service{}).buildArgv(&pb.DeployRequest{NoBuildCache: true}, "-f", "Dockerfile")
 	// docker parses build flags after the verb; the rest of the argv must be
 	// untouched so the caller's -f/--build-arg/context ordering still holds.
-	if strings.Join(fresh, " ") != "build --no-cache -f Dockerfile" {
+	if withoutNS(fresh) != "build --no-cache -f Dockerfile" {
 		t.Fatalf("argv = %v, want `build --no-cache -f Dockerfile`", fresh)
 	}
 }

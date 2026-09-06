@@ -65,10 +65,24 @@ func normalizeRel(rel string) (string, error) {
 	if r == "" || r == "." {
 		return "", nil
 	}
+	var kept []string
 	for _, seg := range strings.Split(r, "/") {
 		if seg == ".." {
 			return "", status.Error(codes.InvalidArgument, "path traversal is not allowed")
 		}
+		if seg == "." || seg == "" {
+			continue
+		}
+		kept = append(kept, seg)
+	}
+	r = strings.Join(kept, "/")
+	if r == "" {
+		return "", nil
+	}
+	// The stack's decrypted env-file lives at the root of this tree and is the
+	// deploy's to write: no file RPC reads, replaces or removes it.
+	if r == ".env" {
+		return "", status.Error(codes.PermissionDenied, "the env-file is written by the deploy, not a file of the app's")
 	}
 	return r, nil
 }

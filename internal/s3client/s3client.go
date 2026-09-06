@@ -103,7 +103,8 @@ func New(cfg Config) (*minio.Client, error) {
 	if endpoint == "" {
 		return nil, fmt.Errorf("s3: empty endpoint")
 	}
-	if err := validateEndpointHost(endpoint, cfg.AllowPrivateEndpoint); err != nil {
+	vetted, err := validateEndpointHost(endpoint, cfg.AllowPrivateEndpoint)
+	if err != nil {
 		return nil, err
 	}
 	extra, unknown := parseExtraArgs(cfg.ExtraArgs)
@@ -121,24 +122,38 @@ func New(cfg Config) (*minio.Client, error) {
 		Region:       cfg.Region,
 		BucketLookup: bucketLookup(pathStyle),
 	}
-	// A custom transport only when something asked for one: minio-go's default is
-	// tuned for S3 (connection pooling, keep-alives), and replacing it wholesale
-	// to flip one bool would cost more than the flag is worth.
-	if extra.noCompression || extra.insecureSkipVerify {
-		tr, err := minio.DefaultTransport(secure)
-		if err != nil {
-			return nil, fmt.Errorf("s3: build transport: %w", err)
-		}
-		tr.DisableCompression = extra.noCompression
-		if extra.insecureSkipVerify {
-			if tr.TLSClientConfig == nil {
-				tr.TLSClientConfig = &tls.Config{}
-			}
-			tr.TLSClientConfig.InsecureSkipVerify = true
-		}
-		opts.Transport = tr
+	tr, err := minio.DefaultTransport(secure)
+	if err != nil {
+		return nil, fmt.Errorf("s3: build transport: %w", err)
 	}
+	tr.DisableCompression = extra.noCompression
+	if extra.insecureSkipVerify {
+		if tr.TLSClientConfig == nil {
+			tr.TLSClientConfig = &tls.Config{}
+		}
+		tr.TLSClientConfig.InsecureSkipVerify = true
+	}
+	// The guard resolved the name once; the dial must go where THAT answer went,
+	// or a zone with a short TTL answers public to the guard and internal to the
+	// dial. TLS still verifies the hostname (ServerName comes from the URL).
+	if vetted != nil {
+		base := tr.DialContext
+		tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, port, splitErr := net.SplitHostPort(addr)
+			if splitErr == nil && strings.EqualFold(host, vetted.host) {
+				addr = net.JoinHostPort(vetted.ip.String(), port)
+			}
+			return base(ctx, network, addr)
+		}
+	}
+	opts.Transport = tr
 	return minio.New(endpoint, opts)
+}
+
+// vettedEndpoint is the one address the SSRF guard approved for a hostname.
+type vettedEndpoint struct {
+	host string
+	ip   net.IP
 }
 
 func bucketLookup(pathStyle bool) minio.BucketLookupType {
@@ -151,9 +166,9 @@ func bucketLookup(pathStyle bool) minio.BucketLookupType {
 // validateEndpointHost is the SSRF guard for the S3 endpoint, which arrives off the
 // wire (user-controlled) and is dialed by the root agent. `endpoint` is scheme-stripped
 // host[:port].
-func validateEndpointHost(endpoint string, allowPrivate bool) error {
+func validateEndpointHost(endpoint string, allowPrivate bool) (*vettedEndpoint, error) {
 	if allowPrivate {
-		return nil
+		return nil, nil
 	}
 	// Isolate host[:port] from any stray path, then drop the port.
 	host := endpoint
@@ -165,16 +180,17 @@ func validateEndpointHost(endpoint string, allowPrivate bool) error {
 	}
 	host = strings.TrimSpace(host)
 	if host == "" {
-		return fmt.Errorf("s3: empty endpoint host")
+		return nil, fmt.Errorf("s3: empty endpoint host")
 	}
 
 	var ips []net.IP
-	if ip := net.ParseIP(host); ip != nil {
-		ips = []net.IP{ip}
+	literal := net.ParseIP(host) != nil
+	if literal {
+		ips = []net.IP{net.ParseIP(host)}
 	} else {
 		resolved, err := net.LookupIP(host)
 		if err != nil {
-			return fmt.Errorf("s3: cannot resolve endpoint host %q: %w", host, err)
+			return nil, fmt.Errorf("s3: cannot resolve endpoint host %q: %w", host, err)
 		}
 		ips = resolved
 	}
@@ -182,10 +198,14 @@ func validateEndpointHost(endpoint string, allowPrivate bool) error {
 	// hostname that mixes a public A record with an internal one).
 	for _, ip := range ips {
 		if reason := blockedIPReason(ip); reason != "" {
-			return fmt.Errorf("s3: endpoint host %q resolves to a disallowed %s address %s; refusing to connect (SSRF guard)", host, reason, ip)
+			return nil, fmt.Errorf("s3: endpoint host %q resolves to a disallowed %s address %s; refusing to connect (SSRF guard)", host, reason, ip)
 		}
 	}
-	return nil
+	// A literal is its own answer; a name is pinned to the first address vetted.
+	if literal || len(ips) == 0 {
+		return nil, nil
+	}
+	return &vettedEndpoint{host: host, ip: ips[0]}, nil
 }
 
 // blockedIPReason names the SSRF category an IP falls into, or "" if it is a

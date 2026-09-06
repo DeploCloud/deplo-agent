@@ -167,6 +167,17 @@ func execWithSecretEnv(pw, name string, flags ...string) (argv []string, env []s
 	return a, env
 }
 
+// mongoShell is the one-line script the mongo tools run under: $1 is the database
+// (empty on restore, where the archive names it), $2 the user, and the password is
+// read from $MONGO_PW so it never appears on the host's argv.
+func mongoShell(tool string, withPassword bool) string {
+	script := "exec " + tool + ` ${1:+--db="$1"} ${2:+-u "$2" --authenticationDatabase=admin}`
+	if withPassword {
+		script += ` -p "$MONGO_PW"`
+	}
+	return script
+}
+
 // dumpArgv returns the `docker exec` argv that dumps the database to stdout, and the
 // extra HOST-PROCESS env the docker client needs, for an engine. MySQL keeps its own
 // names; it never had the mariadb ones.
@@ -202,14 +213,11 @@ func dumpArgv(d *pb.DatabaseDescriptor) (argv []string, env []string, err error)
 	case "mongodb":
 		// --archive writes a single restorable stream to stdout. mongodump has no
 		// password env var, so -p is on argv (masked in any error by redactArgs).
-		a := []string{"exec", c, "mongodump", "--archive", "--db=" + db}
-		if user != "" {
-			a = append(a, "-u", user, "--authenticationDatabase=admin")
-		}
-		if pw != "" {
-			a = append(a, "-p", pw)
-		}
-		return a, nil, nil
+		// mongodump has no password env var of its own, so the shell INSIDE the
+		// container reads it from one: the host's argv (visible in /proc) stays clean.
+		a, env := execWithSecretEnv(pw, "MONGO_PW")
+		a = append(a, c, "sh", "-c", mongoShell("mongodump --archive", pw != ""), "sh", db, user)
+		return a, env, nil
 	case "redis":
 		// redis-cli --rdb - streams a valid RDB to stdout. The password rides in
 		// REDISCLI_AUTH (env), which redis-cli honours, so it stays off argv.
@@ -248,14 +256,10 @@ func restoreArgv(d *pb.DatabaseDescriptor) (argv []string, env []string, err err
 	case "mongodb":
 		// --drop drops each collection before restoring it => overwrite. mongorestore
 		// has no password env var, so -p is on argv (masked in errors by redactArgs).
-		a := []string{"exec", "-i", c, "mongorestore", "--archive", "--drop"}
-		if user != "" {
-			a = append(a, "-u", user, "--authenticationDatabase=admin")
-		}
-		if pw != "" {
-			a = append(a, "-p", pw)
-		}
-		return a, nil, nil
+		// Same shape as the dump: the password rides the container's env, never argv.
+		a, env := execWithSecretEnv(pw, "MONGO_PW", "-i")
+		a = append(a, c, "sh", "-c", mongoShell("mongorestore --archive --drop", pw != ""), "sh", "", user)
+		return a, env, nil
 	case "redis":
 		// Redis does NOT restore over a single stdin pipe: the dump is an RDB file (redis-cli
 		// --rdb), and `redis-cli --pipe` speaks RESP, not RDB - feeding it an RDB fails

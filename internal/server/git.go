@@ -44,7 +44,7 @@ func (s *Service) materializeGit(
 	if b := strings.TrimSpace(g.GetBranch()); b != "" {
 		args = append(args, "--branch", b, "--single-branch")
 	}
-	args = append(args, cloneURL, dir)
+	args = append(args, "--", cloneURL, dir)
 
 	// Log the SANITISED command (the real URL with the token is never emitted).
 	branchNote := ""

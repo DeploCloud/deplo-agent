@@ -32,7 +32,9 @@ func TestDumpArgv_perEngine(t *testing.T) {
 		// name is the only one on PATH there - asking for `mysqldump` failed every
 		// backup of a MariaDB 11 database with "executable file not found".
 		{"mariadb", "mariadb-dump", []string{"--add-drop-table", "--databases", "mydb"}, "MYSQL_PWD"},
-		{"mongodb", "mongodump", []string{"--archive", "--db=mydb"}, ""},
+		// The mongo tools have no password env var of their own, so a shell inside
+		// the container reads MONGO_PW: the host argv carries the script, never the value.
+		{"mongodb", "sh", nil, "MONGO_PW"},
 		{"redis", "redis-cli", []string{"--rdb", "-"}, "REDISCLI_AUTH"},
 	}
 	for _, tc := range cases {
@@ -60,6 +62,14 @@ func TestDumpArgv_perEngine(t *testing.T) {
 					t.Errorf("dump argv for %s missing %q: %v", tc.dbType, tok, argv)
 				}
 			}
+			if tc.dbType == "mongodb" {
+				if !strings.Contains(joined, "mongodump --archive") || !strings.Contains(joined, `--db="$1"`) || !containsToken(argv, "mydb") {
+					t.Errorf("mongodb dump must run mongodump on the archive of the named db: %v", argv)
+				}
+				if !strings.Contains(joined, `-p "$MONGO_PW"`) {
+					t.Errorf("mongodb dump must read the password from MONGO_PW: %v", argv)
+				}
+			}
 			if tc.pwEnvKey != "" {
 				// Env-capable engine (postgres/mysql/redis): the cleartext password
 				// must NEVER appear on argv (the ps/proc-readable host command line);
@@ -73,16 +83,6 @@ func TestDumpArgv_perEngine(t *testing.T) {
 				wantEnv := tc.pwEnvKey + "=s3cret"
 				if !containsToken(env, wantEnv) {
 					t.Errorf("%s password must ride in env %q, got env=%v", tc.dbType, wantEnv, env)
-				}
-			} else if tc.dbType == "mongodb" {
-				// DOCUMENTED RESIDUAL: mongodump/mongorestore have no password env var, so the
-				// password stays on argv as `-p <pw>`. This is a known, bounded exposure
-				// (host-local; masked out of any error string by dockercli.redactArgs).
-				if !containsToken(argv, "-p") || !containsToken(argv, "s3cret") {
-					t.Errorf("mongodb is expected to pass -p <pw> on argv (documented residual), got %v", argv)
-				}
-				if len(env) != 0 {
-					t.Errorf("mongodb has no password env var; env should be empty, got %v", env)
 				}
 			}
 		})
@@ -116,7 +116,7 @@ func TestRestoreArgv_overwriteFlags(t *testing.T) {
 		{"postgres", "pg_restore", "--clean"},
 		{"mysql", "mysql", ""},     // overwrite comes from the dump's --add-drop-table
 		{"mariadb", "mariadb", ""}, // same, under MariaDB's own client name
-		{"mongodb", "mongorestore", "--drop"},
+		{"mongodb", "sh", ""},      // the script carries `mongorestore --archive --drop`
 	}
 	for _, tc := range cases {
 		t.Run(tc.dbType, func(t *testing.T) {
@@ -134,6 +134,9 @@ func TestRestoreArgv_overwriteFlags(t *testing.T) {
 			}
 			if tc.wantDrop != "" && !containsToken(argv, tc.wantDrop) {
 				t.Errorf("restore argv for %s missing overwrite flag %q: %v", tc.dbType, tc.wantDrop, argv)
+			}
+			if tc.dbType == "mongodb" && !strings.Contains(strings.Join(argv, " "), "mongorestore --archive --drop") {
+				t.Errorf("mongodb restore must drop before restoring: %v", argv)
 			}
 		})
 	}

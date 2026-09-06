@@ -204,6 +204,16 @@ func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitt
 			return
 		}
 	}
+	// Every image the stack runs is pulled or built HERE and inspected before it
+	// starts: a Traefik label baked into an image is a router nobody checked.
+	if isCompose {
+		images, ok := s.prepareStackImages(ctx, req, composeBaseArgs(name, stackFile, envFile, projectDir), e)
+		if !ok || !refuseTraefikImageLabels(ctx, images, e) {
+			return
+		}
+	} else if !refuseTraefikImageLabels(ctx, []string{imageRef}, e) {
+		return
+	}
 	composeArgs := composeUpArgs(name, stackFile, envFile, projectDir, req.GetForceRecreate(), req.GetComposeUpArgs())
 	upLog := "docker compose up -d"
 	if req.GetForceRecreate() {
@@ -382,7 +392,7 @@ func (s *Service) buildDockerfile(ctx context.Context, req *pb.DeployRequest, bu
 		// Build-time env (build_env.go): forward every env var the Dockerfile declares as an
 		// ARG.
 		envKeys := dockerfileBuildEnv(dfPath, req)
-		args := appendBuildArgKeys(buildArgv(req), envKeys)
+		args := appendBuildArgKeys(s.buildArgv(req), envKeys)
 		args = append(args, imageOutputArgs(ctx, req.GetImageRef())...)
 		args = append(args, labels...)
 		args = append(args, buildDir)
@@ -420,7 +430,7 @@ func (s *Service) buildDockerfile(ctx context.Context, req *pb.DeployRequest, bu
 		return false
 	}
 
-	args := buildArgv(req, "-f", dockerfilePath)
+	args := s.buildArgv(req, "-f", dockerfilePath)
 	if stage := strings.TrimSpace(df.GetTargetStage()); stage != "" {
 		args = append(args, "--target", stage)
 	}
@@ -462,6 +472,9 @@ func (s *Service) writeComposeEnv(slug string, env map[string]string) (string, s
 	if err != nil {
 		return "", "", err
 	}
+	// The mode above applies on CREATE only; a file that already existed (a bind
+	// the stack declared) keeps whatever it had, and this one holds secrets.
+	_ = f.Chmod(0o600)
 	if _, err := f.Write([]byte(renderComposeEnvFile(env))); err != nil {
 		f.Close()
 		return "", "", err
@@ -543,11 +556,14 @@ func sanitizeComposeArgs(extra []string) []string {
 // buildArgv starts a `docker build` argv, adding --no-cache when the deploy asked to
 // skip the build cache (the app's Build cache setting is off, or this is the one build
 // that follows a manual "Clear build cache").
-func buildArgv(req *pb.DeployRequest, rest ...string) []string {
+func (s *Service) buildArgv(req *pb.DeployRequest, rest ...string) []string {
 	args := []string{"build"}
 	if req.GetNoBuildCache() {
 		args = append(args, "--no-cache")
 	}
+	// Every cache mount of this build, authored or generated, lands in the app's
+	// own namespace (cache_ns.go).
+	args = append(args, "--build-arg", "BUILDKIT_CACHE_MOUNT_NS="+s.cacheNamespace(req.GetSlug()))
 	return append(args, rest...)
 }
 

@@ -38,7 +38,14 @@ var deniedHostRoots = []string{
 // deniedHostSubtrees are refused along with everything under them: kernel and
 // device filesystems are never a service's data, and Docker's own state directory
 // is where every OTHER tenant's volumes live.
-var deniedHostSubtrees = []string{"/proc", "/sys", "/dev", "/var/lib/docker"}
+var deniedHostSubtrees = []string{
+	"/proc", "/sys", "/dev", "/var/lib/docker", "/var/lib/containerd",
+	// The host's own credentials and boot-time hooks, and the agent's key material.
+	"/root", "/home", "/etc/ssh", "/etc/ssl/private", "/etc/cron.d", "/etc/cron.daily",
+	"/etc/systemd", "/etc/sudoers.d", "/var/lib/deplo-agent",
+	// Every tenant's rendered stack, env-file and backup store on this host.
+	"/data/stacks", "/data/backups",
+}
 
 // validateHostPath cleans and vets a wire-supplied host directory.
 func validateHostPath(p string) (string, error) {

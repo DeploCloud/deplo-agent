@@ -178,7 +178,7 @@ CMD ["nginx", "-g", "daemon off;"]
 		return false
 	}
 
-	args := appendBuildArgKeys(buildArgv(req), envKeys)
+	args := appendBuildArgKeys(s.buildArgv(req), envKeys)
 	args = append(args, imageOutputArgs(ctx, req.GetImageRef())...)
 	args = append(args, labelArgs(req)...)
 	args = append(args, buildDir)
@@ -286,6 +286,11 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 	}
 	// Pin the runtime via nixpacks' per-language env var when the user set one.
 	if version := strings.TrimSpace(spec.GetRuntimeVersion()); version != "" {
+		// One argv token, but it names a package in the build: digits and dots only.
+		if !runtimeVersionRe.MatchString(version) {
+			e.result(false, "runtime version must look like 20 or 3.12", "")
+			return false
+		}
 		lang := strings.ToLower(strings.TrimSpace(spec.GetRuntimeLanguage()))
 		if lang == "" || lang == "none" {
 			lang = "node"
@@ -365,7 +370,7 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 
 	if publishDir == "" {
 		// App with a start command: build the generated Dockerfile directly.
-		args := buildArgv(req, "-f", generated, "--build-arg", fmt.Sprintf("PORT=%d", port))
+		args := s.buildArgv(req, "-f", generated, "--build-arg", fmt.Sprintf("PORT=%d", port))
 		args = appendBuildArgKeys(args, envKeys)
 		args = append(args, imageOutputArgs(ctx, req.GetImageRef())...)
 		args = append(args, labelArgs(req)...)
@@ -375,7 +380,7 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 
 	// Static publish dir: build a staging image, then nginx-wrap its output.
 	staging := "deplo-nixpacks-staging:" + imageTag(req.GetImageRef())
-	stageArgs := buildArgv(req, "-f", generated, "--build-arg", fmt.Sprintf("PORT=%d", port))
+	stageArgs := s.buildArgv(req, "-f", generated, "--build-arg", fmt.Sprintf("PORT=%d", port))
 	stageArgs = appendBuildArgKeys(stageArgs, envKeys)
 	stageArgs = append(stageArgs, imageOutputArgs(ctx, staging)...)
 	stageArgs = append(stageArgs, buildDir)
@@ -497,6 +502,9 @@ func (s *Service) buildBuildpacks(ctx context.Context, req *pb.DeployRequest, bu
 // buildRailpack generates a railpack plan with the host railpack binary, then hands the
 // plan to `docker build` as its Dockerfile with the railpack BuildKit frontend selected
 // by BUILDKIT_SYNTAX.
+// runtimeVersionRe bounds a pinned language runtime (`20`, `3.12`, `1.22.4`).
+var runtimeVersionRe = regexp.MustCompile(`^[0-9]+(\.[0-9]+){0,2}$`)
+
 // toolVersionRe is the only shape a pinned build-tool version may take.
 var toolVersionRe = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
 
@@ -635,7 +643,7 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 	}
 
 	args := railpackBuildArgs(frontend, planPath, buildDir, secretNames,
-		imageOutputArgs(ctx, req.GetImageRef()), req.GetNoBuildCache())
+		imageOutputArgs(ctx, req.GetImageRef()), req.GetNoBuildCache(), s.cacheNamespace(req.GetSlug()))
 	if !s.runBuildKit(ctx, req, 20*time.Minute, args, secretEnv, e) {
 		return false
 	}
@@ -648,12 +656,15 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 // railpackBuildArgs assembles the `docker build` argv that runs a railpack plan: the
 // plan file stands in for the Dockerfile and BUILDKIT_SYNTAX selects the railpack
 // frontend to interpret it.
-func railpackBuildArgs(frontend, planPath, contextDir string, secretNames, output []string, noCache bool) []string {
+func railpackBuildArgs(frontend, planPath, contextDir string, secretNames, output []string, noCache bool, cacheNS string) []string {
 	args := []string{"build"}
 	if noCache {
 		args = append(args, "--no-cache")
 	}
 	args = append(args, "--build-arg", "BUILDKIT_SYNTAX="+frontend, "-f", planPath)
+	if cacheNS != "" {
+		args = append(args, "--build-arg", "BUILDKIT_CACHE_MOUNT_NS="+cacheNS)
+	}
 	for _, name := range secretNames {
 		args = append(args, "--secret", "id="+name+",env="+name)
 	}

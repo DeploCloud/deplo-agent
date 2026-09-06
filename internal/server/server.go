@@ -250,6 +250,9 @@ type Service struct {
 	// under which dev workspaces (<dataBase>/dev) and the SSH gateway
 	// (<dataBase>/ssh-gateway) live - the Part D per-host singletons.
 	dataBase string
+	// cacheSalt seeds the per-app BuildKit cache namespace (cache_ns.go).
+	cacheSaltOnce sync.Once
+	cacheSalt     []byte
 	// agentDir is the agent's OWN data root (--agent-dir, the installer's
 	// /var/lib/deplo-agent): mTLS materials, and the Traefik stack the installer puts
 	// under traefik/.
