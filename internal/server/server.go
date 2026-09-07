@@ -233,6 +233,10 @@ var Capabilities = []string{
 	// found nothing, `removeVolumes` or not: the file only ever went on a successful
 	// `down`, so nothing of it is left to reclaim.
 	"teardown.missing-file-ok",
+	// A host-path copy may write under `<stack-dir>/files/`, which the /data/stacks
+	// deny had swallowed - so an imported stack gets the files its own YAML binds.
+	// Its own string because the tag moves.
+	"host-path-copy.stack-files",
 }
 
 // AgentVersion is the version this agent reports over Hello. "dev" for a build that
