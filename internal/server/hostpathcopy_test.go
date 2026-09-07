@@ -58,6 +58,10 @@ func TestValidateHostPath_refusesTheSystem(t *testing.T) {
 		"", "relative/path", "/", "/etc", "/root", "/var/lib/docker",
 		"/var/lib/docker/volumes/someone-elses", "/proc/1", "/sys/kernel",
 		"/data/../etc",
+		// A neighbour's rendered stack, its plaintext env-file, and the dir that
+		// holds every stack's files - the carve-out below starts one level deeper.
+		"/data/stacks", "/data/stacks/api.env", "/data/stacks/files",
+		"/data/backups/app",
 	} {
 		if _, err := validateHostPath(bad); err == nil {
 			t.Errorf("validateHostPath(%q) should have been refused", bad)
@@ -65,6 +69,9 @@ func TestValidateHostPath_refusesTheSystem(t *testing.T) {
 	}
 	for _, good := range []string{
 		"/etc/dokploy/applications/app/files", "/data/myapp", "/srv/app/uploads",
+		// Where a stack-relative bind lands on THIS host: the target of every
+		// `./volumes/db` an imported compose file carries.
+		"/data/stacks/files/sucabase", "/data/stacks/files/sucabase/volumes/db",
 	} {
 		got, err := validateHostPath(good)
 		if err != nil {

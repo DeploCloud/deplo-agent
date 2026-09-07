@@ -47,6 +47,11 @@ var deniedHostSubtrees = []string{
 	"/data/stacks", "/data/backups",
 }
 
+// allowedHostSubtrees are carved back OUT of the deny-list above: a stack's own
+// files directory IS its service's data - a compose `./x` resolves into it - while
+// the rendered YAML and the env-file beside it stay refused.
+var allowedHostSubtrees = []string{"/data/stacks/files"}
+
 // validateHostPath cleans and vets a wire-supplied host directory.
 func validateHostPath(p string) (string, error) {
 	if strings.TrimSpace(p) == "" {
@@ -79,6 +84,12 @@ func validateHostPath(p string) (string, error) {
 
 // refuseSystemPath is the deny-list itself, applied to a cleaned absolute path.
 func refuseSystemPath(clean string) error {
+	for _, root := range allowedHostSubtrees {
+		// Strictly under: the directory itself holds EVERY stack's files.
+		if strings.HasPrefix(clean, root+"/") {
+			return nil
+		}
+	}
 	for _, root := range deniedHostRoots {
 		if clean == root {
 			return status.Errorf(
