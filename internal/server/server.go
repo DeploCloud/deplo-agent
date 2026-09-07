@@ -198,6 +198,10 @@ var Capabilities = []string{
 	// Without them Caddy's `root * ../app/{$NIXPACKS_SPA_OUTPUT_DIR}` resolved to the
 	// repo root and every Vite SPA served its unbuilt index.html.
 	"build.nixpacks-vars",
+	// BuildSpec.output_directory is honoured by the RAILPACK path too (as
+	// RAILPACK_SPA_OUTPUT_DIR): a framework that builds a directory and runs no
+	// server is served by Caddy instead of falling back on its dev script.
+	"build.railpack-output-dir",
 	// ExportImage/ImportImage: a built image streams host-to-host through the control
 	// plane, the third sibling of the volume and files-dir relays.
 	"image-copy",

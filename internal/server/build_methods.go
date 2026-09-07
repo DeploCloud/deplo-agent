@@ -404,9 +404,14 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 		return false
 	}
 	defer func() { _, _ = dockercli.Run(ctx, 30*time.Second, "rmi", staging) }()
-	// Strip a leading "./" or "/" but keep a bare leading "." (dot-dirs like .next).
-	srcPub := strings.TrimPrefix(strings.TrimPrefix(publishDir, "./"), "/")
+	srcPub := relativeDir(publishDir)
 	return s.nginxWrap(ctx, req, buildDir, staging, "/app/"+srcPub, e)
+}
+
+// relativeDir reads a directory the user typed as one relative to /app: a leading
+// "./" or "/" is dropped, a bare leading "." kept (dot-dirs like .next).
+func relativeDir(dir string) string {
+	return strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(dir), "./"), "/")
 }
 
 // nginxWrap builds an nginx image serving files copied out of fromImage at
@@ -576,8 +581,14 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 	envKeys := filterKeys(dropReservedBuildEnv(buildEnvKeys(req.GetEnv())), func(k string) bool {
 		return !strings.HasPrefix(k, "RAILPACK_")
 	})
+	// The directory to SERVE, for a framework whose production artifact is one and that
+	// railpack does not recognise (Gatsby, Eleventy, Docusaurus). Setting it forces
+	// railpack's Caddy deploy, instead of falling back on the repo's `start` script -
+	// which for those three is the DEV server.
+	spaDir := relativeDir(spec.GetOutputDirectory())
 	prepareArgs := []string{"prepare", buildDir,
-		"--env", "RAILPACK_NODE_VERSION", "--env", "RAILPACK_BUILD_CMD", "--env", "RAILPACK_START_CMD"}
+		"--env", "RAILPACK_NODE_VERSION", "--env", "RAILPACK_BUILD_CMD",
+		"--env", "RAILPACK_START_CMD", "--env", "RAILPACK_SPA_OUTPUT_DIR"}
 	for _, k := range envKeys {
 		prepareArgs = append(prepareArgs, "--env", k)
 	}
@@ -612,6 +623,7 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 		{"RAILPACK_NODE_VERSION", nodeVer},
 		{"RAILPACK_BUILD_CMD", buildCmd},
 		{"RAILPACK_START_CMD", startCmd},
+		{"RAILPACK_SPA_OUTPUT_DIR", spaDir},
 	} {
 		if kv[1] != "" {
 			prepareEnv = append(prepareEnv, kv[0]+"="+kv[1])
@@ -641,13 +653,15 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 	known["RAILPACK_NODE_VERSION"] = nodeVer
 	known["RAILPACK_BUILD_CMD"] = buildCmd
 	known["RAILPACK_START_CMD"] = startCmd
+	known["RAILPACK_SPA_OUTPUT_DIR"] = spaDir
 	secretNames, ok := readPlanSecrets(planPath)
 	if !ok {
 		// Plan unreadable: fall back to every name `prepare` referenced - the three overrides
 		// plus each user env key, so a still-required secret is never left unprovided (empty
 		// value is fine - a provided-but-empty secret resolves, an absent one is "not
 		// found").
-		secretNames = append([]string{"RAILPACK_NODE_VERSION", "RAILPACK_BUILD_CMD", "RAILPACK_START_CMD"}, envKeys...)
+		secretNames = append([]string{"RAILPACK_NODE_VERSION", "RAILPACK_BUILD_CMD",
+			"RAILPACK_START_CMD", "RAILPACK_SPA_OUTPUT_DIR"}, envKeys...)
 	}
 	// Defence in depth: the plan is untrusted, so drop any name that isn't a plain env
 	// identifier before it reaches the `--secret id=…,env=…` CSV (a comma or space in a
