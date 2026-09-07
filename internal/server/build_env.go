@@ -88,6 +88,20 @@ func dockerfileEnvKeys(dockerfile string, env map[string]string) []string {
 
 // appendBuildArgKeys appends one bare `--build-arg KEY` per key (docker reads a
 // bare name's value from the client's process env - pass envKV alongside).
+// appendBuildArgValues passes KEY=VALUE build args, sorted so a build is
+// reproducible. Only for values Deplo or its builder computed - never an app's.
+func appendBuildArgValues(args []string, vars map[string]string) []string {
+	keys := make([]string, 0, len(vars))
+	for k := range vars {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		args = append(args, "--build-arg", k+"="+vars[k])
+	}
+	return args
+}
+
 func appendBuildArgKeys(args []string, keys []string) []string {
 	for _, k := range keys {
 		args = append(args, "--build-arg", k)

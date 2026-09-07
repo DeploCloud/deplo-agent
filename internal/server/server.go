@@ -194,6 +194,10 @@ var Capabilities = []string{
 	// DeployRequest.build_only is honoured: this agent can build an image and stop, for a
 	// BUILD SERVER that compiles for hosts it does not run on.
 	"deploy.build-only",
+	// The variables nixpacks computes for a plan reach `docker build` as build args.
+	// Without them Caddy's `root * ../app/{$NIXPACKS_SPA_OUTPUT_DIR}` resolved to the
+	// repo root and every Vite SPA served its unbuilt index.html.
+	"build.nixpacks-vars",
 	// ExportImage/ImportImage: a built image streams host-to-host through the control
 	// plane, the third sibling of the volume and files-dir relays.
 	"image-copy",

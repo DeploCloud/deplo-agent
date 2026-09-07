@@ -239,13 +239,10 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 	envKeys := filterKeys(dropReservedBuildEnv(buildEnvKeys(req.GetEnv())), func(k string) bool {
 		return k != "PORT" && !strings.HasPrefix(k, "NIXPACKS_")
 	})
-	// Phase 1: generate .nixpacks/Dockerfile WITHOUT the daemon (host binary). --cache-key
-	// pins the id of every BuildKit cache mount nixpacks emits.
-	prepArgs := []string{"build", buildDir, "--out", buildDir, "--no-error-without-start",
-		"--env", fmt.Sprintf("PORT=%d", port)}
-	if !req.GetNoBuildCache() {
-		prepArgs = append(prepArgs, "--cache-key", req.GetSlug())
-	}
+	// Phase 1: generate .nixpacks/Dockerfile WITHOUT the daemon (host binary). The flags
+	// that shape the PLAN are collected apart, so `nixpacks plan` can be asked for the
+	// same one below (nixpacksOwnVariables).
+	planFlags := []string{"--env", fmt.Sprintf("PORT=%d", port)}
 	// Restrict the install phase to the manifests where that is provably safe, so
 	// a code change stops rebuilding (and re-exporting) the dependency layer. See
 	// nixpacks_install_copy.go for the gate and the escape hatch.
@@ -263,7 +260,7 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 		e.log("warn", "could not write the nixpacks config: "+cErr.Error())
 	} else if cfg != "" {
 		defer func() { _ = os.Remove(cfg) }()
-		prepArgs = append(prepArgs, "--config", cfg)
+		planFlags = append(planFlags, "--config", cfg)
 		if len(scopeFiles) > 0 {
 			pureInstall = true
 			e.log("info", "Installing dependencies from the manifests only, so unchanged dependencies stay cached")
@@ -276,13 +273,13 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 		}
 	}
 	if c := strings.TrimSpace(spec.GetInstallCommand()); c != "" && !skipInstall {
-		prepArgs = append(prepArgs, "-i", c)
+		planFlags = append(planFlags, "-i", c)
 	}
 	if c := strings.TrimSpace(spec.GetBuildCommand()); c != "" && !skipBuild {
-		prepArgs = append(prepArgs, "-b", c)
+		planFlags = append(planFlags, "-b", c)
 	}
 	if c := strings.TrimSpace(spec.GetStartCommand()); c != "" {
-		prepArgs = append(prepArgs, "-s", c)
+		planFlags = append(planFlags, "-s", c)
 	}
 	// Pin the runtime via nixpacks' per-language env var when the user set one.
 	if version := strings.TrimSpace(spec.GetRuntimeVersion()); version != "" {
@@ -310,7 +307,7 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 			}
 		}
 		if pin {
-			prepArgs = append(prepArgs, "--env",
+			planFlags = append(planFlags, "--env",
 				fmt.Sprintf("NIXPACKS_%s_VERSION=%s", strings.ToUpper(lang), version))
 		}
 	}
@@ -319,12 +316,20 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 	// `ENV KEY=$KEY`, so the value is consumed at docker-build time (Phase 2's
 	// --build-arg), never baked into the Dockerfile text or the log.
 	for _, k := range envKeys {
-		prepArgs = append(prepArgs, "--env", k)
+		planFlags = append(planFlags, "--env", k)
 	}
 
+	// --cache-key pins the id of every BuildKit cache mount nixpacks emits; it is a
+	// build flag, so it stays out of planFlags.
+	prepArgs := append([]string{"build", buildDir, "--out", buildDir, "--no-error-without-start"}, planFlags...)
+	if !req.GetNoBuildCache() {
+		prepArgs = append(prepArgs, "--cache-key", req.GetSlug())
+	}
+
+	spawnEnv := append(envKV(req.GetEnv(), envKeys), dockerConfigEnv(req)...)
 	e.log("command", "nixpacks "+strings.Join(prepArgs, " "))
 	code, err := dockercli.SpawnEnv(ctx, 5*time.Minute, func(l string) { e.log("info", l) },
-		append(envKV(req.GetEnv(), envKeys), dockerConfigEnv(req)...), nixpacks, prepArgs...)
+		spawnEnv, nixpacks, prepArgs...)
 	if err != nil {
 		e.result(false, "nixpacks: "+err.Error(), "")
 		return false
@@ -334,8 +339,17 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 		return false
 	}
 
+	// The variables nixpacks would have fed its own `docker build`. Only DECLARED in
+	// the generated Dockerfile, so an unfed one bakes an empty string.
+	ownVars, vErr := nixpacksOwnVariables(ctx, nixpacks, buildDir, planFlags, spawnEnv,
+		append([]string{"PORT"}, envKeys...))
+	if vErr != nil {
+		e.log("warn", "could not read the nixpacks build variables, the image may miss them: "+vErr.Error())
+	}
+
 	// nixpacks also drops a convenience `build.sh` next to the Dockerfile, holding the
-	// `docker build … -t <FRESH RANDOM UUID>` it would have run itself.
+	// `docker build … -t <FRESH RANDOM UUID>` it would have run itself - with every
+	// variable's VALUE spelled out, an app's secrets included. It never survives.
 	if err := os.Remove(filepath.Join(buildDir, ".nixpacks", "build.sh")); err != nil && !os.IsNotExist(err) {
 		e.log("warn", "could not remove the generated build.sh: "+err.Error())
 	}
@@ -371,6 +385,7 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 	if publishDir == "" {
 		// App with a start command: build the generated Dockerfile directly.
 		args := s.buildArgv(req, "-f", generated, "--build-arg", fmt.Sprintf("PORT=%d", port))
+		args = appendBuildArgValues(args, ownVars)
 		args = appendBuildArgKeys(args, envKeys)
 		args = append(args, imageOutputArgs(ctx, req.GetImageRef())...)
 		args = append(args, labelArgs(req)...)
@@ -381,6 +396,7 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 	// Static publish dir: build a staging image, then nginx-wrap its output.
 	staging := "deplo-nixpacks-staging:" + imageTag(req.GetImageRef())
 	stageArgs := s.buildArgv(req, "-f", generated, "--build-arg", fmt.Sprintf("PORT=%d", port))
+	stageArgs = appendBuildArgValues(stageArgs, ownVars)
 	stageArgs = appendBuildArgKeys(stageArgs, envKeys)
 	stageArgs = append(stageArgs, imageOutputArgs(ctx, staging)...)
 	stageArgs = append(stageArgs, buildDir)
