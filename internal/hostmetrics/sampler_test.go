@@ -82,21 +82,22 @@ func TestSampler_counterResetClampsToZero(t *testing.T) {
 		t.Errorf("after counter reset: NetRx = %d, NetTx = %d, want 0/0", m.NetRx, m.NetTx)
 	}
 
-	// Recovery: the live counters the sampler just adopted as its baseline. A tick
-	// that adopted ZERO instead would report this whole since-boot total divided by
-	// the window, so a rate at or above it is the bug - and unlike a fixed ceiling,
-	// that holds on a runner busy pulling images in another package's tests.
-	rawRx, rawTx := s.prevRx, s.prevTx
+	// Recovery is about the BASELINE, not the rate: the clamped tick must adopt the
+	// LIVE counter, since adopting zero would make the next tick report the whole
+	// since-boot total as a rate. Asserted on the baseline because a rate ceiling is
+	// unmeasurable on a runner moving real bytes in another package's tests.
+	for _, c := range []struct {
+		name string
+		prev int64
+	}{{"rx", s.prevRx}, {"tx", s.prevTx}} {
+		if c.prev <= 0 || c.prev >= 1<<60 {
+			t.Errorf("after counter reset: prev%s = %d, want the live counter", c.name, c.prev)
+		}
+	}
 	time.Sleep(2 * minWindow)
 	m = s.Sample()
 	if m.NetRx < 0 || m.NetTx < 0 {
 		t.Errorf("after recovery: negative rate NetRx = %d, NetTx = %d", m.NetRx, m.NetTx)
-	}
-	if rawRx > 0 && m.NetRx >= rawRx {
-		t.Errorf("after recovery: NetRx = %d, want well under the since-boot %d", m.NetRx, rawRx)
-	}
-	if rawTx > 0 && m.NetTx >= rawTx {
-		t.Errorf("after recovery: NetTx = %d, want well under the since-boot %d", m.NetTx, rawTx)
 	}
 }
 
