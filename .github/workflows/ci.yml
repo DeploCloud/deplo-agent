@@ -45,8 +45,11 @@ jobs:
       # so a stdlib crypto/tls or crypto/x509 advisory is pre-auth surface here.
       # `go-version-file: go.mod` above means the `go` directive is also the
       # toolchain pin: bump it to patch the standard library.
+      # PINNED, not @latest: from v1.8.0 the tool itself requires Go 1.26, which
+      # the toolchain pin above deliberately is not. The advisory database is
+      # fetched at run time, so an older binary still reports today's CVEs.
       - name: govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
       - run: go test ./...
       - name: Verify it builds static for both target arches
         run: |
