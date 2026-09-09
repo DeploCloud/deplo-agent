@@ -88,6 +88,7 @@ const (
 	Agent_SetTimezone_FullMethodName         = "/deplo.agent.v1.Agent/SetTimezone"
 	Agent_TraefikConfig_FullMethodName       = "/deplo.agent.v1.Agent/TraefikConfig"
 	Agent_RestartControlPlane_FullMethodName = "/deplo.agent.v1.Agent/RestartControlPlane"
+	Agent_UpdateControlPlane_FullMethodName  = "/deplo.agent.v1.Agent/UpdateControlPlane"
 )
 
 // AgentClient is the client API for Agent service.
@@ -285,6 +286,10 @@ type AgentClient interface {
 	// Restart the container running the Deplo control plane on THIS host (agent 0 only -
 	// a remote has no panel to restart).
 	RestartControlPlane(ctx context.Context, in *RestartControlPlaneRequest, opts ...grpc.CallOption) (*RestartControlPlaneResponse, error)
+	// Update the Deplo control plane on THIS host by re-running its own installer,
+	// which is exactly what the manual tells an operator to run by hand. The agent
+	// fetches the script itself: nothing about WHAT runs comes from the caller.
+	UpdateControlPlane(ctx context.Context, in *UpdateControlPlaneRequest, opts ...grpc.CallOption) (*UpdateControlPlaneResponse, error)
 }
 
 type agentClient struct {
@@ -1083,6 +1088,16 @@ func (c *agentClient) RestartControlPlane(ctx context.Context, in *RestartContro
 	return out, nil
 }
 
+func (c *agentClient) UpdateControlPlane(ctx context.Context, in *UpdateControlPlaneRequest, opts ...grpc.CallOption) (*UpdateControlPlaneResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UpdateControlPlaneResponse)
+	err := c.cc.Invoke(ctx, Agent_UpdateControlPlane_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AgentServer is the server API for Agent service.
 // All implementations must embed UnimplementedAgentServer
 // for forward compatibility.
@@ -1278,6 +1293,10 @@ type AgentServer interface {
 	// Restart the container running the Deplo control plane on THIS host (agent 0 only -
 	// a remote has no panel to restart).
 	RestartControlPlane(context.Context, *RestartControlPlaneRequest) (*RestartControlPlaneResponse, error)
+	// Update the Deplo control plane on THIS host by re-running its own installer,
+	// which is exactly what the manual tells an operator to run by hand. The agent
+	// fetches the script itself: nothing about WHAT runs comes from the caller.
+	UpdateControlPlane(context.Context, *UpdateControlPlaneRequest) (*UpdateControlPlaneResponse, error)
 	mustEmbedUnimplementedAgentServer()
 }
 
@@ -1482,6 +1501,9 @@ func (UnimplementedAgentServer) TraefikConfig(context.Context, *TraefikConfigReq
 }
 func (UnimplementedAgentServer) RestartControlPlane(context.Context, *RestartControlPlaneRequest) (*RestartControlPlaneResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RestartControlPlane not implemented")
+}
+func (UnimplementedAgentServer) UpdateControlPlane(context.Context, *UpdateControlPlaneRequest) (*UpdateControlPlaneResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateControlPlane not implemented")
 }
 func (UnimplementedAgentServer) mustEmbedUnimplementedAgentServer() {}
 func (UnimplementedAgentServer) testEmbeddedByValue()               {}
@@ -2506,6 +2528,24 @@ func _Agent_RestartControlPlane_Handler(srv interface{}, ctx context.Context, de
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Agent_UpdateControlPlane_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateControlPlaneRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).UpdateControlPlane(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_UpdateControlPlane_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).UpdateControlPlane(ctx, req.(*UpdateControlPlaneRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Agent_ServiceDesc is the grpc.ServiceDesc for Agent service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -2692,6 +2732,10 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RestartControlPlane",
 			Handler:    _Agent_RestartControlPlane_Handler,
+		},
+		{
+			MethodName: "UpdateControlPlane",
+			Handler:    _Agent_UpdateControlPlane_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

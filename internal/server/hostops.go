@@ -1,12 +1,17 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -17,7 +22,7 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/hostinfo"
 )
 
-// The four host-level verbs behind the "hostops" capability. The agent's whole security
+// The host-level verbs behind the "hostops" capability. The agent's whole security
 // value is that the control plane can only ask for what the proto enumerates; a
 // RunCommand RPC would throw that away for convenience.
 
@@ -404,4 +409,168 @@ func removePreviewNetworks(ctx context.Context, names []string) {
 		_, _ = dockercli.Run(ctx, 20*time.Second, "network", "disconnect", "-f", n, traefikContainer)
 		_, _ = dockercli.Run(ctx, 20*time.Second, "network", "rm", n)
 	}
+}
+
+// The installer, which is also the updater: re-running it on a host that already
+// has Deplo pulls the new image, dumps the database first and puts the old image
+// back if the new one does not come up.
+var installerURL = "https://raw.githubusercontent.com/DeploCloud/deplo/main/install.sh"
+
+// Where the run is transcribed. Named in the reply because an update that did not
+// take leaves the operator on the old version with nothing to read.
+const controlPlaneUpdateLog = "/var/log/deplo-update.log"
+
+// The transient systemd unit the updater runs in. It must NOT be a child of the
+// agent: the agent's unit kills its whole cgroup on restart, which would abandon
+// an update halfway through.
+const controlPlaneUpdateUnit = "deplo-control-plane-update"
+
+// MAJOR.MINOR.PATCH and nothing else - the value reaches a script that runs as root.
+var controlPlaneVersion = regexp.MustCompile(`^[0-9]{1,5}\.[0-9]{1,5}\.[0-9]{1,5}$`)
+
+// UpdateControlPlane re-runs the Deplo installer on this host. The version is the
+// only thing the caller decides; the script itself is the agent's own constant.
+func (s *Service) UpdateControlPlane(ctx context.Context, req *pb.UpdateControlPlaneRequest) (*pb.UpdateControlPlaneResponse, error) {
+	version := strings.TrimSpace(req.GetVersion())
+	if version != "" && !controlPlaneVersion.MatchString(version) {
+		return nil, status.Errorf(codes.InvalidArgument, "%q is not a version", version)
+	}
+	id := resolveContainer(ctx, req.GetControlPlaneHint())
+	if id == "" {
+		return &pb.UpdateControlPlaneResponse{
+			Ok: false,
+			Error: "Deplo is not running as a container on this host that the agent can see, " +
+				"so it has to be updated the way it was installed.",
+		}, nil
+	}
+	dir := controlPlaneDir(ctx, id)
+	if dir == "" {
+		return &pb.UpdateControlPlaneResponse{
+			Ok:    false,
+			Error: "The agent cannot find the directory Deplo was installed in on this host.",
+		}, nil
+	}
+	script, err := installerScript(ctx, dir)
+	if err != nil {
+		return &pb.UpdateControlPlaneResponse{Ok: false, Error: err.Error()}, nil
+	}
+	if err := startInstaller(script, dir, version); err != nil {
+		return &pb.UpdateControlPlaneResponse{Ok: false, Error: err.Error()}, nil
+	}
+	return &pb.UpdateControlPlaneResponse{Ok: true, LogPath: controlPlaneUpdateLog}, nil
+}
+
+// controlPlaneDir is the directory the panel's compose project was brought up in
+// (/opt/deplo on an ordinary install), read off the container compose labelled it.
+func controlPlaneDir(ctx context.Context, id string) string {
+	res, err := dockercli.Run(ctx, 10*time.Second, "inspect", "-f",
+		`{{index .Config.Labels "com.docker.compose.project.working_dir"}}`, id)
+	if err == nil && res.Code == 0 {
+		if dir := strings.TrimSpace(res.Stdout); dir != "" && dir != "<no value>" {
+			if _, err := os.Stat(filepath.Join(dir, ".env")); err == nil {
+				return dir
+			}
+		}
+	}
+	// A panel started outside compose still lives where the installer puts it.
+	if _, err := os.Stat("/opt/deplo/.env"); err == nil {
+		return "/opt/deplo"
+	}
+	return ""
+}
+
+// installerScript downloads the current installer next to the instance it updates,
+// falling back to the copy on disk when this host cannot reach GitHub.
+func installerScript(ctx context.Context, dir string) (string, error) {
+	path := filepath.Join(dir, ".deplo-update.sh")
+	body, err := fetchInstaller(ctx)
+	if err != nil {
+		local := filepath.Join(dir, "install.sh")
+		if _, statErr := os.Stat(local); statErr == nil {
+			return local, nil
+		}
+		return "", fmt.Errorf("could not download the Deplo installer: %v", err)
+	}
+	if err := os.WriteFile(path, body, 0o700); err != nil {
+		return "", fmt.Errorf("could not write the installer to %s: %v", path, err)
+	}
+	return path, nil
+}
+
+// fetchInstaller reads the installer over HTTPS. A body that is not a script is
+// refused rather than run: a captive portal or an error page would otherwise be
+// executed as root.
+func fetchInstaller(ctx context.Context) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, installerURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s answered %d", installerURL, res.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(res.Body, 4<<20))
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.HasPrefix(body, []byte("#!")) {
+		return nil, fmt.Errorf("%s did not answer with a script", installerURL)
+	}
+	return body, nil
+}
+
+// startInstaller runs it detached, so it survives both the panel it restarts and
+// the agent that started it. systemd-run puts it in its own cgroup; without
+// systemd the process is merely re-parented, which is the best this can do.
+func startInstaller(script, dir, version string) error {
+	log, err := os.OpenFile(controlPlaneUpdateLog, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return fmt.Errorf("could not open %s: %v", controlPlaneUpdateLog, err)
+	}
+	defer log.Close()
+	args := []string{script, "--yes", "--plain", "--quiet"}
+	env := append(os.Environ(), "DEPLO_LOG_FILE="+controlPlaneUpdateLog)
+	if version != "" {
+		env = append(env, "DEPLO_VERSION="+version)
+	}
+	if systemd, lookErr := exec.LookPath("systemd-run"); lookErr == nil {
+		run := []string{
+			"--collect", "--unit=" + controlPlaneUpdateUnit,
+			"--property=StandardOutput=append:" + controlPlaneUpdateLog,
+			"--property=StandardError=append:" + controlPlaneUpdateLog,
+			"--setenv=DEPLO_LOG_FILE=" + controlPlaneUpdateLog,
+		}
+		if version != "" {
+			run = append(run, "--setenv=DEPLO_VERSION="+version)
+		}
+		run = append(run, "--working-directory="+dir, "/bin/bash")
+		cmd := exec.Command(systemd, append(run, args...)...)
+		out, runErr := cmd.CombinedOutput()
+		if runErr == nil {
+			return nil
+		}
+		// A unit of this name still running IS the answer: two installers at once
+		// on one host is the failure this refusal exists for.
+		if strings.Contains(string(out), "already exists") {
+			return fmt.Errorf("an update is already running on this host")
+		}
+		fmt.Fprintf(log, "[deplo] systemd-run failed (%v): %s\n", runErr, strings.TrimSpace(string(out)))
+	}
+	cmd := exec.Command("/bin/bash", args...)
+	cmd.Dir = dir
+	cmd.Env = env
+	cmd.Stdout, cmd.Stderr = log, log
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("could not start the installer: %v", err)
+	}
+	// Reaped in the background: the agent outlives the panel it just replaced.
+	go func() { _ = cmd.Wait() }()
+	return nil
 }

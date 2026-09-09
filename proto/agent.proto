@@ -270,9 +270,9 @@ service Agent {
   // and hot-reloads its TLS config so new handshakes present the fresh cert.
   rpc InstallRenewedCert(InstallRenewedCertRequest) returns (StackResult);
 
-  // ---- HOST OPS: the four host-level actions the Servers page needs, none of which is
-  // scoped to an app. Gated behind ONE "hostops" capability - they ship in the same
-  // release, so four flags would buy nothing.
+  // ---- HOST OPS: the host-level actions the Servers page needs, none of which is
+  // scoped to an app. The first four are gated behind ONE "hostops" capability - they
+  // shipped in the same release, so four flags would have bought nothing.
 
   // Static host identity - the neofetch answer, not the gauge.
   rpc HostInfo(HostInfoRequest) returns (HostInfoResponse);
@@ -288,6 +288,11 @@ service Agent {
   // Restart the container running the Deplo control plane on THIS host (agent 0 only -
   // a remote has no panel to restart).
   rpc RestartControlPlane(RestartControlPlaneRequest) returns (RestartControlPlaneResponse);
+
+  // Update the Deplo control plane on THIS host by re-running its own installer,
+  // which is exactly what the manual tells an operator to run by hand. The agent
+  // fetches the script itself: nothing about WHAT runs comes from the caller.
+  rpc UpdateControlPlane(UpdateControlPlaneRequest) returns (UpdateControlPlaneResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -1946,4 +1951,23 @@ message RestartControlPlaneResponse {
   // The container the agent is about to restart, echoed back so the operator can
   // see WHICH thing was named.
   string container = 3;
+}
+
+message UpdateControlPlaneRequest {
+  // The caller's own hostname / container id - see HostInfoRequest.
+  string control_plane_hint = 1;
+  // The version to install ("0.1.1"), or "" to take whatever the installer
+  // resolves as the latest release. MAJOR.MINOR.PATCH, refused otherwise: it
+  // becomes an environment variable for a script that runs as root.
+  string version = 2;
+}
+
+message UpdateControlPlaneResponse {
+  // True => the updater was STARTED, not finished. It outlives this call and
+  // takes the panel down with it, so the agent cannot report the outcome; the
+  // control plane learns it by coming back on a new version.
+  bool ok = 1;
+  string error = 2;
+  // Where the run is transcribed on the host, for an update that did not take.
+  string log_path = 3;
 }

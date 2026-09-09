@@ -237,6 +237,10 @@ var Capabilities = []string{
 	// deny had swallowed - so an imported stack gets the files its own YAML binds.
 	// Its own string because the tag moves.
 	"host-path-copy.stack-files",
+	// UpdateControlPlane: the panel updates ITSELF from its own dashboard, by this
+	// agent re-running the Deplo installer on the host. Absent means the control
+	// plane must fall back on telling the operator the command.
+	"control-plane.update",
 }
 
 // AgentVersion is the version this agent reports over Hello. "dev" for a build that

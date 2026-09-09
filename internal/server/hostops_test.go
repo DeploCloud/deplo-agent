@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -268,4 +270,99 @@ func serviceWithTraefik(t *testing.T, yaml string) (*Service, string) {
 	svc := New(t.TempDir(), t.TempDir(), "/", "")
 	svc.SetAgentDir(agentDir)
 	return svc, path
+}
+
+func TestUpdateControlPlaneRefusesAVersionThatIsNotOne(t *testing.T) {
+	svc := New(t.TempDir(), t.TempDir(), "/", "")
+
+	// The value becomes an environment variable for a script that runs as root,
+	// so the shapes that matter are the ones carrying a second command.
+	for _, version := range []string{"latest", "0.1", "0.1.1; rm -rf /", "$(id)", "0.1.1 --flag"} {
+		res, err := svc.UpdateControlPlane(context.Background(),
+			&pb.UpdateControlPlaneRequest{ControlPlaneHint: "deplo", Version: version})
+		if err == nil {
+			t.Fatalf("version %q must be refused, got %+v", version, res)
+		}
+	}
+}
+
+func TestUpdateControlPlaneRefusesAnUnresolvableHint(t *testing.T) {
+	svc := New(t.TempDir(), t.TempDir(), "/", "")
+
+	for _, hint := range []string{"", "definitely-not-a-container-abc123"} {
+		res, err := svc.UpdateControlPlane(context.Background(),
+			&pb.UpdateControlPlaneRequest{ControlPlaneHint: hint, Version: "0.1.1"})
+		if err != nil {
+			t.Fatalf("unexpected RPC error: %v", err)
+		}
+		if res.GetOk() {
+			t.Fatalf("hint %q must not start an installer", hint)
+		}
+		if res.GetError() == "" {
+			t.Errorf("hint %q must explain the refusal", hint)
+		}
+	}
+}
+
+func TestInstallerScriptRefusesABodyThatIsNotAScript(t *testing.T) {
+	dir := t.TempDir()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// A captive portal, a proxy error page, a repository that moved: anything
+		// but a script must never reach a root shell.
+		w.Write([]byte("<html>Sign in to this network</html>"))
+	}))
+	defer srv.Close()
+	restore := installerURL
+	installerURL = srv.URL
+	defer func() { installerURL = restore }()
+
+	if _, err := installerScript(context.Background(), dir); err == nil {
+		t.Fatal("an HTML body must not be accepted as the installer")
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".deplo-update.sh")); err == nil {
+		t.Error("nothing may be written when the download is not a script")
+	}
+}
+
+func TestInstallerScriptWritesTheDownloadedScript(t *testing.T) {
+	dir := t.TempDir()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte("#!/usr/bin/env bash\necho deplo\n"))
+	}))
+	defer srv.Close()
+	restore := installerURL
+	installerURL = srv.URL
+	defer func() { installerURL = restore }()
+
+	path, err := installerScript(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("the installer was not written: %v", err)
+	}
+	// It runs as root: nobody else on the host may edit it between here and there.
+	if info.Mode().Perm() != 0o700 {
+		t.Errorf("installer mode is %v, want 0700", info.Mode().Perm())
+	}
+}
+
+func TestInstallerScriptFallsBackToTheCopyOnDisk(t *testing.T) {
+	dir := t.TempDir()
+	local := filepath.Join(dir, "install.sh")
+	if err := os.WriteFile(local, []byte("#!/bin/bash\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	restore := installerURL
+	installerURL = "https://127.0.0.1:1/install.sh" // nothing answers here
+	defer func() { installerURL = restore }()
+
+	path, err := installerScript(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("a host that cannot reach GitHub must still update: %v", err)
+	}
+	if path != local {
+		t.Errorf("path = %q, want the copy on disk %q", path, local)
+	}
 }
