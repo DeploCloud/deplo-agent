@@ -41,8 +41,7 @@ the migration importer, which have to match what is on the source host.
 
 [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/):
 `type(scope): imperative lowercase summary`. **Title 50 characters or fewer, no trailing period.**
-Body only when the why does not fit the title, 2-3 lines at most. Commit straight to `main`; never
-create a branch.
+Body only when the why does not fit the title, 2-3 lines at most. Commit straight to `main`.
 
 ```
 fix(volumecopy): refuse an export of a missing volume
@@ -97,4 +96,4 @@ on staged Markdown and YAML. CI additionally runs `govulncheck` and the full tes
 The git tag is the only version source - `git describe` stamps the binary, there is no version file.
 A `v*` tag publishes `deplo-agent-linux-amd64`, `deplo-agent-linux-arm64` and `checksums.txt`; the
 control plane resolves the latest release and pins the checksum, so those asset names are a
-contract. **Never tag on your own initiative.**
+contract. **Tag only when the owner asks for a release**, never on your own initiative.
