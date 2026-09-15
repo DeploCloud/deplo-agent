@@ -8,8 +8,6 @@ import (
 	"time"
 )
 
-// writeProcNetNs fakes /proc/<pid>/ns/net. The kernel makes it a symlink whose
-// INODE is the namespace identity, so sharing a namespace is a hard link here.
 func writeProcNetNs(t *testing.T, procRoot string, pid int, shareWith string) string {
 	t.Helper()
 	dir := filepath.Join(procRoot, strconv.Itoa(pid), "ns")
@@ -33,9 +31,7 @@ func runningEntry(id, name, project string, pid int, cg string) rosterEntry {
 	return rosterEntry{ID: id, Name: name, ProjectID: project, State: "running", PID: pid, CgroupPath: cg}
 }
 
-// A compose sidecar on `network_mode: service:x` reads the SAME counters as the
-// container it joins. Both must report the same namespace id so the control plane
-// can sum that traffic once instead of doubling the stack's network.
+// A compose sidecar on `network_mode: service:x` reads the SAME counters as the container it joins.
 func TestCgroupSampler_SidecarsShareANamespaceId(t *testing.T) {
 	tmp := t.TempDir()
 	proc := filepath.Join(tmp, "proc")
@@ -43,7 +39,6 @@ func TestCgroupSampler_SidecarsShareANamespaceId(t *testing.T) {
 	cgB := filepath.Join(tmp, "cg", "b")
 	writeCgroupFiles(t, cgA, fullCgroup())
 	writeCgroupFiles(t, cgB, fullCgroup())
-	// One namespace, two containers in it, and the same counters visible in both.
 	ns := writeProcNetNs(t, proc, 100, "")
 	writeProcNetNs(t, proc, 101, ns)
 	writeProcNetDev(t, proc, 100, goldenNetDev)
@@ -73,15 +68,12 @@ func TestCgroupSampler_SidecarsShareANamespaceId(t *testing.T) {
 	}
 }
 
-// `network_mode: host` puts the container in the agent's own namespace, where
-// /proc/<pid>/net/dev is the WHOLE MACHINE's counters. An idle container reported
-// 51 GB of traffic that way, so the agent must report nothing and say why.
+// `network_mode: host` puts the container in the agent's own namespace, where /proc/<pid>/net/dev is the WHOLE MACHINE's counters.
 func TestCgroupSampler_HostNetworkingReportsNoTrafficOfItsOwn(t *testing.T) {
 	tmp := t.TempDir()
 	proc := filepath.Join(tmp, "proc")
 	cg := filepath.Join(tmp, "cg", "host-net")
 	writeCgroupFiles(t, cg, fullCgroup())
-	// The agent's namespace IS the host's; the container joins it.
 	hostNs := writeProcNetNs(t, proc, os.Getpid(), "")
 	writeProcNetNs(t, proc, 200, hostNs)
 	writeProcNetDev(t, proc, 200, goldenNetDev)
@@ -99,7 +91,6 @@ func TestCgroupSampler_HostNetworkingReportsNoTrafficOfItsOwn(t *testing.T) {
 	if st.NetRx != 0 || st.NetTx != 0 {
 		t.Errorf("net = %d/%d, want 0/0 - those bytes belong to the host chart", st.NetRx, st.NetTx)
 	}
-	// Everything else still measures: only the network is somebody else's.
 	if st.MemUsed == 0 || st.Pids == 0 {
 		t.Errorf("memory/pids were dropped too: mem=%d pids=%d", st.MemUsed, st.Pids)
 	}

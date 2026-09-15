@@ -7,44 +7,32 @@ import (
 	"time"
 )
 
-// When the caller's context is cancelled mid-run, CommandContext SIGKILLs the child and
-// Wait() returns an *exec.ExitError with ExitCode()==-1.
+// When the caller's context is cancelled mid-run, CommandContext SIGKILLs the child and Wait() returns an *exec.ExitError with ExitCode()==-1.
 func TestStream_cancellationReportsClearError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	// Cancel almost immediately so the child is killed during/just after spawn.
 	go func() {
 		time.Sleep(5 * time.Millisecond)
 		cancel()
 	}()
-	// `docker logs -f` follows forever, guaranteeing the cancel lands mid-run on
-	// a host with docker. The container name is bogus; either it blocks on
-	// follow (cancelled) or docker errors fast (spawn/daemon path).
 	_, err := Stream(ctx, 30*time.Second, func(string) {}, "", "logs", "-f", "deplo-nonexistent-cancel-test")
 	if err == nil {
 		t.Skip("command completed before cancellation (no docker / fast error path)")
 	}
-	// Accept either the explicit cancellation message OR a docker spawn/daemon error
-	// (docker absent) - both are non-"-1"-exit error paths.
 	if ctx.Err() == context.Canceled && !strings.Contains(err.Error(), "canceled") &&
 		!strings.Contains(err.Error(), "Cannot connect") && !strings.Contains(err.Error(), "docker") {
 		t.Fatalf("cancellation should surface a clear error, got: %v", err)
 	}
 }
 
-// TraefikRunning detects a running Traefik container on the host (what routes
-// deploys). Verified against real docker: false with none present, true once a
-// throwaway traefik is up. Skips cleanly when docker is unavailable.
+// TraefikRunning detects a running Traefik container on the host (what routes deploys).
 func TestTraefikRunning(t *testing.T) {
 	ctx := context.Background()
 	if !Available(ctx) {
 		t.Skip("docker unavailable")
 	}
 	const name = "deplo-traefik-dockercli-test"
-	// Best-effort cleanup of any leftover from a prior run.
 	_, _ = Run(ctx, 15*time.Second, "rm", "-f", name)
 
-	// Start a throwaway traefik (no ports, just `version` then sleep so the image
-	// name shows in `docker ps`). The detection matches the image substring.
 	res, err := Run(ctx, 60*time.Second, "run", "-d", "--name", name,
 		"--entrypoint", "sleep", "traefik:v3.7", "30")
 	if err != nil || res.Code != 0 {
@@ -59,16 +47,12 @@ func TestTraefikRunning(t *testing.T) {
 	if _, err := Run(ctx, 15*time.Second, "rm", "-f", name); err != nil {
 		t.Fatalf("cleanup rm: %v", err)
 	}
-	// A brief settle, then it should read false again (assuming no OTHER traefik
-	// runs on this host; if one does, skip rather than fail).
 	if TraefikRunning(ctx) {
 		t.Skip("another traefik is running on this host; can't assert the false case")
 	}
 }
 
-// ImageExportOptsSupported decides whether builds may pass `--output type=image,…` - a
-// flag the containerd image store accepts and the classic graphdriver store rejects
-// outright, so a wrong answer breaks every build rather than merely slowing one.
+// ImageExportOptsSupported decides whether builds may pass `--output type=image,…` - a flag the containerd image store accepts and the classic graphdriver store rejects outright, so a wrong answer breaks every build rather than merely slowing one.
 func TestImageExportOptsSupported(t *testing.T) {
 	ctx := context.Background()
 	if !Available(ctx) {
@@ -93,8 +77,6 @@ func TestImageExportOptsSupported(t *testing.T) {
 			got, containerd, bx.Code == 0)
 	}
 
-	// Sticky: with the probe cached, a context that is already dead must still
-	// return the same answer - proof no further docker call is made.
 	dead, cancel := context.WithCancel(ctx)
 	cancel()
 	if got := ImageExportOptsSupported(dead); got != want {
@@ -102,15 +84,11 @@ func TestImageExportOptsSupported(t *testing.T) {
 	}
 }
 
-// An inconclusive probe (docker unreachable) must NOT be cached: a daemon that
-// was momentarily down would otherwise be treated as slow for the life of the
-// agent, silently costing every later build the compression tax.
+// An inconclusive probe (docker unreachable) must NOT be cached: a daemon that was momentarily down would otherwise be treated as slow for the life of the agent, silently costing every later build the compression tax.
 func TestImageExportProbeDoesNotCacheInconclusive(t *testing.T) {
 	resetImageExportProbe()
 	t.Cleanup(resetImageExportProbe)
 
-	// A cancelled context makes `docker info` fail to run at all - the
-	// inconclusive path.
 	dead, cancel := context.WithCancel(context.Background())
 	cancel()
 	if ImageExportOptsSupported(dead) {
@@ -124,9 +102,7 @@ func TestImageExportProbeDoesNotCacheInconclusive(t *testing.T) {
 	}
 }
 
-// BuildCachePruneCap must name a flag family the local CLI ACTUALLY accepts: buildx
-// renamed `--keep-storage` to `--max-used-space`/`--min-free-space`, and Docker 29
-// dropped the old name, so guessing turns a routine cleanup sweep into a hard error.
+// BuildCachePruneCap must name a flag family the local CLI ACTUALLY accepts: buildx renamed `--keep-storage` to `--max-used-space`/`--min-free-space`, and Docker 29 dropped the old name, so guessing turns a routine cleanup sweep into a hard error.
 func TestBuildCachePruneCap(t *testing.T) {
 	ctx := context.Background()
 	if !Available(ctx) {
@@ -139,7 +115,6 @@ func TestBuildCachePruneCap(t *testing.T) {
 	var args []string
 	switch mode {
 	case PruneCapModern:
-		// 1 PB ceiling / 1 byte free target: accepted, reclaims nothing.
 		args = []string{"builder", "prune", "--force", "--max-used-space", "1000000000000000", "--min-free-space", "1"}
 	case PruneCapLegacy:
 		args = []string{"builder", "prune", "--force", "--keep-storage", "1000000000000000"}
@@ -156,8 +131,6 @@ func TestBuildCachePruneCap(t *testing.T) {
 		t.Fatalf("probe chose %q but docker rejected %v: %s", mode, args, strings.TrimSpace(res.Stderr))
 	}
 
-	// Sticky: a cancelled context must still yield the same answer, proving the
-	// probe is not re-run per sweep.
 	dead, cancel := context.WithCancel(ctx)
 	cancel()
 	if got := BuildCachePruneCap(dead); got != mode {
@@ -165,22 +138,17 @@ func TestBuildCachePruneCap(t *testing.T) {
 	}
 }
 
-// redactArgs must mask any secret-bearing token so a failed dump/restore never
-// echoes a cleartext password into an error string the control plane logs.
+// redactArgs must mask any secret-bearing token so a failed dump/restore never echoes a cleartext password into an error string the control plane logs.
 func TestRedactArgs(t *testing.T) {
 	cases := []struct {
 		in   []string
 		want string
 	}{
-		// Inline KEY=VALUE secret env: value hidden, key kept.
 		{[]string{"exec", "-e", "PGPASSWORD=hunter2", "c", "pg_dump"}, "exec -e PGPASSWORD=*** c pg_dump"},
 		{[]string{"exec", "-e", "MYSQL_PWD=s3cret", "c"}, "exec -e MYSQL_PWD=*** c"},
-		// Bare -e NAME (no value) is NOT a secret value - left intact.
 		{[]string{"exec", "-e", "PGPASSWORD", "c", "pg_dump"}, "exec -e PGPASSWORD c pg_dump"},
-		// Value after a secret flag is masked.
 		{[]string{"exec", "c", "redis-cli", "-a", "topsecret", "PING"}, "exec c redis-cli -a *** PING"},
 		{[]string{"exec", "c", "mongodump", "-p", "pw", "--archive"}, "exec c mongodump -p *** --archive"},
-		// A non-secret env (no PASSWORD/SECRET) is untouched.
 		{[]string{"exec", "-e", "PGHOST=db", "c"}, "exec -e PGHOST=db c"},
 	}
 	for _, tc := range cases {
@@ -190,9 +158,7 @@ func TestRedactArgs(t *testing.T) {
 	}
 }
 
-// A pool of its own is not the same as ROOM: reading daemon.json for the presence of
-// the key called one /24 - a single network - "widened", and never saw a pool passed
-// as a daemon flag at all.
+// A pool of its own is not the same as ROOM: reading daemon.json for the presence of the key called one /24 - a single network - "widened", and never saw a pool passed as a daemon flag at all.
 func TestParseAddressPools(t *testing.T) {
 	for doc, want := range map[string]int{
 		"null":                                 0,
@@ -229,8 +195,7 @@ func TestNonEmptyLines(t *testing.T) {
 	}
 }
 
-// Server is the ONE `docker version` Hello pays for; the two readers it replaced
-// must keep answering exactly what they did.
+// Server is the ONE `docker version` Hello pays for; the two readers it replaced must keep answering exactly what they did.
 func TestServer_matchesAvailableAndServerVersion(t *testing.T) {
 	ctx := context.Background()
 	if !Available(ctx) {

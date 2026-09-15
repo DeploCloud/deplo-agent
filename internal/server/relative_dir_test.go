@@ -9,7 +9,7 @@ func TestRelativeDirKeepsADotDir(t *testing.T) {
 		"./dist":  "dist",
 		"/dist":   "dist",
 		"  _site": "_site",
-		".next":   ".next", // a dot-dir, not a leading "./"
+		".next":   ".next",
 		"./.next": ".next",
 	} {
 		if got := relativeDir(in); got != want {

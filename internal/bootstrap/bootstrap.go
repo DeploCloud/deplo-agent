@@ -1,8 +1,4 @@
-// Package bootstrap is the agent side of the call-home provisioning handshake (PLAN
-// Part B, P1-P4).
 package bootstrap
-
-// https://deplo.build/docs/concepts/servers-and-the-agent
 
 import (
 	"bytes"
@@ -27,9 +23,9 @@ import (
 
 // Materials are the persisted mTLS files the agent serves with after bootstrap.
 type Materials struct {
-	CertPath string // agent's signed server cert (PEM)
-	KeyPath  string // agent's private key (PEM) - generated here, never sent
-	CAPath   string // pinned CA cert (PEM)
+	CertPath string
+	KeyPath  string
+	CAPath   string
 }
 
 // Paths returns the standard material paths under agentDir.
@@ -41,8 +37,7 @@ func Paths(agentDir string) Materials {
 	}
 }
 
-// Provisioned reports whether the agent already has its materials (so a restart
-// skips bootstrap and serves straight away).
+// Provisioned reports whether the agent already has its materials (so a restart skips bootstrap and serves straight away).
 func Provisioned(agentDir string) bool {
 	m := Paths(agentDir)
 	for _, p := range []string{m.CertPath, m.KeyPath, m.CAPath} {
@@ -61,8 +56,7 @@ type Config struct {
 	Token string
 	// Fingerprint is the expected control-plane cert sha256 (HTTPS only); "" => HTTP.
 	Fingerprint string
-	// AgentPort is the port the agent will serve gRPC on (reported to the control
-	// plane so it knows where to dial back).
+	// AgentPort is the port the agent will serve gRPC on (reported to the control plane so it knows where to dial back).
 	AgentPort int
 	// AdvertisedHost is what the agent believes its address is (informational).
 	AdvertisedHost string
@@ -83,15 +77,13 @@ type callHomeResponse struct {
 	Error   string `json:"error,omitempty"`
 }
 
-// Run performs the bootstrap and writes the materials. Returns the Materials
-// paths on success. Idempotent in spirit: callers should check Provisioned first.
+// Run performs the bootstrap and writes the materials.
 func Run(cfg Config) (Materials, error) {
 	mats := Paths(cfg.AgentDir)
 	if err := os.MkdirAll(cfg.AgentDir, 0o700); err != nil {
 		return mats, fmt.Errorf("create agent dir: %w", err)
 	}
 
-	// 1. Generate our own key + CSR. The private key never leaves this host.
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return mats, fmt.Errorf("generate key: %w", err)
@@ -105,7 +97,6 @@ func Run(cfg Config) (Materials, error) {
 	_ = pub
 	csrPem := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER}))
 
-	// 2. Call home, authenticating the control plane first (P2/P3).
 	resp, rawBody, mac, err := callHome(cfg, csrPem)
 	if err != nil {
 		return mats, err
@@ -117,9 +108,6 @@ func Run(cfg Config) (Materials, error) {
 		return mats, fmt.Errorf("control plane returned no certificate")
 	}
 
-	// 3. Over plain HTTP, verify the response HMAC binds it to the token (P2). Over
-	// HTTPS the fingerprint pin already authenticated the peer, but verifying the
-	// MAC when present is harmless belt-and-suspenders.
 	if cfg.Fingerprint == "" {
 		if mac == "" {
 			return mats, fmt.Errorf("control plane did not sign the bootstrap response (refusing over plain HTTP)")
@@ -129,9 +117,6 @@ func Run(cfg Config) (Materials, error) {
 		}
 	}
 
-	// 4. The single-use token is already spent by now, so a partial write here would wedge
-	// the agent: a restart re-runs bootstrap (materials incomplete → Provisioned=false)
-	// with a token the control plane will reject.
 	keyDER, err := x509.MarshalPKCS8PrivateKey(priv)
 	if err != nil {
 		return mats, fmt.Errorf("marshal key: %w", err)
@@ -143,7 +128,6 @@ func Run(cfg Config) (Materials, error) {
 		data       []byte
 		perm       os.FileMode
 	}
-	// Order: key first (0600 preserved), then cert, then CA.
 	staged := []material{
 		{tmp: mats.KeyPath + ".tmp", final: mats.KeyPath, data: keyPem, perm: 0o600},
 		{tmp: mats.CertPath + ".tmp", final: mats.CertPath, data: []byte(resp.CertPem), perm: 0o600},
@@ -154,16 +138,13 @@ func Run(cfg Config) (Materials, error) {
 			_ = os.Remove(m.tmp)
 		}
 	}
-	// Stage: write each material to its temp file (same dir → rename is atomic).
 	for _, m := range staged {
-		// Clear any leftover temp so the requested perm applies on a fresh create.
 		_ = os.Remove(m.tmp)
 		if err := os.WriteFile(m.tmp, m.data, m.perm); err != nil {
 			cleanupTmps()
 			return mats, fmt.Errorf("stage %s: %w", filepath.Base(m.final), err)
 		}
 	}
-	// Commit: flip every staged temp into place only now that all are on disk.
 	for _, m := range staged {
 		if err := os.Rename(m.tmp, m.final); err != nil {
 			cleanupTmps()
@@ -173,8 +154,6 @@ func Run(cfg Config) (Materials, error) {
 	return mats, nil
 }
 
-// callHome POSTs the CSR + token and returns the parsed response, the raw body
-// bytes (for HMAC verification), and the response MAC header.
 func callHome(cfg Config, csrPem string) (callHomeResponse, []byte, string, error) {
 	body, _ := json.Marshal(callHomeRequest{
 		Token:          cfg.Token,
@@ -215,14 +194,11 @@ func callHome(cfg Config, csrPem string) (callHomeResponse, []byte, string, erro
 	return parsed, raw, res.Header.Get("x-deplo-bootstrap-mac"), nil
 }
 
-// pinnedTransport builds an http.Transport that trusts the control plane IFF the
-// presented leaf cert's sha256 matches the expected fingerprint - Let's-Encrypt or
-// self-signed alike (P3).
 func pinnedTransport(expected string) *http.Transport {
 	want := strings.ToLower(strings.ReplaceAll(expected, ":", ""))
 	return &http.Transport{
 		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true, // pin replaces chain verification (P3)
+			InsecureSkipVerify: true,
 			VerifyConnection: func(cs tls.ConnectionState) error {
 				if len(cs.PeerCertificates) == 0 {
 					return fmt.Errorf("control plane presented no certificate")

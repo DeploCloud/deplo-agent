@@ -19,36 +19,17 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// probehttp.go answers ProbeHttp: ONE bounded HTTP GET to a container of an app's own
-// stack, from the host, over Docker's network. It exists because a compose app's icon
-// is not a file. The security property is the address: the CALLER never supplies one.
-
 const (
-	// Default and ceiling for the returned body. The ceiling is what makes the
-	// RPC bounded no matter what a caller asks for; it comfortably clears the
-	// control plane's 512 KiB logo cap plus a large HTML document.
 	probeDefaultMaxBytes = 512 * 1024
 	probeMaxBytes        = 2 * 1024 * 1024
-	// Whole-request budget, dial included. An app that cannot answer this fast is
-	// treated as having no icon - detection is cosmetic and must never hold a
-	// deploy or a page open.
-	probeTimeout = 6 * time.Second
-	// Longest path we will send. Far past any real icon URL; a guard against a
-	// caller trying to smuggle a large payload into the request line.
-	probeMaxPathLen = 2048
+	probeTimeout         = 6 * time.Second
+	probeMaxPathLen      = 2048
 )
 
-// probeHostRe is the Host header grammar: a plain hostname, optionally with a
-// port. No spaces, no CR/LF, no userinfo, no scheme - a Host header is a single
-// token and anything richer is a request-splitting attempt, not a hostname.
 var probeHostRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,253}(:[0-9]{1,5})?$`)
 
-// probeClient is shared: one client keeps connection reuse across the handful of
-// requests an icon detection makes, and pins the redirect policy in one place.
 var probeClient = &http.Client{
 	Timeout: probeTimeout,
-	// Never follow: the response says where it was sent, and the control plane
-	// decides whether that target is still this app.
 	CheckRedirect: func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	},
@@ -58,9 +39,6 @@ var probeClient = &http.Client{
 func (s *Service) ProbeHttp(ctx context.Context, req *pb.ProbeHttpRequest) (*pb.ProbeHttpResponse, error) {
 	projectID := req.GetProjectId()
 	if projectID == "" {
-		// Without the label filter the container lookup would range over every
-		// container on the host - the same cross-tenant enumeration ListInstances
-		// refuses.
 		return nil, status.Error(codes.InvalidArgument, "project_id is required")
 	}
 	port := req.GetPort()
@@ -82,7 +60,6 @@ func (s *Service) ProbeHttp(ctx context.Context, req *pb.ProbeHttpRequest) (*pb.
 	return probeOnce(ctx, net.JoinHostPort(ip, strconv.Itoa(int(port))), path, host, int(req.GetMaxBytes()))
 }
 
-// probeOnce is the request itself, against an address the caller has already resolved.
 func probeOnce(ctx context.Context, addr, path, host string, maxBytes int) (*pb.ProbeHttpResponse, error) {
 	if maxBytes <= 0 {
 		maxBytes = probeDefaultMaxBytes
@@ -96,8 +73,6 @@ func probeOnce(ctx context.Context, addr, path, host string, maxBytes int) (*pb.
 		return nil, status.Errorf(codes.InvalidArgument, "bad request target: %v", err)
 	}
 	if host != "" {
-		// Go sends req.Host as the Host header while still dialling the URL's
-		// address - the container IP stays the destination.
 		hreq.Host = host
 	}
 	hreq.Header.Set("User-Agent", "deplo-agent/"+AgentVersion)
@@ -105,14 +80,10 @@ func probeOnce(ctx context.Context, addr, path, host string, maxBytes int) (*pb.
 
 	resp, err := probeClient.Do(hreq)
 	if err != nil {
-		// The app is not answering on that port (still booting, wrong service,
-		// listening elsewhere). Unavailable, not an agent failure.
 		return nil, status.Errorf(codes.Unavailable, "probe %s: %v", path, err)
 	}
 	defer resp.Body.Close()
 
-	// Read one byte past the cap so a body that exactly fills it is not reported
-	// as truncated, and a longer one always is.
 	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxBytes)+1))
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "read %s: %v", path, err)
@@ -130,9 +101,6 @@ func probeOnce(ctx context.Context, addr, path, host string, maxBytes int) (*pb.
 	}, nil
 }
 
-// validateProbePath rejects anything that is not a plain absolute request path.
-// A path arrives off the wire and goes into a request line, so a space or a
-// CR/LF in it is request smuggling, not a typo.
 func validateProbePath(path string) error {
 	if path == "" || !strings.HasPrefix(path, "/") {
 		return status.Error(codes.InvalidArgument, "path must start with /")
@@ -148,8 +116,6 @@ func validateProbePath(path string) error {
 	return nil
 }
 
-// resolveStackContainerIP finds the container serving `service` in the app's stack and
-// returns the IP to talk to it on.
 func resolveStackContainerIP(ctx context.Context, projectID, slug, service string) (string, error) {
 	rows, err := listProjectContainers(ctx, projectID)
 	if err != nil {
@@ -179,10 +145,6 @@ func resolveStackContainerIP(ctx context.Context, projectID, slug, service strin
 	return ip, nil
 }
 
-// containerIP reads a container's address from Docker, preferring the `deplo` network
-// (the one Traefik reaches it on) and falling back to any other network it joined - a
-// container that is only on its own compose network is still perfectly reachable from
-// the host.
 func containerIP(ctx context.Context, container string) (string, error) {
 	res, err := dockercli.Run(ctx, 10*time.Second,
 		"inspect", "-f", "{{json .NetworkSettings.Networks}}", container)
@@ -199,8 +161,6 @@ func containerIP(ctx context.Context, container string) (string, error) {
 	return ip, nil
 }
 
-// pickContainerIP parses `docker inspect`'s network map and picks the address to use.
-// Split out from the docker call so the preference order is directly testable.
 func pickContainerIP(stdout string) (string, error) {
 	var nets map[string]struct {
 		IPAddress         string `json:"IPAddress"`
@@ -219,11 +179,6 @@ func pickContainerIP(stdout string) (string, error) {
 		}
 		return n.GlobalIPv6Address
 	}
-	// Prefer the network the app is ROUTED on - the one Traefik forwards to - so a
-	// probe reads the same address a visitor's request lands on. Since ADR-0028 that
-	// is a tenant network; `deplo` is the platform's own and no app is on it, which
-	// left this preference matching nothing and the choice falling to whichever name
-	// sorted first.
 	for name := range nets {
 		if dockercli.IsTenantNetwork(name) {
 			if ip := addrOf(name); ip != "" {
@@ -245,8 +200,6 @@ func pickContainerIP(stdout string) (string, error) {
 		}
 	}
 	if best == "" {
-		// A container on `network_mode: host` (or one whose networking is gone)
-		// has no address of its own. Nothing to probe.
 		return "", fmt.Errorf("no container IP on any network")
 	}
 	return addrOf(best), nil

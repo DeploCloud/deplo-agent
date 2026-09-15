@@ -14,7 +14,6 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
-// fakeExportFilesStream satisfies grpc.ServerStreamingServer[FilesChunk].
 type fakeExportFilesStream struct {
 	chunks []*pb.FilesChunk
 }
@@ -30,7 +29,6 @@ func (f *fakeExportFilesStream) SetTrailer(metadata.MD)       {}
 func (f *fakeExportFilesStream) SendMsg(any) error            { return nil }
 func (f *fakeExportFilesStream) RecvMsg(any) error            { return nil }
 
-// fakeImportFilesStream satisfies grpc.ClientStreamingServer[FilesChunk, StackResult].
 type fakeImportFilesStream struct {
 	in     []*pb.FilesChunk
 	i      int
@@ -73,16 +71,13 @@ func TestImportFiles_headerRequired(t *testing.T) {
 	}
 }
 
-// TestExportFiles_missingDir: a service with no files dir exports a valid empty
-// archive (not an error) - a common case (plain single-image project).
+// TestExportFiles_missingDir: a service with no files dir exports a valid empty archive (not an error) - a common case (plain single-image project).
 func TestExportFiles_missingDir(t *testing.T) {
 	svc := New(t.TempDir(), t.TempDir(), "/", "")
 	st := &fakeExportFilesStream{}
 	if err := svc.ExportFiles(&pb.ExportFilesRequest{Slug: "no-such-service"}, st); err != nil {
 		t.Fatalf("ExportFiles of a missing dir should not error: %v", err)
 	}
-	// An empty gzip+tar still produces a few framing bytes, so importing it into a
-	// fresh dir must succeed and leave the dir empty.
 	in := []*pb.FilesChunk{
 		{Frame: &pb.FilesChunk_Header_{Header: &pb.FilesChunk_Header{Slug: "no-such-service", WipeFirst: true}}},
 	}
@@ -98,20 +93,16 @@ func TestExportFiles_missingDir(t *testing.T) {
 	}
 }
 
-// TestFilesCopyRoundTrip drives ExportFiles -> (relay) -> ImportFiles against real
-// host directories (no docker needed - the files dir is a plain host dir), proving
-// the tree copies across AND that wipe-first overwrites stale destination content.
+// TestFilesCopyRoundTrip drives ExportFiles -> (relay) -> ImportFiles against real host directories (no docker needed - the files dir is a plain host dir), proving the tree copies across AND that wipe-first overwrites stale destination content.
 func TestFilesCopyRoundTrip(t *testing.T) {
 	stackDir := t.TempDir()
 	svc := New(stackDir, t.TempDir(), "/", "")
 	slug := "my-service"
 
-	// Seed the SOURCE files dir with a nested tree.
 	srcRoot := svc.filesRoot(slug)
 	mustWrite(t, filepath.Join(srcRoot, "config.yml"), "key: value\n")
 	mustWrite(t, filepath.Join(srcRoot, "sub", "nested.txt"), "nested-data\n")
 
-	// Export.
 	ex := &fakeExportFilesStream{}
 	if err := svc.ExportFiles(&pb.ExportFilesRequest{Slug: slug}, ex); err != nil {
 		t.Fatalf("ExportFiles: %v", err)
@@ -120,15 +111,12 @@ func TestFilesCopyRoundTrip(t *testing.T) {
 		t.Fatal("ExportFiles produced no chunks for a non-empty dir")
 	}
 
-	// Simulate a DIFFERENT destination host: a fresh stackDir with a DIFFERENT
-	// service instance, pre-seeded with stale junk that wipe-first must remove.
 	destStackDir := t.TempDir()
 	destSvc := New(destStackDir, t.TempDir(), "/", "")
 	destRoot := destSvc.filesRoot(slug)
 	mustWrite(t, filepath.Join(destRoot, "config.yml"), "STALE\n")
 	mustWrite(t, filepath.Join(destRoot, "leftover.txt"), "junk\n")
 
-	// Relay: header (wipe-first) then every data chunk.
 	in := []*pb.FilesChunk{
 		{Frame: &pb.FilesChunk_Header_{Header: &pb.FilesChunk_Header{Slug: slug, WipeFirst: true}}},
 	}
@@ -143,7 +131,6 @@ func TestFilesCopyRoundTrip(t *testing.T) {
 		t.Fatalf("ImportFiles failed: %+v", im.result)
 	}
 
-	// The destination now mirrors the source tree; the stale junk is gone.
 	assertFile(t, filepath.Join(destRoot, "config.yml"), "key: value\n")
 	assertFile(t, filepath.Join(destRoot, "sub", "nested.txt"), "nested-data\n")
 	if _, err := os.Stat(filepath.Join(destRoot, "leftover.txt")); !os.IsNotExist(err) {
@@ -162,9 +149,7 @@ func assertFile(t *testing.T, path, want string) {
 	}
 }
 
-// TestImportFiles_headerOnlyDoesNotWipe: a stream that announces itself and then dies
-// without sending a byte must leave the destination exactly as it was. Emptying is now
-// earned by the first real byte, the way ImportVolume already earned it.
+// TestImportFiles_headerOnlyDoesNotWipe: a stream that announces itself and then dies without sending a byte must leave the destination exactly as it was.
 func TestImportFiles_headerOnlyDoesNotWipe(t *testing.T) {
 	svc := New(t.TempDir(), t.TempDir(), "/", "")
 	slug := "keep-me"
@@ -180,14 +165,11 @@ func TestImportFiles_headerOnlyDoesNotWipe(t *testing.T) {
 	assertFile(t, filepath.Join(root, "config.yml"), "precious\n")
 }
 
-// TestImportFiles_truncatedStreamLeavesNothing: a copy that dies MID-STREAM leaves
-// nothing behind, not half a config file.
+// TestImportFiles_truncatedStreamLeavesNothing: a copy that dies MID-STREAM leaves nothing behind, not half a config file.
 func TestImportFiles_truncatedStreamLeavesNothing(t *testing.T) {
 	svc := New(t.TempDir(), t.TempDir(), "/", "")
 	slug := "half-written"
 
-	// Big and incompressible, so the truncated stream still carries most of the
-	// file: the point is that extraction gets FAR, not that it never starts.
 	big := make([]byte, 256*1024)
 	if _, err := rand.Read(big); err != nil {
 		t.Fatalf("seed bytes: %v", err)
@@ -205,13 +187,10 @@ func TestImportFiles_truncatedStreamLeavesNothing(t *testing.T) {
 		t.Fatalf("ExportFiles: %v", err)
 	}
 
-	// The destination host: seeded, then handed a stream that stops short.
 	destSvc := New(t.TempDir(), t.TempDir(), "/", "")
 	destRoot := destSvc.filesRoot(slug)
 	mustWrite(t, filepath.Join(destRoot, "old.txt"), "was here\n")
 
-	// Everything the export produced, minus its tail: the gzip trailer goes with
-	// it, which is exactly what a relay dying mid-transfer produces.
 	var whole []byte
 	for _, c := range ex.chunks {
 		whole = append(whole, c.GetData()...)
@@ -234,8 +213,6 @@ func TestImportFiles_truncatedStreamLeavesNothing(t *testing.T) {
 	if !strings.Contains(im.result.Error, "emptied") {
 		t.Errorf("the failure must say what it did with the destination: %q", im.result.Error)
 	}
-	// Nothing at all: not the old file (the wipe was earned), and not a partial
-	// new one (the failure cleaned up after itself).
 	entries, err := os.ReadDir(destRoot)
 	if err != nil && !os.IsNotExist(err) {
 		t.Fatalf("read dest: %v", err)

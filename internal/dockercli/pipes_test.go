@@ -9,8 +9,6 @@ import (
 )
 
 func TestRunPipesSurvivesAHugeSingleStderrLine(t *testing.T) {
-	// 9 MB on stderr with no newline: a line scanner gives up at its buffer
-	// and the child blocks on the full pipe until the timeout. A writer does not.
 	ctx := context.Background()
 	cmd := exec.CommandContext(ctx, "sh", "-c", "head -c 9000000 /dev/zero | tr '\\0' x >&2; echo done")
 	var out, errb bytes.Buffer

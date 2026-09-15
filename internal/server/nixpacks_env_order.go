@@ -7,11 +7,6 @@ import (
 	"strings"
 )
 
-// Why changing one environment variable used to rebuild every dependency.
-
-// installEnvPrefixes name the environment a package manager or language toolchain reads
-// while INSTALLING, so a variable starting with one of these stays above the install
-// step even though it is the app's own.
 var installEnvPrefixes = []string{
 	"NPM_", "NODE_", "YARN_", "PNPM_", "BUN_", "COREPACK_", "NIXPACKS_",
 	"PIP_", "PYTHON", "POETRY_", "PIPENV_", "PDM_", "UV_",
@@ -21,9 +16,6 @@ var installEnvPrefixes = []string{
 	"SSL_", "CURL_", "GIT_", "NETRC",
 }
 
-// installEnvNames are the exact names outside those prefixes that still steer an
-// install: the proxy set every fetcher honours, and the CI flag package managers
-// read to pick their non-interactive behaviour.
 var installEnvNames = map[string]bool{
 	"CI":          true,
 	"HTTP_PROXY":  true,
@@ -37,19 +29,12 @@ var installEnvNames = map[string]bool{
 	"TEMP":        true,
 }
 
-// installConfigFiles are the repo files that can interpolate an environment variable
-// into the install itself - the registry/auth config every Node package manager reads
-// (`//registry.npmjs.org/:_authToken=${NPM_TOKEN}`).
 var installConfigFiles = []string{
 	".npmrc", ".yarnrc", ".yarnrc.yml", ".pnpmrc", ".bunfig.toml", ".netrc",
 }
 
-// envRefPattern matches a shell-style variable reference, `$NAME` or `${NAME}`.
 var envRefPattern = regexp.MustCompile(`\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?`)
 
-// movableBuildEnv returns the subset of the app's build variables that may be declared
-// below the install step: everything except the names that could change how
-// dependencies are installed.
 func movableBuildEnv(keys []string, buildDir, installCmd string) map[string]bool {
 	sensitive := map[string]bool{}
 	for _, name := range envRefsIn(installCmd) {
@@ -75,8 +60,6 @@ func movableBuildEnv(keys []string, buildDir, installCmd string) map[string]bool
 	return movable
 }
 
-// installSensitiveName reports whether a variable name is one an install step
-// reads by convention.
 func installSensitiveName(key string) bool {
 	upper := strings.ToUpper(key)
 	if installEnvNames[upper] {
@@ -90,7 +73,6 @@ func installSensitiveName(key string) bool {
 	return false
 }
 
-// envRefsIn returns every variable name referenced as $NAME / ${NAME} in text.
 func envRefsIn(text string) []string {
 	matches := envRefPattern.FindAllStringSubmatch(text, -1)
 	names := make([]string, 0, len(matches))
@@ -100,9 +82,6 @@ func envRefsIn(text string) []string {
 	return names
 }
 
-// deferEnvBelowInstall rewrites the generated Dockerfile's lines so the movable
-// variables are declared just before the phase that follows the install, and returns
-// the names it moved.
 func deferEnvBelowInstall(lines []string, movable map[string]bool) ([]string, []string) {
 	if countLinesWithPrefix(lines, "FROM ") != 1 {
 		return lines, nil
@@ -116,9 +95,6 @@ func deferEnvBelowInstall(lines []string, movable map[string]bool) ([]string, []
 	if len(names) == 0 || len(names) != len(pairs) {
 		return lines, nil
 	}
-	// Every entry must be the plain `ARG NAME` + `ENV NAME=$NAME` pair Nixpacks
-	// writes. A default value or a literal would mean a different generator and a
-	// different set of assumptions.
 	for i, name := range names {
 		if strings.ContainsAny(name, "=$") || pairs[i] != name+"=$"+name {
 			return lines, nil
@@ -156,9 +132,6 @@ func deferEnvBelowInstall(lines []string, movable map[string]bool) ([]string, []
 	return out, move
 }
 
-// installFollowerIndex returns the index of the section comment that follows the
-// install phase - the build phase when there is one, otherwise whatever Nixpacks emits
-// next.
 func installFollowerIndex(lines []string, after int) int {
 	install := -1
 	for i := after; i < len(lines); i++ {
@@ -172,7 +145,6 @@ func installFollowerIndex(lines []string, after int) int {
 	}
 	for i := install + 1; i < len(lines); i++ {
 		trimmed := strings.TrimSpace(lines[i])
-		// `# noop` marks an empty phase rather than starting a new one.
 		if strings.HasPrefix(trimmed, "#") && trimmed != "# noop" {
 			return i
 		}
@@ -209,16 +181,11 @@ func countLinesWithPrefix(lines []string, prefix string) int {
 	return n
 }
 
-// deferAppEnvBelowInstall applies the rewrite to the Dockerfile Nixpacks generated at
-// path, returning the variable names it moved (none when it left the file alone).
 func deferAppEnvBelowInstall(path string, envKeys []string, buildDir, installCmd string) ([]string, error) {
 	body, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	// Preserve the file's own line endings by splitting on "\n" and keeping any
-	// trailing "\r" inside the line - the prefix checks below are unaffected and
-	// an untouched line is written back byte-identical.
 	lines := strings.Split(string(body), "\n")
 	rewritten, moved := deferEnvBelowInstall(lines, movableBuildEnv(envKeys, buildDir, installCmd))
 	if len(moved) == 0 {
@@ -230,9 +197,6 @@ func deferAppEnvBelowInstall(path string, envKeys []string, buildDir, installCmd
 	return moved, nil
 }
 
-// stripAppEnv drops the app's own variables from every `ENV KEY=$KEY` line Nixpacks
-// wrote. The matching `ARG` still puts the value in each RUN's environment, so the
-// build is unchanged while the image stops carrying it in its config.
 func stripAppEnv(lines []string, app map[string]bool) ([]string, []string) {
 	var dropped []string
 	out := make([]string, 0, len(lines))
@@ -242,9 +206,6 @@ func stripAppEnv(lines []string, app map[string]bool) ([]string, []string) {
 			out = append(out, line)
 			continue
 		}
-		// Only the plain `KEY=$KEY` form Nixpacks generates. A literal or an
-		// interpolation (`ENV NIXPACKS_PATH=/app/bin:$NIXPACKS_PATH`) is a value
-		// the build itself needs, so the line is left byte-identical.
 		pairs := strings.Fields(body)
 		keep, gone := make([]string, 0, len(pairs)), []string(nil)
 		plain := len(pairs) > 0
@@ -271,8 +232,6 @@ func stripAppEnv(lines []string, app map[string]bool) ([]string, []string) {
 	return out, dropped
 }
 
-// stripAppEnvFromDockerfile applies stripAppEnv to the Dockerfile at path. Run it
-// AFTER deferAppEnvBelowInstall, which needs the `ARG`/`ENV` pair still intact.
 func stripAppEnvFromDockerfile(path string, envKeys []string) ([]string, error) {
 	body, err := os.ReadFile(path)
 	if err != nil {

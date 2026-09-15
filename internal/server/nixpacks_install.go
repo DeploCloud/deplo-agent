@@ -14,31 +14,20 @@ import (
 	"time"
 )
 
-// nixpacksVersion is the nixpacks release the agent installs on first use.
 const nixpacksVersion = "1.41.0"
 
-// ensureNixpacks returns the path to a usable nixpacks binary, installing it lazily on
-// first use (the "lazy: fetch on first use" tooling policy). The binary is cached so
-// only the first heavy nixpacks build pays the download.
 func (s *Service) ensureNixpacks(ctx context.Context, e *emitter) (string, error) {
-	// 1. An operator-installed nixpacks on PATH wins (lets a host pin its own).
 	if p, err := exec.LookPath("nixpacks"); err == nil {
 		return p, nil
 	}
 
 	toolsDir := filepath.Join(s.dataBase, "tools")
-	// Version-scope the cached binary so bumping nixpacksVersion re-downloads the new
-	// release instead of silently reusing a stale cached copy (an unversioned path would
-	// pin every server to whatever it first downloaded - the exact trap that kept broken
-	// 1.21.0 around after a bump).
 	dest := filepath.Join(toolsDir, "nixpacks-"+nixpacksVersion)
 
-	// 2. A previously-installed copy of THIS version under <dataBase>/tools.
 	if usableBinary(dest) {
 		return dest, nil
 	}
 
-	// 3. Download the pinned release for this arch and cache it.
 	e.log("info", fmt.Sprintf("Installing nixpacks %s (first use)…", nixpacksVersion))
 	url, err := nixpacksDownloadURL()
 	if err != nil {
@@ -51,16 +40,11 @@ func (s *Service) ensureNixpacks(ctx context.Context, e *emitter) (string, error
 	return dest, nil
 }
 
-// usableBinary reports whether path is an existing, executable regular file -
-// i.e. a cached tool we can run instead of re-downloading.
 func usableBinary(path string) bool {
 	fi, err := os.Stat(path)
 	return err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0
 }
 
-// nixpacksDownloadURL builds the GitHub release asset URL for this host's OS/arch.
-// nixpacks publishes per-target gzipped tarballs (e.g.
-// nixpacks-v1.21.0-x86_64-unknown-linux-musl.tar.gz).
 func nixpacksDownloadURL() (string, error) {
 	if runtime.GOOS != "linux" {
 		return "", fmt.Errorf("nixpacks auto-install supports linux only (host is %s)", runtime.GOOS)
@@ -79,8 +63,6 @@ func nixpacksDownloadURL() (string, error) {
 		nixpacksVersion, nixpacksVersion, target), nil
 }
 
-// installTarBinary fetches the gzipped tarball at url and extracts the single
-// executable named `binary` to dest (0755), atomically.
 func installTarBinary(ctx context.Context, url, binary, dest string) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return fmt.Errorf("create tools dir: %w", err)
@@ -123,8 +105,6 @@ func installTarBinary(ctx context.Context, url, binary, dest string) error {
 			return err
 		}
 		tmp := f.Name()
-		// Bound the copy to defend against a decompression bomb (256 MiB ≫ the
-		// real ~30 MiB binary, but finite).
 		if _, err := io.Copy(f, io.LimitReader(tr, 256<<20)); err != nil {
 			f.Close()
 			_ = os.Remove(tmp)

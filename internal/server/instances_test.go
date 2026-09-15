@@ -2,12 +2,8 @@ package server
 
 import "testing"
 
-// The exposed flag drives which container the console and the log viewer default
-// to. Flagging the whole stack made that default meaningless.
+// The exposed flag drives which container the console and the log viewer default to.
 func TestIsExposed(t *testing.T) {
-	// A real compose stack: the app, its database, its cache. Every container's
-	// NAME contains "-activepieces-", because the compose project is named after
-	// the slug - only the app's SERVICE is actually the exposed one.
 	cases := []struct {
 		service, expose string
 		want            bool
@@ -15,7 +11,6 @@ func TestIsExposed(t *testing.T) {
 		{"activepieces", "activepieces", true},
 		{"postgres", "activepieces", false},
 		{"redis", "activepieces", false},
-		// Nothing is exposed when the app has no primary domain.
 		{"activepieces", "", false},
 		{"postgres", "", false},
 	}
@@ -27,8 +22,6 @@ func TestIsExposed(t *testing.T) {
 }
 
 func TestParseInspectLines(t *testing.T) {
-	// Line 1 is the bug that broke the console: Config.User is empty (the image declares
-	// no USER) while WorkingDir is /app.
 	stdout := `{"name":"/deplo-core-neur1","user":"","workdir":"/app","openStdin":false,"tty":false,"state":"restarting","restartCount":88,"health":""}
 {"name":"/deplo-shop-db-1","user":"postgres","workdir":"/var/lib/postgresql","openStdin":true,"tty":true,"state":"running","restartCount":0,"health":"healthy"}
 {"name":"/deplo-shop-api-1","user":"","workdir":"","openStdin":false,"tty":false,"state":"exited","restartCount":3,"health":"unhealthy"}`
@@ -66,9 +59,7 @@ func TestParseInspectLines(t *testing.T) {
 	}
 }
 
-// A container that disappears between the `ps` and the `inspect` leaves docker
-// printing an error and a non-zero code - the surviving lines must still parse,
-// and the missing one must simply be absent rather than shifting the others.
+// A container that disappears between the `ps` and the `inspect` leaves docker printing an error and a non-zero code - the surviving lines must still parse, and the missing one must simply be absent rather than shifting the others.
 func TestParseInspectLinesSkipsGarbage(t *testing.T) {
 	stdout := `{"name":"/deplo-a","user":"","workdir":"","openStdin":false,"tty":false,"state":"running","restartCount":0,"health":""}
 
@@ -87,16 +78,11 @@ func TestServiceOf(t *testing.T) {
 	cases := []struct {
 		slug, container, want string
 	}{
-		// Compose container: deplo-<slug>-<service>-N -> <service>.
 		{"myapp", "deplo-myapp-web-1", "web"},
 		{"myapp", "deplo-myapp-worker-2", "worker"},
-		// Multi-word service with a replica index.
 		{"myapp", "deplo-myapp-api-server-1", "api-server"},
-		// Single-image deploy: the bare deplo-<slug> -> slug.
 		{"myapp", "deplo-myapp", "myapp"},
-		// A service whose name itself ends in a non-numeric segment.
 		{"myapp", "deplo-myapp-db", "db"},
-		// An unrelated container name (no deplo- prefix at all).
 		{"myapp", "some-other", "some-other"},
 	}
 	for _, c := range cases {
@@ -111,8 +97,8 @@ func TestTrimTrailingReplicaIndex(t *testing.T) {
 		"web-1":        "web",
 		"api-server-2": "api-server",
 		"db":           "db",
-		"web-":         "web-",    // trailing dash, no index
-		"web-abc":      "web-abc", // non-numeric suffix
+		"web-":         "web-",
+		"web-abc":      "web-abc",
 		"x-10":         "x",
 	}
 	for in, want := range cases {

@@ -10,9 +10,7 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// End-to-end (real docker): what "Rebuild container" is worth. This test pins both
-// halves: unchanged deploy keeps the container (that is the desirable default: an
-// unchanged reroute must not restart anything), and force_recreate replaces it.
+// End-to-end (real docker): what "Rebuild container" is worth.
 func TestE2E_ForceRecreateReplacesAnUnchangedContainer(t *testing.T) {
 	ctx := context.Background()
 	if !dockercli.Available(ctx) {
@@ -22,8 +20,6 @@ func TestE2E_ForceRecreateReplacesAnUnchangedContainer(t *testing.T) {
 	const name = "deplo-" + slug
 	s := New(t.TempDir(), t.TempDir(), "/", "")
 
-	// The smallest stack that stays up: no build, no routing, one busybox that
-	// sleeps. Byte-identical across all three deploys, which is the whole point.
 	yaml := "services:\n" +
 		"  " + name + ":\n" +
 		"    image: busybox:latest\n" +
@@ -48,10 +44,6 @@ func TestE2E_ForceRecreateReplacesAnUnchangedContainer(t *testing.T) {
 		_, _ = dockercli.Run(ctx, 60*time.Second, "rm", "-f", name)
 		_, _ = dockercli.Run(ctx, 20*time.Second, "network", "disconnect", "-f", testNetwork, traefikContainer)
 		_, _ = dockercli.Run(ctx, 20*time.Second, "network", "rm", testNetwork)
-		// Compose mints a `<project>_default` alongside whatever the file names, and
-		// it is NOT a tenant network - so the cleanup scope will never reclaim it and
-		// it sits on the host that ran the suite forever. One from 2 Aug was still
-		// here when this was written.
 		_, _ = dockercli.Run(ctx, 20*time.Second, "network", "rm", "deplo-"+slug+"_default")
 	})
 
@@ -81,15 +73,11 @@ func TestE2E_ForceRecreateReplacesAnUnchangedContainer(t *testing.T) {
 		t.Fatal("no container after the first deploy")
 	}
 
-	// Unchanged redeploy: compose sees the same config and keeps the container.
-	// This is the behaviour every ordinary deploy relies on - assert it so the
-	// force below can't be mistaken for "deploys always recreate now".
 	if again := deploy("unchanged redeploy"); again != first {
 		t.Fatalf("an unchanged redeploy replaced the container (%s → %s); "+
 			"ordinary deploys must not restart a stack that did not change", first, again)
 	}
 
-	// "Rebuild container": same stack, new container.
 	req.ForceRecreate = true
 	forced := deploy("forced rebuild")
 	if forced == first {

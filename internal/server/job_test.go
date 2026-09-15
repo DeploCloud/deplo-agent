@@ -40,8 +40,6 @@ func TestTailBufKeepsTheEnd(t *testing.T) {
 }
 
 func TestTailBufSingleOversizedWrite(t *testing.T) {
-	// One write bigger than the whole ceiling must not allocate the write:
-	// only its tail survives. This is the `RUN yes` case.
 	b := newTailBuf(4)
 	b.Write([]byte(strings.Repeat("x", 1<<20) + "END!"))
 	if !strings.HasSuffix(b.String(), "END!") {
@@ -53,9 +51,6 @@ func TestTailBufSingleOversizedWrite(t *testing.T) {
 }
 
 func TestTailBufNeverCutsARuneInHalf(t *testing.T) {
-	// "ééé" is six bytes; keeping the last three lands mid-rune. The leading
-	// continuation byte must be dropped rather than rendered as U+FFFD in the
-	// middle of every truncated log.
 	b := newTailBuf(3)
 	b.Write([]byte("ééé"))
 	got := b.String()
@@ -100,7 +95,6 @@ func TestStartJobRefusesBeyondTheLiveCap(t *testing.T) {
 		t.Fatalf("err = %v, want ResourceExhausted at the cap", err)
 	}
 
-	// A FINISHED job does not count against the cap - only live ones do.
 	for _, j := range s.jobs {
 		j.done = true
 		break
@@ -113,9 +107,6 @@ func TestStartJobRefusesBeyondTheLiveCap(t *testing.T) {
 
 func TestPollJobUnknownIsNotAnError(t *testing.T) {
 	s := newTestService(t)
-	// "I have no record of this" must be a normal answer: the control plane
-	// turns it into a `lost` run, whereas an RPC error would be indistinguishable
-	// from an unreachable host, which means the opposite (keep waiting).
 	resp, err := s.PollJob(context.Background(), &pb.PollJobRequest{JobId: "nope"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -168,8 +159,6 @@ func TestPollJobWithholdsOutputUntilTerminal(t *testing.T) {
 func TestFinishJobIsWriteOnce(t *testing.T) {
 	s := newTestService(t)
 	j := &job{startedAt: time.Now(), stdout: newTailBuf(64), stderr: newTailBuf(64)}
-	// The timeout path and the natural-exit path can race; the first outcome
-	// must win rather than the last one overwriting it.
 	s.finishJob(j, 0, false, "", "")
 	s.finishJob(j, -1, true, "", "timed out")
 	if j.exitCode != 0 || j.timedOut {
@@ -187,8 +176,6 @@ func TestKillJobIsIdempotent(t *testing.T) {
 	if err != nil || !first.GetFound() {
 		t.Fatalf("first kill: found=%v err=%v", first.GetFound(), err)
 	}
-	// Killing an unknown id, or one that already finished, answers found:false
-	// rather than erroring - the Stop button races the job's natural exit.
 	s.finishJob(j, -1, false, "", "stopped")
 	second, err := s.KillJob(context.Background(), &pb.KillJobRequest{JobId: "j1"})
 	if err != nil || second.GetFound() {
@@ -205,9 +192,6 @@ func TestStartJobReturnsBeforeTouchingDocker(t *testing.T) {
 		t.Skip("docker not available")
 	}
 	s := newTestService(t)
-	// The container does not exist, so the goroutine's assertOwned fails - but
-	// that is the POINT: the RPC must have returned long before it found out.
-	// With the checks in front of the spawn this call would take seconds.
 	start := time.Now()
 	resp, err := s.StartJob(context.Background(), &pb.StartJobRequest{
 		ProjectId: "prj_cron_test",
@@ -225,7 +209,6 @@ func TestStartJobReturnsBeforeTouchingDocker(t *testing.T) {
 		t.Fatal("no job id")
 	}
 
-	// It settles as a pre-spawn failure: exit -1 with a reason, never an RPC error.
 	deadline := time.Now().Add(20 * time.Second)
 	for time.Now().Before(deadline) {
 		p, err := s.PollJob(context.Background(), &pb.PollJobRequest{JobId: resp.GetJobId()})

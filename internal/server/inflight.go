@@ -10,36 +10,29 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
-// Retention budget for buffered LOG events.
 const (
-	maxRetainedLogBytes  = 4 << 20 // ~4 MiB of retained log text
-	maxRetainedLogEvents = 20000   // guards against a flood of tiny lines
-	// Per-event fixed overhead charged on top of the text so that even empty
-	// lines cost something toward the count/byte budget.
-	logEventOverhead = 64
+	maxRetainedLogBytes  = 4 << 20
+	maxRetainedLogEvents = 20000
+	logEventOverhead     = 64
 )
 
-// inflight tracks one deploy the agent is running (or recently finished), keyed by its
-// stable deploy id. Finished deploys are retained briefly so a control plane that
-// dropped right before the result can still fetch it.
 type inflight struct {
 	startedAt time.Time
 
 	mu       sync.Mutex
 	cond     *sync.Cond
-	events   []*pb.DeployEvent // retained events in ascending seq order (bounded)
-	lastSeq  uint64            // seq of the most recently appended event
+	events   []*pb.DeployEvent
+	lastSeq  uint64
 	phase    pb.DeployPhase
-	done     bool               // terminal result has been appended
-	finished time.Time          // when done flipped true (for retention/eviction)
-	cancel   context.CancelFunc // cancels the deploy's background context
+	done     bool
+	finished time.Time
+	cancel   context.CancelFunc
 
-	// Log-retention bookkeeping (see the budget constants above).
-	logBytes   int // retained real-log bytes (excludes the note)
-	logCount   int // retained real-log events (excludes the note)
+	logBytes   int
+	logCount   int
 	droppedLog uint64
-	noteIdx    int    // index of the truncation note in events, or -1 if none
-	noteSeq    uint64 // seq the note occupies (the first-dropped log's seq)
+	noteIdx    int
+	noteSeq    uint64
 }
 
 func newInflight(cancel context.CancelFunc) *inflight {
@@ -48,9 +41,6 @@ func newInflight(cancel context.CancelFunc) *inflight {
 	return f
 }
 
-// append stamps an event with the next seq, records phase/terminal transitions,
-// enforces the log-retention budget, and wakes every subscriber. Returns the
-// stamped event (so the live path can also forward it without re-deriving seq).
 func (f *inflight) append(ev *pb.DeployEvent) *pb.DeployEvent {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -73,8 +63,6 @@ func (f *inflight) append(ev *pb.DeployEvent) *pb.DeployEvent {
 	return ev
 }
 
-// enforceLogBudget evicts the oldest retained LOG events until the byte and count
-// budgets are satisfied, coalescing what it drops into a single note.
 func (f *inflight) enforceLogBudget() {
 	for (f.logBytes > maxRetainedLogBytes || f.logCount > maxRetainedLogEvents) && f.logCount > 1 {
 		idx := f.oldestEvictableLogIndex()
@@ -88,26 +76,18 @@ func (f *inflight) enforceLogBudget() {
 			f.noteSeq = victim.GetSeq()
 		}
 		f.droppedLog++
-		// Remove the victim from the buffer.
 		f.events = append(f.events[:idx], f.events[idx+1:]...)
 		if f.noteIdx < 0 {
-			// First eviction: drop a truncation note into the freed slot.
 			f.events = append(f.events, nil)
 			copy(f.events[idx+1:], f.events[idx:])
 			f.events[idx] = f.newNote()
 			f.noteIdx = idx
 		} else {
-			// Subsequent evictions only ever target logs AFTER the note (higher
-			// seq), so the note's index is stable; refresh its text with a NEW
-			// event value rather than mutating the one subscribers may be sending.
 			f.events[f.noteIdx] = f.newNote()
 		}
 	}
 }
 
-// oldestEvictableLogIndex returns the index of the oldest retained real LOG
-// event (skipping the truncation note and any phase/result events), or -1 if
-// there is none. Must hold f.mu.
 func (f *inflight) oldestEvictableLogIndex() int {
 	for i := range f.events {
 		if i == f.noteIdx {
@@ -120,9 +100,6 @@ func (f *inflight) oldestEvictableLogIndex() int {
 	return -1
 }
 
-// newNote builds a fresh truncation-note event reflecting the current dropped
-// count. It occupies noteSeq (the first-dropped log's seq) so it replays in
-// order for a reattacher whose cursor predates the drop. Must hold f.mu.
 func (f *inflight) newNote() *pb.DeployEvent {
 	return &pb.DeployEvent{
 		Seq: f.noteSeq,
@@ -133,8 +110,6 @@ func (f *inflight) newNote() *pb.DeployEvent {
 	}
 }
 
-// logEventSize estimates an event's retained cost: its log text plus a fixed
-// per-event overhead. Non-log events are not budgeted and return 0.
 func logEventSize(ev *pb.DeployEvent) int {
 	l := ev.GetLog()
 	if l == nil {
@@ -143,13 +118,7 @@ func logEventSize(ev *pb.DeployEvent) int {
 	return len(l.GetLevel()) + len(l.GetText()) + logEventOverhead
 }
 
-// subscribe replays buffered events with seq > fromSeq, then streams live events until
-// the deploy is done or ctx is cancelled (the SUBSCRIBER's context - i.e. the gRPC
-// stream; cancelling it detaches this reader without affecting the deploy or other
-// readers). send is the per-event sink; a send error detaches.
 func (f *inflight) subscribe(ctx context.Context, fromSeq uint64, send func(*pb.DeployEvent) error) error {
-	// A goroutine to wake the cond when the subscriber's context is cancelled,
-	// so a detached reader doesn't block forever on cond.Wait().
 	stop := make(chan struct{})
 	defer close(stop)
 	go func() {
@@ -165,8 +134,6 @@ func (f *inflight) subscribe(ctx context.Context, fromSeq uint64, send func(*pb.
 	cursor := fromSeq
 	for {
 		f.mu.Lock()
-		// Wait until there is an event past the cursor, or the deploy is done, or
-		// the subscriber went away.
 		for f.lastSeq <= cursor && !f.done && ctx.Err() == nil {
 			f.cond.Wait()
 		}
@@ -174,10 +141,6 @@ func (f *inflight) subscribe(ctx context.Context, fromSeq uint64, send func(*pb.
 			f.mu.Unlock()
 			return ctx.Err()
 		}
-		// Collect every retained event newer than the cursor, in order, then send outside the
-		// lock (send may block on the network). The buffer stays sorted by seq through
-		// evictions (the note takes the first victim's seq), so this is a binary search;
-		// COPIED, because an eviction shifts the backing array under a released lock.
 		first := sort.Search(len(f.events), func(i int) bool { return f.events[i].GetSeq() > cursor })
 		batch := append([]*pb.DeployEvent(nil), f.events[first:]...)
 		if f.lastSeq > cursor {

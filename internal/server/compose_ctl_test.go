@@ -9,9 +9,7 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// A compose stack interpolates ${VAR}; compose resolves the whole file on EVERY
-// verb, so a stop without the env-file dies at config time on `${VAR:?...}` and
-// the caller falls through to a container name a compose stack never has.
+// A compose stack interpolates ${VAR}; compose resolves the whole file on EVERY verb, so a stop without the env-file dies at config time on `${VAR:?...}` and the caller falls through to a container name a compose stack never has.
 func TestComposeCtlCarriesTheEnvFile(t *testing.T) {
 	dir := t.TempDir()
 	s := &Service{stackDir: dir}
@@ -22,7 +20,6 @@ func TestComposeCtlCarriesTheEnvFile(t *testing.T) {
 		t.Fatalf("no env-file on disk, none should be passed: %s", joined)
 	}
 
-	// Current layout: the stack's own directory, which is also the project dir.
 	projectDir := s.filesRoot(slug)
 	if err := os.MkdirAll(projectDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -42,7 +39,6 @@ func TestComposeCtlCarriesTheEnvFile(t *testing.T) {
 		t.Fatalf("verb must stay last: %s", joined)
 	}
 
-	// Pre-project-directory layout: env-file beside the stack file, no project dir.
 	if err := os.RemoveAll(projectDir); err != nil {
 		t.Fatal(err)
 	}
@@ -59,8 +55,7 @@ func TestComposeCtlCarriesTheEnvFile(t *testing.T) {
 	}
 }
 
-// The fallback names deplo-<slug>, which only a single-image app has, so its
-// "No such container" must never be the message a compose stack reports.
+// The fallback names deplo-<slug>, which only a single-image app has, so its "No such container" must never be the message a compose stack reports.
 func TestStackFailurePrefersCompose(t *testing.T) {
 	got := stackFailure(
 		dockercli.Result{Code: 1, Stderr: "required variable TORBOX_ACCOUNTS is missing a value"},

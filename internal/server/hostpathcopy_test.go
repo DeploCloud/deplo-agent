@@ -17,7 +17,6 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// fakeHostPathImportStream replays queued inbound chunks and captures the result.
 type fakeHostPathImportStream struct {
 	in     []*pb.HostPathChunk
 	i      int
@@ -49,17 +48,12 @@ func (f *fakeHostPathImportStream) SetTrailer(metadata.MD)       {}
 func (f *fakeHostPathImportStream) SendMsg(any) error            { return nil }
 func (f *fakeHostPathImportStream) RecvMsg(any) error            { return nil }
 
-// TestValidateHostPath_refusesTheSystem pins the guardrail: the roots a migration never
-// legitimately names are refused, while a real service directory UNDER one of them is
-// allowed - the other platform keeps its data at /etc/<platform>/..., so a blanket
-// subtree ban would refuse the actual use case.
+// TestValidateHostPath_refusesTheSystem pins the guardrail: the roots a migration never legitimately names are refused, while a real service directory UNDER one of them is allowed - the other platform keeps its data at /etc/<platform>/..., so a blanket subtree ban would refuse the actual use case.
 func TestValidateHostPath_refusesTheSystem(t *testing.T) {
 	for _, bad := range []string{
 		"", "relative/path", "/", "/etc", "/root", "/var/lib/docker",
 		"/var/lib/docker/volumes/someone-elses", "/proc/1", "/sys/kernel",
 		"/data/../etc",
-		// A neighbour's rendered stack, its plaintext env-file, and the dir that
-		// holds every stack's files - the carve-out below starts one level deeper.
 		"/data/stacks", "/data/stacks/api.env", "/data/stacks/files",
 		"/data/backups/app",
 	} {
@@ -69,8 +63,6 @@ func TestValidateHostPath_refusesTheSystem(t *testing.T) {
 	}
 	for _, good := range []string{
 		"/etc/dokploy/applications/app/files", "/data/myapp", "/srv/app/uploads",
-		// Where a stack-relative bind lands on THIS host: the target of every
-		// `./volumes/db` an imported compose file carries.
 		"/data/stacks/files/sucabase", "/data/stacks/files/sucabase/volumes/db",
 	} {
 		got, err := validateHostPath(good)
@@ -83,9 +75,7 @@ func TestValidateHostPath_refusesTheSystem(t *testing.T) {
 	}
 }
 
-// TestExportHostPath_missingIsNotFound is the host-path twin of the volume guard:
-// `docker run -v /missing:/v` CREATES the directory and exports nothing, so the
-// existence check has to happen before anything is mounted.
+// TestExportHostPath_missingIsNotFound is the host-path twin of the volume guard: `docker run -v /missing:/v` CREATES the directory and exports nothing, so the existence check has to happen before anything is mounted.
 func TestExportHostPath_missingIsNotFound(t *testing.T) {
 	svc := New(t.TempDir(), t.TempDir(), "/", "")
 	missing := filepath.Join(t.TempDir(), "not-here")
@@ -106,8 +96,7 @@ func TestExportHostPath_missingIsNotFound(t *testing.T) {
 	}
 }
 
-// TestImportHostPath_headerOnlyDoesNotWipe: no data, no wipe - the whole reason
-// this family of RPCs was rewritten.
+// TestImportHostPath_headerOnlyDoesNotWipe: no data, no wipe - the whole reason this family of RPCs was rewritten.
 func TestImportHostPath_headerOnlyDoesNotWipe(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "payload")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -133,9 +122,7 @@ func TestImportHostPath_headerOnlyDoesNotWipe(t *testing.T) {
 	}
 }
 
-// TestImportHostPath_createsTheWholePath is the case this RPC exists for: the
-// destination has never run the platform being migrated away from, so nothing of that
-// platform's directory tree is there.
+// TestImportHostPath_createsTheWholePath is the case this RPC exists for: the destination has never run the platform being migrated away from, so nothing of that platform's directory tree is there.
 func TestImportHostPath_createsTheWholePath(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -151,7 +138,6 @@ func TestImportHostPath_createsTheWholePath(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(src, "f.txt"), []byte("carried"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Two levels of parent that do not exist on this host.
 	dst := filepath.Join(t.TempDir(), "never", "seen", "before")
 
 	ex := &fakeExportStream{ctx: ctx}
@@ -241,9 +227,7 @@ func TestE2E_HostPathCopyRoundTrip(t *testing.T) {
 	}
 }
 
-// TestValidateHostPath_judgesTheResolvedPath pins the symlink half of the guardrail:
-// the mount and the wipe both follow links, so the deny-list has to judge where the
-// path lands, not how it is spelled.
+// TestValidateHostPath_judgesTheResolvedPath pins the symlink half of the guardrail: the mount and the wipe both follow links, so the deny-list has to judge where the path lands, not how it is spelled.
 func TestValidateHostPath_judgesTheResolvedPath(t *testing.T) {
 	tmp := t.TempDir()
 	real := filepath.Join(tmp, "real")
@@ -271,15 +255,12 @@ func TestValidateHostPath_judgesTheResolvedPath(t *testing.T) {
 		t.Errorf("want PermissionDenied, got %v", err)
 	}
 
-	// A target that does not exist yet still resolves the parents it lands under.
 	if _, err := validateHostPath(filepath.Join(tmp, "poison", "proc", "new")); err == nil {
 		t.Error("a not-yet-created path under a poisoned parent passed the deny-list")
 	}
 }
 
-// TestExportHostPath_fileNeedsSayingSo pins the discriminator the control plane
-// relies on: without allow_file a file is still refused, and that refusal is what
-// tells the caller which of the two this path is.
+// TestExportHostPath_fileNeedsSayingSo pins the discriminator the control plane relies on: without allow_file a file is still refused, and that refusal is what tells the caller which of the two this path is.
 func TestExportHostPath_fileNeedsSayingSo(t *testing.T) {
 	svc := New(t.TempDir(), t.TempDir(), "/", "")
 	f := filepath.Join(t.TempDir(), "nginx.conf")
@@ -293,9 +274,7 @@ func TestExportHostPath_fileNeedsSayingSo(t *testing.T) {
 	}
 }
 
-// TestExportHostPath_fileInheritsItsDirectorysBan pins the widening a per-file export
-// would otherwise be: /etc is refused as a directory, so /etc/shadow must be refused
-// as a file. A file never reaches further than the directory holding it would.
+// TestExportHostPath_fileInheritsItsDirectorysBan pins the widening a per-file export would otherwise be: /etc is refused as a directory, so /etc/shadow must be refused as a file.
 func TestExportHostPath_fileInheritsItsDirectorysBan(t *testing.T) {
 	svc := New(t.TempDir(), t.TempDir(), "/", "")
 	for _, bad := range []string{"/etc/shadow", "/etc/passwd", "/root/.bashrc"} {
@@ -312,9 +291,7 @@ func TestExportHostPath_fileInheritsItsDirectorysBan(t *testing.T) {
 	}
 }
 
-// TestE2E_HostPathCopyFileRoundTrip is the bug this whole path exists for: a stack
-// that binds a config FILE used to fail the copy, and the target then came up on an
-// empty DIRECTORY of that name.
+// TestE2E_HostPathCopyFileRoundTrip is the bug this whole path exists for: a stack that binds a config FILE used to fail the copy, and the target then came up on an empty DIRECTORY of that name.
 func TestE2E_HostPathCopyFileRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -332,11 +309,9 @@ func TestE2E_HostPathCopyFileRoundTrip(t *testing.T) {
 	if err := os.WriteFile(src, []byte("server { listen 8080; }"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// A sibling that must NOT travel: the file is what the stack mounts.
 	if err := os.WriteFile(filepath.Join(srcDir, "secrets.env"), []byte("KEY=1"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// What an older agent left at the target: a DIRECTORY where a file belongs.
 	dst := filepath.Join(dstDir, "nginx.conf")
 	if err := os.MkdirAll(filepath.Join(dst, "junk"), 0o755); err != nil {
 		t.Fatal(err)
@@ -374,7 +349,6 @@ func TestE2E_HostPathCopyFileRoundTrip(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dstDir, "secrets.env")); err == nil {
 		t.Error("only the file named may travel, never its siblings")
 	}
-	// Nothing of the staging directory is left beside it.
 	entries, _ := os.ReadDir(dstDir)
 	if len(entries) != 1 {
 		t.Errorf("the staging directory must be gone: %v", entries)

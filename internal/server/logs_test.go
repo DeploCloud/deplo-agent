@@ -7,9 +7,7 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
-// The argv is the whole contract of the time-range feature: a dropped or
-// misspelled flag streams the WRONG window and looks exactly like a container
-// that had nothing to say. No docker daemon involved.
+// The argv is the whole contract of the time-range feature: a dropped or misspelled flag streams the WRONG window and looks exactly like a container that had nothing to say.
 func TestLogArgs(t *testing.T) {
 	cases := []struct {
 		name string
@@ -17,8 +15,6 @@ func TestLogArgs(t *testing.T) {
 		want string
 	}{
 		{
-			// An older control plane sends none of the new fields, and must get
-			// byte-for-byte the argv this produced before they existed.
 			name: "no window",
 			req:  &pb.FollowLogsRequest{Container: "deplo-web"},
 			want: "logs -f --tail 500 deplo-web",
@@ -39,8 +35,6 @@ func TestLogArgs(t *testing.T) {
 			want: "logs -f --tail 500 --timestamps --since 1756000000 --until 1756003600 deplo-web",
 		},
 		{
-			// 0 is "unset", not "the epoch": a zero must never become `--since 0`,
-			// which docker reads as 1970 and would defeat the tail window.
 			name: "zero is unset, not the epoch",
 			req:  &pb.FollowLogsRequest{Container: "deplo-web", SinceUnix: 0, UntilUnix: 0},
 			want: "logs -f --tail 500 deplo-web",

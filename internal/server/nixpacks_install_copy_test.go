@@ -24,9 +24,7 @@ func writeRepo(t *testing.T, files map[string]string) string {
 	return dir
 }
 
-// The ordinary single-package Node app: the install step may be restricted to
-// the manifests, which is what keeps its dependency layer cached across a code
-// change (and stops a 1.88 GB layer being re-exported for nothing).
+// The ordinary single-package Node app: the install step may be restricted to the manifests, which is what keeps its dependency layer cached across a code change (and stops a 1.88 GB layer being re-exported for nothing).
 func TestManifestOnlyInstallFiles_plainApp(t *testing.T) {
 	dir := writeRepo(t, map[string]string{
 		"package.json": `{"name":"app","scripts":{"build":"next build"},"dependencies":{"next":"15"}}`,
@@ -46,22 +44,17 @@ func TestManifestOnlyInstallFiles_plainApp(t *testing.T) {
 			t.Errorf("missing %s in %v", want, files)
 		}
 	}
-	// Only files that EXIST are listed - a COPY of an absent path fails the build.
 	for _, absent := range []string{"yarn.lock", "pnpm-lock.yaml", "package-lock.json"} {
 		if slices.Contains(files, absent) {
 			t.Errorf("listed a file that does not exist: %s", absent)
 		}
 	}
-	// Application source must NOT be in the list; including it would defeat the
-	// whole point.
 	if slices.Contains(files, "src/index.ts") {
 		t.Errorf("source file leaked into the install scope: %v", files)
 	}
 }
 
-// Every case where the install step legitimately needs more than the manifests
-// must fall back to copying everything, because restricting it would break the
-// build outright.
+// Every case where the install step legitimately needs more than the manifests must fall back to copying everything, because restricting it would break the build outright.
 func TestManifestOnlyInstallFiles_refusesUnsafeRepos(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -101,8 +94,7 @@ func TestManifestOnlyInstallFiles_refusesUnsafeRepos(t *testing.T) {
 	}
 }
 
-// The config nixpacks reads must land OUTSIDE the build context: a file written
-// inside it would change the very context whose stability this exists to protect.
+// The config nixpacks reads must land OUTSIDE the build context: a file written inside it would change the very context whose stability this exists to protect.
 func TestWriteInstallScopeConfig(t *testing.T) {
 	tmp := t.TempDir()
 	path, err := writeNixpacksConfig(tmp, "blinkmypc", []string{"package.json", "bun.lock"}, false, false)
@@ -129,8 +121,7 @@ func TestWriteInstallScopeConfig(t *testing.T) {
 	}
 }
 
-// A phase is emptied with `cmds: []`. Passing `-b ""` sets ONE empty command
-// instead, which nixpacks happily runs - measured against nixpacks 1.41.0.
+// A phase is emptied with `cmds: []`.
 func TestNixpacksConfigEmptiesASkippedPhase(t *testing.T) {
 	tmp := t.TempDir()
 	path, err := writeNixpacksConfig(tmp, "app", nil, true, true)
@@ -172,8 +163,7 @@ func TestNixpacksConfigIsOmittedWhenThereIsNothingToSay(t *testing.T) {
 	}
 }
 
-// railpack ignores an empty RAILPACK_BUILD_CMD, so the skip rides a config file -
-// under a Deplo name, because a repo may own railpack.json itself.
+// railpack ignores an empty RAILPACK_BUILD_CMD, so the skip rides a config file - under a Deplo name, because a repo may own railpack.json itself.
 func TestRailpackSkipConfigDoesNotClobberTheRepoOwnConfig(t *testing.T) {
 	dir := t.TempDir()
 	mine := filepath.Join(dir, "railpack.json")

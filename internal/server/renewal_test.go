@@ -16,7 +16,6 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
-// mkCA returns a self-signed CA cert+key for signing agent leaves in the test.
 func mkCA(t *testing.T) (*x509.Certificate, ed25519.PrivateKey, []byte) {
 	t.Helper()
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
@@ -38,7 +37,6 @@ func mkCA(t *testing.T) (*x509.Certificate, ed25519.PrivateKey, []byte) {
 	return caCert, priv, caPem
 }
 
-// signLeaf mimics the control plane's CA signing a CSR into a leaf certificate.
 func signLeaf(t *testing.T, caCert *x509.Certificate, caKey ed25519.PrivateKey, csrPem string, serial int64) []byte {
 	t.Helper()
 	block, _ := pem.Decode([]byte(csrPem))
@@ -67,7 +65,6 @@ func signLeaf(t *testing.T, caCert *x509.Certificate, caKey ed25519.PrivateKey, 
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
 
-// leafSerial reads the serial of the cert currently on disk, to prove a swap.
 func leafSerial(t *testing.T, certFile string) *big.Int {
 	t.Helper()
 	b, _ := os.ReadFile(certFile)
@@ -89,7 +86,6 @@ func TestCertRenewal_roundTrip(t *testing.T) {
 	if err := os.WriteFile(caFile, caPem, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Initial leaf (serial 100) for a fresh agent keypair.
 	_, initPriv, _ := ed25519.GenerateKey(rand.Reader)
 	initCSRDER, _ := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: "deplo-agent"}}, initPriv)
 	initCSR := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: initCSRDER})
@@ -109,7 +105,6 @@ func TestCertRenewal_roundTrip(t *testing.T) {
 		t.Fatalf("pre-renewal serial = %d, want 100", got)
 	}
 
-	// 1. Agent generates a fresh CSR (new key held pending).
 	csrResp, err := svc.RenewalCSR(context.Background(), &pb.RenewalCSRRequest{})
 	if err != nil {
 		t.Fatalf("RenewalCSR: %v", err)
@@ -117,9 +112,7 @@ func TestCertRenewal_roundTrip(t *testing.T) {
 	if csrResp.GetCsrPem() == "" {
 		t.Fatal("empty CSR")
 	}
-	// 2. Control plane signs it (serial 200).
 	newCert := signLeaf(t, caCert, caKey, csrResp.GetCsrPem(), 200)
-	// 3. Agent installs the renewed cert.
 	res, err := svc.InstallRenewedCert(context.Background(), &pb.InstallRenewedCertRequest{CertPem: string(newCert)})
 	if err != nil {
 		t.Fatalf("InstallRenewedCert: %v", err)
@@ -127,14 +120,12 @@ func TestCertRenewal_roundTrip(t *testing.T) {
 	if !res.GetOk() {
 		t.Fatalf("install not ok: %s", res.GetError())
 	}
-	// On-disk cert is the new one (serial 200) and key/cert still form a valid pair.
 	if got := leafSerial(t, certFile); got.Int64() != 200 {
 		t.Fatalf("post-renewal on-disk serial = %d, want 200", got)
 	}
 	if _, err := loadPairForTest(certFile, keyFile); err != nil {
 		t.Fatalf("renewed cert/key not a valid pair: %v", err)
 	}
-	// The live TLS config serves the new leaf.
 	cfg, _ := cm.ServerTLSConfig().GetConfigForClient(nil)
 	if cfg.Certificates[0].Leaf == nil {
 		leaf, _ := x509.ParseCertificate(cfg.Certificates[0].Certificate[0])
@@ -145,7 +136,6 @@ func TestCertRenewal_roundTrip(t *testing.T) {
 		t.Fatalf("live cert serial = %d, want 200 (hot-swap failed)", served.SerialNumber.Int64())
 	}
 
-	// A replay of the same install now fails (pending key consumed).
 	if r, _ := svc.InstallRenewedCert(context.Background(), &pb.InstallRenewedCertRequest{CertPem: string(newCert)}); r.GetOk() {
 		t.Fatal("replay install unexpectedly succeeded - pending key not consumed")
 	}
@@ -169,7 +159,6 @@ func TestCertRenewal_rejectsMismatchedCert(t *testing.T) {
 	svc := New(dir, dir, dir, dir)
 	svc.EnableCertRenewal(cm)
 
-	// Get a CSR (pending key A), but sign a DIFFERENT key's CSR and try to install.
 	if _, err := svc.RenewalCSR(context.Background(), &pb.RenewalCSRRequest{}); err != nil {
 		t.Fatal(err)
 	}
@@ -183,14 +172,12 @@ func TestCertRenewal_rejectsMismatchedCert(t *testing.T) {
 	if res.GetOk() {
 		t.Fatal("install of a cert not matching the pending key succeeded - must be rejected")
 	}
-	// The on-disk cert is untouched (still serial 1).
 	if got := leafSerial(t, certFile); got.Int64() != 1 {
 		t.Fatalf("on-disk serial = %d, want 1 (must be untouched on mismatch)", got)
 	}
 }
 
 func loadPairForTest(certFile, keyFile string) (any, error) {
-	// tls.LoadX509KeyPair equivalent without importing tls into the test file.
 	c, err := os.ReadFile(certFile)
 	if err != nil {
 		return nil, err

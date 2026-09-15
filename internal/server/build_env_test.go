@@ -11,8 +11,7 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
-// buildEnvKeys must sort deterministically and drop non-identifier names (keys
-// arrive off the wire - same threat model as railpack plan secrets).
+// buildEnvKeys must sort deterministically and drop non-identifier names (keys arrive off the wire - same threat model as railpack plan secrets).
 func TestBuildEnvKeys(t *testing.T) {
 	got := buildEnvKeys(map[string]string{
 		"NEXT_PUBLIC_API": "x",
@@ -30,8 +29,7 @@ func TestBuildEnvKeys(t *testing.T) {
 	}
 }
 
-// declaredArgNames must catch single-name, =default, BuildKit multi-name and
-// continuation forms, in any stage, case-insensitively, and only those.
+// declaredArgNames must catch single-name, =default, BuildKit multi-name and continuation forms, in any stage, case-insensitively, and only those.
 func TestDeclaredArgNames(t *testing.T) {
 	df := `FROM node:20 AS builder
 ARG NEXT_PUBLIC_API
@@ -57,9 +55,7 @@ ARG SECOND_STAGE
 	}
 }
 
-// dockerfileEnvKeys is the intersection: only env keys the Dockerfile declares
-// as ARG become build args - an undeclared var is never passed (no unconsumed-
-// build-arg warnings), a declared-but-absent ARG gets nothing injected.
+// dockerfileEnvKeys is the intersection: only env keys the Dockerfile declares as ARG become build args - an undeclared var is never passed (no unconsumed- build-arg warnings), a declared-but-absent ARG gets nothing injected.
 func TestDockerfileEnvKeys(t *testing.T) {
 	df := "FROM node:20\nARG NEXT_PUBLIC_API\nARG UNSET_BY_USER\n"
 	env := map[string]string{"NEXT_PUBLIC_API": "x", "SECRET_ONLY_RUNTIME": "y"}
@@ -77,8 +73,7 @@ func TestEnvKV(t *testing.T) {
 	}
 }
 
-// appendBuildArgKeys must emit bare names (values NEVER ride argv - command
-// lines are echoed into the user-visible deploy log).
+// appendBuildArgKeys must emit bare names (values NEVER ride argv - command lines are echoed into the user-visible deploy log).
 func TestAppendBuildArgKeysBareNames(t *testing.T) {
 	args := appendBuildArgKeys([]string{"build"}, []string{"NEXT_PUBLIC_API"})
 	if !slices.Equal(args, []string{"build", "--build-arg", "NEXT_PUBLIC_API"}) {
@@ -89,8 +84,7 @@ func TestAppendBuildArgKeysBareNames(t *testing.T) {
 	}
 }
 
-// The static builder's generated Dockerfile must declare each env var as an ARG in the
-// BUILDER stage (so the build command sees it) and leave the nginx stage untouched.
+// The static builder's generated Dockerfile must declare each env var as an ARG in the BUILDER stage (so the build command sees it) and leave the nginx stage untouched.
 func TestBuildStatic_declaresBuildEnvInBuilderStage(t *testing.T) {
 	s := New(t.TempDir(), t.TempDir(), "/", "")
 	buildDir := t.TempDir()
@@ -115,8 +109,6 @@ func TestBuildStatic_declaresBuildEnvInBuilderStage(t *testing.T) {
 	if !strings.Contains(builderStage, "ARG NEXT_PUBLIC_API\n") {
 		t.Errorf("builder stage missing the ARG:\n%s", df)
 	}
-	// No ENV: the ARG already reaches the RUN steps, and the ENV would bake the
-	// value into the image config.
 	if strings.Contains(df, "ENV NEXT_PUBLIC_API") {
 		t.Errorf("the build var must not be declared as ENV:\n%s", df)
 	}
@@ -128,8 +120,7 @@ func TestBuildStatic_declaresBuildEnvInBuilderStage(t *testing.T) {
 	}
 }
 
-// The tag is moved rather than bumped, so the version proves nothing about which
-// binary a host runs - the capability is what a rollout verifies against.
+// The tag is moved rather than bumped, so the version proves nothing about which binary a host runs - the capability is what a rollout verifies against.
 func TestCapabilities_advertisesEnvNotBaked(t *testing.T) {
 	if !containsString(Capabilities, "build.env-not-baked") {
 		t.Error("Capabilities must advertise \"build.env-not-baked\"")

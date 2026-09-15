@@ -2,9 +2,7 @@ package hostmetrics
 
 import "testing"
 
-// Collect reads real /proc on the test host; assert the shape is sane rather
-// than pinning values. It must not fabricate, but on a real Linux host the
-// basic facts (cores >= 1, mem total > 0) hold.
+// Collect reads real /proc on the test host; assert the shape is sane rather than pinning values.
 func TestCollect_returnsSaneShape(t *testing.T) {
 	m := Collect("/")
 	if m.CPUCores < 1 {

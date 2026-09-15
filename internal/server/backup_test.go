@@ -15,25 +15,17 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
-// ---- dumpArgv / restoreArgv: the per-engine command + overwrite contract ----
-
-// The dump argv must name the right tool per engine, dump to stdout (no -f / file), and
-// carry the OVERWRITE-guaranteeing flags the restore relies on.
+// The dump argv must name the right tool per engine, dump to stdout (no -f / file), and carry the OVERWRITE-guaranteeing flags the restore relies on.
 func TestDumpArgv_perEngine(t *testing.T) {
 	cases := []struct {
 		dbType     string
 		wantTool   string
-		wantTokens []string // every token must be present, in order-independent check
-		pwEnvKey   string   // the env KEY the password must ride in (empty => on argv via a flag, e.g. mongo -p)
+		wantTokens []string
+		pwEnvKey   string
 	}{
 		{"postgres", "pg_dump", []string{"-Fc", "mydb", "-U", "admin"}, "PGPASSWORD"},
 		{"mysql", "mysqldump", []string{"--add-drop-table", "--databases", "mydb"}, "MYSQL_PWD"},
-		// MariaDB 11 dropped the `mysql*` compatibility symlinks, so its own client
-		// name is the only one on PATH there - asking for `mysqldump` failed every
-		// backup of a MariaDB 11 database with "executable file not found".
 		{"mariadb", "mariadb-dump", []string{"--add-drop-table", "--databases", "mydb"}, "MYSQL_PWD"},
-		// The mongo tools have no password env var of their own, so a shell inside
-		// the container reads MONGO_PW: the host argv carries the script, never the value.
 		{"mongodb", "sh", nil, "MONGO_PW"},
 		{"redis", "redis-cli", []string{"--rdb", "-"}, "REDISCLI_AUTH"},
 	}
@@ -71,9 +63,6 @@ func TestDumpArgv_perEngine(t *testing.T) {
 				}
 			}
 			if tc.pwEnvKey != "" {
-				// Env-capable engine (postgres/mysql/redis): the cleartext password
-				// must NEVER appear on argv (the ps/proc-readable host command line);
-				// the value rides in env and only `-e NAME` (name-only) goes on argv.
 				if strings.Contains(joined, "s3cret") {
 					t.Errorf("%s leaked the password onto argv: %v", tc.dbType, argv)
 				}
@@ -94,9 +83,6 @@ func TestDumpArgv_unsupportedEngine(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error for an unsupported engine")
 	}
-	// clickhouse uses the dedicated multi-statement path (dumpClickhouse), so the
-	// single-pipe argv builder signals that with errClickhouseSeparate rather than
-	// returning a usable argv.
 	if _, _, err := dumpArgv(&pb.DatabaseDescriptor{Container: "c", DbType: "clickhouse", DbName: "d"}); err != errClickhouseSeparate {
 		t.Errorf("clickhouse dumpArgv should signal the dedicated path, got %v", err)
 	}
@@ -105,18 +91,17 @@ func TestDumpArgv_unsupportedEngine(t *testing.T) {
 	}
 }
 
-// The restore argv must use -i (stdin), the right tool, and the drop-and-recreate
-// flags that make a restore OVERWRITE rather than append (the locked decision).
+// The restore argv must use -i (stdin), the right tool, and the drop-and-recreate flags that make a restore OVERWRITE rather than append (the locked decision).
 func TestRestoreArgv_overwriteFlags(t *testing.T) {
 	cases := []struct {
 		dbType   string
 		wantTool string
-		wantDrop string // a token that proves drop-and-recreate
+		wantDrop string
 	}{
 		{"postgres", "pg_restore", "--clean"},
-		{"mysql", "mysql", ""},     // overwrite comes from the dump's --add-drop-table
-		{"mariadb", "mariadb", ""}, // same, under MariaDB's own client name
-		{"mongodb", "sh", ""},      // the script carries `mongorestore --archive --drop`
+		{"mysql", "mysql", ""},
+		{"mariadb", "mariadb", ""},
+		{"mongodb", "sh", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.dbType, func(t *testing.T) {
@@ -142,8 +127,7 @@ func TestRestoreArgv_overwriteFlags(t *testing.T) {
 	}
 }
 
-// postgres restore --if-exists must accompany --clean (so dropping a not-yet-
-// present object on a fresh DB is not a fatal error).
+// postgres restore --if-exists must accompany --clean (so dropping a not-yet- present object on a fresh DB is not a fatal error).
 func TestRestoreArgv_postgresIfExists(t *testing.T) {
 	argv, _, _ := restoreArgv(&pb.DatabaseDescriptor{Container: "c", DbType: "postgres", DbName: "d", User: "u"})
 	if !containsToken(argv, "--clean") || !containsToken(argv, "--if-exists") {
@@ -151,10 +135,7 @@ func TestRestoreArgv_postgresIfExists(t *testing.T) {
 	}
 }
 
-// Redis restore must NOT go through the uniform stdin-pipe argv path: an RDB dump can't
-// be fed to a restore tool's stdin (redis-cli --pipe speaks RESP, not RDB). restoreArgv
-// signals this with errRedisRestoreSeparate so restoreDatabase dispatches to the
-// dedicated file-swap path.
+// Redis restore must NOT go through the uniform stdin-pipe argv path: an RDB dump can't be fed to a restore tool's stdin (redis-cli --pipe speaks RESP, not RDB).
 func TestRestoreArgv_redisUsesSeparatePath(t *testing.T) {
 	_, _, err := restoreArgv(&pb.DatabaseDescriptor{Container: "c", DbType: "redis", DbName: "d"})
 	if err != errRedisRestoreSeparate {
@@ -162,8 +143,7 @@ func TestRestoreArgv_redisUsesSeparatePath(t *testing.T) {
 	}
 }
 
-// The redis DUMP, by contrast, IS a single stdout pipe (redis-cli --rdb -),
-// verified to emit a valid RDB. Keep that contract.
+// The redis DUMP, by contrast, IS a single stdout pipe (redis-cli --rdb -), verified to emit a valid RDB.
 func TestDumpArgv_redisToStdout(t *testing.T) {
 	argv, _, err := dumpArgv(&pb.DatabaseDescriptor{Container: "c", DbType: "redis", DbName: "d"})
 	if err != nil {
@@ -174,13 +154,11 @@ func TestDumpArgv_redisToStdout(t *testing.T) {
 	}
 }
 
-// shellQuote must single-quote a path and escape embedded single quotes so the
-// `sh -c 'cat > <path>'` in restoreRedis can't be broken out of.
+// shellQuote must single-quote a path and escape embedded single quotes so the `sh -c 'cat > <path>'` in restoreRedis can't be broken out of.
 func TestShellQuote(t *testing.T) {
 	if got := shellQuote("/data/dump.rdb"); got != "'/data/dump.rdb'" {
 		t.Errorf("shellQuote: %q", got)
 	}
-	// A quote in the path is escaped, not left to terminate the quoting.
 	if got := shellQuote("/da'ta"); got != `'/da'\''ta'` {
 		t.Errorf("shellQuote escape: %q", got)
 	}
@@ -204,8 +182,7 @@ func TestRestoreArgv_passwordOffArgv(t *testing.T) {
 	}
 }
 
-// chClientPrefix forwards CLICKHOUSE_PASSWORD via env, not argv, and includes
-// --user when set.
+// chClientPrefix forwards CLICKHOUSE_PASSWORD via env, not argv, and includes --user when set.
 func TestChClientPrefix_passwordOffArgv(t *testing.T) {
 	d := &pb.DatabaseDescriptor{Container: "c", DbType: "clickhouse", User: "app", Password: "s3cret"}
 	argv, env := chClientPrefix(d, false)
@@ -218,7 +195,6 @@ func TestChClientPrefix_passwordOffArgv(t *testing.T) {
 	if !containsToken(argv, "--user") || !containsToken(argv, "app") {
 		t.Errorf("clickhouse prefix must pass --user, got %v", argv)
 	}
-	// stdin=true adds -i (used by the restore --multiquery pipe).
 	argvIn, _ := chClientPrefix(d, true)
 	if !containsToken(argvIn, "-i") {
 		t.Errorf("stdin prefix must include -i, got %v", argvIn)
@@ -244,15 +220,13 @@ func TestRedisCliPrefix_passwordOffArgv(t *testing.T) {
 	if !containsToken(argv, "REDISCLI_AUTH") || !containsToken(env, "REDISCLI_AUTH=s3cret") {
 		t.Errorf("redis prefix must forward REDISCLI_AUTH via env, argv=%v env=%v", argv, env)
 	}
-	// No password => no env forwarded, no -e flag.
 	argv2, env2 := redisCliPrefix("c", "")
 	if len(env2) != 0 || containsToken(argv2, "-e") {
 		t.Errorf("no-password redis prefix must not forward env, argv=%v env=%v", argv2, env2)
 	}
 }
 
-// validateVolumeName rejects path-shaped names so a wire-supplied "/" / "/etc"
-// can't become a host bind mount in `-v <name>:/v`.
+// validateVolumeName rejects path-shaped names so a wire-supplied "/" / "/etc" can't become a host bind mount in `-v <name>:/v`.
 func TestValidateVolumeName(t *testing.T) {
 	ok := []string{"deplo-myapp-data", "vol_1", "a", "deplo-x.y-z"}
 	for _, v := range ok {
@@ -267,8 +241,6 @@ func TestValidateVolumeName(t *testing.T) {
 		}
 	}
 }
-
-// ---- env-file round-trip: renderEnvFile (deploy.go) ⇄ parseEnvFile ----
 
 func TestEnvFileRoundTrip(t *testing.T) {
 	in := map[string]string{"FOO": "bar", "EMPTY": "", "WITH_EQ": "a=b=c"}
@@ -292,8 +264,6 @@ func TestParseEnvFile_skipsJunk(t *testing.T) {
 		t.Errorf("a line with no '=' must be ignored, got %v", got)
 	}
 }
-
-// ---- tar helpers: round-trip a dir, and reject a traversal on extract ----
 
 func TestTarDirRoundTrip(t *testing.T) {
 	src := t.TempDir()
@@ -337,15 +307,13 @@ func TestTarDirRoundTrip(t *testing.T) {
 	}
 }
 
-// extractToDir must reject an entry whose path escapes the target root (the entry
-// name came from an S3 object, never trusted).
+// extractToDir must reject an entry whose path escapes the target root (the entry name came from an S3 object, never trusted).
 func TestExtractToDir_rejectsTraversal(t *testing.T) {
 	dst := t.TempDir()
 	hdr := &tar.Header{Name: "x", Typeflag: tar.TypeReg, Size: 3}
 	if err := extractToDir(dst, "../escape.txt", hdr, strings.NewReader("bad")); err == nil {
 		t.Fatal("expected a traversal rejection for ../escape.txt")
 	}
-	// The file must NOT have been written outside the root.
 	if _, err := os.Stat(filepath.Join(filepath.Dir(dst), "escape.txt")); err == nil {
 		t.Fatal("traversal wrote a file outside the target root")
 	}
@@ -373,9 +341,6 @@ func TestAddBytesToTar(t *testing.T) {
 	}
 }
 
-// ---- RPC-level validation: a missing key / unknown kind emits a clean failure
-// result on the stream rather than a panic or a fake success ----
-
 func TestBackup_missingKeyResultsInFailure(t *testing.T) {
 	s := New(t.TempDir(), t.TempDir(), "/", "")
 	st := &fakeBackupStream{}
@@ -391,8 +356,7 @@ func TestBackup_missingKeyResultsInFailure(t *testing.T) {
 	}
 }
 
-// A store backup with no encryption key must FAIL rather than quietly writing a
-// plaintext artifact.
+// A store backup with no encryption key must FAIL rather than quietly writing a plaintext artifact.
 func TestBackup_storeWithoutRecipientRefuses(t *testing.T) {
 	s := New(t.TempDir(), t.TempDir(), "/", t.TempDir())
 	st := &fakeBackupStream{}
@@ -412,8 +376,7 @@ func TestBackup_storeWithoutRecipientRefuses(t *testing.T) {
 	}
 }
 
-// Same rule for the relay: a stream_out backup is destined for another host's
-// disk, so it must be ciphertext before it leaves this one.
+// Same rule for the relay: a stream_out backup is destined for another host's disk, so it must be ciphertext before it leaves this one.
 func TestBackup_streamOutWithoutRecipientRefuses(t *testing.T) {
 	s := New(t.TempDir(), t.TempDir(), "/", t.TempDir())
 	st := &fakeBackupStream{}
@@ -452,9 +415,7 @@ func TestRestore_missingKey(t *testing.T) {
 	}
 }
 
-// A store restore needs the recovery key. Without it the agent must refuse
-// rather than trying to gunzip ciphertext and reporting a confusing
-// "not a Deplo backup".
+// A store restore needs the recovery key.
 func TestRestore_storeWithoutIdentityRefuses(t *testing.T) {
 	root := t.TempDir()
 	s := New(t.TempDir(), t.TempDir(), "/", root)
@@ -475,8 +436,7 @@ func TestRestore_storeWithoutIdentityRefuses(t *testing.T) {
 	}
 }
 
-// S3Check / S3Delete reject a missing target with InvalidArgument (a programming
-// error, surfaced as a gRPC error not a fake ok).
+// S3Check / S3Delete reject a missing target with InvalidArgument (a programming error, surfaced as a gRPC error not a fake ok).
 func TestS3Check_missingTarget(t *testing.T) {
 	s := New(t.TempDir(), t.TempDir(), "/", "")
 	if _, err := s.S3Check(context.Background(), &pb.S3CheckRequest{}); err == nil {
@@ -491,9 +451,7 @@ func TestS3Delete_missingKey(t *testing.T) {
 	}
 }
 
-// Every backup flag this agent implements must be advertised in Hello, or the
-// control plane's preflight refuses the feature it is standing in front of and
-// tells the operator to update an agent that is already new enough.
+// Every backup flag this agent implements must be advertised in Hello, or the control plane's preflight refuses the feature it is standing in front of and tells the operator to update an agent that is already new enough.
 func TestCapabilities_advertisesBackup(t *testing.T) {
 	for _, want := range []string{"backup", "backup-store", "backup-s3-read"} {
 		found := false
@@ -508,8 +466,6 @@ func TestCapabilities_advertisesBackup(t *testing.T) {
 	}
 }
 
-// ---- test helpers ----
-
 func containsToken(argv []string, tok string) bool {
 	for _, a := range argv {
 		if a == tok {
@@ -519,8 +475,6 @@ func containsToken(argv []string, tok string) bool {
 	return false
 }
 
-// fakeBackupStream / fakeRestoreStream satisfy grpc.ServerStreamingServer[T] for the
-// validation tests: they capture every Send and hand back the terminal result.
 type fakeBackupStream struct {
 	events []*pb.BackupEvent
 }
@@ -593,9 +547,6 @@ func TestHasDotDot(t *testing.T) {
 		"...",
 		"data/..file",
 		"",
-		// A backslash is an ORDINARY character in a POSIX filename, and both the agent and
-		// the helper container's `tar -x` are Linux. This is one weird file name, not a
-		// traversal, and treating it as one would refuse a legitimate restore.
 		`..\..\x`,
 	} {
 		if hasDotDot(ok) {

@@ -1,6 +1,3 @@
-// Package dockercli is the agent's Docker client: it shells out to the `docker` CLI
-// against the host's daemon, exactly as the control plane's lib/infra/docker.ts does
-// today. This is the host-coupled half of the platform moved server-side (ADR-0006).
 package dockercli
 
 import (
@@ -20,9 +17,7 @@ import (
 // LineFn receives one line of merged stdout+stderr as a build/run stream.
 type LineFn func(line string)
 
-// Run executes `docker <args>` to completion, returning combined output and the
-// exit code. A nil error with a non-zero code means docker ran and the command
-// failed; a non-nil error means docker itself could not run (spawn/timeout).
+// Run executes `docker <args>` to completion, returning combined output and the exit code.
 type Result struct {
 	Stdout string
 	Stderr string
@@ -34,15 +29,11 @@ func Run(ctx context.Context, timeout time.Duration, args ...string) (Result, er
 	return capture(ctx, timeout, nil, false, args...)
 }
 
-// RunEnv is Run with extra "KEY=VALUE" host-process env layered on (e.g. so a `docker
-// exec -e REDISCLI_AUTH <c> redis-cli …` can forward the password from the docker
-// client's env into the container without the value touching argv).
+// RunEnv is Run with extra "KEY=VALUE" host-process env layered on (e.g.
 func RunEnv(ctx context.Context, timeout time.Duration, extraEnv []string, args ...string) (Result, error) {
 	return capture(ctx, timeout, extraEnv, true, args...)
 }
 
-// capture is the shared body of Run and RunEnv. `redact` masks secret-bearing
-// tokens in the error label, which only RunEnv's callers ever pass.
 func capture(ctx context.Context, timeout time.Duration, extraEnv []string, redact bool, args ...string) (Result, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -58,9 +49,8 @@ func capture(ctx context.Context, timeout time.Duration, extraEnv []string, reda
 	}
 	if ee, ok := err.(*exec.ExitError); ok {
 		res.Code = ee.ExitCode()
-		return res, nil // ran, exited non-zero
+		return res, nil
 	}
-	// Spawn failure: docker never produced an exit status.
 	label := strings.Join(args, " ")
 	if redact {
 		label = redactArgs(args)
@@ -68,8 +58,7 @@ func capture(ctx context.Context, timeout time.Duration, extraEnv []string, reda
 	return res, fmt.Errorf("docker %s failed: %w (%s)", label, err, errb.String())
 }
 
-// Stream runs `docker <args>` and forwards each line of merged stdout+stderr to onLine
-// as it is produced (the live build/clone log), returning the exit code.
+// Stream runs `docker <args>` and forwards each line of merged stdout+stderr to onLine as it is produced (the live build/clone log), returning the exit code.
 func Stream(ctx context.Context, timeout time.Duration, onLine LineFn, input string, args ...string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -78,9 +67,7 @@ func Stream(ctx context.Context, timeout time.Duration, onLine LineFn, input str
 	return streamCmd(cctx, timeout, onLine, input, cmd)
 }
 
-// StreamEnv is Stream with extra "KEY=VALUE" environment entries layered on top
-// of the agent's own env (e.g. DOCKER_BUILDKIT=1 for the nixpacks generated
-// Dockerfile, which uses BuildKit syntax). Mirrors spawnStream's `env` option.
+// StreamEnv is Stream with extra "KEY=VALUE" environment entries layered on top of the agent's own env (e.g.
 func StreamEnv(ctx context.Context, timeout time.Duration, onLine LineFn, extraEnv []string, args ...string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -89,9 +76,7 @@ func StreamEnv(ctx context.Context, timeout time.Duration, onLine LineFn, extraE
 	return streamCmd(cctx, timeout, onLine, "", cmd)
 }
 
-// Spawn runs an ARBITRARY host binary (not docker) and streams its merged output,
-// for build tools that run on the host rather than via the daemon - e.g. the
-// nixpacks binary (lazily installed). Same streaming/timeout discipline as Stream.
+// Spawn runs an ARBITRARY host binary (not docker) and streams its merged output, for build tools that run on the host rather than via the daemon - e.g.
 func Spawn(ctx context.Context, timeout time.Duration, onLine LineFn, input, name string, args ...string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -100,9 +85,7 @@ func Spawn(ctx context.Context, timeout time.Duration, onLine LineFn, input, nam
 	return streamCmd(cctx, timeout, onLine, input, cmd)
 }
 
-// SpawnEnv is Spawn with extra "KEY=VALUE" env entries layered on top of the agent's
-// own env - e.g. the nixpacks binary resolving bare `--env KEY` refs from its process
-// env, so a build-env VALUE never rides argv (which the deploy log echoes).
+// SpawnEnv is Spawn with extra "KEY=VALUE" env entries layered on top of the agent's own env - e.g.
 func SpawnEnv(ctx context.Context, timeout time.Duration, onLine LineFn, extraEnv []string, name string, args ...string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -111,10 +94,7 @@ func SpawnEnv(ctx context.Context, timeout time.Duration, onLine LineFn, extraEn
 	return streamCmd(cctx, timeout, onLine, "", cmd)
 }
 
-// StreamOut runs `docker <args>` (no shell - argv is injection-safe) with extra
-// "KEY=VALUE" env layered on, streaming the child's RAW stdout into dst (e.g. a build
-// image tar written straight to disk) while forwarding each stderr line to onLine (the
-// live progress log).
+// StreamOut runs `docker <args>` (no shell - argv is injection-safe) with extra "KEY=VALUE" env layered on, streaming the child's RAW stdout into dst (e.g.
 func StreamOut(ctx context.Context, timeout time.Duration, dst io.Writer, onLine LineFn, extraEnv []string, args ...string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -136,8 +116,6 @@ func StreamOut(ctx context.Context, timeout time.Duration, dst io.Writer, onLine
 	}
 	err = cmd.Wait()
 	if err != nil {
-		// Context first: a timeout/cancel kill surfaces as an ExitError with a
-		// negative code, which the ExitError branch would otherwise misreport.
 		if cctx.Err() == context.DeadlineExceeded {
 			return -1, fmt.Errorf("docker %s timed out after %s", label, timeout)
 		}
@@ -152,9 +130,7 @@ func StreamOut(ctx context.Context, timeout time.Duration, dst io.Writer, onLine
 	return 0, nil
 }
 
-// StreamPipes runs docker with stdout and stderr each copied straight into a
-// writer - no line scanner in the way, so a single line longer than a scanner
-// buffer (a 9 MB JSON dump on stderr) cannot stall the process on a full pipe.
+// StreamPipes runs docker with stdout and stderr each copied straight into a writer - no line scanner in the way, so a single line longer than a scanner buffer (a 9 MB JSON dump on stderr) cannot stall the process on a full pipe.
 func StreamPipes(ctx context.Context, timeout time.Duration, stdout, stderr io.Writer, extraEnv []string, args ...string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -163,8 +139,6 @@ func StreamPipes(ctx context.Context, timeout time.Duration, stdout, stderr io.W
 	return runPipes(cctx, timeout, cmd, stdout, stderr, redactArgs(args))
 }
 
-// runPipes is StreamPipes minus the docker argv, so a test can drive it with
-// a plain shell.
 func runPipes(cctx context.Context, timeout time.Duration, cmd *exec.Cmd, stdout, stderr io.Writer, label string) (int, error) {
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
@@ -187,9 +161,6 @@ func runPipes(cctx context.Context, timeout time.Duration, cmd *exec.Cmd, stdout
 	return 0, nil
 }
 
-// streamCmd is the shared core of Stream/StreamEnv/Spawn: start an already-built
-// command, fan its stdout+stderr into onLine line-by-line, and map the exit /
-// timeout / cancellation outcome the same way for every caller.
 func streamCmd(cctx context.Context, timeout time.Duration, onLine LineFn, input string, cmd *exec.Cmd) (int, error) {
 	label := strings.Join(cmd.Args, " ")
 	stdout, err := cmd.StdoutPipe()
@@ -215,8 +186,6 @@ func streamCmd(cctx context.Context, timeout time.Duration, onLine LineFn, input
 		return -1, fmt.Errorf("%s: %w", label, err)
 	}
 
-	// Merge both streams line-by-line. A small fan-in over two scanners keeps
-	// ordering close to emission order, same as the TS flush().
 	done := make(chan struct{}, 2)
 	scan := func(r io.Reader) {
 		defer func() { done <- struct{}{} }()
@@ -233,16 +202,12 @@ func streamCmd(cctx context.Context, timeout time.Duration, onLine LineFn, input
 
 	err = cmd.Wait()
 	if err != nil {
-		// Check the context FIRST: when CommandContext kills the child on timeout or
-		// cancellation, Wait() returns an *exec.ExitError with ExitCode()==-1 (SIGKILL,
-		// ProcessState.Exited()==false).
 		if cctx.Err() == context.DeadlineExceeded {
 			return -1, fmt.Errorf("%s timed out after %s", label, timeout)
 		}
 		if cctx.Err() == context.Canceled {
 			return -1, fmt.Errorf("%s canceled", label)
 		}
-		// A genuine non-zero exit: the process ran and failed (ExitCode>=0).
 		if ee, ok := err.(*exec.ExitError); ok && ee.ProcessState.Exited() {
 			return ee.ExitCode(), nil
 		}
@@ -251,9 +216,7 @@ func streamCmd(cctx context.Context, timeout time.Duration, onLine LineFn, input
 	return 0, nil
 }
 
-// PipeOut runs `docker <args>` and copies the child's RAW stdout into `dst` (bytes, not
-// lines) while collecting stderr for diagnostics - for piping a dump tool's output
-// (`docker exec <c> pg_dump …`) straight into the gzip→S3 pipeline with no temp file.
+// PipeOut runs `docker <args>` and copies the child's RAW stdout into `dst` (bytes, not lines) while collecting stderr for diagnostics - for piping a dump tool's output (`docker exec <c> pg_dump …`) straight into the gzip→S3 pipeline with no temp file.
 func PipeOut(ctx context.Context, timeout time.Duration, dst io.Writer, extraEnv []string, args ...string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -276,9 +239,7 @@ func PipeOut(ctx context.Context, timeout time.Duration, dst io.Writer, extraEnv
 	return 0, nil
 }
 
-// PipeIn runs `docker <args>` feeding `src` to the child's stdin (the restore
-// direction: a decompressed dump streamed into `docker exec -i <c> psql …`),
-// collecting stderr. Same exit-code/error discipline as PipeOut.
+// PipeIn runs `docker <args>` feeding `src` to the child's stdin (the restore direction: a decompressed dump streamed into `docker exec -i <c> psql …`), collecting stderr.
 func PipeIn(ctx context.Context, timeout time.Duration, src io.Reader, extraEnv []string, args ...string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -301,9 +262,6 @@ func PipeIn(ctx context.Context, timeout time.Duration, src io.Reader, extraEnv 
 	return 0, nil
 }
 
-// redactArgs renders an argv for an error message with any secret-bearing token masked,
-// so a failed dump/restore (e.g. on bad credentials) never echoes a cleartext password
-// into an error string that the control plane logs.
 func redactArgs(args []string) string {
 	out := make([]string, len(args))
 	maskNext := false
@@ -330,14 +288,11 @@ func redactArgs(args []string) string {
 
 func looksSecretKey(k string) bool {
 	k = strings.ToUpper(k)
-	// Trailing component for an `-e KEY=` is the env name; match the well-known
-	// DB-credential vars the backup paths use plus a generic PASSWORD substring.
 	return k == "PGPASSWORD" || k == "MYSQL_PWD" || k == "REDISCLI_AUTH" ||
 		k == "MONGODB_PASSWORD" || strings.Contains(k, "PASSWORD") || strings.Contains(k, "SECRET")
 }
 
-// Server asks the daemon once for both things Hello reports: its version, and
-// whether it answered at all. Never errors.
+// Server asks the daemon once for both things Hello reports: its version, and whether it answered at all.
 func Server(ctx context.Context) (version string, available bool) {
 	res, err := Run(ctx, 5*time.Second, "version", "--format", "{{.Server.Version}}")
 	if err != nil || res.Code != 0 {
@@ -346,7 +301,7 @@ func Server(ctx context.Context) (version string, available bool) {
 	return strings.TrimSpace(res.Stdout), true
 }
 
-// Available reports whether the Docker daemon is reachable. Never errors.
+// Available reports whether the Docker daemon is reachable.
 func Available(ctx context.Context) bool {
 	_, ok := Server(ctx)
 	return ok
@@ -358,31 +313,22 @@ func ServerVersion(ctx context.Context) string {
 	return v
 }
 
-// --- build-export capability -----------------------------------------------
-
-// Daemons that keep their images in containerd pay a heavy, invisible tax on every
-// build: BuildKit's `image` exporter GZIPs each new layer into the content store before
-// unpacking it back into the snapshotter.
 var (
 	imageExportMu    sync.Mutex
 	imageExportKnown bool
 	imageExportOK    bool
 )
 
-// ImageExportOptsSupported reports whether `docker build --output type=image,…` is
-// available on this host - i.e. the daemon keeps images in containerd AND the CLI has
-// the buildx plugin that accepts the flag.
+// ImageExportOptsSupported reports whether `docker build --output type=image,…` is available on this host - i.e.
 func ImageExportOptsSupported(ctx context.Context) bool {
 	imageExportMu.Lock()
 	defer imageExportMu.Unlock()
 	if imageExportKnown {
 		return imageExportOK
 	}
-	// `docker info` renders the storage driver's status as [[key value] …]; the
-	// containerd image store announces itself with this driver-type row.
 	res, err := Run(ctx, 15*time.Second, "info", "--format", "{{json .DriverStatus}}")
 	if err != nil || res.Code != 0 {
-		return false // inconclusive - do not cache
+		return false
 	}
 	if !strings.Contains(res.Stdout, "io.containerd.snapshotter.v1") {
 		imageExportKnown, imageExportOK = true, false
@@ -390,22 +336,19 @@ func ImageExportOptsSupported(ctx context.Context) bool {
 	}
 	bx, err := Run(ctx, 15*time.Second, "buildx", "version")
 	if err != nil {
-		return false // inconclusive - do not cache
+		return false
 	}
 	imageExportKnown, imageExportOK = true, bx.Code == 0
 	return imageExportOK
 }
 
-// resetImageExportProbe clears the cached probe. Tests only.
 func resetImageExportProbe() {
 	imageExportMu.Lock()
 	defer imageExportMu.Unlock()
 	imageExportKnown, imageExportOK = false, false
 }
 
-// Build-cache size caps. Docker 29 has dropped the old name entirely, so the flag a
-// host accepts has to be asked for rather than assumed - passing the wrong one turns a
-// routine sweep into a hard error.
+// Build-cache size caps.
 const (
 	// PruneCapModern accepts --max-used-space / --min-free-space.
 	PruneCapModern = "modern"
@@ -421,9 +364,7 @@ var (
 	pruneCapMode  string
 )
 
-// BuildCachePruneCap reports which size-ceiling flags `docker builder prune`
-// accepts here. Cached for the life of the agent (the CLI does not change under
-// a running agent); an inconclusive probe is not cached.
+// BuildCachePruneCap reports which size-ceiling flags `docker builder prune` accepts here.
 func BuildCachePruneCap(ctx context.Context) string {
 	pruneCapMu.Lock()
 	defer pruneCapMu.Unlock()
@@ -432,7 +373,7 @@ func BuildCachePruneCap(ctx context.Context) string {
 	}
 	res, err := Run(ctx, 15*time.Second, "builder", "prune", "--help")
 	if err != nil {
-		return PruneCapNone // inconclusive - do not cache
+		return PruneCapNone
 	}
 	help := res.Stdout + res.Stderr
 	mode := PruneCapNone
@@ -446,7 +387,6 @@ func BuildCachePruneCap(ctx context.Context) string {
 	return mode
 }
 
-// resetPruneCapProbe clears the cached probe. Tests only.
 func resetPruneCapProbe() {
 	pruneCapMu.Lock()
 	defer pruneCapMu.Unlock()
@@ -462,17 +402,13 @@ func EnsureNetwork(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
-	// Two deploys of the same Environment start at once, both look and both create.
-	// The loser is not a failure: the network it wanted now exists.
 	if res.Code != 0 && !strings.Contains(res.Stderr, "already exists") {
 		return fmt.Errorf("docker network create %s failed: %s", name, res.Stderr)
 	}
 	return nil
 }
 
-// ConnectNetwork attaches a container to a network. Already being on it is success,
-// not an error - every deploy re-asserts this and Docker answers with a message
-// rather than a code we can distinguish.
+// ConnectNetwork attaches a container to a network.
 func ConnectNetwork(ctx context.Context, network, container string) error {
 	res, err := Run(ctx, 15*time.Second, "network", "connect", network, container)
 	if err != nil {
@@ -484,8 +420,7 @@ func ConnectNetwork(ctx context.Context, network, container string) error {
 	return fmt.Errorf("docker network connect %s %s failed: %s", network, container, res.Stderr)
 }
 
-// ListNetworks names every docker network on this host. ok is false when the
-// daemon could not answer, which no caller may read as "no networks".
+// ListNetworks names every docker network on this host.
 func ListNetworks(ctx context.Context) (names []string, ok bool) {
 	res, err := Run(ctx, 10*time.Second, "network", "ls", "--format", "{{.Name}}")
 	if err != nil || res.Code != 0 {
@@ -494,10 +429,7 @@ func ListNetworks(ctx context.Context) (names []string, ok bool) {
 	return nonEmptyLines(res.Stdout), true
 }
 
-// TenantNetworksOf keeps the tenant networks out of a listing - the ones a
-// recreated Traefik has to be put back on. The platform's own (`deplo`,
-// `deplo-internal`, `deplo-socket`) are declared in Traefik's compose file and are
-// deliberately NOT in this list.
+// TenantNetworksOf keeps the tenant networks out of a listing - the ones a recreated Traefik has to be put back on.
 func TenantNetworksOf(names []string) []string {
 	var out []string
 	for _, n := range names {
@@ -514,8 +446,7 @@ func DeploNetworks(ctx context.Context) []string {
 	return TenantNetworksOf(names)
 }
 
-// ContainerNetworks is the set of networks a container is attached to. exists is
-// false when docker has no such container.
+// ContainerNetworks is the set of networks a container is attached to.
 func ContainerNetworks(ctx context.Context, name string) (on map[string]bool, exists bool) {
 	res, err := Run(ctx, 10*time.Second, "inspect", "-f",
 		"{{range $k, $_ := .NetworkSettings.Networks}}{{$k}} {{end}}", name)
@@ -529,17 +460,14 @@ func ContainerNetworks(ctx context.Context, name string) (on map[string]bool, ex
 	return on, true
 }
 
-// IsTenantNetwork reports whether a network name is one Deplo mints for an
-// Environment, a team or a preview - never the platform's own.
+// IsTenantNetwork reports whether a network name is one Deplo mints for an Environment, a team or a preview - never the platform's own.
 func IsTenantNetwork(name string) bool {
 	return strings.HasPrefix(name, "deplo-env-") ||
 		strings.HasPrefix(name, "deplo-team-") ||
 		strings.HasPrefix(name, "deplo-preview-")
 }
 
-// CountRunning counts EVERY running container on the host, returning ok=false
-// when the read itself failed - a caller keeping a gauge must not publish a 0 it
-// never measured.
+// CountRunning counts EVERY running container on the host, returning ok=false when the read itself failed - a caller keeping a gauge must not publish a 0 it never measured.
 func CountRunning(ctx context.Context) (int, bool) {
 	res, err := Run(ctx, 10*time.Second, "ps", "-q")
 	if err != nil || res.Code != 0 {
@@ -554,7 +482,6 @@ func RunningContainers(ctx context.Context) int {
 	return n
 }
 
-// nonEmptyLines splits command output into trimmed, non-empty lines.
 func nonEmptyLines(out string) []string {
 	var lines []string
 	for _, l := range strings.Split(out, "\n") {
@@ -565,8 +492,7 @@ func nonEmptyLines(out string) []string {
 	return lines
 }
 
-// TraefikRunning reports whether a Traefik reverse proxy container is running on this
-// host.
+// TraefikRunning reports whether a Traefik reverse proxy container is running on this host.
 func TraefikRunning(ctx context.Context) bool {
 	res, err := Run(ctx, 5*time.Second, "ps", "--filter", "status=running",
 		"--format", "{{.Image}}\t{{.Names}}")
@@ -574,9 +500,6 @@ func TraefikRunning(ctx context.Context) bool {
 		return false
 	}
 	for _, line := range strings.Split(strings.TrimSpace(res.Stdout), "\n") {
-		// Match the image repo (traefik, traefik:v3.7, library/traefik, …) or a
-		// container named *traefik* - covers the deplo-traefik instance and a
-		// bring-your-own proxy alike.
 		low := strings.ToLower(line)
 		if strings.Contains(low, "traefik") {
 			return true
@@ -585,8 +508,7 @@ func TraefikRunning(ctx context.Context) bool {
 	return false
 }
 
-// IsRunning reports whether a named container is in the running state. Used by
-// the deploy readiness wait and Inspect. Never errors (false on any failure).
+// IsRunning reports whether a named container is in the running state.
 func IsRunning(ctx context.Context, name string) bool {
 	res, err := Run(ctx, 5*time.Second, "inspect", "-f", "{{.State.Running}}", name)
 	if err != nil || res.Code != 0 {
@@ -595,8 +517,7 @@ func IsRunning(ctx context.Context, name string) bool {
 	return strings.TrimSpace(res.Stdout) == "true"
 }
 
-// State returns (exists, runtimeState) for a container, e.g. ("running"). exists
-// is false when docker has no such container.
+// State returns (exists, runtimeState) for a container, e.g.
 func State(ctx context.Context, name string) (bool, string) {
 	res, err := Run(ctx, 5*time.Second, "inspect", "-f", "{{.State.Status}}", name)
 	if err != nil || res.Code != 0 {
@@ -605,8 +526,7 @@ func State(ctx context.Context, name string) (bool, string) {
 	return true, strings.TrimSpace(res.Stdout)
 }
 
-// StackRunning reports whether ANY container of a Deplo stack is running, keyed by the
-// deplo.slug label rather than a container name.
+// StackRunning reports whether ANY container of a Deplo stack is running, keyed by the deplo.slug label rather than a container name.
 func StackRunning(ctx context.Context, slug string) bool {
 	res, err := Run(ctx, 5*time.Second, "ps", "-q",
 		"--filter", "label=deplo.slug="+slug,
@@ -617,14 +537,7 @@ func StackRunning(ctx context.Context, slug string) bool {
 	return strings.TrimSpace(res.Stdout) != ""
 }
 
-// NetworkHeadroom reports how close this host is to running out of docker
-// networks, as a warning to print, or "" when there is room.
-//
-// Docker's built-in pools give about 31 networks. Deplo now spends one per
-// Environment, plus each network a compose file declares and one per open preview,
-// so a host installed before the installer began widening the pools reaches that
-// ceiling quietly - and the first sign is a deploy failing with an address-pool
-// error nobody can act on after the fact.
+// NetworkHeadroom reports how close this host is to running out of docker networks, as a warning to print, or "" when there is room.
 func NetworkHeadroom(ctx context.Context) string {
 	names, ok := ListNetworks(ctx)
 	if !ok {
@@ -633,16 +546,12 @@ func NetworkHeadroom(ctx context.Context) string {
 	return NetworkHeadroomFor(ctx, len(names))
 }
 
-// NetworkHeadroomFor is NetworkHeadroom for a caller that has already listed the
-// networks, so a deploy pays for that listing once.
+// NetworkHeadroomFor is NetworkHeadroom for a caller that has already listed the networks, so a deploy pays for that listing once.
 func NetworkHeadroomFor(ctx context.Context, count int) string {
-	// A pool of its own says how many networks fit; without one, docker's built-in
-	// pools give about 31 in practice.
 	ceiling, widened := addressPoolCapacity(ctx), true
 	if ceiling == 0 {
 		ceiling, widened = 31, false
 	}
-	// Warn with a few to spare, so there is time to act before a deploy fails.
 	if count < ceiling-8 {
 		return ""
 	}
@@ -660,12 +569,6 @@ func NetworkHeadroomFor(ctx context.Context, count int) string {
 			"new network will fail.", count)
 }
 
-// addressPoolCapacity is how many networks the daemon's own pools can carve, or 0
-// when it has none.
-//
-// Asked of `docker info`, which reports them WHOLE: reading daemon.json saw
-// nothing of a pool passed as a daemon flag, and a pool of any size at all - one
-// /24 included - counted as room for thousands.
 func addressPoolCapacity(ctx context.Context) int {
 	res, err := Run(ctx, 10*time.Second, "info", "--format", "{{json .DefaultAddressPools}}")
 	if err != nil || res.Code != 0 {
@@ -674,8 +577,6 @@ func addressPoolCapacity(ctx context.Context) int {
 	return parseAddressPools(res.Stdout)
 }
 
-// parseAddressPools counts the networks a `DefaultAddressPools` document can carve.
-// `null` - the daemon running on its built-in pools - is 0.
 func parseAddressPools(out string) int {
 	var pools []struct {
 		Base string `json:"Base"`
@@ -693,8 +594,6 @@ func parseAddressPools(out string) int {
 		base, _ := ipnet.Mask.Size()
 		bits := p.Size - base
 		if bits < 0 || bits > 20 {
-			// Past a million subnets the host runs out of everything else first, and
-			// the shift stays inside an int on every platform.
 			bits = 20
 		}
 		total += 1 << bits
@@ -702,10 +601,6 @@ func parseAddressPools(out string) int {
 	return total
 }
 
-// envAllowedPrefixes and envAllowedNames are what a spawned tool inherits from the
-// agent's own environment. Everything else stays out: `docker compose` interpolates
-// `${VAR}` in a tenant's stack from its process env, so a bootstrap token or an
-// operator's proxy credential would be one `environment:` line away.
 var envAllowedPrefixes = []string{"DOCKER_", "BUILDKIT_", "COMPOSE_", "XDG_", "LC_", "SSL_CERT_"}
 
 var envAllowedNames = map[string]bool{
@@ -725,8 +620,6 @@ func envAllowed(key string) bool {
 	return false
 }
 
-// scopedEnv is the environment a spawned tool gets: the allowed part of the agent's
-// own, plus extra. Never the whole of os.Environ (see envAllowedPrefixes).
 func scopedEnv(extra []string) []string {
 	out := make([]string, 0, len(extra)+16)
 	for _, kv := range os.Environ() {

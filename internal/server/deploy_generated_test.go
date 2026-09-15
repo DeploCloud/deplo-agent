@@ -14,7 +14,6 @@ import (
 func TestBuildImage_generatedWritesDockerfileIntoContext(t *testing.T) {
 	s := New(t.TempDir(), t.TempDir(), "/", "")
 
-	// A context with a source file but NO Dockerfile.
 	data := tarball(t,
 		[]tar.Header{{Name: "app.js", Typeflag: tar.TypeReg, Mode: 0o644}},
 		map[string]string{"app.js": "console.log(1)\n"},
@@ -33,7 +32,6 @@ func TestBuildImage_generatedWritesDockerfileIntoContext(t *testing.T) {
 		BuildKind:  pb.BuildKind_BUILD_KIND_DOCKERFILE,
 		Dockerfile: &pb.DockerfileBuild{Generated: true, GeneratedDockerfile: body},
 	}
-	// Drains events into nowhere; we only care about the Dockerfile being written.
 	e := &emitter{send: func(*pb.DeployEvent) error { return nil }}
 	_ = s.buildImage(context.Background(), req, buildDir, e)
 

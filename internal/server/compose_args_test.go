@@ -7,10 +7,6 @@ import (
 	"testing"
 )
 
-// The app's own extra `docker compose up` flags. They are APPENDED to the
-// bring-up the agent assembles, never a replacement, so the project name, the
-// stack file and the env-file stay the agent's, whatever arrives on the wire.
-
 func TestComposeUpArgsAppendsExtraFlags(t *testing.T) {
 	args := composeUpArgs("deplo-app", "/stacks/app.yml", "", "", false,
 		[]string{"--pull", "always", "--wait"})
@@ -30,8 +26,7 @@ func TestComposeUpArgsKeepsTheDefaultBringUpWhenEmpty(t *testing.T) {
 	}
 }
 
-// One bad token drops the WHOLE set: dropping just `-p` would leave its value
-// behind as a positional arg, which `compose up` reads as "only this service".
+// One bad token drops the WHOLE set: dropping just `-p` would leave its value behind as a positional arg, which `compose up` reads as "only this service".
 func TestSanitizeComposeArgsRejectsTheWholeSet(t *testing.T) {
 	cases := map[string][]string{
 		"repoints the project":   {"--force-recreate", "-p", "somethingelse"},
@@ -67,8 +62,7 @@ func TestSanitizeComposeArgsKeepsOrdinaryFlags(t *testing.T) {
 	}
 }
 
-// A compose stack runs from its OWN directory. A `.env` there would be ONE file for all
-// of them.
+// A compose stack runs from its OWN directory.
 func TestComposeUpArgsPassesProjectDirectory(t *testing.T) {
 	args := composeUpArgs(
 		"deplo-app",
@@ -85,16 +79,13 @@ func TestComposeUpArgsPassesProjectDirectory(t *testing.T) {
 	if !strings.Contains(joined, "--env-file /data/stacks/files/app/.env") {
 		t.Fatalf("env file missing: %v", args)
 	}
-	// The single-image path passes neither.
 	plain := composeUpArgs("deplo-app", "/data/stacks/app.yml", "", "", false, nil)
 	if strings.Contains(strings.Join(plain, " "), "--project-directory") {
 		t.Fatalf("single-image stack should not get a project directory: %v", plain)
 	}
 }
 
-// The env-file is written inside the stack's own directory and the pre-move copy
-// beside the stack file is deleted: it held decrypted secrets and nothing points
-// at it any more.
+// The env-file is written inside the stack's own directory and the pre-move copy beside the stack file is deleted: it held decrypted secrets and nothing points at it any more.
 func TestWriteComposeEnvIsPerStack(t *testing.T) {
 	dir := t.TempDir()
 	s := &Service{stackDir: dir}
@@ -119,7 +110,6 @@ func TestWriteComposeEnvIsPerStack(t *testing.T) {
 	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
 		t.Fatalf("the old env file was left behind: %v", err)
 	}
-	// Two stacks never share a file.
 	other, _, err := s.writeComposeEnv("other", map[string]string{"B": "2"})
 	if err != nil || other == envFile {
 		t.Fatalf("second stack reused %q (err %v)", other, err)

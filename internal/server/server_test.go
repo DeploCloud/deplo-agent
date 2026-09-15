@@ -12,9 +12,6 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
-// dialLocal spins up the Agent service on an in-process listener (no TLS - the
-// mTLS handshake is covered cross-language in the TS PKI tests and the harness
-// integration test) and returns a connected client.
 func dialLocal(t *testing.T) (pb.AgentClient, func()) {
 	t.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
@@ -50,23 +47,15 @@ func TestHello_reportsContractAndCapabilities(t *testing.T) {
 	if len(resp.GetCapabilities()) == 0 {
 		t.Error("expected capabilities to be advertised")
 	}
-	// The control plane gates DockerCleanup on this string: without it advertised,
-	// an operator on an old agent gets "update the agent on this server" instead of
-	// a fake success (the SELF_UPDATE_CAPABILITY / BACKUP_CAPABILITY discipline).
 	if !containsString(resp.GetCapabilities(), "docker-cleanup") {
 		t.Errorf("capabilities %v do not advertise docker-cleanup", resp.GetCapabilities())
 	}
-	// Same discipline for the telemetry stream. Drop it and every host silently degrades
-	// to the poll path, which still draws correct charts, so nothing would tell you.
 	if !containsString(resp.GetCapabilities(), "metrics-stream") {
 		t.Errorf("capabilities %v do not advertise metrics-stream", resp.GetCapabilities())
 	}
-	// The rollout is verified against this one, not against a version string.
 	if !containsString(resp.GetCapabilities(), "metrics.netns") {
 		t.Errorf("capabilities %v do not advertise metrics.netns", resp.GetCapabilities())
 	}
-	// docker_available may be true or false depending on the test host; the
-	// point is Hello answers without error (the deploy pre-flight, PLAN P5).
 }
 
 func TestMetrics_returnsHostShape(t *testing.T) {
@@ -97,8 +86,6 @@ func TestDeploy_missingSlugFailsCleanly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Deploy open: %v", err)
 	}
-	// Expect a single terminal result event reporting the missing slug, not a
-	// hang and not an RPC error.
 	var sawResult bool
 	for {
 		ev, err := stream.Recv()
@@ -126,8 +113,6 @@ func TestCheckPort_reportsAvailability(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// A port we hold open must read as NOT available: bind an ephemeral port
-	// ourselves, learn its number, keep it held, and ask CheckPort about it.
 	held, err := net.Listen("tcp", "0.0.0.0:0")
 	if err != nil {
 		t.Fatal(err)
@@ -146,8 +131,6 @@ func TestCheckPort_reportsAvailability(t *testing.T) {
 		t.Error("expected a reason when a port is unavailable")
 	}
 
-	// Release it, then the same port must read as available again (the probe binds
-	// and immediately releases, so it must not leave the port stuck).
 	held.Close()
 	resp, err = client.CheckPort(ctx, &pb.CheckPortRequest{Port: int32(busyPort)})
 	if err != nil {
@@ -157,7 +140,6 @@ func TestCheckPort_reportsAvailability(t *testing.T) {
 		t.Errorf("port %d was freed but CheckPort said unavailable: %s", busyPort, resp.GetReason())
 	}
 
-	// Out-of-range ports are reported unavailable with a reason, never attempted.
 	for _, p := range []int32{0, -1, 70000} {
 		r, err := client.CheckPort(ctx, &pb.CheckPortRequest{Port: p})
 		if err != nil {

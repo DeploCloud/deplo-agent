@@ -11,12 +11,7 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
-// metricsstream_test.go covers the StreamMetrics handler over the real in-process gRPC
-// harness (dialLocal - actual TCP on 127.0.0.1:0, not bufconn), so the
-// context-cancellation semantics under test are the ones gRPC really delivers.
-
-// The handler must actually emit on the cadence it was asked for. Two frames is
-// the minimum that proves a TICKER rather than a single reply.
+// The handler must actually emit on the cadence it was asked for.
 func TestStreamMetrics_emitsSamplesAtInterval(t *testing.T) {
 	client, done := dialLocal(t)
 	defer done()
@@ -46,22 +41,17 @@ func TestStreamMetrics_emitsSamplesAtInterval(t *testing.T) {
 		if sample.GetSampledAtUnixMs() <= 0 {
 			t.Errorf("sample %d has no agent timestamp", i)
 		}
-		// include_containers:false must mean NO container work was done at all,
-		// not "the roster ran and found nothing".
 		if len(sample.GetContainers()) != 0 {
 			t.Errorf("sample %d carried %d containers despite include_containers:false",
 				i, len(sample.GetContainers()))
 		}
 	}
-	// Two frames at a 1s cadence cannot arrive in well under a second unless the
-	// ticker is being ignored and the loop is spinning.
 	if elapsed := time.Since(start); elapsed < 900*time.Millisecond {
 		t.Errorf("two frames arrived in %v; the 1s cadence is not being honoured", elapsed)
 	}
 }
 
-// A cadence is a HINT. A control plane asking for 1ms must not be able to pin the host,
-// and one asking for an hour must not be able to stall the charts.
+// A cadence is a HINT.
 func TestStreamMetrics_clampsIntervalAtBothEnds(t *testing.T) {
 	t.Run("below the floor", func(t *testing.T) {
 		client, done := dialLocal(t)
@@ -79,8 +69,6 @@ func TestStreamMetrics_clampsIntervalAtBothEnds(t *testing.T) {
 				t.Fatalf("Recv %d: %v", i, err)
 			}
 		}
-		// Clamped to the 1s floor, two frames take ~2s. Un-clamped at 1ms they
-		// would arrive almost immediately.
 		if elapsed := time.Since(start); elapsed < 1500*time.Millisecond {
 			t.Errorf("two frames in %v for interval_ms=1; expected the %v floor to apply",
 				elapsed, minStreamInterval)
@@ -88,8 +76,6 @@ func TestStreamMetrics_clampsIntervalAtBothEnds(t *testing.T) {
 	})
 
 	t.Run("above the ceiling", func(t *testing.T) {
-		// A pure unit assertion for the ceiling: waiting out a 60s clamp to
-		// observe it would make this file take minutes.
 		if got := clampInterval(2 * time.Hour); got != maxStreamInterval {
 			t.Errorf("clampInterval(2h) = %v, want %v", got, maxStreamInterval)
 		}
@@ -105,8 +91,7 @@ func TestStreamMetrics_clampsIntervalAtBothEnds(t *testing.T) {
 	})
 }
 
-// THE LEAK TEST. Cancellation must propagate and the RPC must terminate as Canceled
-// rather than hanging or reporting a spurious error.
+// THE LEAK TEST.
 func TestStreamMetrics_clientCancelEndsTheStream(t *testing.T) {
 	client, done := dialLocal(t)
 	defer done()
@@ -122,7 +107,6 @@ func TestStreamMetrics_clientCancelEndsTheStream(t *testing.T) {
 
 	cancel()
 
-	// The next Recv must fail promptly with Canceled.
 	deadline := time.After(10 * time.Second)
 	errCh := make(chan error, 1)
 	go func() {
@@ -143,9 +127,7 @@ func TestStreamMetrics_clientCancelEndsTheStream(t *testing.T) {
 	}
 }
 
-// buildSample must survive a panic by losing ONE FRAME, never the stream. A handler
-// that propagates the panic kills telemetry for the whole host, and the control plane
-// then reconnects straight back into it every few seconds.
+// buildSample must survive a panic by losing ONE FRAME, never the stream.
 func TestBuildSample_panicCostsOneFrameNotTheStream(t *testing.T) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -153,15 +135,11 @@ func TestBuildSample_panicCostsOneFrameNotTheStream(t *testing.T) {
 		}
 	}()
 
-	// A nil *hostmetrics.Sampler panics on the method call inside the tick.
 	sample := buildSample(context.Background(), nil, nil)
 
 	if sample == nil {
 		t.Fatal("buildSample returned nil; callers dereference the frame")
 	}
-	// The recovered frame must carry NO host metrics. A partial frame is a
-	// fabricated one - the control plane refuses a frame with no host half,
-	// which renders the honest gap.
 	if sample.GetHost() != nil {
 		t.Error("a recovered frame carried host metrics; a partial frame must not be emitted")
 	}

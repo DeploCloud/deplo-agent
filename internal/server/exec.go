@@ -1,7 +1,5 @@
 package server
 
-// https://deplo.build/docs/guides/console-and-files
-
 import (
 	"context"
 	"regexp"
@@ -13,12 +11,6 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// exec.go ports the container-exec half of lib/infra/docker.ts to the agent:
-// resolveShellPlan / shellLabel / splitArgv / execInContainer / isDockerLevelStderr.
-
-// dockerLevelStderr matches stderr emitted by docker / the OCI runtime (never by an
-// in-container shell), used to tell a docker-level failure (container gone, no shell)
-// from a guest command exiting non-zero.
 var dockerLevelStderr = regexp.MustCompile(
 	`(?m)(?:OCI runtime|unable to start container process|executable file not found in \$PATH|Error response from daemon|No such container|is not running|is paused|Cannot connect to the Docker daemon|cannot exec in a stopped|container .* is (?:not running|paused|restarting)|chdir to cwd .* set in config\.json failed)`,
 )
@@ -27,19 +19,12 @@ func isDockerLevelStderr(s string) bool {
 	return dockerLevelStderr.MatchString(s)
 }
 
-// shellPlan is the resolved way to run a command in a container: via a detected
-// shell (run is the argv prefix, e.g. ["sh","-lc"]) or raw argv when the image
-// has none (distroless/scratch).
 type shellPlan struct {
-	// run is the shell argv prefix; nil means raw (no shell).
 	run []string
 }
 
 func (p shellPlan) raw() bool { return p.run == nil }
 
-// shellCandidate mirrors lib/infra/docker.ts SHELL_CANDIDATES: a zero-side-effect
-// probe (`-c :`) and the argv prefix used to run real commands (a login shell
-// `-lc` loads PATH/profile, but is NOT used to probe).
 type shellCandidate struct {
 	probe []string
 	run   []string
@@ -54,9 +39,6 @@ var shellCandidates = []shellCandidate{
 
 const shellTTL = 5 * time.Minute
 
-// shellCacheMax bounds the cache. Each redeploy mints a fresh container name, so
-// without a ceiling a long-lived agent accumulates one dead entry per deploy
-// forever. The cap + eviction on write keep it bounded regardless of churn.
 const shellCacheMax = 1024
 
 type shellCacheEntry struct {
@@ -67,13 +49,9 @@ type shellCacheEntry struct {
 
 var (
 	shellCacheMu sync.Mutex
-	// Keyed by container name.
-	shellCache = map[string]shellCacheEntry{}
+	shellCache   = map[string]shellCacheEntry{}
 )
 
-// evictShellCacheLocked frees room in shellCache. Caller must hold shellCacheMu.
-// It first drops every TTL-lapsed entry (they'd re-probe on next use anyway),
-// then, if still at capacity, drops the oldest entries until below the cap.
 func evictShellCacheLocked(now time.Time) {
 	for k, v := range shellCache {
 		if now.Sub(v.at) >= shellTTL {
@@ -96,9 +74,6 @@ func evictShellCacheLocked(now time.Time) {
 	}
 }
 
-// resolveShellPlan determines how to run commands in a container - via a detected
-// shell, or raw argv when none exists - probed once per container and cached (keyed by
-// name; re-probes on image change or TTL lapse).
 func resolveShellPlan(ctx context.Context, name, image string) shellPlan {
 	shellCacheMu.Lock()
 	hit, ok := shellCache[name]
@@ -107,21 +82,17 @@ func resolveShellPlan(ctx context.Context, name, image string) shellPlan {
 		return hit.plan
 	}
 
-	plan := shellPlan{run: nil} // raw by default
+	plan := shellPlan{run: nil}
 	for _, c := range shellCandidates {
 		args := append([]string{"exec", name}, c.probe...)
 		res, err := dockercli.Run(ctx, 5*time.Second, args...)
 		if err != nil {
-			// Spawn failure / timeout / daemon unreachable: can't probe. Don't
-			// cache a possibly-transient result - treat as raw for this attempt.
 			return shellPlan{run: nil}
 		}
 		if res.Code == 0 {
 			plan = shellPlan{run: c.run}
 			break
 		}
-		// A docker-level error (container stopped/removed) fails every probe
-		// identically - bail without caching so a later restart re-probes.
 		if isDockerLevelStderr(res.Stderr) {
 			return shellPlan{run: nil}
 		}
@@ -136,7 +107,6 @@ func resolveShellPlan(ctx context.Context, name, image string) shellPlan {
 	return plan
 }
 
-// shellLabelFor mirrors lib/infra/docker.ts shellLabel.
 func shellLabelFor(ctx context.Context, name, image string) string {
 	plan := resolveShellPlan(ctx, name, image)
 	if plan.raw() {
@@ -148,12 +118,10 @@ func shellLabelFor(ctx context.Context, name, image string) string {
 	return "/bin/sh"
 }
 
-// splitArgv mirrors lib/infra/docker.ts splitArgv: honours single/double quotes,
-// performs NO expansion (no globbing/$VAR/pipes/redirects). Intentionally minimal.
 func splitArgv(s string) []string {
 	out := []string{}
 	var cur strings.Builder
-	var quote rune // 0 when not in a quote
+	var quote rune
 	has := false
 	for _, ch := range s {
 		switch {
@@ -184,8 +152,7 @@ func splitArgv(s string) []string {
 	return out
 }
 
-// Exec runs a command in a container (docker exec), mirroring lib/infra/docker.ts
-// execInContainer + lib/data/console.ts execInContainer's shell/raw dispatch.
+// Exec runs a command in a container (docker exec), mirroring lib/infra/docker.ts execInContainer + lib/data/console.ts execInContainer's shell/raw dispatch.
 func (s *Service) Exec(ctx context.Context, req *pb.ExecRequest) (*pb.ExecResponse, error) {
 	if err := assertOwned(ctx, req.GetContainer(), req.GetProjectId()); err != nil {
 		return nil, err
@@ -201,7 +168,7 @@ func (s *Service) Exec(ctx context.Context, req *pb.ExecRequest) (*pb.ExecRespon
 		args := append(append([]string{"exec", name}, plan.run...), command)
 		res, err := dockercli.Run(ctx, 30*time.Second, args...)
 		if err != nil {
-			return nil, err // spawn/timeout: docker never produced an exit code
+			return nil, err
 		}
 		return &pb.ExecResponse{
 			Code:    int32(res.Code),
@@ -211,7 +178,6 @@ func (s *Service) Exec(ctx context.Context, req *pb.ExecRequest) (*pb.ExecRespon
 		}, nil
 	}
 
-	// Raw (shell-less) exec: the first word is the binary, the rest literal args.
 	argv := splitArgv(command)
 	if len(argv) == 0 {
 		return &pb.ExecResponse{Code: 0, RawMode: true}, nil

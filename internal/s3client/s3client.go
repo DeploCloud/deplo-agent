@@ -1,9 +1,4 @@
-// Package s3client is the agent's S3 client - a thin wrapper over minio-go that the
-// backup/restore + S3Check/S3Delete RPCs use to move dump bytes to and from an
-// S3-compatible bucket WITHOUT a control-plane round-trip (ADR-0007).
 package s3client
-
-// https://deplo.build/docs/guides/backups-and-restore
 
 import (
 	"context"
@@ -21,41 +16,26 @@ import (
 
 // Config is the decrypted S3 destination the control plane sends over mTLS.
 type Config struct {
-	Endpoint  string // host[:port], no scheme (minio-go adds it from Secure)
+	Endpoint  string
 	Region    string
 	Bucket    string
 	AccessKey string
 	SecretKey string
 	// PathStyle forces bucket-in-path addressing (MinIO + many S3-compatibles).
-	// AWS uses virtual-host style (PathStyle=false).
 	PathStyle bool
-	// AllowPrivateEndpoint opts OUT of the SSRF guard that rejects an endpoint resolving
-	// to a loopback / link-local / private (RFC1918 / ULA) address.
+	// AllowPrivateEndpoint opts OUT of the SSRF guard that rejects an endpoint resolving to a loopback / link-local / private (RFC1918 / ULA) address.
 	AllowPrivateEndpoint bool
-	// ExtraArgs are the destination's advanced quirk flags (`--flag=value`), as
-	// the operator typed them. See parseExtraArgs: anything not on the allowlist
-	// is DROPPED, never an error.
+	// ExtraArgs are the destination's advanced quirk flags (`--flag=value`), as the operator typed them.
 	ExtraArgs []string
 }
 
-// extraOptions is what a Config's ExtraArgs actually amount to, once the tokens
-// the agent understands have been picked out of them.
 type extraOptions struct {
-	// forcePathStyle overrides the control plane's provider-derived choice.
-	forcePathStyle *bool
-	// noCompression stops Go's transport adding `Accept-Encoding: gzip` AFTER
-	// the request was signed - the header the signature does not cover, which is
-	// what some gateways reject.
-	noCompression bool
-	// insecureSkipVerify accepts any TLS certificate. For a self-hosted store on
-	// a self-signed cert, which is an ordinary thing on a private network.
-	insecureSkipVerify bool
-	// disableContentSha256 uploads without the streaming content hash, for
-	// gateways that reject the trailer it produces.
+	forcePathStyle       *bool
+	noCompression        bool
+	insecureSkipVerify   bool
 	disableContentSha256 bool
 }
 
-// parseExtraArgs reads the flags this agent knows out of a destination's tokens.
 func parseExtraArgs(args []string) (extraOptions, []string) {
 	var opts extraOptions
 	var unknown []string
@@ -74,8 +54,6 @@ func parseExtraArgs(args []string) (extraOptions, []string) {
 		case "--s3-force-path-style":
 			opts.forcePathStyle = &on
 		case "--s3-sign-accept-encoding":
-			// Inverted on purpose: the flag says whether Accept-Encoding takes
-			// part in the signature, and turning it OFF is what needs doing.
 			opts.noCompression = !on
 		case "--s3-insecure-skip-verify":
 			opts.insecureSkipVerify = on
@@ -88,9 +66,7 @@ func parseExtraArgs(args []string) (extraOptions, []string) {
 	return opts, unknown
 }
 
-// New builds a minio client for a destination. The endpoint may arrive with a
-// scheme (https://… or http://…); we strip it and derive Secure from it,
-// defaulting to TLS when no scheme is given (the safe default for a public S3).
+// New builds a minio client for a destination.
 func New(cfg Config) (*minio.Client, error) {
 	endpoint := cfg.Endpoint
 	secure := true
@@ -133,9 +109,6 @@ func New(cfg Config) (*minio.Client, error) {
 		}
 		tr.TLSClientConfig.InsecureSkipVerify = true
 	}
-	// The guard resolved the name once; the dial must go where THAT answer went,
-	// or a zone with a short TTL answers public to the guard and internal to the
-	// dial. TLS still verifies the hostname (ServerName comes from the URL).
 	if vetted != nil {
 		base := tr.DialContext
 		tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -150,7 +123,6 @@ func New(cfg Config) (*minio.Client, error) {
 	return minio.New(endpoint, opts)
 }
 
-// vettedEndpoint is the one address the SSRF guard approved for a hostname.
 type vettedEndpoint struct {
 	host string
 	ip   net.IP
@@ -163,14 +135,10 @@ func bucketLookup(pathStyle bool) minio.BucketLookupType {
 	return minio.BucketLookupDNS
 }
 
-// validateEndpointHost is the SSRF guard for the S3 endpoint, which arrives off the
-// wire (user-controlled) and is dialed by the root agent. `endpoint` is scheme-stripped
-// host[:port].
 func validateEndpointHost(endpoint string, allowPrivate bool) (*vettedEndpoint, error) {
 	if allowPrivate {
 		return nil, nil
 	}
-	// Isolate host[:port] from any stray path, then drop the port.
 	host := endpoint
 	if i := strings.IndexByte(host, '/'); i >= 0 {
 		host = host[:i]
@@ -194,22 +162,17 @@ func validateEndpointHost(endpoint string, allowPrivate bool) (*vettedEndpoint, 
 		}
 		ips = resolved
 	}
-	// Reject if ANY resolved address is disallowed (conservative - thwarts a
-	// hostname that mixes a public A record with an internal one).
 	for _, ip := range ips {
 		if reason := blockedIPReason(ip); reason != "" {
 			return nil, fmt.Errorf("s3: endpoint host %q resolves to a disallowed %s address %s; refusing to connect (SSRF guard)", host, reason, ip)
 		}
 	}
-	// A literal is its own answer; a name is pinned to the first address vetted.
 	if literal || len(ips) == 0 {
 		return nil, nil
 	}
 	return &vettedEndpoint{host: host, ip: ips[0]}, nil
 }
 
-// blockedIPReason names the SSRF category an IP falls into, or "" if it is a
-// routable public address that is safe to dial.
 func blockedIPReason(ip net.IP) string {
 	switch {
 	case ip.IsLoopback():
@@ -224,9 +187,7 @@ func blockedIPReason(ip net.IP) string {
 	return ""
 }
 
-// Upload streams `r` to bucket/key via a multipart PUT, no temp file. Size may
-// be -1 (unknown - a piped dump), in which case minio-go buffers part-sized
-// chunks. Returns the bytes written so the control plane can record the size.
+// Upload streams `r` to bucket/key via a multipart PUT, no temp file.
 func Upload(ctx context.Context, cfg Config, key string, r io.Reader) (int64, error) {
 	cl, err := New(cfg)
 	if err != nil {
@@ -234,19 +195,11 @@ func Upload(ctx context.Context, cfg Config, key string, r io.Reader) (int64, er
 	}
 	extra, _ := parseExtraArgs(cfg.ExtraArgs)
 	info, err := cl.PutObject(ctx, cfg.Bucket, key, r, -1, minio.PutObjectOptions{
-		ContentType: "application/octet-stream",
-		// Some gateways reject the streaming-signature trailer this produces.
+		ContentType:          "application/octet-stream",
 		DisableContentSha256: extra.disableContentSha256,
 	})
 	if err != nil {
-		// A multipart upload that dies mid-flight leaves its uploaded parts in the bucket.
-		// minio-go tries to abort them, but it does so on the SAME context that just failed,
-		// so the abort itself fails whenever the cause was a cancellation - which is exactly
-		// the case a canceled backup produces.
 		if cerr := ctx.Err(); cerr != nil {
-			// context.Background(), not `ctx`: `ctx` is the cancellation we are
-			// cleaning up after, and reusing it is precisely the bug this exists to
-			// work around.
 			if rerr := cl.RemoveIncompleteUpload(context.Background(), cfg.Bucket, key); rerr != nil {
 				log.Printf("s3: could not clear the incomplete upload at %q: %v", key, rerr)
 			}
@@ -256,9 +209,7 @@ func Upload(ctx context.Context, cfg Config, key string, r io.Reader) (int64, er
 	return info.Size, nil
 }
 
-// Download opens an object for streaming read. The caller closes the returned
-// ReadCloser. A missing object surfaces when the first Read happens (minio-go
-// is lazy), so backup/restore wrap it with a clear message.
+// Download opens an object for streaming read.
 func Download(ctx context.Context, cfg Config, key string) (io.ReadCloser, error) {
 	cl, err := New(cfg)
 	if err != nil {
@@ -271,9 +222,7 @@ func Download(ctx context.Context, cfg Config, key string) (io.ReadCloser, error
 	return obj, nil
 }
 
-// Check verifies the bucket is reachable AND writable with these creds: it confirms the
-// bucket exists, then round-trips a tiny probe object (put + remove) so a read-only key
-// is reported as not-writable rather than passing a HEAD-only probe.
+// Check verifies the bucket is reachable AND writable with these creds: it confirms the bucket exists, then round-trips a tiny probe object (put + remove) so a read-only key is reported as not-writable rather than passing a HEAD-only probe.
 func Check(ctx context.Context, cfg Config) error {
 	cl, err := New(cfg)
 	if err != nil {
@@ -286,7 +235,6 @@ func Check(ctx context.Context, cfg Config) error {
 	if !ok {
 		return fmt.Errorf("bucket %q does not exist (or the credentials cannot see it)", cfg.Bucket)
 	}
-	// Writability probe: a 0-byte object under a reserved key, then delete it.
 	probe := ".deplo-s3check"
 	if _, err := cl.PutObject(ctx, cfg.Bucket, probe, strings.NewReader(""), 0, minio.PutObjectOptions{}); err != nil {
 		return fmt.Errorf("write probe to bucket %q: %w", cfg.Bucket, err)
@@ -295,15 +243,12 @@ func Check(ctx context.Context, cfg Config) error {
 	return nil
 }
 
-// DeleteOne removes a single object by exact key. Idempotent: removing a
-// missing object is not an error (S3 DELETE is idempotent). Returns 1 when the
-// object existed, 0 when it was already absent.
+// DeleteOne removes a single object by exact key.
 func DeleteOne(ctx context.Context, cfg Config, key string) (int64, error) {
 	cl, err := New(cfg)
 	if err != nil {
 		return 0, err
 	}
-	// Stat first so the count reflects reality (DELETE itself can't tell us).
 	existed := int64(0)
 	if _, serr := cl.StatObject(ctx, cfg.Bucket, key, minio.StatObjectOptions{}); serr == nil {
 		existed = 1
@@ -314,8 +259,7 @@ func DeleteOne(ctx context.Context, cfg Config, key string) (int64, error) {
 	return existed, nil
 }
 
-// DeletePrefix removes every object whose key starts with `prefix` (a target's whole
-// folder, for retention + delete-with-artifacts).
+// DeletePrefix removes every object whose key starts with `prefix` (a target's whole folder, for retention + delete-with-artifacts).
 func DeletePrefix(ctx context.Context, cfg Config, prefix string) (int64, error) {
 	cl, err := New(cfg)
 	if err != nil {
@@ -325,8 +269,6 @@ func DeletePrefix(ctx context.Context, cfg Config, prefix string) (int64, error)
 		Prefix:    prefix,
 		Recursive: true,
 	})
-	// Collect the keys first so a list error is surfaced before we report a
-	// count, and so RemoveObjects gets a clean channel.
 	keys := make([]minio.ObjectInfo, 0, 64)
 	for o := range objCh {
 		if o.Err != nil {

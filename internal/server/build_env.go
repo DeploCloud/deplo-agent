@@ -5,13 +5,6 @@ import (
 	"strings"
 )
 
-// Build-time env, in parity with the runtime env: every build method makes the
-// request's decrypted env (req.env - the same map the runtime stack gets) available to
-// the BUILD, so build-time-inlined configuration (Next.js NEXT_PUBLIC_*, Vite VITE_*,
-// CRA REACT_APP_*) works without the user knowing what a build arg is.
-
-// buildEnvKeys returns the request env's identifier-shaped names, sorted for
-// deterministic argv (and therefore deterministic docker layer caching).
 func buildEnvKeys(env map[string]string) []string {
 	keys := make([]string, 0, len(env))
 	for k := range env {
@@ -23,8 +16,6 @@ func buildEnvKeys(env map[string]string) []string {
 	return keys
 }
 
-// envKV renders "KEY=VALUE" process-env entries for the given keys - the ONLY
-// place a build-env VALUE lives on the way into a build tool.
 func envKV(env map[string]string, keys []string) []string {
 	kv := make([]string, 0, len(keys))
 	for _, k := range keys {
@@ -33,7 +24,6 @@ func envKV(env map[string]string, keys []string) []string {
 	return kv
 }
 
-// filterKeys returns the keys for which keep() is true, preserving order.
 func filterKeys(keys []string, keep func(string) bool) []string {
 	out := make([]string, 0, len(keys))
 	for _, k := range keys {
@@ -44,15 +34,11 @@ func filterKeys(keys []string, keep func(string) bool) []string {
 	return out
 }
 
-// declaredArgNames scans a Dockerfile body for the ARG names it declares - single-name
-// (`ARG FOO`, `ARG FOO=default`) and BuildKit's multi-name (`ARG FOO BAR=x`) forms, in
-// any stage.
 func declaredArgNames(dockerfile string) map[string]struct{} {
 	names := map[string]struct{}{}
 	lines := strings.Split(dockerfile, "\n")
 	for i := 0; i < len(lines); i++ {
 		line := strings.TrimSpace(lines[i])
-		// Join continuations so `ARG FOO \` + `    BAR` declares both.
 		for strings.HasSuffix(line, "\\") && i+1 < len(lines) {
 			i++
 			line = strings.TrimSuffix(line, "\\") + " " + strings.TrimSpace(lines[i])
@@ -74,22 +60,14 @@ func declaredArgNames(dockerfile string) map[string]struct{} {
 	return names
 }
 
-// dockerfileEnvKeys returns the env keys this Dockerfile declares as ARGs - the set
-// that becomes bare `--build-arg KEY` flags.
 func dockerfileEnvKeys(dockerfile string, env map[string]string) []string {
 	declared := declaredArgNames(dockerfile)
-	// The same blocklist every other build method applies: a repo Dockerfile
-	// declaring `ARG DOCKER_HOST` must not steer the root build elsewhere.
 	return dropReservedBuildEnv(filterKeys(buildEnvKeys(env), func(k string) bool {
 		_, ok := declared[k]
 		return ok
 	}))
 }
 
-// appendBuildArgKeys appends one bare `--build-arg KEY` per key (docker reads a
-// bare name's value from the client's process env - pass envKV alongside).
-// appendBuildArgValues passes KEY=VALUE build args, sorted so a build is
-// reproducible. Only for values Deplo or its builder computed - never an app's.
 func appendBuildArgValues(args []string, vars map[string]string) []string {
 	keys := make([]string, 0, len(vars))
 	for k := range vars {

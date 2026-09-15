@@ -26,8 +26,6 @@ func TestValidateProbePath(t *testing.T) {
 			t.Errorf("path %q should be accepted: %v", p, err)
 		}
 	}
-	// A space or a newline in the path is request smuggling, not a typo - the
-	// path lands verbatim in the request line.
 	bad := []string{"", "favicon.ico", "/a b", "/a\r\nX-Injected: 1", "/a\nb", "/\x7f", strings.Repeat("/a", 2000)}
 	for _, p := range bad {
 		if err := validateProbePath(p); err == nil {
@@ -53,8 +51,6 @@ func TestProbeHostGrammar(t *testing.T) {
 
 func TestProbeHttp_refusesAnUnscopedRequest(t *testing.T) {
 	s := New(t.TempDir(), t.TempDir(), t.TempDir(), "")
-	// No project_id => no label filter => every container on the host would be a
-	// candidate. Refused before anything touches Docker.
 	_, err := s.ProbeHttp(context.Background(), &pb.ProbeHttpRequest{Port: 80, Path: "/"})
 	if status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("want InvalidArgument, got %v", err)
@@ -94,8 +90,6 @@ func TestProbeOnce_sendsTheHostHeaderWhileDiallingTheAddress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("probeOnce: %v", err)
 	}
-	// The app is reached at the container's address, but told it is being asked
-	// for its own hostname - what an app with host authorization requires.
 	if gotHost != "app.example.com" {
 		t.Errorf("Host header = %q, want app.example.com", gotHost)
 	}
@@ -157,7 +151,7 @@ func TestProbeOnce_reportsARedirectWithoutFollowingIt(t *testing.T) {
 func TestProbeOnce_aDeadPortIsUnavailableNotAnError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	addr := addrOf(srv)
-	srv.Close() // nothing listens there now
+	srv.Close()
 
 	_, err := probeOnce(context.Background(), addr, "/", "", 0)
 	if status.Code(err) != codes.Unavailable {
@@ -166,34 +160,26 @@ func TestProbeOnce_aDeadPortIsUnavailableNotAnError(t *testing.T) {
 }
 
 func TestPickContainerIP(t *testing.T) {
-	// The TENANT network wins: it is the address Traefik itself reaches the app on.
-	// It used to be the one literally named `deplo`, which no app has been on since
-	// ADR-0028 - so that preference matched nothing and the pick fell to whichever
-	// name sorted first, which can be the stack's private network.
 	ip, err := pickContainerIP(
 		`{"deplo-env-environ_x":{"IPAddress":"10.200.5.2"},"app_default":{"IPAddress":"172.19.0.2"}}`)
 	if err != nil || ip != "10.200.5.2" {
 		t.Fatalf("got %q, %v", ip, err)
 	}
-	// A team network is a tenant network too, and sorts AFTER the private one.
 	ip, err = pickContainerIP(
 		`{"a_default":{"IPAddress":"172.19.0.2"},"deplo-team-team_x":{"IPAddress":"10.200.7.3"}}`)
 	if err != nil || ip != "10.200.7.3" {
 		t.Fatalf("team network should win, got %q, %v", ip, err)
 	}
-	// Without it, the choice must not depend on Go's random map order.
 	for i := 0; i < 20; i++ {
 		ip, err = pickContainerIP(`{"zeta":{"IPAddress":"10.0.0.9"},"alpha":{"IPAddress":"10.0.0.2"}}`)
 		if err != nil || ip != "10.0.0.2" {
 			t.Fatalf("unstable pick: got %q, %v", ip, err)
 		}
 	}
-	// IPv6-only container.
 	ip, err = pickContainerIP(`{"deplo-env-e":{"IPAddress":"","GlobalIPv6Address":"fd00::2"}}`)
 	if err != nil || ip != "fd00::2" {
 		t.Fatalf("got %q, %v", ip, err)
 	}
-	// network_mode: host, or networking gone - nothing to probe.
 	if _, err := pickContainerIP(`{"host":{"IPAddress":""}}`); err == nil {
 		t.Error("a container with no address must be an error")
 	}
@@ -202,7 +188,6 @@ func TestPickContainerIP(t *testing.T) {
 	}
 }
 
-// addrOf is the host:port of a test server, without the scheme.
 func addrOf(srv *httptest.Server) string {
 	return strings.TrimPrefix(srv.URL, "http://")
 }

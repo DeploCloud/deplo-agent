@@ -1,8 +1,4 @@
-// Package safepath re-ports the control plane's path-containment guard
-// (lib/deploy/path-safety.ts safeBuildDir) to Go.
 package safepath
-
-// https://deplo.build/docs/advanced/host-access-and-privileges
 
 import (
 	"os"
@@ -10,14 +6,10 @@ import (
 	"strings"
 )
 
-// Inside canonicalises `candidate` (a path formed by joining an off-the-wire,
-// user-controlled relative segment onto a trusted `base`) and returns it only if it is
-// `base` itself or a real descendant.
+// Inside canonicalises `candidate` (a path formed by joining an off-the-wire, user-controlled relative segment onto a trusted `base`) and returns it only if it is `base` itself or a real descendant.
 func Inside(base, candidate string) (string, error) {
 	realBase, err := filepath.EvalSymlinks(base)
 	if err != nil {
-		// base is always a dir we created; if it can't be resolved, fall back
-		// to its lexical clean form rather than failing the whole deploy.
 		realBase = filepath.Clean(base)
 	}
 	realCandidate, err := filepath.EvalSymlinks(candidate)
@@ -30,9 +22,7 @@ func Inside(base, candidate string) (string, error) {
 	return realBase, nil
 }
 
-// Join cleans a user-supplied relative path and joins it under base WITHOUT touching
-// the filesystem, rejecting absolute paths and any ".." segment. The lexical guard here
-// is backed by the realpath guard in Inside once the parent exists.
+// Join cleans a user-supplied relative path and joins it under base WITHOUT touching the filesystem, rejecting absolute paths and any ".." segment.
 func Join(base, rel string) (string, bool) {
 	rel = strings.ReplaceAll(rel, "\\", "/")
 	rel = strings.TrimPrefix(rel, "./")

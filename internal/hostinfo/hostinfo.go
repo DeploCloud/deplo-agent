@@ -1,6 +1,3 @@
-// Package hostinfo answers "what IS this host?" - the neofetch question, as opposed to
-// the gauge question hostmetrics answers. Putting them in one package would mean every
-// "show me the hardware" click paid for a 1s CPU sample.
 package hostinfo
 
 import (
@@ -14,16 +11,14 @@ import (
 	"time"
 )
 
-// ZoneinfoDir is where IANA zone files live. A variable so tests can point it at
-// a fixture tree instead of the runner's real one.
+// ZoneinfoDir is where IANA zone files live.
 var ZoneinfoDir = "/usr/share/zoneinfo"
 
-// Info mirrors the proto HostInfoResponse, minus the fields the caller supplies
-// (Docker's version/root dir, the Traefik stack file, the control-plane container).
+// Info mirrors the proto HostInfoResponse, minus the fields the caller supplies (Docker's version/root dir, the Traefik stack file, the control-plane container).
 type Info struct {
 	CPUModel         string
-	CPUCores         int // physical, deduplicated by (physical id, core id)
-	CPUThreads       int // logical processors
+	CPUCores         int
+	CPUThreads       int
 	MemTotalBytes    int64
 	DiskTotalBytes   int64
 	DiskUsedBytes    int64
@@ -36,8 +31,7 @@ type Info struct {
 	UTCOffsetMinutes int32
 }
 
-// Collect reads the host. dataDir is the filesystem to measure (empty => "/"),
-// matching hostmetrics.Collect's contract.
+// Collect reads the host.
 func Collect(dataDir string) Info {
 	if dataDir == "" {
 		dataDir = "/"
@@ -54,8 +48,6 @@ func Collect(dataDir string) Info {
 	return info
 }
 
-// ---- CPU ------------------------------------------------------------------
-
 func cpuInfo() (model string, physical, logical int) {
 	f, err := os.Open("/proc/cpuinfo")
 	if err != nil {
@@ -65,11 +57,9 @@ func cpuInfo() (model string, physical, logical int) {
 	return parseCPUInfo(f)
 }
 
-// parseCPUInfo reads /proc/cpuinfo's key : value blocks, one per LOGICAL processor.
 func parseCPUInfo(r io.Reader) (model string, physical, logical int) {
 	seen := map[string]bool{}
 	var pkg, core string
-	// flush closes the block that just ended, recording its (physical, core) pair.
 	flush := func() {
 		if pkg != "" || core != "" {
 			seen[pkg+"/"+core] = true
@@ -93,9 +83,6 @@ func parseCPUInfo(r io.Reader) (model string, physical, logical int) {
 		case "processor":
 			logical++
 		case "model name", "Model", "cpu model":
-			// "Model"/"cpu model" are the ARM and MIPS spellings. First one wins:
-			// every block repeats it, and on a big.LITTLE board the blocks differ,
-			// where any single answer is a simplification anyway.
 			if model == "" {
 				model = value
 			}
@@ -113,8 +100,6 @@ func parseCPUInfo(r io.Reader) (model string, physical, logical int) {
 	return model, physical, logical
 }
 
-// ---- OS -------------------------------------------------------------------
-
 func osPretty() string {
 	f, err := os.Open("/etc/os-release")
 	if err != nil {
@@ -124,8 +109,6 @@ func osPretty() string {
 	return parseOSRelease(f)
 }
 
-// parseOSRelease pulls PRETTY_NAME out of the shell-style os-release format,
-// falling back to NAME + VERSION when it is absent (Alpine's minimal file).
 func parseOSRelease(r io.Reader) string {
 	fields := map[string]string{}
 	sc := bufio.NewScanner(r)
@@ -146,9 +129,6 @@ func parseOSRelease(r io.Reader) string {
 	return name
 }
 
-// unameInfo returns the kernel release and machine arch via the syscall rather
-// than shelling out to `uname` - the agent must work on a host with a minimal
-// PATH, and an exec for two strings is a process we don't need.
 func unameInfo() (kernel, arch string) {
 	var u syscall.Utsname
 	if err := syscall.Uname(&u); err != nil {
@@ -157,9 +137,6 @@ func unameInfo() (kernel, arch string) {
 	return charsToString(u.Release[:]), charsToString(u.Machine[:])
 }
 
-// charsToString turns a NUL-terminated C char array from Utsname into a Go
-// string. The element type is int8 on amd64 and uint8 on arm64, so the
-// conversion goes through a type parameter rather than being written twice.
 func charsToString[T int8 | uint8](chars []T) string {
 	b := make([]byte, 0, len(chars))
 	for _, c := range chars {
@@ -171,10 +148,6 @@ func charsToString[T int8 | uint8](chars []T) string {
 	return string(b)
 }
 
-// ---- Clock ----------------------------------------------------------------
-
-// clock reports the host's IANA zone, its current wall time, and its offset from UTC in
-// MINUTES, not hours, because Kathmandu is +345 and Kolkata +330.
 func clock() (tz string, unixMs int64, offsetMinutes int32) {
 	now := time.Now()
 	tz = readTimezone()
@@ -188,9 +161,6 @@ func clock() (tz string, unixMs int64, offsetMinutes int32) {
 	return tz, now.UnixMilli(), int32(offsetSec / 60)
 }
 
-// readTimezone resolves the host's IANA zone name from the /etc/localtime
-// symlink (the systemd convention), falling back to /etc/timezone (Debian's
-// plain-text file) where localtime is a copy rather than a link.
 func readTimezone() string {
 	if target, err := os.Readlink("/etc/localtime"); err == nil {
 		if tz := zoneFromPath(target); tz != "" {
@@ -205,9 +175,6 @@ func readTimezone() string {
 	return ""
 }
 
-// zoneFromPath turns a zoneinfo path into its IANA name:
-// "/usr/share/zoneinfo/Europe/Rome" and the relative
-// "../usr/share/zoneinfo/Europe/Rome" both yield "Europe/Rome".
 func zoneFromPath(p string) string {
 	p = filepath.Clean(p)
 	const marker = "zoneinfo/"
@@ -217,8 +184,6 @@ func zoneFromPath(p string) string {
 	}
 	return strings.TrimPrefix(p[i+len(marker):], "/")
 }
-
-// ---- Shared readers -------------------------------------------------------
 
 func memTotal() int64 {
 	f, err := os.Open("/proc/meminfo")

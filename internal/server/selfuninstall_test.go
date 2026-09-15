@@ -12,9 +12,6 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// stubSystemctl swaps runSystemctl for one that records the verbs it was asked
-// for (or fails with `err`), and restores it on cleanup. Keeps the tests off the
-// host's real service manager.
 func stubSystemctl(t *testing.T, err error) func() []string {
 	t.Helper()
 	var mu sync.Mutex
@@ -30,8 +27,6 @@ func stubSystemctl(t *testing.T, err error) func() []string {
 	return func() []string { mu.Lock(); defer mu.Unlock(); return append([]string(nil), calls...) }
 }
 
-// captureExit swaps exitProcess for one that records the call instead of ending the
-// test runner.
 func captureExit(t *testing.T) func() bool {
 	t.Helper()
 	var mu sync.Mutex
@@ -42,9 +37,6 @@ func captureExit(t *testing.T) func() bool {
 	return func() bool { mu.Lock(); defer mu.Unlock(); return fired }
 }
 
-// waitExit blocks until the deferred exit fires, and fails the test if it never
-// does - the agent promising "stopping" and then staying up would leave a live
-// agent on a host the control plane has already forgotten.
 func waitExit(t *testing.T, exited func() bool) {
 	t.Helper()
 	deadline := time.After(selfUninstallGrace + 5*time.Second)
@@ -57,7 +49,6 @@ func waitExit(t *testing.T, exited func() bool) {
 	}
 }
 
-// unitAt points agentUnitPath at a temp file for the duration of one test.
 func unitAt(t *testing.T, path string) {
 	t.Helper()
 	orig := agentUnitPath
@@ -65,8 +56,7 @@ func unitAt(t *testing.T, path string) {
 	t.Cleanup(func() { agentUnitPath = orig })
 }
 
-// The whole footprint goes: unit, state dir, binary, and the process then exits
-// on its own rather than being stopped (which would kill it mid-removal).
+// The whole footprint goes: unit, state dir, binary, and the process then exits on its own rather than being stopped (which would kill it mid-removal).
 func TestSelfUninstall_removesUnitStateAndBinary(t *testing.T) {
 	ctx := context.Background()
 	binDir, agentDir := t.TempDir(), t.TempDir()
@@ -103,13 +93,10 @@ func TestSelfUninstall_removesUnitStateAndBinary(t *testing.T) {
 			t.Errorf("%s still exists after the uninstall", p)
 		}
 	}
-	// `disable`, never `stop`/`disable --now`: the unit has no KillMode, so
-	// stopping it would kill this process before anything was removed.
 	got := verbs()
 	if len(got) != 2 || got[0] != "disable" || got[1] != "daemon-reload" {
 		t.Errorf("systemctl verbs = %v, want [disable daemon-reload]", got)
 	}
-	// The exit is deferred, not immediate: the response has to reach the wire.
 	if exited() {
 		t.Error("the process exited before the response could be flushed")
 	}
@@ -138,9 +125,7 @@ func TestSelfUninstall_missingUnitIsNotAFailure(t *testing.T) {
 	waitExit(t, exited)
 }
 
-// An install dir we cannot write to fails BEFORE anything is removed: finding
-// that out after deleting the mTLS materials would leave an agent that can never
-// be commanded again and a binary still on disk.
+// An install dir we cannot write to fails BEFORE anything is removed: finding that out after deleting the mTLS materials would leave an agent that can never be commanded again and a binary still on disk.
 func TestSelfUninstall_readOnlyInstallDirRemovesNothing(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root ignores the directory write bit")

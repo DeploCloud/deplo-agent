@@ -1,7 +1,5 @@
 package server
 
-// https://deplo.build/docs/guides/console-and-files
-
 import (
 	"bytes"
 	"context"
@@ -23,20 +21,11 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/safepath"
 )
 
-// files.go ports lib/data/project-files.ts to the agent: browse/edit a project's
-// <stack-dir>/files/<slug> tree, the on-disk backing for the "./" project-files volume
-// convention.
-
 const (
-	// Files larger than this are never streamed to the editor as text.
-	maxViewBytes = 512 * 1024 // 512 KiB
-	// Reject writes whose body exceeds this - the editor is for config, not blobs.
-	maxWriteBytes = 1024 * 1024 // 1 MiB
+	maxViewBytes  = 512 * 1024
+	maxWriteBytes = 1024 * 1024
 )
 
-// slugPattern is the shape a Deplo DEPLOY KEY always has. An app slug is `[a-z0-9-]`
-// and can never contain `__`, which is what makes the split unambiguous in both
-// directions.
 var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*(__[a-z0-9][a-z0-9-]*)?$`)
 
 func validateSlug(slug string) error {
@@ -46,15 +35,10 @@ func validateSlug(slug string) error {
 	return nil
 }
 
-// filesRoot is the host path of a project's files root. The agent's --stack-dir
-// is the equivalent of the control plane's /data/stacks, so files/<slug> mirrors
-// lib/data/project-files.ts filesRoot exactly. The caller MUST validateSlug first.
 func (s *Service) filesRoot(slug string) string {
 	return filepath.Join(s.stackDir, "files", slug)
 }
 
-// normalizeRel mirrors lib/data/project-files.ts normalizeRel: clean a relative
-// path to POSIX form, reject absolute paths and any ".." segment up front.
 func normalizeRel(rel string) (string, error) {
 	r := strings.ReplaceAll(rel, "\\", "/")
 	r = strings.TrimLeft(r, "/")
@@ -79,16 +63,12 @@ func normalizeRel(rel string) (string, error) {
 	if r == "" {
 		return "", nil
 	}
-	// The stack's decrypted env-file lives at the root of this tree and is the
-	// deploy's to write: no file RPC reads, replaces or removes it.
 	if r == ".env" {
 		return "", status.Error(codes.PermissionDenied, "the env-file is written by the deploy, not a file of the app's")
 	}
 	return r, nil
 }
 
-// resolveInside resolves a (user-supplied) relative path to an absolute host path
-// PROVABLY inside `root`, with symlinks resolved - mirroring resolveWithinRoot.
 func resolveInside(root, rel string) (string, error) {
 	norm, err := normalizeRel(rel)
 	if err != nil {
@@ -97,18 +77,17 @@ func resolveInside(root, rel string) (string, error) {
 	if norm == "" {
 		return canonicalRoot(root), nil
 	}
-	// Walk up to the nearest existing ancestor and realpath-check IT against root.
 	existing := norm
 	var tail []string
 	for {
 		cand := filepath.Join(root, existing)
 		if _, statErr := os.Lstat(cand); statErr == nil {
-			break // `existing` exists; canonicalise it
+			break
 		}
 		parent := path.Dir(existing)
 		tail = append([]string{path.Base(existing)}, tail...)
 		if parent == "." {
-			existing = "" // nothing in the path exists yet; anchor at root
+			existing = ""
 			break
 		}
 		existing = parent
@@ -117,8 +96,6 @@ func resolveInside(root, rel string) (string, error) {
 	if existing != "" {
 		abs, _ := safepath.Inside(root, filepath.Join(root, existing))
 		if abs == canonicalRoot(root) && existing != "" {
-			// The existing ancestor canonicalises to root despite a non-empty path
-			// => a symlink among its components escaped the sandbox.
 			return "", status.Error(codes.InvalidArgument, "path escapes the project files directory")
 		}
 		base = abs
@@ -129,9 +106,6 @@ func resolveInside(root, rel string) (string, error) {
 	return base, nil
 }
 
-// resolveParentInside mirrors resolveParentInsideRoot: for a target that may not exist
-// yet (a new file/folder), the LEAF need not exist but its PARENT must resolve inside
-// the root.
 func resolveParentInside(root, rel string) (abs, norm string, err error) {
 	norm, err = normalizeRel(rel)
 	if err != nil {
@@ -151,8 +125,6 @@ func resolveParentInside(root, rel string) (abs, norm string, err error) {
 	return filepath.Join(realParent, path.Base(norm)), norm, nil
 }
 
-// canonicalRoot is the realpath of the root (or its lexical clean form if it
-// can't be resolved), matching how safepath.Inside computes realBase.
 func canonicalRoot(root string) string {
 	if r, err := filepath.EvalSymlinks(root); err == nil {
 		return r
@@ -185,8 +157,6 @@ func (s *Service) ListFiles(ctx context.Context, req *pb.ListFilesRequest) (*pb.
 	}
 	entries := make([]*pb.FileEntry, 0, len(dirents))
 	for _, d := range dirents {
-		// Resolve through symlinks with Stat; skip anything that isn't a plain
-		// dir/file or whose target vanished between ReadDir and Stat.
 		info, err := os.Stat(filepath.Join(abs, d.Name()))
 		if err != nil {
 			continue
@@ -215,7 +185,6 @@ func (s *Service) ListFiles(ctx context.Context, req *pb.ListFilesRequest) (*pb.
 			ModifiedAt: info.ModTime().UTC().Format(time.RFC3339Nano),
 		})
 	}
-	// Directories first, then files, each alphabetical.
 	sort.SliceStable(entries, func(i, j int) bool {
 		a, b := entries[i], entries[j]
 		if a.Kind != b.Kind {
@@ -251,9 +220,6 @@ func (s *Service) ReadFile(ctx context.Context, req *pb.ReadFileRequest) (*pb.Re
 	if st.Size() > maxViewBytes {
 		return &pb.ReadFileResponse{Path: rel, Size: st.Size(), Reason: "too-large"}, nil
 	}
-	// Read through a LimitReader (cap+1): the files dir is bind-mounted rw into the
-	// container, so a file just under the cap at Stat time can be grown before/ during the
-	// read - os.ReadFile would then pull the whole (now-huge) file into the agent heap.
 	buf, err := io.ReadAll(io.LimitReader(f, maxViewBytes+1))
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "read %s: %v", rel, err)
@@ -261,7 +227,6 @@ func (s *Service) ReadFile(ctx context.Context, req *pb.ReadFileRequest) (*pb.Re
 	if int64(len(buf)) > maxViewBytes {
 		return &pb.ReadFileResponse{Path: rel, Size: int64(len(buf)), Reason: "too-large"}, nil
 	}
-	// A NUL byte in the first chunk is a reliable binary tell for config trees.
 	probe := buf
 	if len(probe) > 8000 {
 		probe = probe[:8000]
@@ -286,8 +251,6 @@ func (s *Service) UploadFile(ctx context.Context, req *pb.UploadFileRequest) (*p
 	return s.writeBytes(req.GetSlug(), req.GetPath(), req.GetData())
 }
 
-// writeBytes is the shared body of WriteFile/UploadFile: create parent dirs,
-// refuse to clobber a directory, write 0644, return fresh metadata.
 func (s *Service) writeBytes(slug, p string, data []byte) (*pb.FileEntryResult, error) {
 	if err := validateSlug(slug); err != nil {
 		return nil, err
@@ -297,7 +260,6 @@ func (s *Service) writeBytes(slug, p string, data []byte) (*pb.FileEntryResult, 
 	if err != nil {
 		return nil, err
 	}
-	// resolveParentInside canonicalises only the PARENT; the leaf is appended lexically.
 	if li, e := os.Lstat(abs); e == nil {
 		if li.Mode()&os.ModeSymlink != 0 {
 			return nil, status.Error(codes.InvalidArgument, "refusing to write through a symlink")
@@ -309,7 +271,6 @@ func (s *Service) writeBytes(slug, p string, data []byte) (*pb.FileEntryResult, 
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return nil, status.Errorf(codes.Internal, "mkdir: %v", err)
 	}
-	// 0644 - bind-mounted into the app container, which may run as non-root.
 	f, err := os.OpenFile(abs, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0o644)
 	if err != nil {
 		if errors.Is(err, syscall.ELOOP) {
@@ -391,7 +352,6 @@ func (s *Service) RenameFile(ctx context.Context, req *pb.RenameFileRequest) (*p
 	return s.entryResult(to, rel)
 }
 
-// entryResult stats `abs` and packs a FileEntry (rel is the in-root path).
 func (s *Service) entryResult(abs, rel string) (*pb.FileEntryResult, error) {
 	st, err := os.Stat(abs)
 	if err != nil {

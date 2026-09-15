@@ -11,9 +11,7 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// End-to-end (real docker): a deploy's env must reach the BUILD, not just the runtime
-// stack - the whole point of build-time env parity (NEXT_PUBLIC_* is inlined while the
-// build command runs).
+// End-to-end (real docker): a deploy's env must reach the BUILD, not just the runtime stack - the whole point of build-time env parity (NEXT_PUBLIC_* is inlined while the build command runs).
 func TestE2E_BuildEnvReachesDockerfileBuild(t *testing.T) {
 	ctx := context.Background()
 	if !dockercli.Available(ctx) {
@@ -25,9 +23,6 @@ func TestE2E_BuildEnvReachesDockerfileBuild(t *testing.T) {
 	const image = "deplo-test/buildenv:e2e"
 	const value = "https://api.example.test/v1"
 
-	// What the control plane's generateDockerfile renders: one ARG per var and no
-	// ENV, then build steps that consume it. `RUN` writes the var to a file, if the
-	// value survives into the file, it was present AT BUILD TIME.
 	df := `FROM busybox
 ARG NEXT_PUBLIC_API
 RUN printf '%s' "$NEXT_PUBLIC_API" > /baked
@@ -41,8 +36,7 @@ CMD ["cat", "/baked"]
 		Dockerfile: &pb.DockerfileBuild{Generated: true, GeneratedDockerfile: df},
 		Env: map[string]string{
 			"NEXT_PUBLIC_API": value,
-			// NOT declared as ARG - must never be passed (warning-free builds).
-			"RUNTIME_ONLY": "never-a-build-arg",
+			"RUNTIME_ONLY":    "never-a-build-arg",
 		},
 	}
 
@@ -70,8 +64,6 @@ CMD ["cat", "/baked"]
 		t.Errorf("baked build-time value = %q; want %q", res.Stdout, value)
 	}
 
-	// ...and must not survive into the image config, where `docker inspect` would
-	// hand it back in plaintext long after the build.
 	insp, err := dockercli.Run(ctx, 30*time.Second, "inspect", "-f", "{{range .Config.Env}}{{println .}}{{end}}", image)
 	if err != nil {
 		t.Fatalf("docker inspect: %v", err)

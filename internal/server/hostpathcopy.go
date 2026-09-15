@@ -1,7 +1,5 @@
 package server
 
-// https://deplo.build/docs/guides/move-from-dokploy
-
 import (
 	"compress/gzip"
 	"context"
@@ -20,39 +18,21 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// hostpathcopy.go copies a plain HOST DIRECTORY across hosts - the bind-mount half of a
-// migration from another platform, where a service's data may live in a directory
-// rather than in a Docker volume (Dokploy mounts a `type: bind` source straight off the
-// host).
-
-// deniedHostRoots are refused as a copy source or target, exactly (a path EQUAL to one
-// of them) - a deeper path under most of them is legitimate, and refusing those
-// wholesale would refuse the actual use case (the other platform keeps its service data
-// under /etc/<platform>/...).
 var deniedHostRoots = []string{
 	"/", "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib32", "/lib64",
 	"/media", "/mnt", "/opt", "/proc", "/root", "/run", "/sbin", "/srv", "/sys",
 	"/tmp", "/usr", "/var", "/var/lib", "/var/lib/docker", "/var/run",
 }
 
-// deniedHostSubtrees are refused along with everything under them: kernel and
-// device filesystems are never a service's data, and Docker's own state directory
-// is where every OTHER tenant's volumes live.
 var deniedHostSubtrees = []string{
 	"/proc", "/sys", "/dev", "/var/lib/docker", "/var/lib/containerd",
-	// The host's own credentials and boot-time hooks, and the agent's key material.
 	"/root", "/home", "/etc/ssh", "/etc/ssl/private", "/etc/cron.d", "/etc/cron.daily",
 	"/etc/systemd", "/etc/sudoers.d", "/var/lib/deplo-agent",
-	// Every tenant's rendered stack, env-file and backup store on this host.
 	"/data/stacks", "/data/backups",
 }
 
-// allowedHostSubtrees are carved back OUT of the deny-list above: a stack's own
-// files directory IS its service's data - a compose `./x` resolves into it - while
-// the rendered YAML and the env-file beside it stay refused.
 var allowedHostSubtrees = []string{"/data/stacks/files"}
 
-// validateHostPath cleans and vets a wire-supplied host directory.
 func validateHostPath(p string) (string, error) {
 	if strings.TrimSpace(p) == "" {
 		return "", status.Error(codes.InvalidArgument, "no path given")
@@ -67,9 +47,6 @@ func validateHostPath(p string) (string, error) {
 	if err := refuseSystemPath(clean); err != nil {
 		return "", err
 	}
-	// The deny-list has to judge where the path LANDS, not how it is spelled: the
-	// mount and the wipe both follow symlinks, so `/srv/data -> /` was a lexical
-	// pass and a real root wipe.
 	real, err := resolveHostPath(clean)
 	if err != nil {
 		return "", status.Errorf(codes.InvalidArgument, "host path %q cannot be resolved: %v", p, err)
@@ -82,10 +59,8 @@ func validateHostPath(p string) (string, error) {
 	return real, nil
 }
 
-// refuseSystemPath is the deny-list itself, applied to a cleaned absolute path.
 func refuseSystemPath(clean string) error {
 	for _, root := range allowedHostSubtrees {
-		// Strictly under: the directory itself holds EVERY stack's files.
 		if strings.HasPrefix(clean, root+"/") {
 			return nil
 		}
@@ -109,9 +84,6 @@ func refuseSystemPath(clean string) error {
 	return nil
 }
 
-// resolveHostPath follows symlinks on the deepest EXISTING prefix of p and re-attaches
-// the rest, so an import target that does not exist yet still resolves the parents it
-// will be created under.
 func resolveHostPath(p string) (string, error) {
 	cur, rest := p, ""
 	for {
@@ -131,9 +103,7 @@ func resolveHostPath(p string) (string, error) {
 	}
 }
 
-// ExportHostPath tars a host directory out of this machine, gzipped, as raw byte
-// chunks - the same producer as ExportVolume, with a bind mount in place of the
-// named volume. The caller is expected to have QUIESCED whatever writes there.
+// ExportHostPath tars a host directory out of this machine, gzipped, as raw byte chunks - the same producer as ExportVolume, with a bind mount in place of the named volume.
 func (s *Service) ExportHostPath(
 	req *pb.ExportHostPathRequest,
 	stream pb.Agent_ExportHostPathServer,
@@ -142,16 +112,10 @@ func (s *Service) ExportHostPath(
 	if err != nil {
 		return err
 	}
-	// It must ALREADY be here, and be a directory. Docker would happily create it
-	// on the mount and export an empty archive - the exact shape that made a wrong
-	// source host look like a successful copy of nothing.
 	info, statErr := os.Stat(path)
 	if statErr != nil {
 		return status.Errorf(codes.NotFound, "no such directory on this host: %s", path)
 	}
-	// A stack that binds `./nginx.conf` or `/srv/site/app.yml` names a FILE, and the
-	// directory export cannot carry one. Mount the directory holding it and tar that
-	// one entry - so the file travels without its siblings.
 	mount, entry := path, "."
 	if !info.IsDir() {
 		if !req.GetAllowFile() {
@@ -167,8 +131,6 @@ func (s *Service) ExportHostPath(
 	cw := &chunkWriter{send: func(b []byte) error {
 		return stream.Send(&pb.VolumeChunk{Frame: &pb.VolumeChunk_Data{Data: b}})
 	}}
-	// BestSpeed: a copy is CPU-bound on the source agent at the default level -
-	// measured at 6 MiB/s on incompressible data, an hour for 20 GB.
 	gz, _ := gzip.NewWriterLevel(cw, gzip.BestSpeed)
 
 	code, runErr := dockercli.PipeOut(ctx, volumeCopyTimeout, gz, nil,
@@ -189,8 +151,7 @@ func (s *Service) ExportHostPath(
 	return nil
 }
 
-// ImportHostPath is the destination half: header first (target dir + wipe flag),
-// then the gzipped tar. Mirrors ImportVolume, including the deferred wipe.
+// ImportHostPath is the destination half: header first (target dir + wipe flag), then the gzipped tar.
 func (s *Service) ImportHostPath(stream pb.Agent_ImportHostPathServer) error {
 	ctx := stream.Context()
 
@@ -206,9 +167,6 @@ func (s *Service) ImportHostPath(stream pb.Agent_ImportHostPathServer) error {
 	if verr != nil {
 		return sendHostPathResult(stream, false, 0, "", verr.Error())
 	}
-	// A FILE target is extracted BESIDE itself and moved into place at the end, so the
-	// one that is there survives a copy that does not finish - and so `path` never
-	// becomes the empty DIRECTORY that `MkdirAll` would leave a stack mounting.
 	isFile := hdr.GetFile()
 	extractInto := path
 	if isFile {
@@ -228,17 +186,12 @@ func (s *Service) ImportHostPath(stream pb.Agent_ImportHostPathServer) error {
 		defer os.RemoveAll(tmp)
 		extractInto = tmp
 	} else if mkErr := os.MkdirAll(path, 0o755); mkErr != nil {
-		// The whole path is materialised, parents included. The deny-list above is what keeps
-		// a wrong path from being a dangerous one; a missing parent only ever meant "this host
-		// has not run that platform".
 		return sendHostPathResult(stream, false, 0, "",
 			fmt.Sprintf("create %s: %v", path, mkErr))
 	}
 
 	pr, pw := io.Pipe()
 	done := make(chan error, 1)
-	// Named so a failure can remove it before emptying the directory it is
-	// writing into - see abandonImport.
 	helper := importHelperName()
 	go func() {
 		code, perr := dockercli.PipeIn(ctx, volumeCopyTimeout, pr, nil,
@@ -293,9 +246,6 @@ func (s *Service) ImportHostPath(stream pb.Agent_ImportHostPathServer) error {
 	_ = pw.Close()
 	extractErr := <-done
 
-	// One failure path: whatever this import emptied is emptied again, so a
-	// half-written directory never survives a copy that did not finish. See
-	// abandonImport.
 	failure := ""
 	switch {
 	case wipeErr != nil:
@@ -327,9 +277,6 @@ func (s *Service) ImportHostPath(stream pb.Agent_ImportHostPathServer) error {
 		importResult(true, received, hex.EncodeToString(digest.Sum(nil)), "", &gz.drops))
 }
 
-// moveStagedFile puts the ONE entry a file import extracted where the caller asked
-// for it, replacing whatever is there - a stale file, or the empty directory an
-// older agent created at that path.
 func moveStagedFile(staging, target string) error {
 	entries, err := os.ReadDir(staging)
 	if err != nil {
@@ -348,9 +295,6 @@ func moveStagedFile(staging, target string) error {
 	return os.Rename(from, target)
 }
 
-// wipeHostPath empties a directory in place, keeping the directory itself (it may
-// already be bind-mounted into a stopped container). Removes the ENTRIES rather
-// than the tree, so the mount stays valid.
 func wipeHostPath(path string) error {
 	entries, err := os.ReadDir(path)
 	if err != nil {

@@ -17,12 +17,6 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// backup_store_e2e_test.go is the store sibling of backup_e2e_test.go: the same dump →
-// artifact → restore round-trip against a REAL Postgres, but landing on THIS host's
-// filesystem instead of a bucket, and encrypted.
-
-// startE2EPostgres brings up a throwaway Postgres and returns its descriptor plus
-// a psql runner. Skips (never fails) when the host cannot host it.
 func startE2EPostgres(t *testing.T, ctx context.Context, name string) (*pb.DatabaseDescriptor, func(string) (dockercli.Result, error)) {
 	t.Helper()
 	_, _ = dockercli.Run(ctx, 10*time.Second, "rm", "-f", name)
@@ -73,7 +67,6 @@ func TestE2E_StoreBackupRestoreOverwrites(t *testing.T) {
 		t.Fatalf("seed: %v", e)
 	}
 
-	// Back up to this host's store.
 	bs := &fakeBackupStream{}
 	if err := svc.Backup(&pb.BackupRequest{
 		Kind:         pb.BackupKind_BACKUP_KIND_DATABASE,
@@ -91,7 +84,6 @@ func TestE2E_StoreBackupRestoreOverwrites(t *testing.T) {
 		t.Errorf("a store backup must report size + digest, got %d / %q", br.GetSizeBytes(), br.GetSha256())
 	}
 
-	// The artifact is on disk and it is REALLY an age file.
 	onDisk := filepath.Join(root, key)
 	raw, rerr := os.ReadFile(onDisk)
 	if rerr != nil {
@@ -100,9 +92,6 @@ func TestE2E_StoreBackupRestoreOverwrites(t *testing.T) {
 	if !bytes.HasPrefix(raw, []byte("age-encryption.org/v1")) {
 		t.Fatalf("the artifact on disk is not age-encrypted (starts with %q)", firstBytes(raw, 24))
 	}
-	// ...and it IS readable with the identity - the recovery key's whole promise.
-	// PGDMP is pg_dump's custom-format magic, so this pins that what comes back
-	// out is a real restorable dump, not merely bytes that decrypted.
 	rc, oerr := openArtifactReader(bytes.NewReader(raw), identity)
 	if oerr != nil {
 		t.Fatalf("the artifact must decrypt with its identity: %v", oerr)
@@ -113,7 +102,6 @@ func TestE2E_StoreBackupRestoreOverwrites(t *testing.T) {
 		t.Errorf("the decrypted artifact is not a pg_dump archive (starts with %q)", firstBytes(plain, 16))
 	}
 
-	// Mutate, then restore in place - must drop-and-recreate back to sentinel-A.
 	if _, e := psql("UPDATE t SET v='sentinel-B';"); e != nil {
 		t.Fatalf("mutate: %v", e)
 	}
@@ -133,7 +121,6 @@ func TestE2E_StoreBackupRestoreOverwrites(t *testing.T) {
 		t.Fatalf("store restore did not overwrite: got %q", r.Stdout)
 	}
 
-	// A restore with the WRONG key must fail loudly, not half-restore.
 	other, _ := age.GenerateX25519Identity()
 	rsBad := &fakeRestoreStream{}
 	_ = svc.Restore(&pb.RestoreRequest{
@@ -146,7 +133,6 @@ func TestE2E_StoreBackupRestoreOverwrites(t *testing.T) {
 		t.Error("a restore with the wrong recovery key must fail")
 	}
 
-	// Retention: delete by exact key, then idempotently again.
 	del1, _ := svc.S3Delete(ctx, &pb.S3DeleteRequest{Store: &pb.StoreTarget{ObjectKey: key}})
 	if !del1.GetOk() || del1.GetDeleted() != 1 {
 		t.Errorf("store delete should remove 1, got ok=%v n=%d err=%s", del1.GetOk(), del1.GetDeleted(), del1.GetError())
@@ -157,9 +143,7 @@ func TestE2E_StoreBackupRestoreOverwrites(t *testing.T) {
 	}
 }
 
-// The CROSS-HOST shape, with the control plane's relay simulated in-process: stream_out
-// produces the artifact, WriteStoreFile lands it "elsewhere", ReadStoreFile streams it
-// back, and RestoreFrom replays it into the database.
+// The CROSS-HOST shape, with the control plane's relay simulated in-process: stream_out produces the artifact, WriteStoreFile lands it "elsewhere", ReadStoreFile streams it back, and RestoreFrom replays it into the database.
 func TestE2E_StoreRelayRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
@@ -180,7 +164,6 @@ func TestE2E_StoreRelayRoundTrip(t *testing.T) {
 		t.Fatalf("seed: %v", e)
 	}
 
-	// 1. Backup with stream_out - the control plane's side of the relay.
 	bs := &fakeBackupStream{}
 	if err := svc.Backup(&pb.BackupRequest{
 		Kind:         pb.BackupKind_BACKUP_KIND_DATABASE,
@@ -203,7 +186,6 @@ func TestE2E_StoreRelayRoundTrip(t *testing.T) {
 		t.Fatal("plaintext crossed the relay")
 	}
 
-	// 2. WriteStoreFile on the "destination" host.
 	ws := &fakeWriteStoreStream{
 		msgs: framedStoreChunks(&pb.StoreTarget{Root: root, ObjectKey: key}, relayed),
 	}
@@ -220,7 +202,6 @@ func TestE2E_StoreRelayRoundTrip(t *testing.T) {
 		t.Errorf("digest mismatch across the relay: %q vs %q", ws.result.GetSha256(), br.GetSha256())
 	}
 
-	// 3. ReadStoreFile streams it back out.
 	rsf := &fakeReadStoreStream{}
 	if err := svc.ReadStoreFile(&pb.ReadStoreFileRequest{
 		Store: &pb.StoreTarget{Root: root, ObjectKey: key},
@@ -231,7 +212,6 @@ func TestE2E_StoreRelayRoundTrip(t *testing.T) {
 		t.Fatal("ReadStoreFile did not return the bytes WriteStoreFile stored")
 	}
 
-	// 4. RestoreFrom replays them into the database.
 	if _, e := psql("UPDATE t SET v='relay-B';"); e != nil {
 		t.Fatalf("mutate: %v", e)
 	}
@@ -253,8 +233,6 @@ func TestE2E_StoreRelayRoundTrip(t *testing.T) {
 	}
 }
 
-// firstBytes renders a short prefix for a failure message without dumping a
-// multi-MB artifact into the test log.
 func firstBytes(b []byte, n int) string {
 	if len(b) < n {
 		n = len(b)
@@ -262,9 +240,6 @@ func firstBytes(b []byte, n int) string {
 	return string(b[:n])
 }
 
-// ---- fakes for the three streaming store RPCs ----
-
-// dataBytes reassembles the artifact from a stream_out backup's data frames.
 func (f *fakeBackupStream) dataBytes() []byte {
 	var out []byte
 	for _, ev := range f.events {
@@ -273,8 +248,6 @@ func (f *fakeBackupStream) dataBytes() []byte {
 	return out
 }
 
-// fakeWriteStoreStream replays a pre-framed client stream into WriteStoreFile and
-// captures the terminal StoreResult.
 type fakeWriteStoreStream struct {
 	msgs   []*pb.StoreChunk
 	i      int
@@ -300,7 +273,6 @@ func (f *fakeWriteStoreStream) SetTrailer(metadata.MD)       {}
 func (f *fakeWriteStoreStream) SendMsg(any) error            { return nil }
 func (f *fakeWriteStoreStream) RecvMsg(any) error            { return nil }
 
-// fakeReadStoreStream accumulates everything ReadStoreFile sends.
 type fakeReadStoreStream struct {
 	buf bytes.Buffer
 }
@@ -316,8 +288,6 @@ func (f *fakeReadStoreStream) SetTrailer(metadata.MD)       {}
 func (f *fakeReadStoreStream) SendMsg(any) error            { return nil }
 func (f *fakeReadStoreStream) RecvMsg(any) error            { return nil }
 
-// fakeRestoreFromStream is the bidi fake: it feeds pre-framed chunks in and
-// captures the RestoreEvents that come back out.
 type fakeRestoreFromStream struct {
 	msgs   []*pb.RestoreChunk
 	i      int

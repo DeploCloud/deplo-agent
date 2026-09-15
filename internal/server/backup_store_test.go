@@ -21,8 +21,6 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
-// newStoreService builds a Service whose managed backup store is under a temp
-// dir, and returns the resolved root (already initialized, as a check would).
 func newStoreService(t *testing.T) (*Service, string) {
 	t.Helper()
 	base := t.TempDir()
@@ -42,10 +40,6 @@ func testKeypair(t *testing.T) (recipient, identity string) {
 	}
 	return id.Recipient().String(), id.String()
 }
-
-// ---------------------------------------------------------------------------
-// Root resolution + the sentinel rule
-// ---------------------------------------------------------------------------
 
 func TestResolveStoreRoot_managedIsCreatedAndMarked(t *testing.T) {
 	s, root := newStoreService(t)
@@ -68,15 +62,12 @@ func TestResolveStoreRoot_customNeedsSentinel(t *testing.T) {
 	s, _ := newStoreService(t)
 	custom := t.TempDir()
 
-	// Without the sentinel, a plain write/delete path must refuse: this is what
-	// stops a mistyped path from becoming a remote wipe on the next retention run.
 	if _, err := s.resolveStoreRoot(custom, false); err == nil {
 		t.Fatal("an unmarked custom root must be refused outside a check")
 	} else if !strings.Contains(err.Error(), "not initialized") {
 		t.Errorf("error should explain the root is not initialized, got %v", err)
 	}
 
-	// A check on an EMPTY directory marks it, and then it is usable.
 	if _, err := s.resolveStoreRoot(custom, true); err != nil {
 		t.Fatalf("an empty custom root must be adoptable: %v", err)
 	}
@@ -102,12 +93,6 @@ func TestResolveStoreRoot_refusesRelative(t *testing.T) {
 		t.Error("a relative root must be refused")
 	}
 }
-
-// --------------------------------------------------------------------------- THE
-// regression that justifies living in internal/server: deleting a prefix that does not
-// exist must delete NOTHING. safepath.Inside returns the BASE on every failure path, so
-// the obvious implementation (join, resolve, RemoveAll) resolves a missing prefix to
-// the root and wipes every backup on the server.
 
 func TestStoreDeletePrefix_missingPrefixDeletesNothing(t *testing.T) {
 	_, root := newStoreService(t)
@@ -185,10 +170,6 @@ func TestStoreDeleteOne_isIdempotent(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Containment: an object key never escapes the root
-// ---------------------------------------------------------------------------
-
 func TestStoreWrite_refusesTraversalKey(t *testing.T) {
 	_, root := newStoreService(t)
 	for _, key := range []string{"../escape.age", "deplo/../../escape.age"} {
@@ -196,8 +177,6 @@ func TestStoreWrite_refusesTraversalKey(t *testing.T) {
 			t.Errorf("key %q must be refused", key)
 		}
 	}
-	// An ABSOLUTE key is not an error - normalizeRel strips the leading slash, the same
-	// way it does for the file RPCs, but it must stay CONTAINED.
 	if _, _, err := storeWrite(root, "/etc/cron.d/evil", strings.NewReader("x"), false); err != nil {
 		t.Fatalf("an absolute key should be relativised, not fail: %v", err)
 	}
@@ -224,12 +203,6 @@ func TestStoreWrite_refusesOverwriteByDefault(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Atomicity: a failed write leaves no artifact at the real key
-// ---------------------------------------------------------------------------
-
-// failingReader yields some bytes and then errors, standing in for a dump that
-// dies partway (ENOSPC, a killed container, a dropped relay).
 type failingReader struct {
 	data []byte
 	n    int
@@ -258,9 +231,7 @@ func TestStoreWrite_partialWriteLeavesNoArtifact(t *testing.T) {
 	}
 }
 
-// The sweep must not touch a write that is STILL HAPPENING. The root is shared by every
-// destination and every team on the host, and a check is fired by something as ordinary
-// as opening the destination dropdown.
+// The sweep must not touch a write that is STILL HAPPENING.
 func TestSweepPartials_leavesAnInFlightWriteAlone(t *testing.T) {
 	s, root := newStoreService(t)
 	dir := filepath.Join(root, "deplo", "team_b", "app", "x")
@@ -271,7 +242,6 @@ func TestSweepPartials_leavesAnInFlightWriteAlone(t *testing.T) {
 	if err := os.WriteFile(inFlight, []byte("still streaming"), storeFilePerm); err != nil {
 		t.Fatal(err)
 	}
-	// Freshly written, i.e. exactly what an in-progress relay looks like.
 	res := s.storeCheck(&pb.StoreTarget{})
 	if !res.GetOk() {
 		t.Fatalf("check failed: %s", res.GetError())
@@ -280,7 +250,6 @@ func TestSweepPartials_leavesAnInFlightWriteAlone(t *testing.T) {
 		t.Fatal("the sweep deleted a temp file that was being written right now")
 	}
 
-	// Backdate it past the staleness window: now it is debris and must go.
 	old := time.Now().Add(-storePartialStaleAfter - time.Minute)
 	if err := os.Chtimes(inFlight, old, old); err != nil {
 		t.Fatal(err)
@@ -303,7 +272,6 @@ func TestSweepPartials_reclaimsStrandedTempFiles(t *testing.T) {
 	if err := os.WriteFile(stranded, []byte("interrupted"), storeFilePerm); err != nil {
 		t.Fatal(err)
 	}
-	// Aged out, so the sweep is allowed to touch it.
 	old := time.Now().Add(-storePartialStaleAfter - time.Minute)
 	if err := os.Chtimes(stranded, old, old); err != nil {
 		t.Fatal(err)
@@ -323,14 +291,8 @@ func TestSweepPartials_reclaimsStrandedTempFiles(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Encryption round-trip, and the close-ordering trap
-// ---------------------------------------------------------------------------
-
 func TestArtifactWriter_roundTrip(t *testing.T) {
 	recipient, identity := testKeypair(t)
-	// Big enough to span several of age's 64 KiB STREAM chunks, so a broken
-	// final-chunk marker actually shows up.
 	payload := bytes.Repeat([]byte("deplo backup payload\n"), 20_000)
 
 	var sink bytes.Buffer
@@ -362,11 +324,7 @@ func TestArtifactWriter_roundTrip(t *testing.T) {
 	}
 }
 
-// Pins the close-ordering bug. age's STREAM writer only emits its final-chunk marker on
-// Close: skip it and the artifact decrypts perfectly until the last chunk and then
-// fails - silent corruption discovered at restore time, months later.
-// artifactWriter.Close is what prevents it, so assert that NOT calling it really does
-// break the artifact.
+// Pins the close-ordering bug.
 func TestArtifactWriter_skippingCloseCorruptsTheArtifact(t *testing.T) {
 	recipient, identity := testKeypair(t)
 	payload := bytes.Repeat([]byte("x"), 200_000)
@@ -379,14 +337,13 @@ func TestArtifactWriter_skippingCloseCorruptsTheArtifact(t *testing.T) {
 	if _, err := aw.Writer().Write(payload); err != nil {
 		t.Fatal(err)
 	}
-	// Deliberately close ONLY the gzip layer, as a naive implementation would.
 	if err := aw.gz.Close(); err != nil {
 		t.Fatal(err)
 	}
 
 	rc, err := openArtifactReader(bytes.NewReader(sink.Bytes()), identity)
 	if err != nil {
-		return // already unreadable - the point stands
+		return
 	}
 	defer rc.Close()
 	if _, err := io.ReadAll(rc); err == nil {
@@ -419,11 +376,6 @@ func TestNewArtifactWriter_rejectsBadRecipient(t *testing.T) {
 		t.Error("a malformed recipient must be rejected before any bytes are produced")
 	}
 }
-
-// --------------------------------------------------------------------------- The full
-// store pipeline: write an artifact, read it back through the same artifactSource a
-// restore uses.
-// ---------------------------------------------------------------------------
 
 func TestWriteArtifact_storeRoundTripThroughSource(t *testing.T) {
 	s, root := newStoreService(t)
@@ -480,9 +432,7 @@ func TestWriteArtifact_storeRoundTripThroughSource(t *testing.T) {
 	}
 }
 
-// A relayed backup must hand out CIPHERTEXT: the control plane forwards these
-// frames to another host, and plaintext crossing it would defeat the whole point
-// of holding the identity control-plane side.
+// A relayed backup must hand out CIPHERTEXT: the control plane forwards these frames to another host, and plaintext crossing it would defeat the whole point of holding the identity control-plane side.
 func TestWriteArtifact_streamOutEmitsCiphertext(t *testing.T) {
 	s, _ := newStoreService(t)
 	recipient, identity := testKeypair(t)
@@ -530,10 +480,6 @@ func TestWriteArtifact_streamOutEmitsCiphertext(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// The managed root is the agent's own, so every path may create it
-// ---------------------------------------------------------------------------
-
 // A write path must bring the MANAGED root into being on its own.
 func TestResolveStoreRoot_managedRootIsCreatedByAWritePath(t *testing.T) {
 	base := t.TempDir()
@@ -543,7 +489,7 @@ func TestResolveStoreRoot_managedRootIsCreatedByAWritePath(t *testing.T) {
 		t.Fatalf("the store must not exist before the first call: %v", err)
 	}
 
-	root, err := s.resolveStoreRoot("", false) // false == a backup, not a check
+	root, err := s.resolveStoreRoot("", false)
 	if err != nil {
 		t.Fatalf("a write path must create the managed root: %v", err)
 	}
@@ -555,12 +501,11 @@ func TestResolveStoreRoot_managedRootIsCreatedByAWritePath(t *testing.T) {
 	}
 }
 
-// A CUSTOM root keeps the old rule: only a check may mark one, because marking
-// it IS the act of vetting it. A backup pointed at an unmarked path fails.
+// A CUSTOM root keeps the old rule: only a check may mark one, because marking it IS the act of vetting it.
 func TestResolveStoreRoot_customRootStillNeedsACheckToMarkIt(t *testing.T) {
 	base := t.TempDir()
 	s := New(filepath.Join(base, "stacks"), t.TempDir(), "/", base)
-	custom := t.TempDir() // exists, empty, unmarked
+	custom := t.TempDir()
 
 	if _, err := s.resolveStoreRoot(custom, false); err == nil {
 		t.Fatal("a write must refuse a custom root the agent has not marked")
@@ -572,10 +517,6 @@ func TestResolveStoreRoot_customRootStillNeedsACheckToMarkIt(t *testing.T) {
 		t.Fatalf("once marked, a write must accept it: %v", err)
 	}
 }
-
-// ---------------------------------------------------------------------------
-// A bucket artifact is encrypted and hashed too
-// ---------------------------------------------------------------------------
 
 func TestDestinationFromBackup_s3CarriesTheRecipient(t *testing.T) {
 	base := t.TempDir()
@@ -590,14 +531,10 @@ func TestDestinationFromBackup_s3CarriesTheRecipient(t *testing.T) {
 	if err != nil {
 		t.Fatalf("destinationFromBackup: %v", err)
 	}
-	// Without this the archive - which carries the app's whole decrypted env -
-	// lands in the bucket in the clear.
 	if dest.recipient != recipient {
 		t.Errorf("an S3 destination must encrypt to %q, got %q", recipient, dest.recipient)
 	}
 
-	// A destination created before bucket encryption sends no recipient, and must
-	// keep working rather than fail closed on an agent that now supports it.
 	legacy, err := destinationFromBackup(s, &pb.BackupRequest{
 		Kind: pb.BackupKind_BACKUP_KIND_PROJECT,
 		S3:   &pb.S3Target{Bucket: "b", ObjectKey: "deplo/t/app/a/x.tar.gz"},
@@ -628,14 +565,8 @@ func TestSourceFromRestore_s3CarriesTheIdentity(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// A restore trusts the control plane, not the artifact
-// ---------------------------------------------------------------------------
-
 // The artifact's own compose is what a restore used to execute.
 func TestRestoreConfig_aProvenArchiveRestoresItsOwnConfig(t *testing.T) {
-	// The whole point of the snapshot: a restore puts back the config the app was
-	// running, not today's config wrapped around last month's volumes.
 	archived := "services:\n  web:\n    image: app:0\n"
 	rr := restoreConfig("blog", &pb.ProjectDescriptor{
 		ComposeYaml: "services:\n  web:\n    image: app:2\n",
@@ -687,8 +618,7 @@ func TestRestoreConfig_anUnprovenArchiveNeverWins(t *testing.T) {
 	}
 }
 
-// Either way, the archive is the fallback when the control plane sends nothing -
-// which is what keeps a restore working for a config that no longer exists.
+// Either way, the archive is the fallback when the control plane sends nothing - which is what keeps a restore working for a config that no longer exists.
 func TestRestoreConfig_fallsBackToTheArchive(t *testing.T) {
 	archived := "services:\n  web:\n    image: app:0\n"
 	for _, proven := range []bool{true, false} {
@@ -709,12 +639,7 @@ func TestRestoreConfig_fallsBackToTheArchive(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// An artifact has to be the one the control plane wrote
-// ---------------------------------------------------------------------------
-
-// The pre-emptive shape: a store artifact is a local file, so a tampered one is
-// caught before the caller stops a stack or wipes a single volume for it.
+// The pre-emptive shape: a store artifact is a local file, so a tampered one is caught before the caller stops a stack or wipes a single volume for it.
 func TestVerifyStoreDigest_catchesATamperedArtifactUpFront(t *testing.T) {
 	s, root := newStoreService(t)
 	recipient, identity := testKeypair(t)
@@ -744,9 +669,6 @@ func TestVerifyStoreDigest_catchesATamperedArtifactUpFront(t *testing.T) {
 		t.Errorf("a run with no recorded digest must still restore: %v", verr)
 	}
 
-	// A compromised storage host can forge one: it holds the recipient, which is a
-	// PUBLIC key it is handed on every backup. age proves confidentiality, not who
-	// wrote the file, so the digest is the only thing standing here.
 	forged, err := age.ParseX25519Recipient(recipient)
 	if err != nil {
 		t.Fatalf("parse recipient: %v", err)
@@ -764,15 +686,12 @@ func TestVerifyStoreDigest_catchesATamperedArtifactUpFront(t *testing.T) {
 	if verr := verifyStoreDigest(root, key, digest); verr == nil {
 		t.Fatal("a forged artifact must be refused, even though it decrypts fine")
 	}
-	// It really does decrypt: the refusal is the digest's doing, nothing else.
 	if _, oerr := openArtifactReader(bytes.NewReader(buf.Bytes()), identity); oerr == nil {
 		t.Log("confirmed: the forged artifact is valid age, only the digest catches it")
 	}
 }
 
-// The streaming shape: an S3 object or a relayed artifact can only be hashed as
-// it goes past, so the verdict lands at the end - which for a project is still
-// before the stack configuration is re-applied.
+// The streaming shape: an S3 object or a relayed artifact can only be hashed as it goes past, so the verdict lands at the end - which for a project is still before the stack configuration is re-applied.
 func TestVerifyingReader_settlesOnlyOnFinish(t *testing.T) {
 	payload := bytes.Repeat([]byte("artifact"), 1024)
 	sum := sha256.Sum256(payload)
@@ -786,9 +705,6 @@ func TestVerifyingReader_settlesOnlyOnFinish(t *testing.T) {
 		t.Errorf("an untouched stream must verify: %v", err)
 	}
 
-	// gzip and age stop at their own trailer rather than at EOF, so finish() has
-	// to drain the rest itself - a reader that only checked on io.EOF would never
-	// fire at all.
 	partial := &verifyingReader{r: bytes.NewReader(payload), sum: sha256.New(), expected: good}
 	if _, err := io.CopyN(io.Discard, partial, 64); err != nil {
 		t.Fatalf("partial read: %v", err)
@@ -804,8 +720,7 @@ func TestVerifyingReader_settlesOnlyOnFinish(t *testing.T) {
 	}
 }
 
-// verify() is also what promotes a streaming source to "proven", which is what
-// lets its own configuration snapshot be restored rather than discarded.
+// verify() is also what promotes a streaming source to "proven", which is what lets its own configuration snapshot be restored rather than discarded.
 func TestArtifactSource_verifyMarksTheSourceProven(t *testing.T) {
 	payload := []byte("artifact")
 	sum := sha256.Sum256(payload)
@@ -841,13 +756,6 @@ func TestArtifactSource_verifyMarksTheSourceProven(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// ReadStoreFile - the two shapes an artifact can be read from
-// ---------------------------------------------------------------------------
-
-// fakeBucket serves ONE object over plain http, ignoring the signature: what is
-// under test is this agent's plumbing, not minio-go's signing. Path-style, so
-// the object is at /<bucket>/<key>.
 func fakeBucket(t *testing.T, key string, body []byte) *pb.S3Target {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -855,27 +763,22 @@ func fakeBucket(t *testing.T, key string, body []byte) *pb.S3Target {
 			http.NotFound(w, r)
 			return
 		}
-		// A real modtime, not the zero value: ServeContent omits Last-Modified for
-		// a zero time and minio-go refuses a response without one.
 		modtime := time.Date(2026, 8, 11, 12, 0, 0, 0, time.UTC)
 		http.ServeContent(w, r, path.Base(key), modtime, bytes.NewReader(body))
 	}))
 	t.Cleanup(srv.Close)
 	return &pb.S3Target{
-		Endpoint:  srv.URL,
-		Region:    "us-east-1",
-		Bucket:    "deplo-test",
-		AccessKey: "k",
-		SecretKey: "s",
-		ObjectKey: key,
-		PathStyle: true,
-		// httptest listens on 127.0.0.1, which the SSRF guard refuses by default -
-		// the same flag a self-hosted bucket on the operator's own network needs.
+		Endpoint:             srv.URL,
+		Region:               "us-east-1",
+		Bucket:               "deplo-test",
+		AccessKey:            "k",
+		SecretKey:            "s",
+		ObjectKey:            key,
+		PathStyle:            true,
 		AllowPrivateEndpoint: true,
 	}
 }
 
-// encryptedArtifact builds what a backup actually writes: gzip inside age.
 func encryptedArtifact(t *testing.T, recipient string, payload []byte) []byte {
 	t.Helper()
 	var buf bytes.Buffer
@@ -892,9 +795,7 @@ func encryptedArtifact(t *testing.T, recipient string, payload []byte) []byte {
 	return buf.Bytes()
 }
 
-// The download case for a BUCKET artifact: decrypted on the way out, and
-// deliberately still gzip. Handing over a bare tar would be a different file
-// from the one the panel promises.
+// The download case for a BUCKET artifact: decrypted on the way out, and deliberately still gzip.
 func TestReadStoreFile_s3DecryptsButDoesNotDecompress(t *testing.T) {
 	s, _ := newStoreService(t)
 	recipient, identity := testKeypair(t)
@@ -928,8 +829,7 @@ func TestReadStoreFile_s3DecryptsButDoesNotDecompress(t *testing.T) {
 	}
 }
 
-// No identity is the RELAY shape, and it must stay verbatim: the control plane
-// passing a bucket artifact to another host has no business seeing plaintext.
+// No identity is the RELAY shape, and it must stay verbatim: the control plane passing a bucket artifact to another host has no business seeing plaintext.
 func TestReadStoreFile_s3WithoutIdentityStaysCiphertext(t *testing.T) {
 	s, _ := newStoreService(t)
 	recipient, _ := testKeypair(t)
@@ -949,8 +849,7 @@ func TestReadStoreFile_s3WithoutIdentityStaysCiphertext(t *testing.T) {
 	}
 }
 
-// The asymmetry, pinned in both directions. A bucket object cannot be hashed before it
-// is fetched, so its verdict lands at the END - after bytes have already gone.
+// The asymmetry, pinned in both directions.
 func TestReadStoreFile_s3DigestFailsOnlyAfterTheBytesAreGone(t *testing.T) {
 	s, _ := newStoreService(t)
 	recipient, identity := testKeypair(t)
@@ -971,8 +870,7 @@ func TestReadStoreFile_s3DigestFailsOnlyAfterTheBytesAreGone(t *testing.T) {
 	}
 }
 
-// The other half of the asymmetry: an artifact on this host's disk is hashed
-// before a single byte leaves, so it really can refuse.
+// The other half of the asymmetry: an artifact on this host's disk is hashed before a single byte leaves, so it really can refuse.
 func TestReadStoreFile_storeDigestRefusesBeforeAnyBytes(t *testing.T) {
 	s, root := newStoreService(t)
 	recipient, identity := testKeypair(t)
@@ -1011,7 +909,6 @@ func TestReadStoreFile_namingNoArtifactIsRefused(t *testing.T) {
 func TestRestoreConfig_anUntrustedArchiveNeverConfiguresAnything(t *testing.T) {
 	hostile := "services:\n  x:\n    image: alpine\n    privileged: true\n    volumes: ['/:/host']\n"
 
-	// Nothing from the control plane, which is exactly when the fallback fired.
 	rr := restoreConfig("blog", &pb.ProjectDescriptor{}, projectSnapshot{
 		compose: hostile,
 		env:     map[string]string{"LD_PRELOAD": "/tmp/evil.so"},
@@ -1028,7 +925,6 @@ func TestRestoreConfig_anUntrustedArchiveNeverConfiguresAnything(t *testing.T) {
 		t.Errorf("nor the config files: %v", rr.GetMounts())
 	}
 
-	// And it must not be able to displace a control plane that DID send config.
 	trusted := "services:\n  web:\n    image: app:1\n"
 	rr = restoreConfig("blog", &pb.ProjectDescriptor{
 		ComposeYaml: trusted,
@@ -1042,16 +938,13 @@ func TestRestoreConfig_anUntrustedArchiveNeverConfiguresAnything(t *testing.T) {
 	}
 }
 
-// TestWriteArtifact_decryptedSizeIsWhatADownloadDelivers pins the number the download's
-// Content-Length is built from.
+// TestWriteArtifact_decryptedSizeIsWhatADownloadDelivers pins the number the download's Content-Length is built from.
 func TestWriteArtifact_decryptedSizeIsWhatADownloadDelivers(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		encrypt bool
 		payload []byte
 	}{
-		// Several chunk boundaries: age frames at 64 KiB, so a payload spanning
-		// more than one chunk is where a per-chunk tag would be miscounted.
 		{"encrypted, multi-chunk", true, bytes.Repeat([]byte("volume bytes\n"), 40_000)},
 		{"encrypted, tiny", true, []byte("x")},
 		{"unencrypted legacy bucket", false, bytes.Repeat([]byte("dump\n"), 1_000)},

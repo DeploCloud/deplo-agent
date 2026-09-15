@@ -2,8 +2,7 @@ package server
 
 import "testing"
 
-// The plan carries what the generated Dockerfile only declares. An app's own
-// variable must not come from here: its value would land on argv and in the log.
+// The plan carries what the generated Dockerfile only declares.
 func TestPlanVariablesKeepsNixpacksOwnAndDropsTheAppsOwn(t *testing.T) {
 	plan := []byte(`{"variables":{"CI":"true","NIXPACKS_SPA_OUTPUT_DIR":"dist",
 		"NODE_ENV":"production","PORT":"4173","SECRET_TOKEN":"s3cr3t"}}`)

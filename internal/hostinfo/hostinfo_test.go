@@ -7,8 +7,6 @@ import (
 	"testing"
 )
 
-// The parsers are the whole risk surface of this package: everything else is a syscall.
-
 func TestParseCPUInfo(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -17,8 +15,6 @@ func TestParseCPUInfo(t *testing.T) {
 		physical, logical int
 	}{
 		{
-			// The case that matters: 2 physical cores presented as 4 logical ones.
-			// Reporting 4 "cores" is the classic spec-sheet lie.
 			name: "hyperthreaded x86 reports physical cores, not threads",
 			in: cpuBlock("0", "AMD Ryzen 5 5600X 6-Core Processor", "0", "0") +
 				cpuBlock("1", "AMD Ryzen 5 5600X 6-Core Processor", "0", "1") +
@@ -33,8 +29,6 @@ func TestParseCPUInfo(t *testing.T) {
 			model: "Intel(R) Xeon(R) Silver 4210", physical: 2, logical: 2,
 		},
 		{
-			// Many ARM boards and VMs publish no physical/core id at all. Falling
-			// back to the logical count beats reporting 0 cores.
 			name:  "no topology keys falls back to the logical count",
 			in:    "processor\t: 0\nModel\t\t: Raspberry Pi 5\n\nprocessor\t: 1\nModel\t\t: Raspberry Pi 5\n\n",
 			model: "Raspberry Pi 5", physical: 2, logical: 2,
@@ -79,7 +73,6 @@ func TestParseOSRelease(t *testing.T) {
 			want: "Ubuntu 24.04.1 LTS",
 		},
 		{
-			// Alpine's file has no PRETTY_NAME on some releases.
 			name: "falls back to NAME + VERSION",
 			in:   "NAME=\"Alpine Linux\"\nVERSION=3.20.3\nID=alpine\n",
 			want: "Alpine Linux 3.20.3",
@@ -113,8 +106,7 @@ func TestZoneFromPath(t *testing.T) {
 	}
 }
 
-// resolveZone is what stands between a name off the wire and a relink of
-// /etc/localtime, so its refusals are the security-relevant assertions here.
+// resolveZone is what stands between a name off the wire and a relink of /etc/localtime, so its refusals are the security-relevant assertions here.
 func TestResolveZoneRefusesAnythingOutsideZoneinfo(t *testing.T) {
 	dir := t.TempDir()
 	zoneDir := filepath.Join(dir, "zoneinfo")
@@ -124,8 +116,6 @@ func TestResolveZoneRefusesAnythingOutsideZoneinfo(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(zoneDir, "Europe", "Rome"), []byte("TZif"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// A secret next to the zone tree, and a symlink inside the tree pointing at
-	// it - the escape a string-prefix check would wave through.
 	secret := filepath.Join(dir, "shadow")
 	if err := os.WriteFile(secret, []byte("root:x:"), 0o600); err != nil {
 		t.Fatal(err)
@@ -146,13 +136,13 @@ func TestResolveZoneRefusesAnythingOutsideZoneinfo(t *testing.T) {
 	}
 
 	for _, bad := range []string{
-		"",                    // nothing given
-		"../shadow",           // lexical traversal
-		"Europe/../../shadow", // traversal mid-path
-		"/etc/shadow",         // absolute
-		"Sneaky",              // symlink escape: inside the tree, points out of it
-		"Europe",              // a directory is a path, not a zone
-		"Mars/Olympus",        // simply not there
+		"",
+		"../shadow",
+		"Europe/../../shadow",
+		"/etc/shadow",
+		"Sneaky",
+		"Europe",
+		"Mars/Olympus",
 	} {
 		t.Run("refuses "+bad, func(t *testing.T) {
 			if _, err := resolveZone(bad); err == nil {
@@ -165,8 +155,7 @@ func TestResolveZoneRefusesAnythingOutsideZoneinfo(t *testing.T) {
 	}
 }
 
-// Collect must never panic or block on a host where some source is missing -
-// it is called from an interactive RPC.
+// Collect must never panic or block on a host where some source is missing - it is called from an interactive RPC.
 func TestCollectIsBestEffort(t *testing.T) {
 	got := Collect("/")
 	if got.DiskTotalBytes <= 0 {
@@ -175,7 +164,6 @@ func TestCollectIsBestEffort(t *testing.T) {
 	if got.TimeUnixMs <= 0 {
 		t.Error("the clock must always be reported")
 	}
-	// -720..+840 minutes is the full range of real UTC offsets.
 	if got.UTCOffsetMinutes < -720 || got.UTCOffsetMinutes > 840 {
 		t.Errorf("implausible UTC offset %d", got.UTCOffsetMinutes)
 	}

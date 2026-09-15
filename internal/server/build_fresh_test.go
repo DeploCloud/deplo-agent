@@ -8,12 +8,7 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
-// The two "give me a genuinely fresh one" switches: no_build_cache must put --no-cache
-// on the docker build, force_recreate must put --force-recreate on the compose up.
-
 func TestBuildArgvNoCache(t *testing.T) {
-	// Every build carries the app's cache namespace (cache_ns.go); strip it to
-	// judge the rest of the argv.
 	withoutNS := func(args []string) string {
 		var out []string
 		for i := 0; i < len(args); i++ {
@@ -37,8 +32,6 @@ func TestBuildArgvNoCache(t *testing.T) {
 	}
 
 	fresh := (&Service{}).buildArgv(&pb.DeployRequest{NoBuildCache: true}, "-f", "Dockerfile")
-	// docker parses build flags after the verb; the rest of the argv must be
-	// untouched so the caller's -f/--build-arg/context ordering still holds.
 	if withoutNS(fresh) != "build --no-cache -f Dockerfile" {
 		t.Fatalf("argv = %v, want `build --no-cache -f Dockerfile`", fresh)
 	}
@@ -56,8 +49,7 @@ func TestComposeUpArgsForceRecreate(t *testing.T) {
 	}
 }
 
-// Both switches are capability-gated, so an older agent's control plane can warn
-// instead of silently caching / silently not recreating.
+// Both switches are capability-gated, so an older agent's control plane can warn instead of silently caching / silently not recreating.
 func TestFreshBuildCapabilitiesAdvertised(t *testing.T) {
 	for _, c := range []string{"deploy.nocache", "deploy.force-recreate"} {
 		if !slices.Contains(Capabilities, c) {

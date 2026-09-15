@@ -1,7 +1,5 @@
 package server
 
-// https://deplo.build/docs/guides/console-and-files
-
 import (
 	"errors"
 	"io"
@@ -17,23 +15,11 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// attach.go ports lib/infra/docker.ts attachContainer + attachContainerPty to the
-// agent: interactive `docker attach` over one bidi gRPC stream.
-
-// attachClient abstracts the two backings (piped child / pty) the way the TS
-// AttachHandle did, but with a direct read([]byte) model - gRPC pumps bytes, it
-// does not register callbacks.
 type attachClient interface {
-	// read fills p with merged container output; returns io.EOF when the client
-	// exits. Blocking.
 	read(p []byte) (int, error)
-	// write forwards keystroke bytes to the container stdin (best-effort).
 	write(data []byte)
-	// resize sets the terminal size (pty only; a no-op on pipes).
 	resize(cols, rows int)
-	// exitCode is valid only after read returned io.EOF (0 if unknown).
 	exitCode() int
-	// close tears down the agent's attach client only (never the container).
 	close()
 }
 
@@ -41,7 +27,7 @@ var attachArgs = func(name string) []string {
 	return []string{"attach", "--sig-proxy=false", name}
 }
 
-// Attach is the bidi RPC. The first client frame MUST be AttachOpen.
+// Attach is the bidi RPC.
 func (s *Service) Attach(stream pb.Agent_AttachServer) error {
 	first, err := stream.Recv()
 	if err != nil {
@@ -55,9 +41,6 @@ func (s *Service) Attach(stream pb.Agent_AttachServer) error {
 	if err := assertOwned(ctx, open.GetContainer(), open.GetProjectId()); err != nil {
 		return err
 	}
-	// Attaching to a stopped container's PID 1 would just hang - refuse early,
-	// mirroring resolveAttachTarget's "stopped" rejection (which the control plane
-	// also does, but a remote container's liveness must be checked where it runs).
 	if !dockercli.IsRunning(ctx, open.GetContainer()) {
 		return status.Error(codes.FailedPrecondition, "container is not running")
 	}
@@ -74,8 +57,6 @@ func (s *Service) Attach(stream pb.Agent_AttachServer) error {
 	}
 	defer client.close()
 
-	// Output pump: container -> client. Runs until the attach client exits or a
-	// send fails (the gRPC stream closed). Sends a terminal exit frame on EOF.
 	outDone := make(chan struct{})
 	go func() {
 		defer close(outDone)
@@ -100,17 +81,11 @@ func (s *Service) Attach(stream pb.Agent_AttachServer) error {
 		}
 	}()
 
-	// Input pump: client -> container. Without this, an idle attach to a container that
-	// exits would stay blocked in Recv() and defer client.close() would not run until the
-	// client eventually tore the stream down - leaking the docker attach child.
 	type frameOrErr struct {
 		in  *pb.AttachInput
 		err error
 	}
 	recvCh := make(chan frameOrErr, 1)
-	// recvDone lets the recv goroutine terminate even when the handler returns while a
-	// frame is parked on the buffered send below (buffer full, main loop gone via
-	// outDone/ctx.Done and no longer draining recvCh).
 	recvDone := make(chan struct{})
 	defer close(recvDone)
 	go func() {
@@ -130,15 +105,11 @@ func (s *Service) Attach(stream pb.Agent_AttachServer) error {
 	for {
 		select {
 		case <-outDone:
-			// Container exited / output stream closed: stop. defer client.close()
-			// tears down the backing, which unblocks the recv goroutine's Recv().
 			return nil
 		case <-ctx.Done():
 			return ctx.Err()
 		case fe := <-recvCh:
 			if fe.err == io.EOF {
-				// Browser closed the input direction; keep streaming output until
-				// the container exits (outDone), then return.
 				<-outDone
 				return nil
 			}
@@ -151,8 +122,6 @@ func (s *Service) Attach(stream pb.Agent_AttachServer) error {
 			case *pb.AttachInput_Resize:
 				client.resize(int(f.Resize.GetCols()), int(f.Resize.GetRows()))
 			case *pb.AttachInput_Open:
-				// A second open frame is a protocol error; ignore it (the first
-				// one already selected the container).
 			}
 		}
 	}
@@ -168,13 +137,11 @@ func dimsOrDefault(cols, rows int) (int, int) {
 	return cols, rows
 }
 
-// ---- pipe backing (tty:false): docker attach over plain pipes -------------
-
 type attachPipes struct {
 	cmd       *exec.Cmd
 	stdin     io.WriteCloser
 	merged    chan []byte
-	done      chan struct{} // closed by close() to unblock blocked pump sends
+	done      chan struct{}
 	closeOnce sync.Once
 	code      int
 }
@@ -213,8 +180,6 @@ func newAttachPipes(name string) (*attachPipes, error) {
 			if n > 0 {
 				chunk := make([]byte, n)
 				copy(chunk, buf[:n])
-				// Select on done so a send never blocks forever once the reader
-				// has gone (close() fired): the pump exits instead of leaking.
 				select {
 				case a.merged <- chunk:
 				case <-a.done:
@@ -228,8 +193,6 @@ func newAttachPipes(name string) (*attachPipes, error) {
 	}
 	go pump(stdout)
 	go pump(stderr)
-	// Once both pipes drain (process exited, or close() killed it), reap the child and
-	// close merged so the reader sees io.EOF.
 	go func() {
 		wg.Wait()
 		werr := a.cmd.Wait()
@@ -248,34 +211,27 @@ func (a *attachPipes) read(p []byte) (int, error) {
 			return 0, io.EOF
 		}
 		n := copy(p, chunk)
-		// A chunk larger than p is rare (p is 32KiB, matching the pump buffer);
-		// the merged buffer is sized to the same 32KiB pump, so copy is full in
-		// practice.
 		return n, nil
 	case <-a.done:
-		// close() fired; stop reading promptly (the pumps/wait goroutine drain
-		// and close merged on their own).
 		return 0, io.EOF
 	}
 }
 
 func (a *attachPipes) write(data []byte) {
-	_, _ = a.stdin.Write(data) // best-effort; ignored if stdin is closed
+	_, _ = a.stdin.Write(data)
 }
 
-func (a *attachPipes) resize(_, _ int) {} // no pty, nothing to resize
+func (a *attachPipes) resize(_, _ int) {}
 
 func (a *attachPipes) exitCode() int { return a.code }
 
 func (a *attachPipes) close() {
-	a.closeOnce.Do(func() { close(a.done) }) // unblock the pumps + read()
+	a.closeOnce.Do(func() { close(a.done) })
 	_ = a.stdin.Close()
 	if a.cmd.Process != nil {
-		_ = a.cmd.Process.Kill() // sig-proxy=false => container untouched
+		_ = a.cmd.Process.Kill()
 	}
 }
-
-// ---- pty backing (tty:true): docker attach inside a pseudo-terminal -------
 
 type attachPTY struct {
 	cmd      *exec.Cmd
@@ -284,9 +240,6 @@ type attachPTY struct {
 	waitOnce sync.Once
 }
 
-// reap Wait()s the docker attach child exactly once (guarded), capturing its
-// exit code. Both read() (natural EOF) and close() (killed on a failed Send /
-// client teardown) call it, so the child is always reaped, never left a zombie.
 func (a *attachPTY) reap() {
 	a.waitOnce.Do(func() {
 		werr := a.cmd.Wait()
@@ -308,7 +261,6 @@ func newAttachPTY(name string, cols, rows int) (*attachPTY, error) {
 func (a *attachPTY) read(p []byte) (int, error) {
 	n, err := a.ptmx.Read(p)
 	if err != nil {
-		// The pty closes when the attach client exits; reap to capture the code.
 		a.reap()
 		return n, io.EOF
 	}
@@ -331,8 +283,5 @@ func (a *attachPTY) close() {
 	if a.cmd.Process != nil {
 		_ = a.cmd.Process.Kill()
 	}
-	// Reap the killed child so it never lingers as a zombie when close() is the
-	// exit path (output pump gone, no further read() to Wait() it). Idempotent
-	// with read()'s reap via waitOnce; Kill() above ensures Wait() returns.
 	a.reap()
 }

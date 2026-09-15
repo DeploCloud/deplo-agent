@@ -21,8 +21,7 @@ func phaseEvent(p pb.DeployPhase) *pb.DeployEvent {
 	return &pb.DeployEvent{Event: &pb.DeployEvent_Phase{Phase: &pb.PhaseChange{Phase: p}}}
 }
 
-// A subscriber from seq 0 receives every event in order, including the terminal
-// result, then the subscription returns.
+// A subscriber from seq 0 receives every event in order, including the terminal result, then the subscription returns.
 func TestInflight_subscribeFromStart(t *testing.T) {
 	f := newInflight(func() {})
 	go func() {
@@ -52,15 +51,14 @@ func TestInflight_subscribeFromStart(t *testing.T) {
 	}
 }
 
-// A reattach with from_seq replays only events past the cursor - the core of D5:
-// a control plane that saw seq 1 reconnects with from_seq=1 and gets 2,3 only.
+// A reattach with from_seq replays only events past the cursor - the core of D5: a control plane that saw seq 1 reconnects with from_seq=1 and gets 2,3 only.
 func TestInflight_reattachReplaysPastCursor(t *testing.T) {
 	f := newInflight(func() {})
-	f.append(logEvent("a")) // seq 1
-	f.append(logEvent("b")) // seq 2
+	f.append(logEvent("a"))
+	f.append(logEvent("b"))
 	go func() {
 		time.Sleep(20 * time.Millisecond)
-		f.append(resultEvent(true)) // seq 3
+		f.append(resultEvent(true))
 	}()
 
 	var got []*pb.DeployEvent
@@ -76,8 +74,7 @@ func TestInflight_reattachReplaysPastCursor(t *testing.T) {
 	}
 }
 
-// Two concurrent subscribers both see the full stream - a live Deploy reader and
-// a reattacher do not steal events from each other.
+// Two concurrent subscribers both see the full stream - a live Deploy reader and a reattacher do not steal events from each other.
 func TestInflight_twoSubscribers(t *testing.T) {
 	f := newInflight(func() {})
 	var wg sync.WaitGroup
@@ -92,7 +89,7 @@ func TestInflight_twoSubscribers(t *testing.T) {
 	wg.Add(2)
 	go collect(&a)
 	go collect(&b)
-	time.Sleep(10 * time.Millisecond) // let both attach
+	time.Sleep(10 * time.Millisecond)
 	f.append(logEvent("x"))
 	f.append(resultEvent(false))
 	wg.Wait()
@@ -101,8 +98,7 @@ func TestInflight_twoSubscribers(t *testing.T) {
 	}
 }
 
-// Cancelling a subscriber's context detaches it without affecting the deploy or
-// other subscribers (the build goes on).
+// Cancelling a subscriber's context detaches it without affecting the deploy or other subscribers (the build goes on).
 func TestInflight_subscriberCancelDetaches(t *testing.T) {
 	f := newInflight(func() {})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -119,20 +115,16 @@ func TestInflight_subscriberCancelDetaches(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatalf("cancelled subscriber did not return")
 	}
-	// The inflight is still usable: a fresh subscriber still completes.
 	go func() { f.append(resultEvent(true)) }()
 	if err := f.subscribe(context.Background(), 0, func(*pb.DeployEvent) error { return nil }); err != nil {
 		t.Fatalf("post-detach subscribe failed: %v", err)
 	}
 }
 
-// A verbose/malicious build cannot grow the retained buffer without bound: log events
-// are capped by count, the oldest are coalesced into a single note, yet the phase and
-// terminal result events are always retained and the newest log line survives, so
-// reattach still yields a truncated log + a note + the result.
+// A verbose/malicious build cannot grow the retained buffer without bound: log events are capped by count, the oldest are coalesced into a single note, yet the phase and terminal result events are always retained and the newest log line survives, so reattach still yields a truncated log + a note + the result.
 func TestInflight_logRetentionIsBounded(t *testing.T) {
 	f := newInflight(func() {})
-	f.append(phaseEvent(pb.DeployPhase_DEPLOY_PHASE_BUILDING)) // structural, must survive
+	f.append(phaseEvent(pb.DeployPhase_DEPLOY_PHASE_BUILDING))
 	total := maxRetainedLogEvents + 500
 	for i := 0; i < total; i++ {
 		f.append(logEvent(fmt.Sprintf("line %d", i)))
@@ -151,7 +143,6 @@ func TestInflight_logRetentionIsBounded(t *testing.T) {
 	if logCount > maxRetainedLogEvents {
 		t.Fatalf("retained real logs %d exceed cap %d", logCount, maxRetainedLogEvents)
 	}
-	// Buffer bounded: real logs + note + phase + result, never the full flood.
 	if len(events) >= total {
 		t.Fatalf("buffer not bounded: retained %d of %d events", len(events), total)
 	}
@@ -186,8 +177,6 @@ func TestInflight_logRetentionIsBounded(t *testing.T) {
 		t.Fatalf("newest log line %q was evicted; the most recent line must survive", newest)
 	}
 
-	// Seqs remain strictly ascending across the (trimmed) buffer, so the replay
-	// cursor stays well-defined.
 	var prev uint64
 	for _, ev := range events {
 		if ev.GetSeq() <= prev {
@@ -196,7 +185,6 @@ func TestInflight_logRetentionIsBounded(t *testing.T) {
 		prev = ev.GetSeq()
 	}
 
-	// A fresh subscriber still terminates and ends on the terminal result.
 	var got []*pb.DeployEvent
 	if err := f.subscribe(context.Background(), 0, func(ev *pb.DeployEvent) error {
 		got = append(got, ev)
@@ -217,9 +205,7 @@ func seqs(evs []*pb.DeployEvent) []uint64 {
 	return out
 }
 
-// subscribe finds the replay point by binary search, which rests on the buffer
-// staying sorted by seq through evictions. For every cursor a reattacher could
-// carry, the batch must equal what a linear scan of the trimmed buffer yields.
+// subscribe finds the replay point by binary search, which rests on the buffer staying sorted by seq through evictions.
 func TestInflight_reattachAfterTrimMatchesLinearScan(t *testing.T) {
 	f := newInflight(func() {})
 	f.append(phaseEvent(pb.DeployPhase_DEPLOY_PHASE_BUILDING))

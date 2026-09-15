@@ -12,18 +12,10 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// backup_clickhouse.go implements clickhouse backup/restore, which - unlike the
-// single-`docker exec`-pipe engines - needs multi-statement orchestration: a clickhouse
-// database is a SET of tables, each with its own DDL + data, and there is no single
-// command that streams a restorable whole-database dump.
-
-// errClickhouseSeparate flags that clickhouse uses the dedicated dump/restore
-// path (dumpClickhouse / restoreClickhouse) rather than the single-pipe argv.
 var errClickhouseSeparate = fmt.Errorf("clickhouse uses the dedicated multi-statement path")
 
 const clickhouseQueryTimeout = 5 * time.Minute
 
-// chClient builds the `docker exec <c> clickhouse-client [--user U] …` prefix.
 func chClientPrefix(d *pb.DatabaseDescriptor, stdin bool) (argv []string, env []string) {
 	a := []string{"exec"}
 	if stdin {
@@ -37,13 +29,9 @@ func chClientPrefix(d *pb.DatabaseDescriptor, stdin bool) (argv []string, env []
 	if u := d.GetUser(); u != "" {
 		a = append(a, "--user", u)
 	}
-	// No --password on argv: clickhouse-client picks up the password from the
-	// CLICKHOUSE_PASSWORD env var we forwarded above (when set), so the secret
-	// never lands on the host docker-client's command line.
 	return a, env
 }
 
-// chQuery runs a single clickhouse-client `--query` and returns trimmed stdout.
 func (s *Service) chQuery(ctx context.Context, d *pb.DatabaseDescriptor, query string) (string, error) {
 	argv, env := chClientPrefix(d, false)
 	argv = append(argv, "--query", query)
@@ -57,17 +45,11 @@ func (s *Service) chQuery(ctx context.Context, d *pb.DatabaseDescriptor, query s
 	return res.Stdout, nil
 }
 
-// dumpClickhouse writes the database's full restorable SQL script to `w`. It runs
-// on the same context as the Backup RPC; an error aborts the upload with its
-// cause (the pipe propagates it to the uploader).
 func (s *Service) dumpClickhouse(ctx context.Context, d *pb.DatabaseDescriptor, w io.Writer) error {
 	db := d.GetDbName()
 	if db == "" {
 		return fmt.Errorf("clickhouse backup requires a database name")
 	}
-	// Enumerate the real tables (exclude views + temporary tables - a view's data
-	// is derived, and its definition would be restored by its source table's DDL
-	// only if we dumped views too; keeping to base tables is the safe, portable set).
 	out, err := s.chQuery(ctx, d, fmt.Sprintf(
 		"SELECT name FROM system.tables WHERE database='%s' AND engine NOT LIKE '%%View%%' AND NOT is_temporary ORDER BY name",
 		chEscape(db)))
@@ -79,11 +61,8 @@ func (s *Service) dumpClickhouse(ctx context.Context, d *pb.DatabaseDescriptor, 
 	bw := bufio.NewWriter(w)
 	fmt.Fprintf(bw, "-- Deplo clickhouse backup of database %q\n", db)
 	for _, tbl := range tables {
-		// DROP first so the restore overwrites rather than merges.
 		fmt.Fprintf(bw, "DROP TABLE IF EXISTS `%s`.`%s`;\n", chQuoteIdent(db), chQuoteIdent(tbl))
 
-		// Schema: the stored CREATE query, made idempotent. create_table_query is
-		// `CREATE TABLE <db>.<t> (...)`; rewrite the leading verb to IF NOT EXISTS.
 		ddl, err := s.chQuery(ctx, d, fmt.Sprintf(
 			"SELECT create_table_query FROM system.tables WHERE database='%s' AND name='%s'",
 			chEscape(db), chEscape(tbl)))
@@ -94,8 +73,6 @@ func (s *Service) dumpClickhouse(ctx context.Context, d *pb.DatabaseDescriptor, 
 		ddl = strings.Replace(ddl, "CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ", 1)
 		fmt.Fprintf(bw, "%s;\n", ddl)
 
-		// Data: rows as INSERT … VALUES with the real qualified table name. Stream
-		// it (a table can be large) directly into the script via PipeOut.
 		if err := bw.Flush(); err != nil {
 			return err
 		}
@@ -119,9 +96,6 @@ func (s *Service) dumpClickhouse(ctx context.Context, d *pb.DatabaseDescriptor, 
 	return bw.Flush()
 }
 
-// restoreClickhouse streams the backed-up SQL script back through
-// `clickhouse-client --multiquery`, which replays the DROP/CREATE/INSERT
-// statements (drop-and-recreate overwrite).
 func (s *Service) restoreClickhouse(ctx context.Context, d *pb.DatabaseDescriptor, src *artifactSource, e *rsEmitter) {
 	e.log("info", fmt.Sprintf("Restoring clickhouse database %q into container %q from %s", d.GetDbName(), d.GetContainer(), src.label))
 
@@ -151,21 +125,14 @@ func (s *Service) restoreClickhouse(ctx context.Context, d *pb.DatabaseDescripto
 	e.result(true, "")
 }
 
-// chEscape escapes a single-quoted clickhouse string literal (the db/table names
-// are control-plane-derived identifiers, but they are interpolated into a query,
-// so escape defensively).
 func chEscape(s string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), `'`, `\'`)
 }
 
-// chQuoteIdent escapes a name for a backtick-quoted clickhouse identifier (`name`),
-// doubling any backtick it contains (clickhouse's escape for a literal backtick inside
-// a quoted identifier).
 func chQuoteIdent(s string) string {
 	return strings.ReplaceAll(s, "`", "``")
 }
 
-// nonEmptyLines splits stdout into trimmed, non-empty lines.
 func nonEmptyLines(s string) []string {
 	var out []string
 	for _, l := range strings.Split(s, "\n") {

@@ -1,7 +1,3 @@
-// Command deplo-agent is the per-server agent: a single static Go binary that owns the
-// host-coupled half of the Deplo platform (Docker, the build pipeline, host metrics) on
-// the machine it runs on, exposed to the control plane over a typed, mTLS-secured gRPC
-// contract (proto/agent.proto, ADR-0006).
 package main
 
 import (
@@ -37,16 +33,12 @@ func main() {
 		dataBase    = flag.String("data-base", envOr("DEPLO_AGENT_DATA_BASE", ""), "host data root for dev workspaces + the SSH gateway (empty => parent of --stack-dir)")
 		insecure    = flag.Bool("insecure", os.Getenv("DEPLO_AGENT_INSECURE") == "1", "DANGEROUS: serve without mTLS (tests/local only)")
 
-		// Call-home bootstrap (PLAN Part B). Set by the install command on a remote
-		// server's first run; ignored once the agent is already provisioned.
 		bootstrapURL   = flag.String("bootstrap-url", envOr("DEPLO_BOOTSTRAP_URL", ""), "control-plane URL to call home to on first run")
 		bootstrapTok   = flag.String("bootstrap-token", envOr("DEPLO_BOOTSTRAP_TOKEN", ""), "one-time bootstrap token")
 		bootstrapFP    = flag.String("bootstrap-fingerprint", envOr("DEPLO_BOOTSTRAP_FINGERPRINT", ""), "expected control-plane cert sha256 (HTTPS only)")
 		advertisedHost = flag.String("advertised-host", envOr("DEPLO_AGENT_ADVERTISED_HOST", ""), "address the agent reports it is reachable at (informational)")
 	)
 	flag.Parse()
-	// Read once, above; nothing spawned later may find them (`docker compose`
-	// interpolates a tenant's `${VAR}` from this process's environment).
 	for _, k := range []string{"DEPLO_BOOTSTRAP_URL", "DEPLO_BOOTSTRAP_TOKEN", "DEPLO_BOOTSTRAP_FINGERPRINT"} {
 		_ = os.Unsetenv(k)
 	}
@@ -55,14 +47,10 @@ func main() {
 		log.Fatalf("deplo-agent: build-tmp: %v", err)
 	}
 
-	// Resolve the mTLS material paths. Explicit --cert/--key/--ca (the supervised
-	// LOCAL agent, Part A) take precedence; otherwise, with --agent-dir, the
-	// materials live there and may be produced by a call-home bootstrap (Part B).
 	cert, key, ca := *certFile, *keyFile, *caFile
 	if cert == "" && key == "" && ca == "" && *agentDir != "" {
 		m := bootstrap.Paths(*agentDir)
 		if !bootstrap.Provisioned(*agentDir) {
-			// First run on a remote server: call home to get our cert signed.
 			if *bootstrapTok == "" || *bootstrapURL == "" {
 				log.Fatalf("deplo-agent: not provisioned and no bootstrap token/url given (run via the dashboard's install command)")
 			}
@@ -91,24 +79,15 @@ func main() {
 			log.Fatalf("deplo-agent: mTLS setup: %v", err)
 		}
 		certMgr = cm
-		// The TLS config reads the CURRENT materials per handshake, so an
-		// InstallRenewedCert hot-swaps the leaf without restarting the listener.
 		opts = append(opts, grpc.Creds(credentials.NewTLS(cm.ServerTLSConfig())))
 	} else {
 		log.Printf("deplo-agent: WARNING serving WITHOUT mTLS (--insecure)")
 	}
-	// Build contexts and rendered compose can be large; lift the default 4MiB
-	// receive cap so an uploaded archive rides inside the Deploy request.
 	opts = append(opts, grpc.MaxRecvMsgSize(256*1024*1024))
 
-	// Keepalive, sized for the LONG-LIVED streams (StreamMetrics runs for the whole life
-	// of a control-plane process; FollowLogs and Attach for hours).
 	opts = append(opts,
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
-			MinTime: 15 * time.Second,
-			// The control plane only pings while a stream is open, and so should
-			// anyone else; a ping on a wholly idle connection is not something we
-			// need to permit.
+			MinTime:             15 * time.Second,
 			PermitWithoutStream: false,
 		}),
 		grpc.KeepaliveParams(keepalive.ServerParameters{
@@ -119,12 +98,9 @@ func main() {
 
 	srv := grpc.NewServer(opts...)
 	svc := server.New(*stackDir, *buildTmpDir, *dataDir, *dataBase)
-	// The agent's own data root, where the installer put Traefik's stack, which
-	// TraefikConfig manages. Distinct from --data-base (the host data root the
-	// control plane shares); conflating them would point Traefik ops at /data.
 	svc.SetAgentDir(*agentDir)
 	if certMgr != nil {
-		svc.EnableCertRenewal(certMgr) // makes RenewalCSR / InstallRenewedCert live
+		svc.EnableCertRenewal(certMgr)
 	}
 	pb.RegisterAgentServer(srv, svc)
 
@@ -134,9 +110,6 @@ func main() {
 	}
 	log.Printf("deplo-agent %s listening on %s (mtls=%v)", server.AgentVersion, *addr, !*insecure)
 
-	// Graceful shutdown: on SIGTERM/SIGINT (service restart, host reboot) let in-flight
-	// unary RPCs finish and open streams receive a clean GOAWAY instead of a hard process
-	// kill that could leave a stack half-deployed (image built, `compose up` not run).
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	serveErr := make(chan error, 1)
@@ -160,10 +133,6 @@ func main() {
 	}
 }
 
-// mTLS transport credentials are built from a server.CertManager (see the serve block
-// above), which reads the CURRENT materials on every handshake so a renewed leaf
-// hot-swaps without a restart.
-
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -171,8 +140,6 @@ func envOr(key, def string) string {
 	return def
 }
 
-// portFromAddr extracts the port from a host:port listen address, defaulting to
-// 9443. Reported to the control plane at bootstrap so it knows where to dial.
 func portFromAddr(addr string) int {
 	_, p, err := net.SplitHostPort(addr)
 	if err != nil {

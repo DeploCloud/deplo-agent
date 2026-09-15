@@ -14,8 +14,6 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// bcrypt of "s3cret" for user "deplo-e2e" - a fixture for the throwaway registry
-// below, which lives for the length of one test.
 const e2eHtpasswd = "deplo-e2e:$2b$10$6aH1T6bAeVkmA5BIxIfV/e7RtcW6TBA91a2BKTqgEvGyDl5YfHG1e"
 
 const (
@@ -24,10 +22,7 @@ const (
 	e2eRegistryName = "deplo-e2e-registry"
 )
 
-// End-to-end (real docker, real registry): a deploy's registry credentials must be a
-// docker config the CLI actually accepts, and the same image must NOT pull without
-// them. This is the whole feature - a credential the pull never reads is what this
-// replaced.
+// End-to-end (real docker, real registry): a deploy's registry credentials must be a docker config the CLI actually accepts, and the same image must NOT pull without them.
 func TestE2E_RegistryAuthPullsAnImageAnonymousPullCannot(t *testing.T) {
 	ctx := context.Background()
 	if !dockercli.Available(ctx) {
@@ -55,7 +50,6 @@ func TestE2E_RegistryAuthPullsAnImageAnonymousPullCannot(t *testing.T) {
 	}()
 	waitForPort(t, e2eRegistryHost)
 
-	// The credentials exactly as the control plane sends them for a deploy.
 	req := &pb.DeployRequest{
 		DeployId: "dep_e2e_regauth",
 		RegistryAuth: []*pb.RegistryAuth{
@@ -68,7 +62,6 @@ func TestE2E_RegistryAuthPullsAnImageAnonymousPullCannot(t *testing.T) {
 	}
 	defer cleanup()
 
-	// Something small that is already on any host that just started the registry.
 	private := e2eRegistryHost + "/deplo/private:e2e"
 	if r, err := dockercli.Run(ctx, 30*time.Second, "tag", "registry:2", private); err != nil || r.Code != 0 {
 		t.Fatalf("tag: %v %s", err, r.Stderr)
@@ -89,12 +82,10 @@ func TestE2E_RegistryAuthPullsAnImageAnonymousPullCannot(t *testing.T) {
 	if !pushed {
 		t.Fatal("could not push to the test registry")
 	}
-	// Force a real network pull for both attempts below.
 	if r, err := dockercli.Run(ctx, 60*time.Second, "rmi", "-f", private); err != nil || r.Code != 0 {
 		t.Fatalf("rmi: %v %s", err, r.Stderr)
 	}
 
-	// 1. Without the credentials the image is simply not pullable.
 	anon := []string{"DOCKER_CONFIG=" + t.TempDir()}
 	r, err := dockercli.RunEnv(ctx, 2*time.Minute, anon, "pull", private)
 	if err == nil && r.Code == 0 {
@@ -104,7 +95,6 @@ func TestE2E_RegistryAuthPullsAnImageAnonymousPullCannot(t *testing.T) {
 		t.Logf("anonymous pull failed with: %s", strings.TrimSpace(r.Stderr))
 	}
 
-	// 2. With the deploy's own docker config it pulls. Same env deploy.go passes.
 	r, err = dockercli.RunEnv(ctx, 2*time.Minute, dockerConfigEnv(req), "pull", private)
 	if err != nil || r.Code != 0 {
 		t.Fatalf("authenticated pull failed: %v code=%d %s", err, r.Code, r.Stderr)

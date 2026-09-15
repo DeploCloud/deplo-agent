@@ -14,13 +14,8 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// volumeNamePattern is the shape a Docker named volume always has. The pattern forbids
-// '/', '..', and a leading '.', so a path can never masquerade as a volume name.
 var volumeNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 
-// hasDotDot reports whether a POSIX-ish relative path contains a ".." segment (or is
-// one), the traversal vector for a tar entry written into a helper container's `tar
-// -x`.
 func hasDotDot(p string) bool {
 	for _, seg := range strings.Split(filepath.ToSlash(p), "/") {
 		if seg == ".." {
@@ -30,9 +25,6 @@ func hasDotDot(p string) bool {
 	return false
 }
 
-// validateVolumeName rejects any name that is not a safe Docker named volume
-// (anything containing a path separator, or otherwise outside the pattern), so a
-// wire-supplied "/" / "/etc" can never become a host bind mount.
 func validateVolumeName(name string) error {
 	if !volumeNamePattern.MatchString(name) || strings.Contains(name, "..") {
 		return fmt.Errorf("unsafe volume name %q (must be a docker named volume, not a path)", name)
@@ -40,13 +32,6 @@ func validateVolumeName(name string) error {
 	return nil
 }
 
-// backup_tar.go holds the tar/volume plumbing for project backup+restore: adding a host
-// dir or raw bytes to the archive, wiping + repopulating named volumes via throwaway
-// helper containers, extracting into the files dir (anti-traversal), and the env-file
-// round-trip used by the snapshot.
-
-// addDirToTar walks `root` and writes every regular file + dir into `tw` under
-// `prefix/<relpath>`.
 func addDirToTar(tw *tar.Writer, root, prefix string) error {
 	return filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -57,7 +42,7 @@ func addDirToTar(tw *tar.Writer, root, prefix string) error {
 			return err
 		}
 		if rel == "." {
-			return nil // don't emit the root itself
+			return nil
 		}
 		name := prefix + "/" + filepath.ToSlash(rel)
 		switch {
@@ -87,13 +72,11 @@ func addDirToTar(tw *tar.Writer, root, prefix string) error {
 			_, err = io.Copy(tw, f)
 			return err
 		default:
-			// Symlink / device / socket - skip (not part of a config-files backup).
 			return nil
 		}
 	})
 }
 
-// addBytesToTar writes a single in-memory file into the archive.
 func addBytesToTar(tw *tar.Writer, name string, content []byte) error {
 	if err := tw.WriteHeader(&tar.Header{
 		Name:     name,
@@ -108,13 +91,7 @@ func addBytesToTar(tw *tar.Writer, name string, content []byte) error {
 	return err
 }
 
-// extractToDir writes one tar entry (relative path `rel` under `root`) to disk,
-// re-validating the path against `root` (the entry name arrived from an S3 object,
-// never trusted).
 func extractToDir(root, rel string, hdr *tar.Header, r io.Reader) error {
-	// Reject any ".." segment OUTRIGHT (not merely anchor it away): the entry name came
-	// from an S3 object, so a traversal attempt is a clear signal the archive is
-	// hostile/corrupt and the restore must abort rather than silently relocate the file.
 	for _, seg := range strings.Split(filepath.ToSlash(rel), "/") {
 		if seg == ".." {
 			return fmt.Errorf("archive entry %q escapes the target dir", rel)
@@ -139,19 +116,14 @@ func extractToDir(root, rel string, hdr *tar.Header, r io.Reader) error {
 		_, err = io.Copy(f, r)
 		return err
 	default:
-		return nil // skip links/devices/etc.
+		return nil
 	}
 }
 
-// wipeVolume empties a named volume's contents WITHOUT removing the volume itself (the
-// volume stays attached to the stopped stack; we just clear it so a restore overwrites
-// rather than merges).
 func wipeVolume(ctx context.Context, vol string) error {
 	if err := validateVolumeName(vol); err != nil {
 		return err
 	}
-	// `sh -c` with a glob that also catches dotfiles; `|| true` so an empty volume
-	// (nothing to remove) is not a non-zero exit.
 	code, err := dockercli.Stream(ctx, 5*time.Minute, func(string) {}, "",
 		volumeHelperRun(ctx, "-v", vol+":/v", volumeHelperImage,
 			"sh", "-c", "rm -rf /v/..?* /v/.[!.]* /v/* 2>/dev/null || true")...)
@@ -164,9 +136,6 @@ func wipeVolume(ctx context.Context, vol string) error {
 	return nil
 }
 
-// parseEnvFile parses KEY=VALUE lines (renderEnvFile's output) back into a map.
-// The inverse of renderEnvFile (deploy.go). Blank lines are skipped; a line with
-// no '=' is ignored.
 func parseEnvFile(s string) map[string]string {
 	out := map[string]string{}
 	for _, line := range strings.Split(s, "\n") {
@@ -183,9 +152,6 @@ func parseEnvFile(s string) map[string]string {
 	return out
 }
 
-// volumeStreams demultiplexes the restore archive into one running helper
-// container per target volume, each fed a tar stream it extracts into the volume.
-// One container per volume keeps each `tar -x` rooted at its own volume mount.
 type volumeStreams struct {
 	ctx     context.Context
 	writers map[string]*volumeWriter
@@ -197,9 +163,6 @@ type volumeWriter struct {
 	done chan error
 }
 
-// newVolumeStreams starts a helper container per volume that reads a tar from
-// stdin and extracts it into the volume (mounted rw at /v). Each container's
-// stdin is a pipe we wrap in a tar.Writer.
 func newVolumeStreams(ctx context.Context, vols []string) *volumeStreams {
 	vs := &volumeStreams{ctx: ctx, writers: map[string]*volumeWriter{}}
 	for _, vol := range vols {
@@ -209,7 +172,6 @@ func newVolumeStreams(ctx context.Context, vols []string) *volumeStreams {
 		pr, pw := io.Pipe()
 		w := &volumeWriter{pw: pw, tw: tar.NewWriter(pw), done: make(chan error, 1)}
 		go func(v string, reader *io.PipeReader) {
-			// `tar -C /v -xf -` reads the tar we feed on stdin into the volume.
 			code, err := dockercli.PipeIn(ctx, 10*time.Minute, reader, nil,
 				volumeHelperRun(ctx, "-i", "-v", v+":/v", volumeHelperImage,
 					"tar", "-C", "/v", "-xf", "-")...)
@@ -232,9 +194,6 @@ func (vs *volumeStreams) writerFor(vol string) (*tar.Writer, bool) {
 	return w.tw, true
 }
 
-// finish closes each volume's tar + pipe writer (flushing the trailer so the
-// helper's `tar -x` sees clean EOF) and waits for every helper to exit, returning
-// the first extraction error.
 func (vs *volumeStreams) finish(e *rsEmitter) error {
 	var firstErr error
 	for vol, w := range vs.writers {
@@ -254,8 +213,6 @@ func (vs *volumeStreams) finish(e *rsEmitter) error {
 	return firstErr
 }
 
-// closeAll is a defensive cleanup (deferred): abort any still-open writers so a
-// mid-restore error doesn't leak helper containers blocked on stdin.
 func (vs *volumeStreams) closeAll() {
 	for _, w := range vs.writers {
 		_ = w.pw.CloseWithError(io.ErrClosedPipe)

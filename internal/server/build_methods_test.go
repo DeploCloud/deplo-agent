@@ -11,7 +11,6 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
-// staticBuildDir materialises a one-file context for a static build test.
 func staticBuildDir(t *testing.T, s *Service) (string, func()) {
 	t.Helper()
 	data := tarball(t,
@@ -25,9 +24,6 @@ func staticBuildDir(t *testing.T, s *Service) (string, func()) {
 	return dir, cleanup
 }
 
-// readBuiltDockerfile returns the Dockerfile + nginx conf the static builder wrote
-// into the context. The build itself needs a daemon (covered by e2e); we assert
-// the rendered artifacts, the part that must mirror builders.ts byte-for-byte.
 func readBuiltDockerfile(t *testing.T, dir string) (string, string) {
 	t.Helper()
 	df, err := os.ReadFile(filepath.Join(dir, "Dockerfile"))
@@ -55,7 +51,6 @@ func TestBuildStatic_alreadyStaticCopiesOutputDir(t *testing.T) {
 	_ = s.buildStatic(context.Background(), req, dir, e)
 
 	df, conf := readBuiltDockerfile(t, dir)
-	// No build command → single-stage: copy the output dir straight into nginx.
 	if strings.Contains(df, "AS builder") {
 		t.Errorf("expected single-stage Dockerfile, got builder stage:\n%s", df)
 	}
@@ -65,7 +60,6 @@ func TestBuildStatic_alreadyStaticCopiesOutputDir(t *testing.T) {
 	if !strings.Contains(conf, "listen       8080;") {
 		t.Errorf("nginx not listening on the spec port:\n%s", conf)
 	}
-	// Non-SPA default → directory/404 fallback, not the index.html rewrite.
 	if !strings.Contains(conf, "try_files $uri $uri/ =404;") {
 		t.Errorf("expected non-SPA try_files:\n%s", conf)
 	}
@@ -90,7 +84,6 @@ func TestBuildStatic_withBuildCommandIsTwoStage(t *testing.T) {
 	_ = s.buildStatic(context.Background(), req, dir, e)
 
 	df, conf := readBuiltDockerfile(t, dir)
-	// Two-stage: Node builder then nginx; runtime_version pins the node major.
 	if !strings.Contains(df, "FROM node:18-alpine AS builder") {
 		t.Errorf("node major not pinned from runtime_version:\n%s", df)
 	}
@@ -100,7 +93,6 @@ func TestBuildStatic_withBuildCommandIsTwoStage(t *testing.T) {
 	if !strings.Contains(df, "COPY --from=builder /app/build/ /usr/share/nginx/html/") {
 		t.Errorf("output dir not copied from builder stage:\n%s", df)
 	}
-	// SPA → history-API fallback to index.html.
 	if !strings.Contains(conf, "try_files $uri /index.html;") {
 		t.Errorf("expected SPA try_files:\n%s", conf)
 	}
@@ -116,14 +108,13 @@ func TestBuildStatic_nonNodeIgnoresRuntimeVersion(t *testing.T) {
 		BuildKind: pb.BuildKind_BUILD_KIND_STATIC,
 		BuildSpec: &pb.BuildSpec{
 			Method: "static", BuildCommand: "make",
-			RuntimeLanguage: "go", RuntimeVersion: "1.22", // not node → ignored
+			RuntimeLanguage: "go", RuntimeVersion: "1.22",
 		},
 	}
 	e := &emitter{send: func(*pb.DeployEvent) error { return nil }}
 	_ = s.buildStatic(context.Background(), req, dir, e)
 
 	df, _ := readBuiltDockerfile(t, dir)
-	// The builder stage is always Node; a non-node runtime_version must not leak in.
 	if !strings.Contains(df, "FROM node:20-alpine AS builder") {
 		t.Errorf("expected default node:20 builder for non-node runtime:\n%s", df)
 	}
@@ -134,7 +125,7 @@ func TestMajorVersion(t *testing.T) {
 		{"20.11.0", "20", "20"},
 		{"v18", "20", "18"},
 		{"", "20", "20"},
-		{"latest", "20", "20"}, // no digits → default
+		{"latest", "20", "20"},
 		{"3.12", "3", "3"},
 	}
 	for _, c := range cases {
@@ -163,12 +154,8 @@ func TestBuildPortDefaultsTo80(t *testing.T) {
 }
 
 func TestNixpacksDownloadURL_arch(t *testing.T) {
-	// The URL builder only runs on linux servers; on this host arch it must yield a
-	// musl asset URL for the pinned version (or a clear unsupported-arch error).
 	url, err := nixpacksDownloadURL()
 	if err != nil {
-		// Acceptable on a non-linux/unsupported-arch test host - just assert it's a
-		// deliberate error, not a malformed URL.
 		if !strings.Contains(err.Error(), "nixpacks auto-install") {
 			t.Fatalf("unexpected error: %v", err)
 		}

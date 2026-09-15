@@ -1,7 +1,5 @@
 package server
 
-// https://deplo.build/docs/concepts/what-happens-on-a-deploy
-
 import (
 	"bufio"
 	"context"
@@ -18,9 +16,6 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/safepath"
 )
 
-// materializeGit clones a git source (PLAN Part B, D3): the agent clones the repo
-// ITSELF with a short-lived token the control plane minted, so a remote build never
-// ships the whole repo over the wire.
 func (s *Service) materializeGit(
 	ctx context.Context,
 	g *pb.GitSource,
@@ -38,15 +33,12 @@ func (s *Service) materializeGit(
 
 	cloneURL, display, authHeader := authenticatedURL(g.GetUrl(), g.GetToken())
 
-	// Clone shallowly at the requested branch. A shallow single-branch clone is
-	// the smallest fetch that still yields a working tree + the tip commit sha.
 	args := []string{"clone", "--depth", "1"}
 	if b := strings.TrimSpace(g.GetBranch()); b != "" {
 		args = append(args, "--branch", b, "--single-branch")
 	}
 	args = append(args, "--", cloneURL, dir)
 
-	// Log the SANITISED command (the real URL with the token is never emitted).
 	branchNote := ""
 	if b := strings.TrimSpace(g.GetBranch()); b != "" {
 		branchNote = " (" + b + ")"
@@ -58,17 +50,11 @@ func (s *Service) materializeGit(
 		return "", "", func() {}, err
 	}
 
-	// Resolve the checked-out commit sha (reported back so the control plane can
-	// write it to the Deployment row - proto DeployResult.commit_sha).
 	sha, _ := gitOutput(ctx, dir, "rev-parse", "HEAD")
 	commitSha = strings.TrimSpace(sha)
 
-	// Make the build context byte-identical for a given commit, so Docker's layer
-	// cache can actually be hit (see stripVolatileGitMetadata).
 	stripVolatileGitMetadata(dir)
 
-	// Apply the optional sub-directory (the project's rootDirectory), validated to
-	// stay inside the clone - the subdir arrived off the wire, never trusted.
 	buildDir = dir
 	if sub := strings.TrimSpace(g.GetSubdir()); sub != "" {
 		joined, ok := safepath.Join(dir, sub)
@@ -89,19 +75,10 @@ func (s *Service) materializeGit(
 	return buildDir, commitSha, cleanup, nil
 }
 
-// volatileGitPaths are the entries a fresh `git clone` rewrites on every run even when
-// it lands on the exact same commit: the index records each worktree file's mtime and
-// inode, and the reflogs record WHEN the clone happened.
 var volatileGitPaths = []string{"index", "logs"}
 
-// stripVolatileGitMetadata deletes those entries from the clone at root. Deplo clones
-// fresh every deploy (it never leaves an app tree lying on a host), so it has to
-// establish the same determinism itself.
 func stripVolatileGitMetadata(root string) {
 	gitDir := filepath.Join(root, ".git")
-	// A worktree/submodule checkout has `.git` as a FILE pointing elsewhere; there
-	// is no index of ours to strip there, and following it would reach outside the
-	// clone. Only a real directory is touched.
 	if fi, err := os.Lstat(gitDir); err != nil || !fi.IsDir() {
 		return
 	}
@@ -110,25 +87,17 @@ func stripVolatileGitMetadata(root string) {
 	}
 }
 
-// authenticatedURL returns (cloneURL, display, authHeader). Credentials are NEVER
-// placed on the clone URL - a URL on argv lands in /proc/<pid>/cmdline, which is
-// world-readable, so the token would leak.
 func authenticatedURL(raw, token string) (cloneURL, display, authHeader string) {
 	u, err := url.Parse(raw)
 	if err != nil {
-		// Not a parseable URL (e.g. scp-like git@host:repo) - pass through. Such
-		// forms carry no HTTP userinfo and authenticate over ssh, so no secret
-		// reaches argv.
 		return raw, raw, ""
 	}
-	// Strip any credentials from both the clone URL and the display URL.
 	user := u.User
 	u.User = nil
 	cloneURL = u.String()
 	display = cloneURL
 
 	if user != nil && user.Username() != "" {
-		// Pre-authenticated URL: lift the existing creds off the URL into a header.
 		pass, _ := user.Password()
 		return cloneURL, display, basicAuthHeader(user.Username(), pass)
 	}
@@ -138,14 +107,10 @@ func authenticatedURL(raw, token string) (cloneURL, display, authHeader string) 
 	return cloneURL, display, ""
 }
 
-// basicAuthHeader builds the "Authorization: Basic <b64>" header line for git's
-// http.extraHeader, matching git's own userinfo scheme (base64 of "user:pass").
 func basicAuthHeader(user, pass string) string {
 	return "Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass))
 }
 
-// runGit runs a git command, streaming combined output line-by-line as info logs (so
-// the operator sees clone progress).
 func runGit(ctx context.Context, e *emitter, dir, authHeader string, args ...string) error {
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
@@ -153,13 +118,8 @@ func runGit(ctx context.Context, e *emitter, dir, authHeader string, args ...str
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	// GIT_TERMINAL_PROMPT=0: never block on an interactive credential prompt (a
-	// bad/expired token must fail fast, not hang the deploy).
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	if strings.TrimSpace(authHeader) != "" {
-		// Inject the credential as an http.extraHeader through git's env-based
-		// config (GIT_CONFIG_COUNT/KEY/VALUE) so it authenticates the request
-		// WITHOUT ever appearing on argv / in the world-readable /proc/<pid>/cmdline.
 		cmd.Env = append(cmd.Env,
 			"GIT_CONFIG_COUNT=1",
 			"GIT_CONFIG_KEY_0=http.extraHeader",
@@ -167,7 +127,7 @@ func runGit(ctx context.Context, e *emitter, dir, authHeader string, args ...str
 		)
 	}
 	stdout, _ := cmd.StdoutPipe()
-	cmd.Stderr = cmd.Stdout // fold stderr into the same stream for ordered logs
+	cmd.Stderr = cmd.Stdout
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("git: %w", err)
 	}
@@ -182,7 +142,6 @@ func runGit(ctx context.Context, e *emitter, dir, authHeader string, args ...str
 	return nil
 }
 
-// gitOutput runs a git command and returns its trimmed stdout (no streaming).
 func gitOutput(ctx context.Context, dir string, args ...string) (string, error) {
 	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -192,9 +151,6 @@ func gitOutput(ctx context.Context, dir string, args ...string) (string, error) 
 	return string(out), err
 }
 
-// sanitizeGitLine strips anything that looks like an x-access-token credential
-// from a log line, as belt-and-suspenders - git should not echo the URL, but a
-// defensive scrub guarantees a token never lands in the deployment log.
 func sanitizeGitLine(line string) string {
 	if i := strings.Index(line, "x-access-token:"); i >= 0 {
 		if at := strings.Index(line[i:], "@"); at >= 0 {

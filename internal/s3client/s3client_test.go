@@ -5,8 +5,7 @@ import (
 	"testing"
 )
 
-// New derives the endpoint host + TLS flag from the scheme the control plane sends:
-// https:// (or no scheme) => TLS; http:// => plaintext (a local MinIO).
+// New derives the endpoint host + TLS flag from the scheme the control plane sends: https:// (or no scheme) => TLS; http:// => plaintext (a local MinIO).
 func TestNew_endpointSchemeParsing(t *testing.T) {
 	cases := []struct {
 		endpoint string
@@ -35,8 +34,7 @@ func TestNew_endpointSchemeParsing(t *testing.T) {
 	}
 }
 
-// PathStyle selects path-style bucket addressing (MinIO/compatibles); the
-// default is DNS/virtual-host (AWS). A built client just needs to accept both.
+// PathStyle selects path-style bucket addressing (MinIO/compatibles); the default is DNS/virtual-host (AWS).
 func TestNew_pathStyle(t *testing.T) {
 	for _, ps := range []bool{true, false} {
 		if _, err := New(Config{Endpoint: "s3.example.com", Bucket: "b", AccessKey: "a", SecretKey: "s", PathStyle: ps, AllowPrivateEndpoint: true}); err != nil {
@@ -45,19 +43,17 @@ func TestNew_pathStyle(t *testing.T) {
 	}
 }
 
-// TestNew_ssrfGuard proves the default (AllowPrivateEndpoint=false) rejects endpoints
-// that resolve to loopback / link-local (incl. the cloud metadata address) / private /
-// unspecified addresses, while a public IP passes.
+// TestNew_ssrfGuard proves the default (AllowPrivateEndpoint=false) rejects endpoints that resolve to loopback / link-local (incl.
 func TestNew_ssrfGuard(t *testing.T) {
 	blocked := []string{
-		"http://127.0.0.1:9000",    // loopback v4
-		"https://[::1]:9000",       // loopback v6
-		"http://169.254.169.254",   // link-local / cloud metadata
-		"http://10.0.0.5:9000",     // RFC1918
-		"https://172.16.3.4",       // RFC1918
-		"http://192.168.1.20:9000", // RFC1918
-		"http://0.0.0.0:9000",      // unspecified
-		"https://[fd00::1]:9000",   // ULA
+		"http://127.0.0.1:9000",
+		"https://[::1]:9000",
+		"http://169.254.169.254",
+		"http://10.0.0.5:9000",
+		"https://172.16.3.4",
+		"http://192.168.1.20:9000",
+		"http://0.0.0.0:9000",
+		"https://[fd00::1]:9000",
 	}
 	for _, ep := range blocked {
 		_, err := New(Config{Endpoint: ep, Bucket: "b", AccessKey: "a", SecretKey: "s"})
@@ -70,7 +66,6 @@ func TestNew_ssrfGuard(t *testing.T) {
 		}
 	}
 
-	// A public IP passes with the guard active (no opt-in needed).
 	public := []string{"1.1.1.1", "https://8.8.8.8:9000", "203.0.113.10"}
 	for _, ep := range public {
 		if _, err := New(Config{Endpoint: ep, Bucket: "b", AccessKey: "a", SecretKey: "s"}); err != nil {
@@ -78,15 +73,12 @@ func TestNew_ssrfGuard(t *testing.T) {
 		}
 	}
 
-	// The opt-in flag bypasses the guard for a private endpoint (a local MinIO).
 	if _, err := New(Config{Endpoint: "http://127.0.0.1:9000", Bucket: "b", AccessKey: "a", SecretKey: "s", AllowPrivateEndpoint: true}); err != nil {
 		t.Errorf("opt-in private endpoint: unexpected error %v", err)
 	}
 }
 
-// The quirk flags are an allowlist, and everything else is DROPPED rather than
-// refused - an agent mid-rollout will see flags a newer control plane accepted,
-// and failing there would make one destination work per host.
+// The quirk flags are an allowlist, and everything else is DROPPED rather than refused - an agent mid-rollout will see flags a newer control plane accepted, and failing there would make one destination work per host.
 func TestParseExtraArgs(t *testing.T) {
 	opts, unknown := parseExtraArgs([]string{
 		"--s3-force-path-style=true",
@@ -97,7 +89,6 @@ func TestParseExtraArgs(t *testing.T) {
 	if opts.forcePathStyle == nil || !*opts.forcePathStyle {
 		t.Errorf("force-path-style: want true, got %v", opts.forcePathStyle)
 	}
-	// Inverted: signing the header OFF is what stops Go adding it after signing.
 	if !opts.noCompression {
 		t.Error("sign-accept-encoding=false should disable compression")
 	}
@@ -111,8 +102,8 @@ func TestParseExtraArgs(t *testing.T) {
 
 func TestParseExtraArgs_dropsWhatItDoesNotKnow(t *testing.T) {
 	opts, unknown := parseExtraArgs([]string{
-		"--s3-upload-cutoff=200M", // real rclone flag, not one we map
-		"--s3-force-path-style",   // no value
+		"--s3-upload-cutoff=200M",
+		"--s3-force-path-style",
 		"--s3-force-path-style=maybe",
 		"",
 	})

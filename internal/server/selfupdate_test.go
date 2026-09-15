@@ -17,14 +17,10 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
-// binariesFor builds a SelfUpdateRequest.binaries map carrying a single entry for
-// THIS host's arch (runtime.GOARCH), which is what applyUpdate selects.
 func binariesFor(url, sha string) map[string]*pb.ArchBinary {
 	return map[string]*pb.ArchBinary{runtime.GOARCH: {Url: url, Sha256: sha}}
 }
 
-// stubDownload swaps the package-level downloadFile for one returning `body` (or
-// `err`), and restores it on cleanup. Keeps tests off the network.
 func stubDownload(t *testing.T, body []byte, err error) {
 	t.Helper()
 	orig := downloadFile
@@ -32,9 +28,6 @@ func stubDownload(t *testing.T, body []byte, err error) {
 	t.Cleanup(func() { downloadFile = orig })
 }
 
-// captureReexec swaps reexec for one that records its call instead of replacing
-// the process (a real syscall.Exec would nuke the test runner). Returns a getter
-// for whether it fired and with what path. Restored on cleanup.
 func captureReexec(t *testing.T) (fired func() bool, gotPath func() string) {
 	t.Helper()
 	var mu sync.Mutex
@@ -45,7 +38,7 @@ func captureReexec(t *testing.T) (fired func() bool, gotPath func() string) {
 		mu.Lock()
 		didFire, path = true, p
 		mu.Unlock()
-		return nil // pretend the exec succeeded (never returns in prod)
+		return nil
 	}
 	t.Cleanup(func() { reexec = orig })
 	return func() bool { mu.Lock(); defer mu.Unlock(); return didFire },
@@ -57,8 +50,7 @@ func sha256Hex(b []byte) string {
 	return hex.EncodeToString(s[:])
 }
 
-// A successful update replaces the on-disk binary with the downloaded bytes and
-// schedules a re-exec of that same path.
+// A successful update replaces the on-disk binary with the downloaded bytes and schedules a re-exec of that same path.
 func TestSelfUpdate_swapsBinaryAndReexecs(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -83,7 +75,6 @@ func TestSelfUpdate_swapsBinaryAndReexecs(t *testing.T) {
 		t.Fatalf("unexpected response: restarting=%v version=%q", resp.GetRestarting(), resp.GetVersion())
 	}
 
-	// The binary on disk is now the new bytes.
 	got, err := os.ReadFile(exe)
 	if err != nil {
 		t.Fatal(err)
@@ -91,12 +82,10 @@ func TestSelfUpdate_swapsBinaryAndReexecs(t *testing.T) {
 	if string(got) != string(newBytes) {
 		t.Errorf("binary not swapped: got %q want %q", got, newBytes)
 	}
-	// And it stayed executable.
 	if fi, _ := os.Stat(exe); fi.Mode().Perm()&0o111 == 0 {
 		t.Errorf("swapped binary is not executable: mode %v", fi.Mode())
 	}
 
-	// The deferred re-exec fires (after the grace sleep) and targets the swapped path.
 	deadline := time.After(selfUpdateGrace + 2*time.Second)
 	for !fired() {
 		select {
@@ -110,8 +99,7 @@ func TestSelfUpdate_swapsBinaryAndReexecs(t *testing.T) {
 	}
 }
 
-// A checksum mismatch must REFUSE the update and leave the running binary byte-
-// for-byte untouched - the agent never installs an unverified binary (P2 parity).
+// A checksum mismatch must REFUSE the update and leave the running binary byte- for-byte untouched - the agent never installs an unverified binary (P2 parity).
 func TestSelfUpdate_checksumMismatchLeavesBinaryUntouched(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -137,14 +125,12 @@ func TestSelfUpdate_checksumMismatchLeavesBinaryUntouched(t *testing.T) {
 	if string(got) != string(original) {
 		t.Errorf("binary was modified despite checksum mismatch: got %q want %q", got, original)
 	}
-	// No staged temp file left behind in the install dir.
 	entries, _ := os.ReadDir(dir)
 	for _, e := range entries {
 		if e.Name() != "deplo-agent" {
 			t.Errorf("leftover file in install dir after failed update: %s", e.Name())
 		}
 	}
-	// Give any (incorrectly scheduled) re-exec a chance to fire, then assert none did.
 	time.Sleep(selfUpdateGrace + 200*time.Millisecond)
 	if fired() {
 		t.Error("re-exec fired after a refused update - must not restart into an unverified binary")
@@ -173,17 +159,12 @@ func TestSelfUpdate_downloadFailureIsUnavailable(t *testing.T) {
 	}
 }
 
-// No binary for this host's arch (empty map, or an entry with blank url/sha) is a
-// FailedPrecondition before anything is downloaded - the agent tells the operator
-// to re-run the installer rather than installing a wrong/absent binary.
+// No binary for this host's arch (empty map, or an entry with blank url/sha) is a FailedPrecondition before anything is downloaded - the agent tells the operator to re-run the installer rather than installing a wrong/absent binary.
 func TestSelfUpdate_noBinaryForThisArch(t *testing.T) {
 	s := New(t.TempDir(), t.TempDir(), "/", "")
 	cases := []*pb.SelfUpdateRequest{
-		// Empty map: no arch published at all.
 		{Version: "1.2.0", Binaries: map[string]*pb.ArchBinary{}},
-		// Only a DIFFERENT arch is present (never this host's).
 		{Version: "1.2.0", Binaries: map[string]*pb.ArchBinary{"sparc64": {Url: "https://x", Sha256: "abc"}}},
-		// This host's arch present but blank fields.
 		{Version: "1.2.0", Binaries: binariesFor("", "")},
 	}
 	for _, req := range cases {

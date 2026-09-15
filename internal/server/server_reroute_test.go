@@ -11,13 +11,8 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// testNetwork is the throwaway tenant network these tests deploy onto. Never a name
-// a real Environment could mint, and torn down with the stack - a leftover would have
-// this host's live Traefik still attached to it.
 const testNetwork = "deplo-env-agent-selftest"
 
-// teardownStack removes whatever the real `docker compose up` inside Reroute brought
-// up, plus the throwaway network and Traefik's attachment to it.
 func teardownStack(t *testing.T, s *Service, slug string) {
 	t.Helper()
 	t.Cleanup(func() {
@@ -30,8 +25,7 @@ func teardownStack(t *testing.T, s *Service, slug string) {
 	})
 }
 
-// A reroute with no rendered compose is a no-op failure (mirrors Deploy's
-// missing-compose guard): Ok:false with a clear error and no stack file written.
+// A reroute with no rendered compose is a no-op failure (mirrors Deploy's missing-compose guard): Ok:false with a clear error and no stack file written.
 func TestReroute_missingComposeFailsCleanly(t *testing.T) {
 	stackDir := t.TempDir()
 	s := New(stackDir, t.TempDir(), "/", "")
@@ -48,15 +42,12 @@ func TestReroute_missingComposeFailsCleanly(t *testing.T) {
 	if res.GetError() == "" {
 		t.Error("expected an error message for a missing compose")
 	}
-	// Nothing should have been written for a rejected request.
 	if _, err := os.Stat(s.stackPath("deplo-agent-test-reroute")); err == nil {
 		t.Error("stack file written despite missing compose")
 	}
 }
 
-// Reroute writes the rendered YAML, the 0600 env-file and the compose mount files
-// BEFORE it runs `compose up`, so the on-disk artefacts are observable even on a host
-// without docker (the compose call then just fails).
+// Reroute writes the rendered YAML, the 0600 env-file and the compose mount files BEFORE it runs `compose up`, so the on-disk artefacts are observable even on a host without docker (the compose call then just fails).
 func TestReroute_writesStackEnvAndMountFiles(t *testing.T) {
 	stackDir := t.TempDir()
 	s := New(stackDir, t.TempDir(), "/", "")
@@ -76,10 +67,7 @@ func TestReroute_writesStackEnvAndMountFiles(t *testing.T) {
 			{Path: "nginx.conf", Content: "server {}"},
 		},
 	})
-	// The docker `up` may fail (no docker / no such image); we only assert the
-	// files written before it, so the return value is intentionally ignored.
 
-	// Stack file: exact YAML, 0644.
 	stackFile := s.stackPath("deplo-agent-test-reroute")
 	got, err := os.ReadFile(stackFile)
 	if err != nil {
@@ -88,19 +76,12 @@ func TestReroute_writesStackEnvAndMountFiles(t *testing.T) {
 	if string(got) != yaml {
 		t.Fatalf("stack file = %q, want %q", got, yaml)
 	}
-	// 0600, like the env file below: for a SINGLE-IMAGE app the control plane bakes the
-	// whole environment into this YAML, so it holds exactly the secrets the env file is
-	// protected for.
 	if info, err := os.Stat(stackFile); err != nil {
 		t.Fatalf("stat stack file: %v", err)
 	} else if perm := info.Mode().Perm(); perm != 0o600 {
 		t.Errorf("stack file perm = %o, want 0600", perm)
 	}
 
-	// Env file: rendered KEY=VALUE (sorted), 0600, and inside the stack's OWN directory -
-	// the one compose is pointed at with --project-directory, so a relative path the
-	// author wrote (`env_file: .env` above all) resolves to this stack's file and never to
-	// another tenant's.
 	envFile := filepath.Join(
 		stackDir,
 		"files",
@@ -120,7 +101,6 @@ func TestReroute_writesStackEnvAndMountFiles(t *testing.T) {
 		t.Errorf("env file perm = %o, want 0600", perm)
 	}
 
-	// Mount file: materialised under files/<slug>/.
 	mountFile := filepath.Join(stackDir, "files", "deplo-agent-test-reroute", "nginx.conf")
 	mGot, err := os.ReadFile(mountFile)
 	if err != nil {
@@ -131,8 +111,7 @@ func TestReroute_writesStackEnvAndMountFiles(t *testing.T) {
 	}
 }
 
-// With no env, Reroute writes no env-file (single-image stacks bake env into the
-// YAML and send empty env), matching Deploy's single-image path.
+// With no env, Reroute writes no env-file (single-image stacks bake env into the YAML and send empty env), matching Deploy's single-image path.
 func TestReroute_noEnvWritesNoEnvFile(t *testing.T) {
 	stackDir := t.TempDir()
 	s := New(stackDir, t.TempDir(), "/", "")
@@ -151,8 +130,7 @@ func TestReroute_noEnvWritesNoEnvFile(t *testing.T) {
 	}
 }
 
-// ReadStack on a slug with no stack file reports Exists:false (nothing deployed
-// yet) rather than an RPC error.
+// ReadStack on a slug with no stack file reports Exists:false (nothing deployed yet) rather than an RPC error.
 func TestReadStack_missingFileReportsNotExists(t *testing.T) {
 	s := New(t.TempDir(), t.TempDir(), "/", "")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

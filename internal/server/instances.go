@@ -14,14 +14,9 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// instances.go ports lib/data/console.ts listInstances (+ the inspectRuntime /
-// inspectStdio / serviceOf helpers from lib/infra/docker.ts) to the agent.
-
 // ListInstances enumerates a project's attachable containers.
 func (s *Service) ListInstances(ctx context.Context, req *pb.ListInstancesRequest) (*pb.ListInstancesResponse, error) {
 	projectID := req.GetProjectId()
-	// An empty project_id would drop the label filter and list EVERY container on the host
-	// (cross-tenant enumeration).
 	if projectID == "" {
 		return nil, status.Error(codes.InvalidArgument, "project_id is required")
 	}
@@ -34,16 +29,11 @@ func (s *Service) ListInstances(ctx context.Context, req *pb.ListInstancesReques
 	for _, c := range cs {
 		names = append(names, c.Name)
 	}
-	// ONE `docker inspect` for the whole stack, keyed by container name, not two
-	// per container. A container that vanished between the `ps` and the inspect
-	// is simply absent from the map (never silently mistaken for another one).
 	details := inspectContainers(ctx, names)
 
 	out := make([]*pb.ConsoleInstance, 0, len(cs))
 	for _, c := range cs {
 		d := details[c.Name]
-		// `docker ps` already told us the state; the inspect confirms it. Prefer
-		// the inspect (same daemon, richer read), fall back to ps.
 		state := d.State
 		if state == "" {
 			state = c.State
@@ -65,8 +55,6 @@ func (s *Service) ListInstances(ctx context.Context, req *pb.ListInstancesReques
 			StartedAtUnix: startedAtUnix(d.StartedAt),
 		})
 	}
-	// Exposed app first, then running, then alphabetical by service - the same
-	// order listInstances produces (so instances[0] is the default target).
 	sort.SliceStable(out, func(i, j int) bool {
 		a, b := out[i], out[j]
 		if a.Exposed != b.Exposed {
@@ -80,7 +68,6 @@ func (s *Service) ListInstances(ctx context.Context, req *pb.ListInstancesReques
 	return &pb.ListInstancesResponse{Instances: out}, nil
 }
 
-// isExposed reports whether a container's service is the Traefik-exposed one.
 func isExposed(service, exposeService string) bool {
 	return exposeService != "" && service == exposeService
 }
@@ -91,8 +78,6 @@ type containerRow struct {
 	State string
 }
 
-// listProjectContainers runs `docker ps -a --filter label=deplo.project=<id>`
-// and parses the JSON lines, mirroring lib/infra/docker.ts listContainers.
 func listProjectContainers(ctx context.Context, projectID string) ([]containerRow, error) {
 	args := []string{"ps", "-a", "--format", "{{json .}}"}
 	if projectID != "" {
@@ -121,9 +106,6 @@ func listProjectContainers(ctx context.Context, projectID string) ([]containerRo
 	return rows, nil
 }
 
-// startedAtUnix turns docker's .State.StartedAt into epoch seconds. A container that
-// has never run carries the zero time ("0001-01-01T00:00:00Z"), which must answer 0 -
-// its epoch is negative, and the panel would render it as decades of uptime.
 func startedAtUnix(ts string) int64 {
 	t, ok := parseDockerTime(ts)
 	if !ok || t.IsZero() || t.Unix() <= 0 {
@@ -132,7 +114,6 @@ func startedAtUnix(ts string) int64 {
 	return t.Unix()
 }
 
-// containerDetail is everything one `docker inspect` pass yields per container.
 type containerDetail struct {
 	Name         string `json:"name"`
 	User         string `json:"user"`
@@ -145,7 +126,6 @@ type containerDetail struct {
 	StartedAt    string `json:"startedAt"`
 }
 
-// The inspect template emits one JSON object per container.
 const inspectTemplate = `{"name":{{json .Name}},` +
 	`"user":{{json .Config.User}},` +
 	`"workdir":{{json .Config.WorkingDir}},` +
@@ -156,9 +136,6 @@ const inspectTemplate = `{"name":{{json .Name}},` +
 	`"startedAt":{{json .State.StartedAt}},` +
 	`"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}""{{end}}}`
 
-// inspectContainers inspects every named container in ONE call, keyed by name.
-// Best-effort: a container that cannot be inspected is simply missing from the map, and
-// the caller falls back to the `docker ps` row.
 func inspectContainers(ctx context.Context, names []string) map[string]containerDetail {
 	out := map[string]containerDetail{}
 	if len(names) == 0 {
@@ -169,12 +146,9 @@ func inspectContainers(ctx context.Context, names []string) map[string]container
 	if err != nil {
 		return out
 	}
-	// A non-zero code means at least one name was not found; the lines for the
-	// ones that WERE found are still on stdout, so parse whatever came back.
 	return parseInspectLines(res.Stdout)
 }
 
-// parseInspectLines turns the inspect template's output into details by name.
 func parseInspectLines(stdout string) map[string]containerDetail {
 	out := map[string]containerDetail{}
 	for _, line := range strings.Split(strings.TrimSpace(stdout), "\n") {
@@ -186,14 +160,10 @@ func parseInspectLines(stdout string) map[string]containerDetail {
 		if err := json.Unmarshal([]byte(line), &d); err != nil {
 			continue
 		}
-		// docker reports the name as "/deplo-foo".
 		d.Name = strings.TrimPrefix(d.Name, "/")
 		if d.Name == "" {
 			continue
 		}
-		// An image that declares no USER runs as root, and no WORKDIR means "/".
-		// Defaulted HERE, on the parsed field, never by string-splitting, which
-		// is what shifted workdir into user when Config.User was empty.
 		if d.User == "" {
 			d.User = "root"
 		}
@@ -205,9 +175,6 @@ func parseInspectLines(stdout string) map[string]containerDetail {
 	return out
 }
 
-// serviceOf extracts the compose service name from a container name
-// (deplo-<slug>-<service>-N), falling back to the slug for single-image deploys.
-// Mirrors lib/data/console.ts serviceOf.
 func serviceOf(slug, containerName string) string {
 	prefix := "deplo-" + slug + "-"
 	if strings.HasPrefix(containerName, prefix) {
@@ -217,7 +184,6 @@ func serviceOf(slug, containerName string) string {
 	return strings.TrimPrefix(containerName, "deplo-")
 }
 
-// trimTrailingReplicaIndex strips a compose "-N" replica suffix (.replace(/-\d+$/,"")).
 func trimTrailingReplicaIndex(s string) string {
 	i := strings.LastIndex(s, "-")
 	if i < 0 || i == len(s)-1 {

@@ -10,8 +10,6 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
-// newFilesService builds a Service whose stackDir is a temp dir, with the files
-// root for `slug` pre-created so reads/lists work.
 func newFilesService(t *testing.T, slug string) (*Service, string) {
 	t.Helper()
 	stackDir := t.TempDir()
@@ -74,7 +72,6 @@ func TestFiles_WriteReadList(t *testing.T) {
 func TestFiles_BinaryDetection(t *testing.T) {
 	ctx := context.Background()
 	s, root := newFilesService(t, "app")
-	// Plant a file with a NUL byte in the first chunk.
 	if err := os.WriteFile(filepath.Join(root, "blob.bin"), []byte("abc\x00def"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -132,8 +129,6 @@ func TestFiles_RejectTraversal(t *testing.T) {
 func TestFiles_RejectSymlinkEscape(t *testing.T) {
 	ctx := context.Background()
 	s, root := newFilesService(t, "app")
-	// Plant a symlink inside the root pointing OUTSIDE it; reading through it must
-	// be rejected (realpath lands outside the sandbox boundary).
 	outside := t.TempDir()
 	secret := filepath.Join(outside, "secret.txt")
 	if err := os.WriteFile(secret, []byte("top secret"), 0o644); err != nil {
@@ -175,11 +170,9 @@ func TestFiles_RenameContainment(t *testing.T) {
 	if _, err := s.WriteFile(ctx, &pb.WriteFileRequest{Slug: "app", Path: "a.txt", Content: "hi"}); err != nil {
 		t.Fatal(err)
 	}
-	// Valid in-root rename.
 	if _, err := s.RenameFile(ctx, &pb.RenameFileRequest{Slug: "app", Path: "a.txt", NewPath: "sub/b.txt"}); err != nil {
 		t.Fatalf("RenameFile in-root: %v", err)
 	}
-	// Destination escaping the root must be rejected.
 	if _, err := s.RenameFile(ctx, &pb.RenameFileRequest{Slug: "app", Path: "sub/b.txt", NewPath: "../escape.txt"}); err == nil {
 		t.Fatal("RenameFile to escaping dest = nil error, want rejection")
 	}
@@ -188,7 +181,6 @@ func TestFiles_RenameContainment(t *testing.T) {
 func TestFiles_RejectBadSlug(t *testing.T) {
 	ctx := context.Background()
 	s, _ := newFilesService(t, "app")
-	// A slug that would escape <stack-dir>/files if joined unguarded.
 	bad := []string{"../../../etc", "..", "a/b", "App", "x..y/../..", ""}
 	for _, slug := range bad {
 		if _, err := s.ReadFile(ctx, &pb.ReadFileRequest{Slug: slug, Path: "hostname"}); err == nil {
@@ -201,7 +193,6 @@ func TestFiles_RejectBadSlug(t *testing.T) {
 			t.Errorf("FilesExist(slug=%q) = nil error, want invalid-slug rejection", slug)
 		}
 	}
-	// A valid slug still works.
 	good := []string{"app", "my-app", "a1-b2-c3"}
 	for _, slug := range good {
 		if err := validateSlug(slug); err != nil {
@@ -210,15 +201,14 @@ func TestFiles_RejectBadSlug(t *testing.T) {
 	}
 }
 
-// A DEPLOY KEY may carry one `__<suffix>`, which is how one app owns more than one
-// stack on a host (a pull request preview is `<slug>__pr-<n>`).
+// A DEPLOY KEY may carry one `__<suffix>`, which is how one app owns more than one stack on a host (a pull request preview is `<slug>__pr-<n>`).
 func TestValidateSlug_DeployKeySuffix(t *testing.T) {
 	good := []string{
-		"app",            // production: the bare slug, unchanged
-		"my-app",         //
-		"blog__pr-42",    // a pull request preview
-		"a1-b2-c3__pr-1", //
-		"app__staging",   // any other deploy target the control plane may name
+		"app",
+		"my-app",
+		"blog__pr-42",
+		"a1-b2-c3__pr-1",
+		"app__staging",
 	}
 	for _, slug := range good {
 		if err := validateSlug(slug); err != nil {
@@ -226,19 +216,16 @@ func TestValidateSlug_DeployKeySuffix(t *testing.T) {
 		}
 	}
 
-	// Everything that could escape <stack-dir>/files, or reach it through the
-	// new suffix, must still be refused. `__` buys exactly one extra segment of
-	// the SAME alphabet and nothing else.
 	bad := []string{
-		"app__",        // empty suffix
-		"__pr-1",       // empty base
-		"app__pr__1",   // only one separator
-		"app__../etc",  // traversal via the suffix
-		"app__.",       // a dot is still unrepresentable
-		"app__A",       // upper case is still refused
-		"app__-x",      // a suffix may not start with a dash
-		"app_pr-1",     // a single underscore is not the separator
-		"../../../etc", // the originals, unchanged
+		"app__",
+		"__pr-1",
+		"app__pr__1",
+		"app__../etc",
+		"app__.",
+		"app__A",
+		"app__-x",
+		"app_pr-1",
+		"../../../etc",
 		"..",
 		"a/b",
 		"App",

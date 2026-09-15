@@ -7,8 +7,6 @@ import (
 )
 
 func TestKillMarkedProcessesStopsTheWholeTree(t *testing.T) {
-	// A shell that forks two sleepers - the shape of a job whose command spawns
-	// helpers. Only the marker ties them together; there is no exec id to ask for.
 	cmd := exec.Command("sh", "-c", "sleep 300 & sleep 300 & wait")
 	cmd.Env = append(cmd.Environ(), jobMarkerEnv+"=testjob-"+t.Name())
 	if err := cmd.Start(); err != nil {

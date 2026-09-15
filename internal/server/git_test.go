@@ -12,8 +12,6 @@ import (
 )
 
 func TestAuthenticatedURL_injectsToken(t *testing.T) {
-	// The token must NOT ride the clone URL (that lands on argv / in
-	// /proc/<pid>/cmdline); it is carried as an out-of-band Authorization header.
 	clone, display, authHeader := authenticatedURL("https://github.com/acme/app.git", "tok-secret")
 	if strings.Contains(clone, "tok-secret") || strings.Contains(clone, "@") {
 		t.Fatalf("credentials must not be on the clone URL (argv leak): %s", clone)
@@ -28,8 +26,6 @@ func TestAuthenticatedURL_injectsToken(t *testing.T) {
 }
 
 func TestAuthenticatedURL_liftsPreAuthenticatedCreds(t *testing.T) {
-	// A control-plane GitHub-App URL arrives already authenticated; the creds must
-	// be lifted OFF the URL (argv leak) into the header, not left on the URL.
 	pre := "https://x-access-token:ghs_existing@github.com/acme/app.git"
 	clone, display, authHeader := authenticatedURL(pre, "ignored")
 	if strings.Contains(clone, "ghs_existing") || strings.Contains(clone, "@") {
@@ -71,16 +67,13 @@ func TestSanitizeGitLine_scrubsToken(t *testing.T) {
 	}
 }
 
-// Two clones of the SAME commit must leave a byte-identical build context, or Docker's
-// layer cache can never be hit: BuildKit keys a COPY on the content it copies, and git
-// rewrites its index and reflogs on every clone.
+// Two clones of the SAME commit must leave a byte-identical build context, or Docker's layer cache can never be hit: BuildKit keys a COPY on the content it copies, and git rewrites its index and reflogs on every clone.
 func TestStripVolatileGitMetadataMakesClonesIdentical(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not available")
 	}
 	ctx := context.Background()
 
-	// An origin with one commit.
 	origin := t.TempDir()
 	run := func(dir string, args ...string) {
 		t.Helper()
@@ -111,10 +104,9 @@ func TestStripVolatileGitMetadataMakesClonesIdentical(t *testing.T) {
 	}
 	a, b := filepath.Join(t.TempDir(), "a"), filepath.Join(t.TempDir(), "b")
 	clone(a)
-	time.Sleep(1100 * time.Millisecond) // guarantee a different clone timestamp
+	time.Sleep(1100 * time.Millisecond)
 	clone(b)
 
-	// Before: the reflogs alone already differ, which is what defeated the cache.
 	if sameTree(t, a, b) {
 		t.Skip("this git leaves clones identical already; nothing to prove")
 	}
@@ -125,7 +117,6 @@ func TestStripVolatileGitMetadataMakesClonesIdentical(t *testing.T) {
 		t.Fatal("clones of the same commit still differ after stripping volatile git metadata")
 	}
 
-	// And git must still answer the questions a build asks of it.
 	sha, err := gitOutput(ctx, a, "rev-parse", "HEAD")
 	if err != nil || len(strings.TrimSpace(sha)) != 40 {
 		t.Fatalf("rev-parse after strip: %q %v", sha, err)
@@ -135,14 +126,13 @@ func TestStripVolatileGitMetadataMakesClonesIdentical(t *testing.T) {
 	}
 }
 
-// A `.git` FILE (a worktree or submodule pointer) must be left alone - there is
-// no index of ours behind it and following it would reach outside the clone.
+// A `.git` FILE (a worktree or submodule pointer) must be left alone - there is no index of ours behind it and following it would reach outside the clone.
 func TestStripVolatileGitMetadataIgnoresGitFile(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: /elsewhere\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	stripVolatileGitMetadata(dir) // must not panic, must not remove it
+	stripVolatileGitMetadata(dir)
 	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
 		t.Fatalf("the .git file was disturbed: %v", err)
 	}
@@ -150,10 +140,9 @@ func TestStripVolatileGitMetadataIgnoresGitFile(t *testing.T) {
 
 // A clone with no .git at all (already stripped, or a plain directory) is a no-op.
 func TestStripVolatileGitMetadataNoGitDir(t *testing.T) {
-	stripVolatileGitMetadata(t.TempDir()) // must not panic
+	stripVolatileGitMetadata(t.TempDir())
 }
 
-// sameTree reports whether two directory trees are byte-identical.
 func sameTree(t *testing.T, a, b string) bool {
 	t.Helper()
 	out, err := exec.Command("diff", "-r", a, b).CombinedOutput()

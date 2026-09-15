@@ -19,7 +19,7 @@ func TestJoin_rejectsEscapes(t *testing.T) {
 		{"./sub/Dockerfile", true, filepath.Join(base, "sub/Dockerfile")},
 		{"../escape", false, base},
 		{"sub/../../escape", false, base},
-		{"/abs/path", true, filepath.Join(base, "abs/path")}, // leading / stripped, contained
+		{"/abs/path", true, filepath.Join(base, "abs/path")},
 	}
 	for _, c := range cases {
 		got, ok := Join(base, c.rel)
@@ -40,7 +40,6 @@ func TestInside_followsRealpathAndContains(t *testing.T) {
 		t.Fatalf("Inside(root, sub) = (%q,%v), want %q", got, err, mustEval(t, sub))
 	}
 
-	// A symlink pointing OUTSIDE root must fall back to root (escape defeated).
 	outside := t.TempDir()
 	link := filepath.Join(root, "link")
 	if err := os.Symlink(outside, link); err != nil {

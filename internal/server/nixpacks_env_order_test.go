@@ -8,8 +8,6 @@ import (
 	"testing"
 )
 
-// The exact shape nixpacks 1.41 generates for a Node app, reduced to the lines
-// that matter here.
 const nixpacksGenerated = `FROM ghcr.io/railwayapp/nixpacks:ubuntu-1745885067
 
 ENTRYPOINT ["/bin/bash", "-l", "-c"]
@@ -56,8 +54,7 @@ func lineIndex(t *testing.T, lines []string, prefix string) int {
 	return -1
 }
 
-// The whole point: the app's own variables end up below the install RUN and
-// above the build RUN, so a value change can no longer invalidate the install.
+// The whole point: the app's own variables end up below the install RUN and above the build RUN, so a value change can no longer invalidate the install.
 func TestDeferEnvBelowInstall_movesAppVars(t *testing.T) {
 	lines := strings.Split(nixpacksGenerated, "\n")
 	movable := map[string]bool{"DATABASE_URL": true, "PAYLOAD_SECRET": true, "RESEND_API_KEY": true}
@@ -82,8 +79,6 @@ func TestDeferEnvBelowInstall_movesAppVars(t *testing.T) {
 		t.Errorf("the moved block must come BEFORE the build RUN (%d vs %d)", movedEnv, buildRun)
 	}
 
-	// Everything nixpacks needs for the install keeps its original position, and
-	// the moved names are gone from the top block.
 	top := out[lineIndex(t, out, "ARG CI ")]
 	if top != "ARG CI NIXPACKS_METADATA NODE_ENV NPM_CONFIG_PRODUCTION PORT" {
 		t.Errorf("top ARG line = %q", top)
@@ -93,24 +88,18 @@ func TestDeferEnvBelowInstall_movesAppVars(t *testing.T) {
 		t.Errorf("a moved var is still declared on top: %q", topEnv)
 	}
 
-	// Every declared name still exists exactly once across the file, or the build
-	// would fail on an undeclared build-arg.
 	joined := strings.Join(out, "\n")
 	for _, name := range []string{"CI", "DATABASE_URL", "NIXPACKS_METADATA", "NODE_ENV", "NPM_CONFIG_PRODUCTION", "PAYLOAD_SECRET", "PORT", "RESEND_API_KEY"} {
 		if !strings.Contains(joined, name+"=$"+name) {
 			t.Errorf("%s lost its ENV declaration", name)
 		}
 	}
-	// The nix layer must stay above everything we touched - it is the expensive
-	// one and no app variable may ever reach its cache key.
 	if lineIndex(t, out, "RUN nix-env ") > movedArg {
 		t.Error("the nix layer moved below the app variables")
 	}
 }
 
-// When every declared name has to stay, the file is left byte-identical rather
-// than rewritten into an equivalent-but-different form (which would itself be a
-// cache miss).
+// When every declared name has to stay, the file is left byte-identical rather than rewritten into an equivalent-but-different form (which would itself be a cache miss).
 func TestDeferEnvBelowInstall_nothingMovable(t *testing.T) {
 	lines := strings.Split(nixpacksGenerated, "\n")
 	out, moved := deferEnvBelowInstall(lines, map[string]bool{"UNRELATED": true})
@@ -119,13 +108,10 @@ func TestDeferEnvBelowInstall_nothingMovable(t *testing.T) {
 	}
 }
 
-// Anything that is not the generator we know about is left alone: a bail costs a
-// cache hit, a wrong rewrite costs the build.
+// Anything that is not the generator we know about is left alone: a bail costs a cache hit, a wrong rewrite costs the build.
 func TestDeferEnvBelowInstall_bailsOnUnknownShapes(t *testing.T) {
 	movable := map[string]bool{"DATABASE_URL": true, "PAYLOAD_SECRET": true, "RESEND_API_KEY": true}
 	cases := map[string]string{
-		// ARG is scoped per stage, so the same move across stages would silently
-		// drop the variables.
 		"multi-stage": nixpacksGenerated + "\nFROM alpine\nCOPY --from=0 /app /app\n",
 		"ARG carries a default": strings.Replace(nixpacksGenerated,
 			"ARG CI DATABASE_URL", "ARG CI=1 DATABASE_URL", 1),
@@ -147,8 +133,7 @@ func TestDeferEnvBelowInstall_bailsOnUnknownShapes(t *testing.T) {
 	}
 }
 
-// An app with no build command still gains: the variables land after the install
-// so it stays cached, and they are still present in the final image.
+// An app with no build command still gains: the variables land after the install so it stays cached, and they are still present in the final image.
 func TestDeferEnvBelowInstall_noBuildPhase(t *testing.T) {
 	body := strings.Replace(nixpacksGenerated, `# build phase
 COPY . /app/.
@@ -182,9 +167,6 @@ func TestMovableBuildEnv(t *testing.T) {
 			t.Errorf("%s is a plain app variable and should move", want)
 		}
 	}
-	// A toolchain variable changes how dependencies resolve; a name interpolated
-	// into .npmrc authenticates the registry the install talks to. Both must keep
-	// their position even though they are the app's own variables.
 	for _, want := range []string{
 		"NODE_ENV", "NPM_CONFIG_PRODUCTION", "npm_config_registry", "YARN_NPM_AUTH_TOKEN",
 		"CI", "HTTPS_PROXY", "NIXPACKS_METADATA", "ACME_REGISTRY_TOKEN", "PRIVATE_FEED_USER",
@@ -195,8 +177,7 @@ func TestMovableBuildEnv(t *testing.T) {
 	}
 }
 
-// A user-supplied install command is part of the install step, so anything it
-// reads has to stay above it.
+// A user-supplied install command is part of the install step, so anything it reads has to stay above it.
 func TestMovableBuildEnv_customInstallCommand(t *testing.T) {
 	movable := movableBuildEnv([]string{"TURBO_TOKEN", "PAYLOAD_SECRET"}, t.TempDir(),
 		`bun i --registry "$TURBO_TOKEN"`)
@@ -247,8 +228,7 @@ func TestDeferAppEnvBelowInstall_noopKeepsBytes(t *testing.T) {
 	}
 }
 
-// The app's variables lose their ENV (the ARG still feeds every RUN) while Nixpacks'
-// own declarations, and any line that is not the plain KEY=$KEY form, stay put.
+// The app's variables lose their ENV (the ARG still feeds every RUN) while Nixpacks' own declarations, and any line that is not the plain KEY=$KEY form, stay put.
 func TestStripAppEnv_dropsOnlyTheAppsOwn(t *testing.T) {
 	lines := strings.Split(nixpacksGenerated, "\n")
 	app := map[string]bool{"DATABASE_URL": true, "PAYLOAD_SECRET": true, "RESEND_API_KEY": true}
@@ -276,8 +256,7 @@ func TestStripAppEnv_dropsOnlyTheAppsOwn(t *testing.T) {
 	}
 }
 
-// An ENV line made up entirely of the app's variables - what the deferred block below
-// the install step is - goes away rather than being left empty.
+// An ENV line made up entirely of the app's variables - what the deferred block below the install step is - goes away rather than being left empty.
 func TestStripAppEnv_dropsAWhollyAppEnvLine(t *testing.T) {
 	out, dropped := stripAppEnv([]string{"ENV A=$A B=$B", "RUN true"}, map[string]bool{"A": true, "B": true})
 	if !slices.Equal(out, []string{"RUN true"}) || len(dropped) != 2 {

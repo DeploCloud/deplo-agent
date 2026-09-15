@@ -18,12 +18,8 @@ import (
 	"time"
 )
 
-// fakeControlPlane stands in for /api/agent/bootstrap: it parses the CSR, signs
-// it with a throwaway CA, and HMAC-binds the response with the token (the
-// plain-HTTP trust path). tamperMAC corrupts the MAC to test rejection.
 func fakeControlPlane(t *testing.T, token string, tamperMAC bool) *httptest.Server {
 	t.Helper()
-	// A throwaway CA.
 	caPub, caPriv, _ := ed25519.GenerateKey(rand.Reader)
 	caTmpl := &x509.Certificate{
 		SerialNumber:          big.NewInt(1),
@@ -81,9 +77,9 @@ func TestBootstrap_happyPathOverHTTP(t *testing.T) {
 	dir := t.TempDir()
 
 	mats, err := Run(Config{
-		ControlPlaneURL: srv.URL, // http:// -> the HMAC trust path
+		ControlPlaneURL: srv.URL,
 		Token:           "tok-123",
-		Fingerprint:     "", // no TLS to pin
+		Fingerprint:     "",
 		AgentPort:       9443,
 		AgentDir:        dir,
 	})
@@ -93,7 +89,6 @@ func TestBootstrap_happyPathOverHTTP(t *testing.T) {
 	if !Provisioned(dir) {
 		t.Fatalf("materials not written")
 	}
-	// The key we wrote must match the cert we got back (it signed the CSR).
 	keyPem, _ := os.ReadFile(mats.KeyPath)
 	certPem, _ := os.ReadFile(mats.CertPath)
 	if len(keyPem) == 0 || len(certPem) == 0 {
@@ -106,7 +101,7 @@ func TestBootstrap_happyPathOverHTTP(t *testing.T) {
 }
 
 func TestBootstrap_rejectsTamperedMACOverHTTP(t *testing.T) {
-	srv := fakeControlPlane(t, "tok-123", true) // corrupts the MAC
+	srv := fakeControlPlane(t, "tok-123", true)
 	defer srv.Close()
 	_, err := Run(Config{
 		ControlPlaneURL: srv.URL,

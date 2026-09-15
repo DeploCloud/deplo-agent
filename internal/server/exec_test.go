@@ -42,7 +42,6 @@ func TestIsDockerLevelStderr(t *testing.T) {
 		}
 	}
 
-	// Guest command output must NOT be classified as a docker-level failure.
 	guest := []string{
 		"sh: gtrger: not found",
 		"bash: command-not-here: command not found",

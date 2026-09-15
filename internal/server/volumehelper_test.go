@@ -21,9 +21,7 @@ func TestVolumeHelperRunSilencesTheContainerLog(t *testing.T) {
 	}
 }
 
-// A helper container started by hand writes a full second copy of the archive
-// into its json log - 88 GB of it, once, on a production host. Every call site
-// goes through volumeHelperRun, and this is what says so.
+// A helper container started by hand writes a full second copy of the archive into its json log - 88 GB of it, once, on a production host.
 func TestNoHandWrittenVolumeHelperRun(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {

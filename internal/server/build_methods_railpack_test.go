@@ -8,8 +8,7 @@ import (
 	"testing"
 )
 
-// readPlanSecrets returns the plan's declared secrets and ok=true on a good read,
-// and ok=false (so the caller falls back) only when the plan is missing/unparseable.
+// readPlanSecrets returns the plan's declared secrets and ok=true on a good read, and ok=false (so the caller falls back) only when the plan is missing/unparseable.
 func TestReadPlanSecrets(t *testing.T) {
 	dir := t.TempDir()
 
@@ -21,8 +20,6 @@ func TestReadPlanSecrets(t *testing.T) {
 		t.Fatalf("good plan: got %v ok=%v", got, ok)
 	}
 
-	// A valid plan that declares no secrets reads OK with an empty set (the caller
-	// then passes no --secret flags, matching railpack exactly).
 	none := filepath.Join(dir, "none.json")
 	if err := os.WriteFile(none, []byte(`{"steps":[]}`), 0o644); err != nil {
 		t.Fatal(err)
@@ -31,7 +28,6 @@ func TestReadPlanSecrets(t *testing.T) {
 		t.Fatalf("no-secrets plan: got %v ok=%v; want empty,true", got, ok)
 	}
 
-	// Missing / unparseable ⇒ ok=false so the caller falls back to the known set.
 	if got, ok := readPlanSecrets(filepath.Join(dir, "absent.json")); ok || got != nil {
 		t.Fatalf("absent plan: got %v ok=%v; want nil,false", got, ok)
 	}
@@ -44,13 +40,12 @@ func TestReadPlanSecrets(t *testing.T) {
 	}
 }
 
-// sanitizeSecretNames keeps identifier-shaped names and drops anything an
-// untrusted plan might use to smuggle buildctl CSV attributes.
+// sanitizeSecretNames keeps identifier-shaped names and drops anything an untrusted plan might use to smuggle buildctl CSV attributes.
 func TestSanitizeSecretNames(t *testing.T) {
 	in := []string{
 		"RAILPACK_NODE_VERSION", "RAILPACK_BUILD_CMD", "_ok", "a1",
-		"x; rm -rf / #",       // shell metachars
-		"foo,src=/etc/passwd", // CSV smuggling
+		"x; rm -rf / #",
+		"foo,src=/etc/passwd",
 		"has space", "-flag", "", "WITH-DASH", "uni¢ode",
 	}
 	got := sanitizeSecretNames(in)
@@ -58,16 +53,12 @@ func TestSanitizeSecretNames(t *testing.T) {
 	if !slices.Equal(got, want) {
 		t.Fatalf("sanitizeSecretNames = %v; want %v", got, want)
 	}
-	// Must not mutate the caller's slice (fallback literal reuse).
 	if in[4] != "x; rm -rf / #" {
 		t.Fatalf("input slice was mutated: %v", in)
 	}
 }
 
-// railpackBuildArgs must select the railpack frontend via BUILDKIT_SYNTAX, feed the
-// plan as the Dockerfile, forward every plan secret as `--secret id=NAME,env=NAME`, and
-// carry the caller's image output - all as discrete argv tokens, so a hostile name from
-// an untrusted plan can never be word-split or shell-interpreted.
+// railpackBuildArgs must select the railpack frontend via BUILDKIT_SYNTAX, feed the plan as the Dockerfile, forward every plan secret as `--secret id=NAME,env=NAME`, and carry the caller's image output - all as discrete argv tokens, so a hostile name from an untrusted plan can never be word-split or shell-interpreted.
 func TestRailpackBuildArgs(t *testing.T) {
 	names := []string{"RAILPACK_NODE_VERSION", "RAILPACK_BUILD_CMD"}
 	args := railpackBuildArgs(
@@ -76,7 +67,6 @@ func TestRailpackBuildArgs(t *testing.T) {
 		[]string{"-t", "deplo/cwars:dpl_abc"}, false, "",
 	)
 
-	// No shell is ever involved: there is no `sh`/`-c` token anywhere.
 	if slices.Contains(args, "sh") || slices.Contains(args, "-c") {
 		t.Fatalf("argv must not invoke a shell: %v", args)
 	}
@@ -92,26 +82,19 @@ func TestRailpackBuildArgs(t *testing.T) {
 			t.Fatalf("argv missing %q in: %s", want, joined)
 		}
 	}
-	// Labels are the relabel pass's job - the frontend drops them, so emitting
-	// them here would be dead argv that reads as if it worked.
 	if slices.Contains(args, "--label") {
 		t.Fatalf("labels must not ride the railpack frontend build: %v", args)
 	}
-	// The build context is the final positional argument - docker reads it there.
 	if args[len(args)-1] != "/tmp/ctx" {
 		t.Fatalf("context must be the last arg: %v", args)
 	}
 
-	// Injection safety: a crafted secret name lands as EXACTLY one argv token in
-	// the `--secret` slot, never split, never a command.
 	evil := "x; rm -rf / #"
 	adv := railpackBuildArgs("front", "plan.json", "ctx", []string{evil}, nil, false, "")
 	if !slices.Contains(adv, "--secret") || !slices.Contains(adv, "id="+evil+",env="+evil) {
 		t.Fatalf("hostile name not a single --secret token: %v", adv)
 	}
 
-	// A no-cache deploy must reach the railpack frontend build too - --no-cache
-	// right after the verb, where docker parses global build flags.
 	fresh := railpackBuildArgs("front", "plan.json", "ctx", nil, nil, true, "")
 	if fresh[0] != "build" || fresh[1] != "--no-cache" {
 		t.Fatalf("no-cache railpack argv = %v, want build --no-cache first", fresh)

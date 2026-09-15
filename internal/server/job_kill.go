@@ -9,13 +9,8 @@ import (
 	"time"
 )
 
-// The variable every process of a cron job carries. Docker has no "kill the
-// exec'd process" API: when the exec client goes away the command lives on, so
-// the job is found again by the marker its whole process tree inherited.
 const jobMarkerEnv = "DEPLO_JOB_ID"
 
-// killMarkedProcesses stops every process on the host whose environment carries
-// the job's marker: TERM, a short grace, then KILL for whatever is left.
 func killMarkedProcesses(jobID string, grace time.Duration) int {
 	self := os.Getpid()
 	marker := []byte(jobMarkerEnv + "=" + jobID + "\x00")
@@ -27,7 +22,6 @@ func killMarkedProcesses(jobID string, grace time.Duration) int {
 			if err != nil || pid == self {
 				continue
 			}
-			// Unreadable (gone, or a kernel thread) is "not ours".
 			env, err := os.ReadFile(path)
 			if err != nil || !bytes.Contains(env, marker) {
 				continue

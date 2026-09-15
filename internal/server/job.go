@@ -1,7 +1,5 @@
 package server
 
-// https://deplo.build/docs/guides/cron-jobs
-
 import (
 	"context"
 	"crypto/rand"
@@ -18,35 +16,22 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// job.go implements the cron-job half of the contract: StartJob / PollJob / KillJob.
-// Sharing the code would mean giving the REPL an unbounded deadline, which is exactly
-// the thing that ceiling is there to prevent.
-
 const (
-	// Retained output per stream, per job. Attacker-controlled (`yes | head -c 2G` is a
-	// legal cron command) and this agent is a root process shared by every app on the
-	// host, so the buffer is a fixed-size ring - it never grows with the command's output.
 	cronOutputTailBytes = 16 << 10
 
-	// How long a FINISHED job is kept so the control plane can still collect its result.
 	cronRetainFinished = 30 * time.Minute
 
-	// Concurrent LIVE jobs one agent will accept.
 	maxLiveJobs = 64
 
-	// Default when the caller names no timeout. Matches the control plane's own
-	// default so the two agree on what "unset" means.
 	cronDefaultTimeout = time.Hour
 
-	// How long a stopped job's processes get to exit on TERM before KILL.
 	jobKillGrace = 3 * time.Second
 )
 
-// tailBuf keeps the LAST n bytes written to it and nothing else.
 type tailBuf struct {
 	buf  []byte
 	max  int
-	over bool // something was dropped
+	over bool
 }
 
 func newTailBuf(max int) *tailBuf { return &tailBuf{max: max} }
@@ -57,11 +42,8 @@ func (t *tailBuf) Write(p []byte) (int, error) {
 		t.buf = append(t.buf, p...)
 		return n, nil
 	}
-	// Something is being dropped. `over` is set here and nowhere else, so a
-	// write that exactly fills the ceiling is not reported as truncated.
 	t.over = true
 	if n >= t.max {
-		// This write alone overflows: keep only its tail and forget the rest.
 		t.buf = append(t.buf[:0], p[n-t.max:]...)
 		return n, nil
 	}
@@ -71,9 +53,6 @@ func (t *tailBuf) Write(p []byte) (int, error) {
 }
 
 // String returns the retained tail, prefixed with a note when anything was dropped.
-// The cut may land inside a rune: those leading continuation bytes go. Anything
-// else that is not UTF-8 (a stray binary byte in the middle) is replaced, never
-// used as a reason to throw the text before it away.
 func (t *tailBuf) String() string {
 	b := t.buf
 	for len(b) > 0 && !utf8.RuneStart(b[0]) {
@@ -90,8 +69,6 @@ func (t *tailBuf) String() string {
 	return fmt.Sprintf("[deplo] earlier output trimmed - showing the last %s\n%s", kept, text)
 }
 
-// job is one cron execution the agent is running or has recently finished.
-// Every field except the immutable ones is read under the Service mutex.
 type job struct {
 	startedAt  time.Time
 	finishedAt time.Time
@@ -106,9 +83,6 @@ type job struct {
 func newJobID() string {
 	b := make([]byte, 12)
 	if _, err := rand.Read(b); err != nil {
-		// crypto/rand failing is not survivable in any meaningful way, and a
-		// duplicate id would silently attach two runs to one process. Fall back
-		// to a monotonic-ish value rather than returning a fixed string.
 		return fmt.Sprintf("job-%d", time.Now().UnixNano())
 	}
 	return hex.EncodeToString(b)
@@ -161,14 +135,8 @@ func (s *Service) StartJob(ctx context.Context, req *pb.StartJobRequest) (*pb.St
 	return &pb.StartJobResponse{JobId: id}, nil
 }
 
-// driveJob runs the command to completion, then schedules the record's eviction
-// so a control plane that was down when it finished can still collect the
-// result.
 func (s *Service) driveJob(ctx context.Context, id string, req *pb.StartJobRequest, j *job) {
 	defer j.cancel()
-	// A panic in the exec path must cost ONE cron run, not the whole agent -
-	// which on a shared host would take down every tenant's deploys, streams and
-	// metrics. Same containment as driveDeploy.
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -193,9 +161,6 @@ func (s *Service) runJob(ctx context.Context, id string, req *pb.StartJobRequest
 		return
 	}
 
-	// The shell prefix. NOT a login shell: /etc/profile on Debian and Alpine
-	// resets PATH, which drops the image's own additions (a venv, mise shims) and
-	// makes a command that works in the console fail here with "not found".
 	var prefix []string
 	switch req.GetShell() {
 	case "bash":
@@ -229,9 +194,6 @@ func (s *Service) runJob(ctx context.Context, id string, req *pb.StartJobRequest
 	if u := strings.TrimSpace(req.GetUser()); u != "" {
 		args = append(args, "-u", u)
 	}
-	// The NAME rides argv; the VALUE rides the docker client's own environment,
-	// so a secret is never visible in `ps` to every user on the host. Same
-	// discipline as the REDISCLI_AUTH path in backup.go.
 	extraEnv := make([]string, 0, len(req.GetEnv()))
 	for _, e := range req.GetEnv() {
 		name := strings.TrimSpace(e.GetName())
@@ -241,7 +203,6 @@ func (s *Service) runJob(ctx context.Context, id string, req *pb.StartJobRequest
 		args = append(args, "-e", name)
 		extraEnv = append(extraEnv, name+"="+e.GetValue())
 	}
-	// The marker the whole process tree inherits, so a stop can find it later.
 	args = append(args, "-e", jobMarkerEnv)
 	extraEnv = append(extraEnv, jobMarkerEnv+"="+id)
 	args = append(args, container)
@@ -253,20 +214,15 @@ func (s *Service) runJob(ctx context.Context, id string, req *pb.StartJobRequest
 		timeout = cronDefaultTimeout
 	}
 
-	// Both streams go straight into their rings, so neither buffer ever holds
-	// more than its ceiling and no line length can stall the command.
 	execStart := time.Now()
 	code, err := dockercli.StreamPipes(ctx, timeout, j.stdout, j.stderr, extraEnv, args...)
 
 	if err != nil {
-		// docker never produced an exit status.
 		switch {
 		case ctx.Err() != nil:
 			killMarkedProcesses(id, jobKillGrace)
 			s.finishJob(j, -1, false, "", "The job was stopped.")
 		case time.Since(execStart) >= timeout:
-			// Killing the exec client left the command running; the marker
-			// finds it. Without this a "timed out" job kept burning CPU.
 			killMarkedProcesses(id, jobKillGrace)
 			s.finishJob(j, -1, true, "",
 				fmt.Sprintf("The command was still running after %s and was stopped.", timeout))
@@ -278,9 +234,6 @@ func (s *Service) runJob(ctx context.Context, id string, req *pb.StartJobRequest
 	s.finishJob(j, int32(code), false, "", "")
 }
 
-// finishJob stamps the terminal state. `extraOut`/`extraErr` are appended to
-// whatever the command already produced, so a failure explanation never
-// destroys the output that led to it.
 func (s *Service) finishJob(j *job, code int32, timedOut bool, extraOut, extraErr string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -299,24 +252,17 @@ func (s *Service) finishJob(j *job, code int32, timedOut bool, extraOut, extraEr
 	j.done = true
 }
 
-// hasShell probes for a specific interpreter with a zero-side-effect command,
-// the same `-c :` probe resolveShellPlan uses.
 func hasShell(ctx context.Context, container, shell string) bool {
 	res, err := dockercli.Run(ctx, 5*time.Second, "exec", container, shell, "-c", ":")
 	return err == nil && res.Code == 0
 }
 
-// PollJob reports a job's state. Output rides along ONLY on the terminal poll:
-// a hundred in-flight jobs each returning 32 KiB every minute is megabytes of
-// wire per tick for data the control plane throws away until the job ends.
+// PollJob reports a job's state.
 func (s *Service) PollJob(_ context.Context, req *pb.PollJobRequest) (*pb.PollJobResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	j := s.jobs[req.GetJobId()]
 	if j == nil {
-		// Not an error: "I have no record of this" is a legitimate answer that the control
-		// plane turns into a `lost` run. An RPC error here would be indistinguishable from
-		// the host being unreachable, which means the opposite (keep waiting).
 		return &pb.PollJobResponse{Found: false}, nil
 	}
 	resp := &pb.PollJobResponse{
@@ -335,9 +281,7 @@ func (s *Service) PollJob(_ context.Context, req *pb.PollJobRequest) (*pb.PollJo
 	return resp, nil
 }
 
-// KillJob cancels a running job. Idempotent by design: the control plane calls
-// it from a Stop button and from its own deadline check, and racing with the
-// job's natural exit must not produce an error.
+// KillJob cancels a running job.
 func (s *Service) KillJob(_ context.Context, req *pb.KillJobRequest) (*pb.KillJobResponse, error) {
 	s.mu.Lock()
 	j := s.jobs[req.GetJobId()]
@@ -346,8 +290,6 @@ func (s *Service) KillJob(_ context.Context, req *pb.KillJobRequest) (*pb.KillJo
 	if !live {
 		return &pb.KillJobResponse{Found: false}, nil
 	}
-	// Cancelling the job context kills the `docker exec` client; runJob then
-	// stops the command itself by its marker (docker has no kill-exec API).
 	j.cancel()
 	return &pb.KillJobResponse{Found: true}, nil
 }

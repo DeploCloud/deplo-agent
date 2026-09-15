@@ -6,8 +6,7 @@ import (
 	"time"
 )
 
-// Two operations on ONE stack must not interleave: `docker compose` on the same
-// `-p` from two goroutines races its own create/remove steps.
+// Two operations on ONE stack must not interleave: `docker compose` on the same `-p` from two goroutines races its own create/remove steps.
 func TestLockStackSerializesOneSlug(t *testing.T) {
 	s := &Service{}
 	var mu sync.Mutex

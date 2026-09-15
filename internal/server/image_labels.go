@@ -11,13 +11,6 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// Docker merges an IMAGE's labels into every container it starts, and Traefik
-// reads the container's labels: a `LABEL traefik.http.routers.x.rule=Host(...)`
-// baked into an image would register a router the control plane never rendered
-// and never checked against anybody's domains. Deplo stamps every Traefik label
-// itself, so an image carrying one is refused before the stack starts.
-
-// composeBaseArgs is the `docker compose` prefix that names THIS stack.
 func composeBaseArgs(project, stackFile, envFile, projectDir string) []string {
 	args := []string{"compose", "-p", project, "-f", stackFile}
 	if projectDir != "" {
@@ -29,8 +22,6 @@ func composeBaseArgs(project, stackFile, envFile, projectDir string) []string {
 	return args
 }
 
-// prepareStackImages pulls and builds every image of the stack so that all of
-// them can be inspected BEFORE `up`, and returns their references.
 func (s *Service) prepareStackImages(ctx context.Context, req *pb.DeployRequest, base []string, e *emitter) ([]string, bool) {
 	env := dockerConfigEnv(req)
 	steps := [][]string{
@@ -62,8 +53,6 @@ func (s *Service) prepareStackImages(ctx context.Context, req *pb.DeployRequest,
 	return images, true
 }
 
-// refuseTraefikImageLabels fails the deploy when any of the images carries a
-// Traefik label. An image that is not present is left to `up` to complain about.
 func refuseTraefikImageLabels(ctx context.Context, images []string, e *emitter) bool {
 	for _, img := range images {
 		res, err := dockercli.Run(ctx, 30*time.Second, "image", "inspect", "--format", "{{json .Config.Labels}}", img)
@@ -80,8 +69,6 @@ func refuseTraefikImageLabels(ctx context.Context, images []string, e *emitter) 
 	return true
 }
 
-// traefikLabelKeys reads `docker image inspect --format {{json .Config.Labels}}`
-// output and returns the label keys Traefik would act on, sorted.
 func traefikLabelKeys(labelsJSON string) []string {
 	var labels map[string]string
 	if err := json.Unmarshal([]byte(strings.TrimSpace(labelsJSON)), &labels); err != nil {

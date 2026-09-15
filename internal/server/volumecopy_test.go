@@ -20,8 +20,6 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// fakeExportStream satisfies grpc.ServerStreamingServer[VolumeChunk] for
-// ExportVolume: it just collects every chunk sent.
 type fakeExportStream struct {
 	chunks []*pb.VolumeChunk
 	ctx    context.Context
@@ -43,9 +41,6 @@ func (f *fakeExportStream) SetTrailer(metadata.MD)       {}
 func (f *fakeExportStream) SendMsg(any) error            { return nil }
 func (f *fakeExportStream) RecvMsg(any) error            { return nil }
 
-// fakeImportStream satisfies grpc.ClientStreamingServer[VolumeChunk, StackResult]
-// for ImportVolume: it replays a queued list of inbound chunks (header first) and
-// captures the terminal result from SendAndClose.
 type fakeImportStream struct {
 	in     []*pb.VolumeChunk
 	i      int
@@ -77,12 +72,9 @@ func (f *fakeImportStream) SetTrailer(metadata.MD)       {}
 func (f *fakeImportStream) SendMsg(any) error            { return nil }
 func (f *fakeImportStream) RecvMsg(any) error            { return nil }
 
-// TestImportVolume_headerRequired proves the protocol guard: the first message
-// must be a header, else the RPC reports a business failure (not a panic). No
-// docker needed.
+// TestImportVolume_headerRequired proves the protocol guard: the first message must be a header, else the RPC reports a business failure (not a panic).
 func TestImportVolume_headerRequired(t *testing.T) {
 	svc := New(t.TempDir(), t.TempDir(), "/", "")
-	// First (only) message is a data frame, not a header.
 	st := &fakeImportStream{in: []*pb.VolumeChunk{
 		{Frame: &pb.VolumeChunk_Data{Data: []byte("nope")}},
 	}}
@@ -97,8 +89,7 @@ func TestImportVolume_headerRequired(t *testing.T) {
 	}
 }
 
-// TestImportVolume_unsafeName proves a wire-supplied path masquerading as a volume
-// name is rejected before any helper container runs.
+// TestImportVolume_unsafeName proves a wire-supplied path masquerading as a volume name is rejected before any helper container runs.
 func TestImportVolume_unsafeName(t *testing.T) {
 	svc := New(t.TempDir(), t.TempDir(), "/", "")
 	st := &fakeImportStream{in: []*pb.VolumeChunk{
@@ -125,9 +116,7 @@ func TestExportVolume_unsafeName(t *testing.T) {
 	}
 }
 
-// TestE2E_VolumeCopyRoundTrip drives ExportVolume → (relay the chunks) → ImportVolume
-// against REAL docker volumes, proving the cross-host copy machinery moves the bytes
-// and that the import OVERWRITES the destination (wipe-first).
+// TestE2E_VolumeCopyRoundTrip drives ExportVolume → (relay the chunks) → ImportVolume against REAL docker volumes, proving the cross-host copy machinery moves the bytes and that the import OVERWRITES the destination (wipe-first).
 func TestE2E_VolumeCopyRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -146,18 +135,15 @@ func TestE2E_VolumeCopyRoundTrip(t *testing.T) {
 		defer dockercli.Run(context.Background(), 15*time.Second, "volume", "rm", "-f", v)
 	}
 
-	// Seed the SOURCE with a sentinel tree.
 	if res, err := dockercli.Run(ctx, 30*time.Second, "run", "--rm", "-v", src+":/v", volumeHelperImage,
 		"sh", "-c", "echo sentinel-data > /v/file.txt && mkdir -p /v/sub && echo nested > /v/sub/n.txt"); err != nil || res.Code != 0 {
 		t.Fatalf("seed source: %v / %s", err, res.Stderr)
 	}
-	// Seed the DESTINATION with junk that a correct copy (wipe-first) must remove.
 	if res, err := dockercli.Run(ctx, 30*time.Second, "run", "--rm", "-v", dst+":/v", volumeHelperImage,
 		"sh", "-c", "echo STALE > /v/file.txt && echo junk > /v/leftover.txt"); err != nil || res.Code != 0 {
 		t.Fatalf("seed dest: %v / %s", err, res.Stderr)
 	}
 
-	// 1. Export the source volume; collect the gzipped-tar chunks.
 	ex := &fakeExportStream{ctx: ctx}
 	if err := svc.ExportVolume(&pb.ExportVolumeRequest{VolumeName: src}, ex); err != nil {
 		t.Fatalf("ExportVolume: %v", err)
@@ -166,8 +152,6 @@ func TestE2E_VolumeCopyRoundTrip(t *testing.T) {
 		t.Fatal("ExportVolume produced no chunks")
 	}
 
-	// 2. Relay: build the ImportVolume inbound sequence = header, then every data
-	//    chunk verbatim. This is exactly what the control plane's relay does.
 	in := []*pb.VolumeChunk{
 		{Frame: &pb.VolumeChunk_Header_{Header: &pb.VolumeChunk_Header{VolumeName: dst, WipeFirst: true}}},
 	}
@@ -180,7 +164,6 @@ func TestE2E_VolumeCopyRoundTrip(t *testing.T) {
 		t.Fatalf("ImportVolume failed: %+v", im.result)
 	}
 
-	// 3. The destination now holds the SOURCE's tree, and the stale junk is gone.
 	res, err := dockercli.Run(ctx, 30*time.Second, "run", "--rm", "-v", dst+":/v", volumeHelperImage,
 		"sh", "-c", "cat /v/file.txt; echo ---; cat /v/sub/n.txt; echo ---; ls /v/leftover.txt 2>/dev/null || echo GONE")
 	if err != nil || res.Code != 0 {
@@ -201,10 +184,7 @@ func TestE2E_VolumeCopyRoundTrip(t *testing.T) {
 	t.Log("volume export→import cross-copy OVERWRITE verified")
 }
 
-// TestExportVolume_missingVolumeIsNotFound is the guard that had to exist and did not:
-// `docker run -v <name>:/v` CREATES a missing named volume, so an export of a volume
-// that is not on this host used to exit 0 with a complete EMPTY archive, and the
-// caller wiped a real destination for it.
+// TestExportVolume_missingVolumeIsNotFound is the guard that had to exist and did not: `docker run -v <name>:/v` CREATES a missing named volume, so an export of a volume that is not on this host used to exit 0 with a complete EMPTY archive, and the caller wiped a real destination for it.
 func TestExportVolume_missingVolumeIsNotFound(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Minute)
 	defer cancel()
@@ -227,16 +207,13 @@ func TestExportVolume_missingVolumeIsNotFound(t *testing.T) {
 	if len(st.chunks) != 0 {
 		t.Errorf("a refused export must send no chunks, got %d", len(st.chunks))
 	}
-	// And it must not have CREATED it on the way past.
 	if res, err := dockercli.Run(ctx, 10*time.Second, "volume", "inspect", missing); err == nil && res.Code == 0 {
 		dockercli.Run(context.Background(), 10*time.Second, "volume", "rm", "-f", missing)
 		t.Error("the export created the volume it was supposed to refuse")
 	}
 }
 
-// TestImportVolume_headerOnlyDoesNotWipe pins the other half: a header asking to
-// wipe, followed by no data at all, is exactly what a failed or empty export looks
-// like. The destination must survive it untouched.
+// TestImportVolume_headerOnlyDoesNotWipe pins the other half: a header asking to wipe, followed by no data at all, is exactly what a failed or empty export looks like.
 func TestImportVolume_headerOnlyDoesNotWipe(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -277,9 +254,7 @@ func TestImportVolume_headerOnlyDoesNotWipe(t *testing.T) {
 	}
 }
 
-// TestImportVolume_reportsBytesAndDigest proves the cross-check the control plane
-// makes is actually answerable: a real copy comes back with the compressed byte
-// count and the sha256 of what arrived.
+// TestImportVolume_reportsBytesAndDigest proves the cross-check the control plane makes is actually answerable: a real copy comes back with the compressed byte count and the sha256 of what arrived.
 func TestImportVolume_reportsBytesAndDigest(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -331,8 +306,7 @@ func TestImportVolume_reportsBytesAndDigest(t *testing.T) {
 	}
 }
 
-// TestImportVolume_truncatedStreamLeavesNothing proves all-or-nothing survives a stream
-// that dies MID-transfer, not only one that never starts.
+// TestImportVolume_truncatedStreamLeavesNothing proves all-or-nothing survives a stream that dies MID-transfer, not only one that never starts.
 func TestImportVolume_truncatedStreamLeavesNothing(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
@@ -351,8 +325,6 @@ func TestImportVolume_truncatedStreamLeavesNothing(t *testing.T) {
 		defer dockercli.Run(context.Background(), 15*time.Second, "volume", "rm", "-f", v)
 	}
 
-	// Big and incompressible, so the truncated stream still carries most of the
-	// file: the point is that the extract gets FAR, not that it never starts.
 	if res, err := dockercli.Run(ctx, 60*time.Second, "run", "--rm", "-v", src+":/v", volumeHelperImage,
 		"sh", "-c", "dd if=/dev/urandom of=/v/big.bin bs=1024 count=4096 2>/dev/null"); err != nil || res.Code != 0 {
 		t.Fatalf("seed source: %v / %s", err, res.Stderr)
@@ -374,8 +346,6 @@ func TestImportVolume_truncatedStreamLeavesNothing(t *testing.T) {
 		t.Fatalf("export produced too little to truncate meaningfully (%d bytes)", len(whole))
 	}
 
-	// The relay dies with the last 32 KiB still in flight: the gzip trailer never
-	// arrives, which is how a truncation announces itself.
 	im := &fakeImportStream{ctx: ctx, in: []*pb.VolumeChunk{
 		{Frame: &pb.VolumeChunk_Header_{Header: &pb.VolumeChunk_Header{VolumeName: dst, WipeFirst: true}}},
 		{Frame: &pb.VolumeChunk_Data{Data: whole[:len(whole)-32*1024]}},
@@ -400,8 +370,7 @@ func TestImportVolume_truncatedStreamLeavesNothing(t *testing.T) {
 	}
 }
 
-// TestSanitizeTar keeps the import half as strict as the restore half: the archive
-// comes off another platform's host and is extracted by a helper running as root.
+// TestSanitizeTar keeps the import half as strict as the restore half: the archive comes off another platform's host and is extracted by a helper running as root.
 func TestSanitizeTar(t *testing.T) {
 	var in bytes.Buffer
 	tw := tar.NewWriter(&in)
@@ -474,8 +443,7 @@ func TestSanitizeTar(t *testing.T) {
 	}
 }
 
-// TestImportReportsDrops is the wire half of the tally: an import that silently
-// arrived short reported "0 failed", so the pump's count has to reach StackResult.
+// TestImportReportsDrops is the wire half of the tally: an import that silently arrived short reported "0 failed", so the pump's count has to reach StackResult.
 func TestImportReportsDrops(t *testing.T) {
 	var raw bytes.Buffer
 	tw := tar.NewWriter(&raw)
@@ -518,15 +486,12 @@ func TestImportReportsDrops(t *testing.T) {
 	if !containsString(res.GetDroppedNames(), "./escape") || !containsString(res.GetDroppedNames(), "./pipe") {
 		t.Errorf("the dropped entries must be named: %v", res.GetDroppedNames())
 	}
-	// An import whose pump never ran reports nothing, which the control plane must
-	// not read as a clean run.
 	if bare := importResult(false, 0, "", "boom", nil); bare.GetDroppedLinks() != 0 || bare.GetDroppedNames() != nil {
 		t.Errorf("a result with no pump must carry no tally: %+v", bare)
 	}
 }
 
-// TestDroppedNamesAreBounded keeps the tally an RPC field, not a log: it rides a
-// response, so both the count of names and each name are capped.
+// TestDroppedNamesAreBounded keeps the tally an RPC field, not a log: it rides a response, so both the count of names and each name are capped.
 func TestDroppedNamesAreBounded(t *testing.T) {
 	var drops tarDrops
 	long := strings.Repeat("a", droppedNameMax+50)
@@ -544,33 +509,28 @@ func TestDroppedNamesAreBounded(t *testing.T) {
 	}
 }
 
-// The control plane can tell "this agent does not report drops" from "it reported
-// none" only if the capability is advertised.
+// The control plane can tell "this agent does not report drops" from "it reported none" only if the capability is advertised.
 func TestCapabilities_advertisesDropReport(t *testing.T) {
 	if !containsString(Capabilities, "volume-copy.drop-report") {
 		t.Error("Capabilities must advertise \"volume-copy.drop-report\"")
 	}
 }
 
-// The control plane stops tolerating a missing digest once this is advertised, and
-// only advertises the hardened import behind it.
+// The control plane stops tolerating a missing digest once this is advertised, and only advertises the hardened import behind it.
 func TestCapabilities_advertisesHardenedCopy(t *testing.T) {
 	if !containsString(Capabilities, "volume-copy-hardened") {
 		t.Error("Capabilities must advertise \"volume-copy-hardened\"")
 	}
 }
 
-// The tag is moved rather than bumped, so the version proves nothing about which
-// binary a host runs - the capability is what a rollout verifies against.
+// The tag is moved rather than bumped, so the version proves nothing about which binary a host runs - the capability is what a rollout verifies against.
 func TestCapabilities_advertisesBestSpeedGzip(t *testing.T) {
 	if !containsString(Capabilities, "copy.gzip-bestspeed") {
 		t.Error("Capabilities must advertise \"copy.gzip-bestspeed\"")
 	}
 }
 
-// A tar whose size is an exact multiple of 32 KiB hands its EOF marker over on a
-// flate window flush, before the gzip trailer arrives: the pump has to read on to
-// the gzip EOF or the sender's last frames hit a closed pipe.
+// A tar whose size is an exact multiple of 32 KiB hands its EOF marker over on a flate window flush, before the gzip trailer arrives: the pump has to read on to the gzip EOF or the sender's last frames hit a closed pipe.
 func TestSanitizeTar_drainsToGzipEOF(t *testing.T) {
 	for _, fileSize := range []int{31232, 31232 + 512} {
 		var frames [][]byte
@@ -604,7 +564,6 @@ func TestSanitizeTar_drainsToGzipEOF(t *testing.T) {
 			t.Fatalf("tar of %d bytes: close: %v", tarSize, err)
 		}
 
-		// Reading to the gzip EOF is also what checks the trailer.
 		last := frames[len(frames)-1]
 		last[len(last)-1] ^= 0xff
 		pump, _ = newSanitizingGunzipPump(io.Discard)

@@ -16,9 +16,6 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/s3client"
 )
 
-// backup_e2e_test.go is the END-TO-END proof that a real dump → gzip → S3 → download →
-// restore round-trip overwrites data, against REAL containers (a MinIO bucket + a DB).
-
 const (
 	e2eMinioImage      = "minio/minio:latest"
 	e2ePostgresImage   = "postgres:16-alpine"
@@ -30,14 +27,10 @@ const (
 	e2eSecretKey       = "minioadmin"
 )
 
-// startMinio starts a throwaway MinIO, creates the bucket, and returns the
-// S3Target coordinates (path-style, http) + a cleanup func.
 func startMinio(t *testing.T, ctx context.Context) (s3client.Config, func()) {
 	t.Helper()
 	name := "deplo-e2e-minio"
 	_, _ = dockercli.Run(ctx, 10*time.Second, "rm", "-f", name)
-	// 0 published port → docker assigns one; we reach MinIO over its container IP
-	// on the default bridge from the host, so use a fixed host port instead.
 	res, err := dockercli.Run(ctx, 60*time.Second,
 		"run", "-d", "--name", name,
 		"-p", "19000:9000",
@@ -57,8 +50,6 @@ func startMinio(t *testing.T, ctx context.Context) (s3client.Config, func()) {
 		SecretKey: e2eSecretKey,
 		PathStyle: true,
 	}
-	// Wait for MinIO to answer, then create the bucket via a mc-less approach:
-	// minio-go can MakeBucket once the server is up.
 	deadline := time.Now().Add(40 * time.Second)
 	for time.Now().Before(deadline) {
 		cl, cerr := s3client.New(cfg)
@@ -100,7 +91,6 @@ func TestE2E_PostgresBackupRestoreOverwrites(t *testing.T) {
 		return dockercli.Run(ctx, 20*time.Second, "exec", "-e", "PGPASSWORD=secret", pgName,
 			"psql", "-U", "admin", "-d", "appdb", "-tAc", sql)
 	}
-	// Wait for postgres to accept connections.
 	ready := false
 	for i := 0; i < 30; i++ {
 		if r, e := psql("SELECT 1"); e == nil && r.Code == 0 && strings.Contains(r.Stdout, "1") {
@@ -113,7 +103,6 @@ func TestE2E_PostgresBackupRestoreOverwrites(t *testing.T) {
 		t.Skip("postgres did not become ready")
 	}
 
-	// Seed a sentinel row.
 	if _, e := psql("CREATE TABLE t(v text); INSERT INTO t VALUES ('sentinel-A');"); e != nil {
 		t.Fatalf("seed: %v", e)
 	}
@@ -127,7 +116,6 @@ func TestE2E_PostgresBackupRestoreOverwrites(t *testing.T) {
 
 	svc := New(t.TempDir(), t.TempDir(), "/", "")
 
-	// Back up.
 	bs := &fakeBackupStream{}
 	if err := svc.Backup(&pb.BackupRequest{Kind: pb.BackupKind_BACKUP_KIND_DATABASE, S3: target, Database: d}, bs); err != nil {
 		t.Fatalf("Backup rpc: %v", err)
@@ -141,7 +129,6 @@ func TestE2E_PostgresBackupRestoreOverwrites(t *testing.T) {
 	}
 	t.Logf("backed up %d bytes to %s", br.GetSizeBytes(), br.GetObjectKey())
 
-	// Mutate: change the sentinel so a successful overwrite-restore reverts it.
 	if _, e := psql("UPDATE t SET v='sentinel-B';"); e != nil {
 		t.Fatalf("mutate: %v", e)
 	}
@@ -149,7 +136,6 @@ func TestE2E_PostgresBackupRestoreOverwrites(t *testing.T) {
 		t.Fatalf("pre-restore sanity: expected sentinel-B, got %q", r.Stdout)
 	}
 
-	// Restore in place - must DROP-AND-RECREATE, reverting to sentinel-A.
 	rs := &fakeRestoreStream{}
 	if err := svc.Restore(&pb.RestoreRequest{Kind: pb.BackupKind_BACKUP_KIND_DATABASE, S3: target, Database: d}, rs); err != nil {
 		t.Fatalf("Restore rpc: %v", err)
@@ -164,7 +150,6 @@ func TestE2E_PostgresBackupRestoreOverwrites(t *testing.T) {
 	}
 	t.Log("postgres backup→mutate→restore OVERWRITE verified")
 
-	// S3Delete the artifact, then a second delete is idempotent (0).
 	del1, _ := svc.S3Delete(ctx, &pb.S3DeleteRequest{S3: target})
 	if !del1.GetOk() || del1.GetDeleted() != 1 {
 		t.Errorf("S3Delete should remove 1, got ok=%v n=%d err=%s", del1.GetOk(), del1.GetDeleted(), del1.GetError())
@@ -174,7 +159,6 @@ func TestE2E_PostgresBackupRestoreOverwrites(t *testing.T) {
 		t.Errorf("second S3Delete should be idempotent (0), got ok=%v n=%d", del2.GetOk(), del2.GetDeleted())
 	}
 
-	// S3Check against the live bucket passes; a bad key fails clearly.
 	chk, _ := svc.S3Check(ctx, &pb.S3CheckRequest{S3: target})
 	if !chk.GetOk() {
 		t.Errorf("S3Check on a real bucket should pass, got %s", chk.GetError())
@@ -200,8 +184,6 @@ func TestE2E_RedisBackupRestoreOverwrites(t *testing.T) {
 
 	name := "deplo-e2e-redis"
 	_, _ = dockercli.Run(ctx, 10*time.Second, "rm", "-f", name)
-	// A restart policy is REQUIRED for the redis restore (SHUTDOWN NOSAVE relies
-	// on the supervisor bringing it back) - mirror what Deplo's compose sets.
 	res, err := dockercli.Run(ctx, 60*time.Second,
 		"run", "-d", "--name", name, "--restart", "unless-stopped", e2eRedisImage)
 	if err != nil || res.Code != 0 {
@@ -235,7 +217,6 @@ func TestE2E_RedisBackupRestoreOverwrites(t *testing.T) {
 		t.Fatalf("redis backup failed: %s", br.GetError())
 	}
 
-	// Mutate, then restore must revert (overwrite, not merge).
 	if _, e := rcli("SET", "sentinel", "B"); e != nil {
 		t.Fatalf("mutate: %v", e)
 	}
@@ -251,7 +232,6 @@ func TestE2E_RedisBackupRestoreOverwrites(t *testing.T) {
 		t.Fatalf("redis restore failed: %s", rr.GetError())
 	}
 
-	// sentinel reverted to A; the key added after backup is gone (overwrite).
 	if r, _ := rcli("GET", "sentinel"); !strings.Contains(r.Stdout, "A") || strings.Contains(r.Stdout, "B") {
 		t.Fatalf("redis restore did not overwrite sentinel: %q", r.Stdout)
 	}
@@ -272,8 +252,6 @@ func TestE2E_MongoBackupRestoreOverwrites(t *testing.T) {
 
 	name := "deplo-e2e-mongo"
 	_, _ = dockercli.Run(ctx, 10*time.Second, "rm", "-f", name)
-	// Mirror Deplo's generated DB compose: root user "app" + a password, so the
-	// dump/restore must authenticate (--authenticationDatabase=admin).
 	res, err := dockercli.Run(ctx, 90*time.Second,
 		"run", "-d", "--name", name,
 		"-e", "MONGO_INITDB_ROOT_USERNAME=app", "-e", "MONGO_INITDB_ROOT_PASSWORD=secret",
@@ -283,7 +261,6 @@ func TestE2E_MongoBackupRestoreOverwrites(t *testing.T) {
 	}
 	defer dockercli.Run(context.Background(), 15*time.Second, "rm", "-f", name)
 
-	// mongosh eval helper, authenticating as the root user.
 	mongo := func(js string) (dockercli.Result, error) {
 		return dockercli.Run(ctx, 25*time.Second, "exec", name,
 			"mongosh", "-u", "app", "-p", "secret", "--authenticationDatabase", "admin",
@@ -301,7 +278,6 @@ func TestE2E_MongoBackupRestoreOverwrites(t *testing.T) {
 		t.Skip("mongo did not become ready")
 	}
 
-	// Seed a sentinel document.
 	if r, e := mongo(`db.t.insertOne({k:"sentinel", v:"A"})`); e != nil || r.Code != 0 {
 		t.Fatalf("seed: %v / %s", e, r.Stderr)
 	}
@@ -326,7 +302,6 @@ func TestE2E_MongoBackupRestoreOverwrites(t *testing.T) {
 		t.Logf("backed up %d bytes", br.GetSizeBytes())
 	}
 
-	// Mutate: change the sentinel + add a doc the restore must drop (overwrite).
 	if r, e := mongo(`db.t.updateOne({k:"sentinel"},{$set:{v:"B"}}); db.t.insertOne({k:"added",v:"x"})`); e != nil || r.Code != 0 {
 		t.Fatalf("mutate: %v / %s", e, r.Stderr)
 	}
@@ -339,7 +314,6 @@ func TestE2E_MongoBackupRestoreOverwrites(t *testing.T) {
 		t.Fatalf("mongo restore failed: %s", rr.GetError())
 	}
 
-	// sentinel reverted to A; the post-backup doc is gone (--drop overwrite).
 	r, _ := mongo(`print(db.t.findOne({k:"sentinel"}).v + "/" + db.t.countDocuments({k:"added"}))`)
 	if !strings.Contains(r.Stdout, "A/0") {
 		t.Fatalf("mongo restore did not overwrite (want sentinel=A and 0 added docs), got %q / stderr %q", r.Stdout, r.Stderr)
@@ -371,8 +345,6 @@ func TestE2E_ClickhouseBackupRestoreOverwrites(t *testing.T) {
 		return dockercli.Run(ctx, 25*time.Second, "exec", name,
 			"clickhouse-client", "--user", "app", "--password", "secret", "-q", q)
 	}
-	// clickhouse-server creates CLICKHOUSE_DB during init and may briefly restart;
-	// poll for the database's existence (a bare PING can pass before appdb exists).
 	ready := false
 	for i := 0; i < 45; i++ {
 		if r, e := ch("SELECT 1 FROM system.databases WHERE name='appdb'"); e == nil && r.Code == 0 && strings.Contains(r.Stdout, "1") {
@@ -412,7 +384,6 @@ func TestE2E_ClickhouseBackupRestoreOverwrites(t *testing.T) {
 		t.Logf("backed up %d bytes", br.GetSizeBytes())
 	}
 
-	// Mutate: change the sentinel + add a row the restore must drop (overwrite).
 	if r, e := ch("INSERT INTO appdb.t VALUES (3,'added-after-backup')"); e != nil || r.Code != 0 {
 		t.Fatalf("mutate-insert: %v / %s", e, r.Stderr)
 	}
@@ -428,7 +399,6 @@ func TestE2E_ClickhouseBackupRestoreOverwrites(t *testing.T) {
 		t.Fatalf("clickhouse restore failed: %s", rr.GetError())
 	}
 
-	// id=1 reverted to sentinel-A; the post-backup id=3 is gone (DROP+recreate).
 	r, _ := ch("SELECT name FROM appdb.t WHERE id=1")
 	r3, _ := ch("SELECT count() FROM appdb.t WHERE id=3")
 	if !strings.Contains(r.Stdout, "sentinel-A") || strings.Contains(r.Stdout, "sentinel-B") {
@@ -440,10 +410,7 @@ func TestE2E_ClickhouseBackupRestoreOverwrites(t *testing.T) {
 	t.Log("clickhouse backup→mutate→restore OVERWRITE verified")
 }
 
-// TestE2E_VolumeArchiveRoundTrip exercises the project-backup volume machinery directly
-// (archiveVolume → tar → gzip; gunzip → volumeStreams demux → extract) against a REAL
-// docker named volume, proving the round-trip restores the bytes AND that the
-// archiveVolume exit-code fix doesn't break the happy path.
+// TestE2E_VolumeArchiveRoundTrip exercises the project-backup volume machinery directly (archiveVolume → tar → gzip; gunzip → volumeStreams demux → extract) against a REAL docker named volume, proving the round-trip restores the bytes AND that the archiveVolume exit-code fix doesn't break the happy path.
 func TestE2E_VolumeArchiveRoundTrip(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -459,13 +426,11 @@ func TestE2E_VolumeArchiveRoundTrip(t *testing.T) {
 	}
 	defer dockercli.Run(context.Background(), 15*time.Second, "volume", "rm", "-f", vol)
 
-	// Seed the volume with a sentinel file via a helper container.
 	if res, err := dockercli.Run(ctx, 30*time.Second, "run", "--rm", "-v", vol+":/v", volumeHelperImage,
 		"sh", "-c", "echo sentinel-data > /v/file.txt && mkdir -p /v/sub && echo nested > /v/sub/n.txt"); err != nil || res.Code != 0 {
 		t.Fatalf("seed volume: %v / %s", err, res.Stderr)
 	}
 
-	// Archive the volume into a buffer (archiveVolume re-frames under volumes/<vol>/).
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
@@ -482,13 +447,11 @@ func TestE2E_VolumeArchiveRoundTrip(t *testing.T) {
 		t.Fatal("archive is empty")
 	}
 
-	// Mutate the volume (so a successful restore must overwrite back).
 	if res, err := dockercli.Run(ctx, 30*time.Second, "run", "--rm", "-v", vol+":/v", volumeHelperImage,
 		"sh", "-c", "echo MUTATED > /v/file.txt && echo added > /v/added.txt"); err != nil || res.Code != 0 {
 		t.Fatalf("mutate volume: %v / %s", err, res.Stderr)
 	}
 
-	// Restore: feed the archive through the same demux unpackProjectArchive uses.
 	rs := &fakeRestoreStream{}
 	e := &rsEmitter{send: rs.Send}
 	gzr, err := gzip.NewReader(&buf)
@@ -499,7 +462,6 @@ func TestE2E_VolumeArchiveRoundTrip(t *testing.T) {
 		t.Fatalf("unpackProjectArchive: %v", err)
 	}
 
-	// The sentinel file is back; the post-backup file is gone (overwrite-not-merge).
 	res, err := dockercli.Run(ctx, 30*time.Second, "run", "--rm", "-v", vol+":/v", volumeHelperImage,
 		"sh", "-c", "cat /v/file.txt; echo ---; cat /v/sub/n.txt; echo ---; ls /v/added.txt 2>/dev/null || echo GONE")
 	if err != nil || res.Code != 0 {

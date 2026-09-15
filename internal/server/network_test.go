@@ -11,9 +11,7 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// An empty network is a control-plane bug, not a reason to fall back to a shared one:
-// there is no shared network any more, so guessing would put the stack somewhere no
-// Environment owns.
+// An empty network is a control-plane bug, not a reason to fall back to a shared one: there is no shared network any more, so guessing would put the stack somewhere no Environment owns.
 func TestEnsureTenantNetwork_emptyNameIsRefused(t *testing.T) {
 	err := ensureTenantNetwork(context.Background(), "")
 	if err == nil {
@@ -24,8 +22,7 @@ func TestEnsureTenantNetwork_emptyNameIsRefused(t *testing.T) {
 	}
 }
 
-// Two deploys of one Environment start together, both see no network and both
-// create it. The loser must not fail the deploy: what it wanted now exists.
+// Two deploys of one Environment start together, both see no network and both create it.
 func TestEnsureNetwork_existingIsNotAFailure(t *testing.T) {
 	ctx := context.Background()
 	if !dockercli.Available(ctx) {
@@ -38,11 +35,9 @@ func TestEnsureNetwork_existingIsNotAFailure(t *testing.T) {
 	if err := dockercli.EnsureNetwork(ctx, n); err != nil {
 		t.Fatalf("first EnsureNetwork: %v", err)
 	}
-	// The second call is the loser of the race: the network is already there.
 	if err := dockercli.EnsureNetwork(ctx, n); err != nil {
 		t.Fatalf("EnsureNetwork on an existing network must succeed, got: %v", err)
 	}
-	// And so is a create that races past the inspect, which is what actually happens.
 	res, err := dockercli.Run(ctx, 15*time.Second, "network", "create", n)
 	if err != nil || res.Code == 0 {
 		t.Fatalf("expected docker to refuse the duplicate create, got code=%d err=%v", res.Code, err)
@@ -52,9 +47,7 @@ func TestEnsureNetwork_existingIsNotAFailure(t *testing.T) {
 	}
 }
 
-// Only Deplo's tenant namespace is ever a cleanup candidate or a Traefik reconnect
-// target. The platform's own networks are declared in Traefik's compose file, and
-// removing one would take the panel or the socket proxy off the air.
+// Only Deplo's tenant namespace is ever a cleanup candidate or a Traefik reconnect target.
 func TestIsTenantNetwork(t *testing.T) {
 	for _, n := range []string{
 		"deplo-env-environ_abc123",
@@ -75,9 +68,7 @@ func TestIsTenantNetwork(t *testing.T) {
 	}
 }
 
-// An emptied Environment leaves its network with ONLY Traefik on it, because a deploy
-// attached the proxy and nothing detaches it. Counting the proxy made every tenant
-// network look busy forever, so the scope reclaimed nothing at all.
+// An emptied Environment leaves its network with ONLY Traefik on it, because a deploy attached the proxy and nothing detaches it.
 func TestAttachedExcludingProxy(t *testing.T) {
 	cases := []struct {
 		names string
@@ -96,10 +87,7 @@ func TestAttachedExcludingProxy(t *testing.T) {
 	}
 }
 
-// A restore ends in an internal Reroute, and that Reroute is refused without a
-// network - which would leave the data restored and the stack down, the one moment
-// that must not fail. The network comes from the control plane, not the snapshot:
-// the app may have changed Environment since the backup was taken.
+// A restore ends in an internal Reroute, and that Reroute is refused without a network - which would leave the data restored and the stack down, the one moment that must not fail.
 func TestRestoreConfig_carriesTheNetwork(t *testing.T) {
 	rr := restoreConfig("shop", &pb.ProjectDescriptor{
 		ComposeYaml: "services:\n  web:\n    image: nginx\n",
@@ -110,9 +98,7 @@ func TestRestoreConfig_carriesTheNetwork(t *testing.T) {
 	}
 }
 
-// The scope reclaimed nothing for a reason no unit test could see: `{{.Created}}`
-// renders Go's default layout, not RFC3339, so every network failed to parse and
-// fell to the fail-closed branch. This pins the format the template must produce.
+// The scope reclaimed nothing for a reason no unit test could see: `{{.Created}}` renders Go's default layout, not RFC3339, so every network failed to parse and fell to the fail-closed branch.
 func TestNetworkState_readsDockersTimestamp(t *testing.T) {
 	ctx := context.Background()
 	if !dockercli.Available(ctx) {
@@ -137,13 +123,8 @@ func TestNetworkState_readsDockersTimestamp(t *testing.T) {
 	}
 }
 
-// A BUILD-ONLY deploy compiles for a machine it is not: no stack is written and
-// nothing is brought up, so no network is needed. Creating one anyway left a build
-// server holding an empty network per Environment it ever built for, and the
-// live-network list is by NAME and instance-wide, so it could never be reclaimed.
+// A BUILD-ONLY deploy compiles for a machine it is not: no stack is written and nothing is brought up, so no network is needed.
 func TestBuildOnlyDeploy_needsNoNetwork(t *testing.T) {
-	// The guard is `if !req.GetBuildOnly()`, so an empty network - which every other
-	// path refuses - has to be acceptable here.
 	if err := ensureTenantNetwork(context.Background(), ""); err == nil {
 		t.Fatal("a non-build deploy must still refuse an empty network")
 	}
@@ -153,8 +134,7 @@ func TestBuildOnlyDeploy_needsNoNetwork(t *testing.T) {
 	}
 }
 
-// The refusal is BEFORE docker: a platform name arriving here would put a tenant
-// beside the panel, so it never reaches `network create`.
+// The refusal is BEFORE docker: a platform name arriving here would put a tenant beside the panel, so it never reaches `network create`.
 func TestEnsureTenantNetwork_refusesWhatIsNotATenantNetwork(t *testing.T) {
 	for _, n := range []string{"", "deplo", "deplo-internal", "deplo-socket", "bridge"} {
 		if err := ensureTenantNetwork(context.Background(), n); err == nil {
@@ -163,11 +143,8 @@ func TestEnsureTenantNetwork_refusesWhatIsNotATenantNetwork(t *testing.T) {
 	}
 }
 
-// The ceiling is invisible until a deploy fails on it, and the hosts that hit it
-// are the ones installed before the installer began widening the pools.
+// The ceiling is invisible until a deploy fails on it, and the hosts that hit it are the ones installed before the installer began widening the pools.
 func TestNetworkHeadroom_silentWhenPoolsAreWidened(t *testing.T) {
-	// This host has widened pools (the installer wrote them), so there is nothing
-	// to warn about however many networks exist.
 	if _, err := os.Stat("/etc/docker/daemon.json"); err != nil {
 		t.Skip("no daemon.json on this host")
 	}
@@ -180,9 +157,7 @@ func TestNetworkHeadroom_silentWhenPoolsAreWidened(t *testing.T) {
 	}
 }
 
-// A deploy reconnects Traefik only to the tenant networks it is NOT on: on a host
-// with dozens of Environments the old "connect to all" paid one docker call per
-// network per deploy, every one answered "already exists".
+// A deploy reconnects Traefik only to the tenant networks it is NOT on: on a host with dozens of Environments the old "connect to all" paid one docker call per network per deploy, every one answered "already exists".
 func TestMissingNetworks_onlyTheAbsentOnes(t *testing.T) {
 	on := map[string]bool{"deplo-env-a": true, "deplo": true}
 	got := missingNetworks(on, []string{"deplo-env-a", "deplo-env-b", "deplo-team-c"})
@@ -197,9 +172,7 @@ func TestMissingNetworks_onlyTheAbsentOnes(t *testing.T) {
 	}
 }
 
-// The preview networks of a stack are read off ONE `docker ps --format {{.Networks}}`
-// listing: one comma-joined line per container, duplicates collapsed, everything
-// that is not a preview network ignored.
+// The preview networks of a stack are read off ONE `docker ps --format {{.Networks}}` listing: one comma-joined line per container, duplicates collapsed, everything that is not a preview network ignored.
 func TestPreviewNetworksIn_readsDockerPsNetworks(t *testing.T) {
 	out := "deplo-preview-web__pr-3,deplo\n" +
 		"deplo-preview-web__pr-3\n" +

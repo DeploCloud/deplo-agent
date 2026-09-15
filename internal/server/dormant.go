@@ -9,12 +9,6 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
-// Dev mode and its SSH gateway were removed from the control plane (#33/#34) and
-// nothing here is reachable. These methods exist only so the generated Agent
-// interface stays satisfied; every one refuses before any Docker/ssh/fs work, and
-// the bodies that used to sit behind them are gone. Never revive them here: a
-// return goes through the agent's own RPCs, not a second host-lifecycle path.
-
 func (s *Service) StartDev(req *pb.StartDevRequest, stream pb.Agent_StartDevServer) error {
 	return status.Error(codes.Unimplemented, "dev mode has been removed")
 }

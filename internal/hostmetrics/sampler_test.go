@@ -5,17 +5,11 @@ import (
 	"time"
 )
 
-// These tests read real /proc on the test host, so they assert SHAPE and INVARIANTS
-// rather than pinning values - CI runners are shared and noisy, and a test that expects
-// a particular CPU or byte count would fail for reasons that have nothing to do with
-// this package.
-
-// The regression guard this whole file exists for: Sampler's reason to live is that it
-// does NOT buy its delta window with a sleep the way Collect does.
+// The regression guard this whole file exists for: Sampler's reason to live is that it does NOT buy its delta window with a sleep the way Collect does.
 func TestSampler_Sample_doesNotSleep(t *testing.T) {
 	s := NewSampler("/")
 	primed := s.prevAt
-	time.Sleep(2 * minWindow) // the TEST may sleep; Sample may not
+	time.Sleep(2 * minWindow)
 
 	start := time.Now()
 	s.Sample()
@@ -28,8 +22,6 @@ func TestSampler_Sample_doesNotSleep(t *testing.T) {
 		t.Errorf("Sample() over a usable window took %v, want well under 300ms - a sleep has been reintroduced", elapsed)
 	}
 
-	// The degenerate branch carries the same guard, so a sleep cannot hide there
-	// either.
 	start = time.Now()
 	s.Sample()
 	if d := time.Since(start); d > 300*time.Millisecond {
@@ -37,11 +29,10 @@ func TestSampler_Sample_doesNotSleep(t *testing.T) {
 	}
 }
 
-// Same register as TestCollect_returnsSaneShape: on a real Linux host the basic
-// facts hold. Sampled across a genuine window so the rate path is exercised too.
+// Same register as TestCollect_returnsSaneShape: on a real Linux host the basic facts hold.
 func TestSampler_Sample_returnsSaneShape(t *testing.T) {
 	s := NewSampler("/")
-	time.Sleep(2 * minWindow) // let a real window form; the TEST may sleep, Sample may not
+	time.Sleep(2 * minWindow)
 	m := s.Sample()
 
 	if m.CPUCores < 1 {
@@ -67,14 +58,11 @@ func TestSampler_Sample_returnsSaneShape(t *testing.T) {
 	}
 }
 
-// A counter reset between samples must clamp to 0, not wrap negative, AND the sampler
-// must recover on the next window: adopting the post-reset counter as the new baseline
-// is what makes the tick after a bounce report a real rate instead of a since-boot
-// total.
+// A counter reset between samples must clamp to 0, not wrap negative, AND the sampler must recover on the next window: adopting the post-reset counter as the new baseline is what makes the tick after a bounce report a real rate instead of a since-boot total.
 func TestSampler_counterResetClampsToZero(t *testing.T) {
 	s := NewSampler("/")
 	s.prevAt = time.Now().Add(-time.Second)
-	s.prevRx = 1 << 60 // baseline far above the live counter, as after a reset
+	s.prevRx = 1 << 60
 	s.prevTx = 1 << 60
 
 	m := s.Sample()
@@ -82,10 +70,6 @@ func TestSampler_counterResetClampsToZero(t *testing.T) {
 		t.Errorf("after counter reset: NetRx = %d, NetTx = %d, want 0/0", m.NetRx, m.NetTx)
 	}
 
-	// Recovery is about the BASELINE, not the rate: the clamped tick must adopt the
-	// LIVE counter, since adopting zero would make the next tick report the whole
-	// since-boot total as a rate. Asserted on the baseline because a rate ceiling is
-	// unmeasurable on a runner moving real bytes in another package's tests.
 	for _, c := range []struct {
 		name string
 		prev int64
@@ -101,9 +85,7 @@ func TestSampler_counterResetClampsToZero(t *testing.T) {
 	}
 }
 
-// A window too short to measure must report rates of 0 and leave the baseline ALONE, so
-// the next call measures across the full span instead of being reset back to zero-width
-// forever.
+// A window too short to measure must report rates of 0 and leave the baseline ALONE, so the next call measures across the full span instead of being reset back to zero-width forever.
 func TestSampler_degenerateWindowKeepsBaseline(t *testing.T) {
 	s := NewSampler("/")
 	baseline := time.Now().Add(time.Hour)
@@ -113,8 +95,6 @@ func TestSampler_degenerateWindowKeepsBaseline(t *testing.T) {
 	if m.NetRx != 0 || m.NetTx != 0 || m.CPU != 0 {
 		t.Errorf("degenerate window: got CPU=%f NetRx=%d NetTx=%d, want all 0", m.CPU, m.NetRx, m.NetTx)
 	}
-	// Point-in-time fields are still real - a too-short window makes RATES
-	// unmeasurable, it does not make the whole sample unmeasurable.
 	if m.MemTotal <= 0 {
 		t.Errorf("MemTotal = %d, want > 0 even on a degenerate window", m.MemTotal)
 	}
@@ -126,9 +106,7 @@ func TestSampler_degenerateWindowKeepsBaseline(t *testing.T) {
 	}
 }
 
-// The complement of the test above: a usable window MUST advance the baseline,
-// or every sample would keep diffing against the original priming read and the
-// reported rates would drift into a since-startup average.
+// The complement of the test above: a usable window MUST advance the baseline, or every sample would keep diffing against the original priming read and the reported rates would drift into a since-startup average.
 func TestSampler_goodWindowAdvancesBaseline(t *testing.T) {
 	s := NewSampler("/")
 	primed := s.prevAt
@@ -141,21 +119,13 @@ func TestSampler_goodWindowAdvancesBaseline(t *testing.T) {
 	}
 }
 
-// windowed re-arms the sampler so the next Sample() is guaranteed to clear
-// minWindow with a known elapsed of ~1s, without the test sleeping for it.
 func windowed(s *Sampler) { s.prevAt = time.Now().Add(-time.Second) }
 
-// THE failure path: /proc/net/dev fails to read (fd exhaustion under load, a restricted
-// /proc in a container, a hostile ulimit). readNetCounters reports that as 0/0,
-// indistinguishable from a real reading, so a sampler that adopted it as its baseline
-// would diff the entire since-boot counter against 0 on the very next tick - measured
-// at 11.4 GB/s before this was fixed.
+// THE failure path: /proc/net/dev fails to read (fd exhaustion under load, a restricted /proc in a container, a hostile ulimit).
 func TestSampler_failedNetReadDoesNotPoisonBaseline(t *testing.T) {
-	const sinceBoot = int64(1) << 40 // ~1.1 TB, an ordinary long-lived host
+	const sinceBoot = int64(1) << 40
 	counter, ok := sinceBoot, true
 	s := NewSampler("/")
-	// Faithful to readNetCounters: a failed read yields ZERO values, which is
-	// exactly what makes it indistinguishable from a real reading downstream.
 	s.readNet = func() (int64, int64, bool) {
 		if !ok {
 			return 0, 0, false
@@ -163,14 +133,12 @@ func TestSampler_failedNetReadDoesNotPoisonBaseline(t *testing.T) {
 		return counter, counter, true
 	}
 
-	// A good tick establishes the baseline at the since-boot value.
 	windowed(s)
 	s.Sample()
 	if s.prevRx != sinceBoot {
 		t.Fatalf("setup: baseline = %d, want %d", s.prevRx, sinceBoot)
 	}
 
-	// The read fails: rates are unmeasured (0) and the baseline must not move.
 	ok = false
 	windowed(s)
 	m := s.Sample()
@@ -181,8 +149,6 @@ func TestSampler_failedNetReadDoesNotPoisonBaseline(t *testing.T) {
 		t.Fatalf("failed read advanced the baseline to %d/%d; the next tick would divide a since-boot counter by one tick", s.prevRx, s.prevTx)
 	}
 
-	// The read recovers after ~1s having moved 1000 bytes: the rate must be
-	// measured across the gap. A poisoned baseline reports ~1.1e12 bytes/sec here.
 	ok = true
 	counter = sinceBoot + 1000
 	windowed(s)
@@ -195,14 +161,10 @@ func TestSampler_failedNetReadDoesNotPoisonBaseline(t *testing.T) {
 	}
 }
 
-// The CPU half of the same bug, and the more insidious one: a poisoned CPU
-// baseline does not produce an obviously absurd number, it produces the
-// since-boot AVERAGE, which looks entirely plausible and so is never noticed.
+// The CPU half of the same bug, and the more insidious one: a poisoned CPU baseline does not produce an obviously absurd number, it produces the since-boot AVERAGE, which looks entirely plausible and so is never noticed.
 func TestSampler_failedCPUReadDoesNotPoisonBaseline(t *testing.T) {
-	// A long-lived host that has been ~90% idle since boot.
 	cur, ok := cpuTimes{idle: 900, total: 1000}, true
 	s := NewSampler("/")
-	// Faithful to readCPUTimes: a failed read yields a zero cpuTimes.
 	s.readCPU = func() (cpuTimes, bool) {
 		if !ok {
 			return cpuTimes{}, false
@@ -225,7 +187,6 @@ func TestSampler_failedCPUReadDoesNotPoisonBaseline(t *testing.T) {
 		t.Fatalf("failed read advanced the CPU baseline to %+v; the next tick would report the since-boot average", s.prevCPU)
 	}
 
-	// Recovery across a fully busy gap: 100 ticks of total, none of them idle.
 	ok = true
 	cur = cpuTimes{idle: 900, total: 1100}
 	windowed(s)
@@ -234,9 +195,7 @@ func TestSampler_failedCPUReadDoesNotPoisonBaseline(t *testing.T) {
 	}
 }
 
-// A failed net read must not drag the CPU baseline down with it, and vice
-// versa: the two counters come from different files and fail independently, so
-// one unreadable file must not cost the other its window.
+// A failed net read must not drag the CPU baseline down with it, and vice versa: the two counters come from different files and fail independently, so one unreadable file must not cost the other its window.
 func TestSampler_readFailuresAreIndependent(t *testing.T) {
 	s := NewSampler("/")
 	cpu := cpuTimes{idle: 900, total: 1000}
@@ -249,9 +208,6 @@ func TestSampler_readFailuresAreIndependent(t *testing.T) {
 		t.Errorf("CPU baseline = %+v, want it advanced to %+v despite the net read failing", s.prevCPU, cpu)
 	}
 
-	// prevAt timestamps the NET baseline, so a net failure must leave it behind
-	// too - advancing the clock while keeping stale counters would divide a
-	// multi-tick delta by a single tick, the same fake spike by another route.
 	if time.Since(s.prevAt) < time.Second {
 		t.Error("net read failed but prevAt advanced; the next window would be measured too short")
 	}

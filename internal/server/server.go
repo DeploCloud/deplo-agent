@@ -1,5 +1,3 @@
-// Package server implements the Agent gRPC service - the server side of the second
-// system boundary (ADR-0006).
 package server
 
 import (
@@ -23,284 +21,111 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/hostmetrics"
 )
 
-// Capabilities this agent advertises in Hello. The control plane routes only
-// what the agent supports here through the agent path, keeping a local fallback
-// for everything else (Part A: the Dockerfile build + single-image compose-up).
+// Capabilities this agent advertises in Hello.
 var Capabilities = []string{
-	"deploy.dockerfile",     // builds the Dockerfile method
-	"deploy.image",          // runs a prebuilt image as-is
-	"deploy.compose.single", // single-image compose-up
-	"deploy.compose.multi",  // multi-service compose stack (env-file + label-wait)
-	// The heavy builders, ported from builders.ts (build_methods.go).
-	"deploy.static",     // nginx static site
-	"deploy.nixpacks",   // nixpacks (binary lazily installed on first use)
-	"deploy.buildpacks", // Cloud Native Buildpacks (heroku + paketo) via pack
-	"deploy.railpack",   // railpack via buildkitd/buildctl
-	"deploy.buildenv",   // req.env reaches BUILDS too (build args / plan secrets), not just the runtime stack
-	// A pinned runtime version reaches nixpacks as a file in the build dir, not only
-	// as NIXPACKS_NODE_VERSION - which picks the nodejs package but not the nixpkgs
-	// archive, so every unpinned Node app failed on "undefined variable 'nodejs_24'".
+	"deploy.dockerfile",
+	"deploy.image",
+	"deploy.compose.single",
+	"deploy.compose.multi",
+	"deploy.static",
+	"deploy.nixpacks",
+	"deploy.buildpacks",
+	"deploy.railpack",
+	"deploy.buildenv",
 	"deploy.nixpacks-runtime-pin",
-	// The two "give me a genuinely fresh one" switches on DeployRequest.
 	"deploy.nocache",
 	"deploy.force-recreate",
-	// The app's own extra `docker compose up` flags ride DeployRequest / RerouteRequest
-	// and are appended to the bring-up the agent assembles.
 	"deploy.compose-args",
-	// A compose stack is brought up with `--project-directory` pointing at its OWN
-	// directory, and its env-file is `.env` inside it. Gated because a stack imported from
-	// a platform that writes its own `.env` simply will not start on an agent without it.
 	"deploy.compose.projectdir",
-	// BuildSpec.skip_install / skip_build are honoured: a step is emptied rather
-	// than detected. Without this the control plane must not offer the choice -
-	// the command strings alone cannot carry it, and detecting is the safe read.
 	"build.skip_steps",
-	// A build var is declared ARG-only in a generated Dockerfile: the arg already
-	// reaches every RUN, and the paired ENV persisted the value in the image config
-	// where `docker inspect` handed it back in plaintext.
 	"build.env-not-baked",
-	// FollowLogsRequest carries a time window and a timestamp prefix
-	// (`--since`/`--until`/`--timestamps`).
 	"logs.timerange",
 	"metrics",
-	"container-stats", // per-container `docker stats` snapshot (ContainerStats) - the per-app/per-database Monitoring tab
-	// ONE long-lived host+container telemetry stream (StreamMetrics), sampled on the
-	// agent's own ticker.
+	"container-stats",
 	"metrics-stream",
-	// ContainerStat carries net_ns_id / net_ns_host, so the control plane can count a
-	// shared network namespace once and recognise `network_mode: host`. Also marks the
-	// build whose host counters skip bridges and veths - the rollout's check.
 	"metrics.netns",
-	"dev",         // dev container lifecycle (StartDev/StopDev/Reset/Teardown) - Part D
-	"ssh-gateway", // the per-host SSH gateway singleton (Ensure/Provision/Deprovision)
-	"tunnel",      // the VS Code remote tunnel (Start/Get/Stop)
-	"self-update", // in-place agent binary update over mTLS (SelfUpdate), certs kept
-	// The agent removes ITSELF from the host (SelfUninstall): unit, binary, state dir.
-	// Docker is never touched; uninstall-agent.sh stays the answer for a host that is
-	// unreachable or already de-trusted.
+	"dev",
+	"ssh-gateway",
+	"tunnel",
+	"self-update",
 	"self-uninstall",
-	"backup",    // dump/restore a DB or project to/from S3 (Backup/Restore/S3Check/S3Delete)
-	"checkport", // host TCP port availability probe (CheckPort) - gates DB "expose publicly"
-	// One bounded HTTP GET to a container of an app's own stack (ProbeHttp).
+	"backup",
+	"checkport",
 	"http-probe",
-	// Scheduled `docker exec` the agent owns for its whole lifetime
-	// (StartJob/PollJob/KillJob) - the Cron jobs feature.
 	"cron",
-	// A cron job runs in a plain `sh -c`, not a login shell: the container's PATH
-	// reaches the command unchanged.
 	"cron.plain-shell",
-	// A stopped or timed-out job's process tree is killed on the host by the
-	// DEPLO_JOB_ID marker it inherited, not left running behind a dead exec.
 	"cron.kill-tree",
-	// stderr is a byte stream into its ring, not a line scanner (a huge single
-	// line no longer stalls the job), and a stray non-UTF-8 byte is replaced
-	// instead of costing the output before it.
 	"cron.output-hardened",
-	"volume-copy", // cross-host named-volume copy for a server move (ExportVolume/ImportVolume)
-	// The import half of a copy is hardened: the incoming tar is sanitised (setuid
-	// bits, device nodes and escaping links dropped), a host path is symlink-resolved
-	// before the deny-list judges it, and the result always carries its sha256.
+	"volume-copy",
 	"volume-copy-hardened",
-	// ExportHostPath/ImportHostPath carry a single FILE, not only a directory: a
-	// stack that binds `/srv/site/nginx.conf` moves the file instead of failing the
-	// copy and coming back up on an empty directory of that name.
 	"host-path-copy.file",
-	// ImportVolume / ImportHostPath report what the sanitising pump dropped
-	// (StackResult.dropped_*). Absent means the agent does not report it, never that
-	// nothing was dropped.
 	"volume-copy.drop-report",
-	"files-copy", // cross-host files-dir copy for a service move (ExportFiles/ImportFiles)
-	// On-disk size of a named volume (VolumeUsage) - what a database's Data card
-	// reports, measured rather than stored.
+	"files-copy",
 	"volume-usage",
-	// Backup artifacts held on THIS host's filesystem instead of an S3 bucket: the
-	// StoreTarget arms of Backup/Restore/S3Check/S3Delete, plus the relay primitives
-	// ReadStoreFile / WriteStoreFile / RestoreFrom.
 	"backup-store",
-	// Two things that changed about a BUCKET artifact, shipped as one flag because they
-	// land together and a control plane that finds it absent must fall back on both at
-	// once: - `age_recipient` is honoured for an S3 destination, so a bucket artifact is
-	// encrypted like a store one.
 	"backup-encrypt-s3",
-	// `S3Target.extra_args` is read: a destination's advanced quirk flags
-	// (`--s3-sign-accept-encoding=false`, `--s3-force-path-style=true`, …) reach the minio
-	// client instead of being ignored.
 	"backup-s3-args",
-	// ReadStoreFile accepts an S3Target, so a BUCKET artifact can be streamed out
-	// decrypted the same way a store one already is.
 	"backup-s3-read",
-	// RestoreFrom honours `untrusted_config`: an artifact that came from outside the fleet
-	// contributes DATA only, never the compose/env/mounts the stack comes back up with.
 	"backup-untrusted-config",
-	// Allow-listed Docker disk reclaim (DockerCleanup): build cache, dangling
-	// images, orphaned buildkit volumes, unused app images. NEVER a bare prune.
 	"docker-cleanup",
-	// DockerCleanupRequest.keep_per_slug is read: app-image retention is per APP instead
-	// of one number for the whole host, which is what lets each app carry its own rollback
-	// depth.
 	"cleanup.keep-per-slug",
-	// CLEANUP_SCOPE_LEFTOVER_APP_FILES is implemented: the files/<slug> directories of
-	// deleted stacks are reclaimed, judged against the live-slug list the request carries.
 	"cleanup.leftover-files",
-	// CLEANUP_SCOPE_LEFTOVER_NETWORKS is implemented AND actually reclaims: the proxy
-	// is not counted as a live attachment and is disconnected before the removal, so an
-	// emptied Environment's network is a candidate instead of being pinned forever.
-	// Its own string because the first cut of the scope advertised the name and
-	// reclaimed nothing - and a moved tag makes the version no proof of which is running.
 	"cleanup.leftover-networks.reclaims",
-	// A BUILD-ONLY deploy no longer creates the app's network on a machine that
-	// runs nothing of it, and an HTTP probe reads the address the app is ROUTED on
-	// rather than whichever network name sorted first. Its own string because the
-	// tag is moved rather than bumped, so the version proves nothing about which
-	// binary a host is running.
 	"deploy.network.build-only-skips",
-	// The network a Deploy/Reroute names is REFUSED unless it is a tenant's
-	// (`deplo-env-` / `deplo-team-` / `deplo-preview-`), so a control-plane bug that
-	// sent the platform's own name cannot put a stack beside the panel. Its own
-	// string for the usual reason: the tag moves, so the version proves nothing.
 	"deploy.network.tenant-only",
-	// Nothing new in the agent for the control plane's second network audit - the
-	// fixes were all control-plane side. Its own string so a fleet rolled onto THAT
-	// release can be told apart from one still on the previous binary.
 	"deploy.network.audit2",
-	// A restore re-points the archived stack file at the network the request names,
-	// instead of bringing it up on the one the app had on the day of the backup -
-	// which by then may have been reclaimed, leaving the data restored and the
-	// stack down.
 	"restore.network-retarget",
-	// Two things this binary does that the previous one did not: it warns while
-	// there is still address space left instead of failing a deploy on an exhausted
-	// pool, and it puts Traefik back on EVERY tenant network at each deploy, healing
-	// a proxy recreated outside the config-apply path.
 	"deploy.network.headroom",
 	"cleanup.leftover-networks",
-	// CLEANUP_SCOPE_ORPHAN_VOLUMES and CLEANUP_SCOPE_UNUSED_PULLED_IMAGES are
-	// implemented; live_slugs also drives UNUSED_APP_IMAGES and LEFTOVER_NETWORKS.
 	"cleanup.orphan-volumes",
 	"cleanup.pulled-images",
-	// DeployRequest.network / RerouteRequest.network are honoured: a stack joins the
-	// network its Environment owns instead of one shared network, and the agent puts
-	// Traefik on it. There is no shared-network fallback - this agent cannot serve a
-	// control plane that does not send it.
 	"deploy.network",
-	// mTLS leaf renewal over the existing pinned channel (RenewalCSR +
-	// InstallRenewedCert): the control plane re-signs a fresh CSR before the ~365d cert
-	// expires and the agent hot-reloads it WITHOUT a restart.
 	"cert-renewal",
-	// The host-level verbs the Servers page needs (HostInfo, SetTimezone, TraefikConfig,
-	// RestartControlPlane): what this hardware IS, what time it thinks it is, restarting
-	// Traefik, restarting the panel.
 	"hostops",
-	// DeployRequest.build_only is honoured: this agent can build an image and stop, for a
-	// BUILD SERVER that compiles for hosts it does not run on.
 	"deploy.build-only",
-	// The variables nixpacks computes for a plan reach `docker build` as build args.
-	// Without them Caddy's `root * ../app/{$NIXPACKS_SPA_OUTPUT_DIR}` resolved to the
-	// repo root and every Vite SPA served its unbuilt index.html.
 	"build.nixpacks-vars",
-	// BuildSpec.output_directory is honoured by the RAILPACK path too (as
-	// RAILPACK_SPA_OUTPUT_DIR): a framework that builds a directory and runs no
-	// server is served by Caddy instead of falling back on its dev script.
 	"build.railpack-output-dir",
-	// ExportImage/ImportImage: a built image streams host-to-host through the control
-	// plane, the third sibling of the volume and files-dir relays.
 	"image-copy",
-	// DeployRequest.registry_auth is honoured: every pull this deploy makes reads the
-	// team's registry credentials, so a private image works without a host `docker login`.
 	"deploy.registry-auth",
-	// Two things this binary does that the previous one did not: it ranks an app's
-	// images within their REPOSITORY (a pulled image labelled with someone else's slug
-	// can no longer evict their rollback), and it reads the daemon's address pools from
-	// `docker info` and measures them instead of looking for a key in daemon.json. Its
-	// own string because the tag moves, so the version proves nothing.
 	"cleanup.images.by-repository",
-	// A volume or host-path copy gets a 6h wall clock instead of 30 minutes, so a large
-	// volume over a slow link is no longer killed mid-transfer. Its own string because
-	// the tag moves, so the version proves nothing.
 	"volume-copy-6h",
-	// Every export gzips at BestSpeed: the default level was CPU-bound on the source
-	// agent and capped a relay at ~7 MiB/s. Its own string because the tag moves.
 	"copy.gzip-bestspeed",
-	// A sanitised import reads on to the gzip EOF after the tar's end, so a tar sized
-	// on a 32 KiB flate boundary no longer dies on a closed pipe. Its own string
-	// because the tag moves.
 	"copy.drain-eof",
-	// A destroyed stack takes its `deplo-preview-*` network with it (Traefik taken
-	// off first). Before, every closed pull request left one network behind until
-	// the nightly cleanup, against a default address pool of about thirty.
 	"teardown.preview-network",
-	// A destroy of a stack whose file is already gone reports Ok once `rm -f` has
-	// found nothing, `removeVolumes` or not: the file only ever went on a successful
-	// `down`, so nothing of it is left to reclaim.
 	"teardown.missing-file-ok",
-	// A host-path copy may write under `<stack-dir>/files/`, which the /data/stacks
-	// deny had swallowed - so an imported stack gets the files its own YAML binds.
-	// Its own string because the tag moves.
 	"host-path-copy.stack-files",
-	// UpdateControlPlane: the panel updates ITSELF from its own dashboard, by this
-	// agent re-running the Deplo installer on the host. Absent means the control
-	// plane must fall back on telling the operator the command.
 	"control-plane.update",
 }
 
-// AgentVersion is the version this agent reports over Hello. "dev" for a build that
-// skipped the stamp (e.g. a bare `go build`), which the control plane treats as "can't
-// compare", never "outdated".
+// AgentVersion is the version this agent reports over Hello.
 var AgentVersion = "dev"
 
-// retainFinished is how long a finished deploy's event buffer is kept so a
-// control plane that dropped just before the terminal result can still reattach
-// and fetch it (PLAN D5). After this it is evicted to bound memory.
 const retainFinished = 10 * time.Minute
 
 // Service is the gRPC Agent implementation.
 type Service struct {
 	pb.UnimplementedAgentServer
 
-	// stackDir is where rendered stack files are written (mirrors the control
-	// plane's /data/stacks). buildTmpDir is where upload contexts are extracted.
-	stackDir    string
-	buildTmpDir string
-	dataDir     string
-	// dataBase is the host data root (the control plane's DEPLO_DATA_DIR, e.g. /data),
-	// under which dev workspaces (<dataBase>/dev) and the SSH gateway
-	// (<dataBase>/ssh-gateway) live - the Part D per-host singletons.
-	dataBase string
-	// cacheSalt seeds the per-app BuildKit cache namespace (cache_ns.go).
+	stackDir      string
+	buildTmpDir   string
+	dataDir       string
+	dataBase      string
 	cacheSaltOnce sync.Once
 	cacheSalt     []byte
-	// agentDir is the agent's OWN data root (--agent-dir, the installer's
-	// /var/lib/deplo-agent): mTLS materials, and the Traefik stack the installer puts
-	// under traefik/.
-	agentDir string
-	// traefikApply overrides how the Traefik stack is brought up. nil in
-	// production (bringUpTraefik runs docker); set by tests so exercising the
-	// rollback path cannot start a container on the machine running them.
-	traefikApply func(ctx context.Context, path string, restartOnly bool) error
+	agentDir      string
+	traefikApply  func(ctx context.Context, path string, restartOnly bool) error
 
 	mu      sync.Mutex
 	deploys map[string]*inflight
-	// Cron jobs this agent is running or recently finished (job.go). Same mutex as
-	// `deploys` and the same ownership rule: the process lives on a job-scoped context, so
-	// a control-plane disconnect never kills it.
-	jobs map[string]*job
+	jobs    map[string]*job
 
-	// mTLS leaf renewal (nil for --insecure / tests). certMgr hot-swaps the live
-	// server cert; pendingKey is the freshly-generated key from a RenewalCSR,
-	// held until the matching signed cert arrives via InstallRenewedCert.
 	certMgr    *CertManager
 	pendingMu  sync.Mutex
 	pendingKey ed25519.PrivateKey
 
-	// One compose project is one lock. Two `docker compose` runs on the same `-p`
-	// interleave their own create/remove steps, and a move racing a start is exactly
-	// that. Deploy is deliberately out: the control plane single-flights it, and
-	// holding this across a ten-minute build would block the stop that cancels it.
-	stackLocks sync.Map // slug -> *sync.Mutex
+	stackLocks sync.Map
 }
 
-// lockStack serializes the compose operations on one stack. The returned func
-// unlocks; call it with defer.
 func (s *Service) lockStack(slug string) func() {
 	v, _ := s.stackLocks.LoadOrStore(slug, &sync.Mutex{})
 	mu := v.(*sync.Mutex)
@@ -308,14 +133,11 @@ func (s *Service) lockStack(slug string) func() {
 	return mu.Unlock
 }
 
-// New builds the service. stackDir/buildTmpDir are created lazily by the deploy
-// path; dataDir is the filesystem measured for disk metrics; dataBase is the host
-// data root for the Part D dev/gateway singletons (empty => parent of stackDir).
+// New builds the service.
 func New(stackDir, buildTmpDir, dataDir, dataBase string) *Service {
 	if dataBase == "" {
 		dataBase = filepath.Dir(stackDir)
 	}
-	// Credentials an agent that died mid-deploy left behind.
 	sweepDockerConfigs()
 	return &Service{
 		stackDir:    stackDir,
@@ -327,8 +149,7 @@ func New(stackDir, buildTmpDir, dataDir, dataBase string) *Service {
 	}
 }
 
-// Hello is the health + identity handshake and the mandatory deploy pre-flight (PLAN
-// P5).
+// Hello is the health + identity handshake and the mandatory deploy pre-flight (PLAN P5).
 func (s *Service) Hello(ctx context.Context, req *pb.HelloRequest) (*pb.HelloResponse, error) {
 	version, available := dockercli.Server(ctx)
 	return &pb.HelloResponse{
@@ -337,12 +158,8 @@ func (s *Service) Hello(ctx context.Context, req *pb.HelloRequest) (*pb.HelloRes
 		DockerAvailable: available,
 		DockerVersion:   version,
 		Capabilities:    Capabilities,
-		// Read live so the control plane can set the server's traefikEnabled from
-		// each Hello rather than a stored value that goes stale.
-		TraefikRunning: available && dockercli.TraefikRunning(ctx),
-		// This binary's own architecture, which is the host's: the release publishes
-		// linux/amd64 and linux/arm64 and the installer picks by `uname -m`.
-		HostArch: runtime.GOARCH,
+		TraefikRunning:  available && dockercli.TraefikRunning(ctx),
+		HostArch:        runtime.GOARCH,
 	}, nil
 }
 
@@ -353,13 +170,9 @@ func (s *Service) Metrics(ctx context.Context, req *pb.MetricsRequest) (*pb.Host
 		dataDir = s.dataDir
 	}
 	m := hostmetrics.Collect(dataDir)
-	// `docker ps -q` per call is affordable here (one unary RPC, on demand) but
-	// NOT on the stream's ticker - StreamMetrics takes the count from its roster,
-	// which is rebuilt on container churn rather than every 5s. See roster.go.
 	return hostMetricsPB(m, dockercli.RunningContainers(ctx)), nil
 }
 
-// hostMetricsPB maps a hostmetrics.Metrics onto the wire type.
 func hostMetricsPB(m hostmetrics.Metrics, runningContainers int) *pb.HostMetrics {
 	return &pb.HostMetrics{
 		Cpu:               m.CPU,
@@ -392,12 +205,9 @@ func (s *Service) Deploy(req *pb.DeployRequest, stream pb.Agent_DeployServer) er
 	s.mu.Lock()
 	existing := s.deploys[id]
 	if existing != nil {
-		// Already running (or finished + retained): attach instead of re-running.
 		s.mu.Unlock()
 		return existing.subscribe(stream.Context(), 0, stream.Send)
 	}
-	// Start a fresh deploy on a background, deploy-scoped context so a stream
-	// disconnect does not abort the build.
 	deployCtx, cancel := context.WithCancel(context.Background())
 	f := newInflight(cancel)
 	s.deploys[id] = f
@@ -405,13 +215,10 @@ func (s *Service) Deploy(req *pb.DeployRequest, stream pb.Agent_DeployServer) er
 
 	go s.driveDeploy(deployCtx, id, req, f)
 
-	// The caller's stream subscribes from the start; its context cancelling just
-	// detaches this reader (the build continues for a reattacher).
 	return f.subscribe(stream.Context(), 0, stream.Send)
 }
 
-// ReattachDeploy reconnects to an in-flight or recently-finished deploy and replays
-// events past from_seq, then follows it live to completion (D5).
+// ReattachDeploy reconnects to an in-flight or recently-finished deploy and replays events past from_seq, then follows it live to completion (D5).
 func (s *Service) ReattachDeploy(req *pb.ReattachRequest, stream pb.Agent_ReattachDeployServer) error {
 	id := req.GetDeployId()
 	s.mu.Lock()
@@ -423,19 +230,12 @@ func (s *Service) ReattachDeploy(req *pb.ReattachRequest, stream pb.Agent_Reatta
 	return f.subscribe(stream.Context(), req.GetFromSeq(), stream.Send)
 }
 
-// driveDeploy runs the deploy body, appending every emitted event to the inflight
-// buffer (which fans out to all subscribers), then schedules the record's eviction
-// after the retention window so a late reattacher can still fetch the terminal result.
 func (s *Service) driveDeploy(ctx context.Context, id string, req *pb.DeployRequest, f *inflight) {
-	defer f.cancel() // release the deploy context when the body returns
+	defer f.cancel()
 	e := &emitter{send: func(ev *pb.DeployEvent) error {
 		f.append(ev)
 		return nil
 	}}
-	// A panic inside a builder (a nil-deref on a partial proto, an index error on
-	// malformed build input) must degrade to ONE failed deploy, not crash the whole
-	// agent, which would take down every tenant's streams/metrics/management on this
-	// shared host.
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -444,7 +244,6 @@ func (s *Service) driveDeploy(ctx context.Context, id string, req *pb.DeployRequ
 		}()
 		s.runDeploy(ctx, req, e)
 	}()
-	// Retain briefly for reconnection, then evict.
 	time.AfterFunc(retainFinished, func() {
 		s.mu.Lock()
 		if s.deploys[id] == f {
@@ -490,20 +289,14 @@ func (s *Service) StartStack(ctx context.Context, ref *pb.StackRef) (*pb.StackRe
 	return &pb.StackResult{Ok: false, Error: stackFailure(res, err, r2, err2)}, nil
 }
 
-// DestroyStack stops and removes a stack (compose down, falling back to rm -f). An
-// older control plane that never sends the field leaves it false too, so the default is
-// the original volume-preserving behaviour.
+// DestroyStack stops and removes a stack (compose down, falling back to rm -f).
 func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.StackResult, error) {
 	slug := ref.GetSlug()
 	if err := validateSlug(slug); err != nil {
 		return nil, err
 	}
 	defer s.lockStack(slug)()
-	// Read BEFORE the down: once the containers are gone nothing names the network.
 	previewNets := stackPreviewNetworks(ctx, slug)
-	// No stack file ⇒ no project for `down` to act on. The file only goes on a
-	// successful `down`, so what that run removed is gone; left to the fallback, a
-	// `down -v` here reported failure forever for a stack that no longer existed.
 	if !isFile(s.stackPath(slug)) {
 		r2, err := removeStackContainers(ctx, slug)
 		if err != nil {
@@ -521,20 +314,12 @@ func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.Stack
 		downArgs = append(downArgs, "-v")
 	}
 	res, err := dockercli.Run(ctx, 90*time.Second, downArgs...)
-	// Named volumes the control plane asked for BY NAME, reclaimed whatever the `down`
-	// did. Best-effort by design: a volume that is gone, or still in use by something
-	// else, must not turn a good destroy bad.
 	reclaimed := s.reclaimVolumes(ctx, ref.GetReclaimVolumes())
 	if err == nil && res.Code == 0 {
-		// The stack files go on ANY successful `down`, not just a `down -v`. On a long-lived
-		// host that is dozens of files nothing will ever read again, each holding the env the
-		// app was running with.
 		s.removeStackFiles(slug)
 		removePreviewNetworks(ctx, previewNets)
 		return &pb.StackResult{Ok: true, Error: reclaimed}, nil
 	}
-	// `rm -f` is idempotent for a missing container (exit 0), so the common already-gone
-	// case still reports Ok.
 	r2, err := removeStackContainers(ctx, slug)
 	if err != nil {
 		return &pb.StackResult{Ok: false, Error: err.Error()}, nil
@@ -542,8 +327,6 @@ func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.Stack
 	if r2.Code == 0 {
 		removePreviewNetworks(ctx, previewNets)
 	}
-	// A removeVolumes destroy that fell through to `rm -f` did NOT run a successful `down
-	// -v`, and `rm -f` only removes a container - it can never reclaim a named volume.
 	if ref.GetRemoveVolumes() {
 		msg := r2.Stderr
 		if msg == "" {
@@ -557,10 +340,6 @@ func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.Stack
 	return &pb.StackResult{Ok: r2.Code == 0, Error: r2.Stderr}, nil
 }
 
-// removeStackContainers force-removes every container of the stack's compose project
-// plus the legacy single-container name. A compose stack's containers are
-// `deplo-<slug>-<service>-1`, and a DB stack's carry their own name, so the fixed
-// name alone left a failed `down` with its containers, pinning images and volumes.
 func removeStackContainers(ctx context.Context, slug string) (dockercli.Result, error) {
 	args := []string{"rm", "-f", "deplo-" + slug}
 	ls, err := dockercli.Run(ctx, 30*time.Second, "ps", "-aq",
@@ -574,21 +353,13 @@ func removeStackContainers(ctx context.Context, slug string) (dockercli.Result, 
 	return dockercli.Run(ctx, 60*time.Second, args...)
 }
 
-// removeStackFiles deletes everything a destroyed stack leaves on disk: the compose
-// file, its env sidecar, and the app's own files directory.
 func (s *Service) removeStackFiles(slug string) {
 	_ = os.Remove(s.stackPath(slug))
 	_ = os.Remove(s.legacyEnvPath(slug))
-	// The env-file moved into the stack's own directory (writeComposeEnv); the
-	// whole directory goes with the stack, but remove the file explicitly first
-	// so a failure to remove the tree never leaves decrypted secrets behind.
 	_ = os.Remove(filepath.Join(s.stackDir, "files", slug, ".env"))
-	// Safe as a recursive remove: every caller has already run validateSlug, whose
-	// pattern cannot express a dot, a slash or a leading dash.
 	_ = os.RemoveAll(s.filesRoot(slug))
 }
 
-// reclaimVolumes removes named volumes the control plane listed on a destroy.
 func (s *Service) reclaimVolumes(ctx context.Context, names []string) string {
 	var failed []string
 	for _, name := range names {
@@ -612,10 +383,7 @@ func (s *Service) reclaimVolumes(ctx context.Context, names []string) string {
 	return "could not reclaim " + strings.Join(failed, "; ")
 }
 
-// Reroute re-renders a running stack in place: the control plane changed the stack's
-// domain/label set (or rotated env) and ships the freshly rendered compose, env and
-// mount files so the agent rewrites them and runs `up -d` to pick up the new config
-// WITHOUT a rebuild.
+// Reroute re-renders a running stack in place: the control plane changed the stack's domain/label set (or rotated env) and ships the freshly rendered compose, env and mount files so the agent rewrites them and runs `up -d` to pick up the new config WITHOUT a rebuild.
 func (s *Service) Reroute(ctx context.Context, req *pb.RerouteRequest) (*pb.StackResult, error) {
 	slug := req.GetSlug()
 	if err := validateSlug(slug); err != nil {
@@ -631,17 +399,11 @@ func (s *Service) Reroute(ctx context.Context, req *pb.RerouteRequest) (*pb.Stac
 	if err := os.MkdirAll(s.stackDir, 0o755); err != nil {
 		return &pb.StackResult{Ok: false, Error: "create stack dir: " + err.Error()}, nil
 	}
-	// Same opener as Deploy, and for the same reason: the stack's network is declared
-	// `external: true` in the rendered compose, so `compose up` fails outright if it does
-	// not exist yet - and Traefik has to be on it for the re-rendered routers to resolve.
 	if err := ensureTenantNetwork(ctx, req.GetNetwork()); err != nil {
 		return &pb.StackResult{Ok: false, Error: "ensure network: " + err.Error()}, nil
 	}
 
 	stackFile := s.stackPath(slug)
-	// 0600 + Chmod, same as the deploy path writes it: this YAML carries a
-	// single-image app's whole environment, and Reroute is what a RESTORE runs -
-	// so without this a restore would quietly hand the file back its old 0644.
 	if err := os.Chmod(stackFile, 0o600); err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
@@ -649,9 +411,6 @@ func (s *Service) Reroute(ctx context.Context, req *pb.RerouteRequest) (*pb.Stac
 		return &pb.StackResult{Ok: false, Error: "write stack file: " + err.Error()}, nil
 	}
 
-	// (Re)materialise the compose mount files. There is no deploy stream here, so
-	// any unsafe-path warnings are discarded (the control plane already validated
-	// the rendered set; the in-agent guard stays as defence in depth).
 	if len(req.GetMounts()) > 0 {
 		discard := &emitter{send: func(*pb.DeployEvent) error { return nil }}
 		if err := s.writeMountFiles(slug, req.GetMounts(), discard); err != nil {
@@ -659,9 +418,6 @@ func (s *Service) Reroute(ctx context.Context, req *pb.RerouteRequest) (*pb.Stac
 		}
 	}
 
-	// Single-image stacks bake env into the YAML and send empty env+mounts;
-	// compose stacks need a 0600 env-file for ${VAR} interpolation. Mirror Deploy:
-	// write+pass the env-file only when there is env to interpolate.
 	envFile := ""
 	projectDir := ""
 	if len(req.GetEnv()) > 0 {
@@ -670,9 +426,6 @@ func (s *Service) Reroute(ctx context.Context, req *pb.RerouteRequest) (*pb.Stac
 			return &pb.StackResult{Ok: false, Error: "write env file: " + err.Error()}, nil
 		}
 	}
-	// Through the SAME assembler as a deploy: a reroute brings the stack up too,
-	// so the operator's extra flags (and their vetting) must apply identically -
-	// two hand-rolled argvs is how one of them silently stops matching the other.
 	composeArgs := composeUpArgs(name, stackFile, envFile, projectDir, false, req.GetComposeUpArgs())
 
 	res, err := dockercli.Run(ctx, 120*time.Second, composeArgs...)
@@ -682,8 +435,7 @@ func (s *Service) Reroute(ctx context.Context, req *pb.RerouteRequest) (*pb.Stac
 	return &pb.StackResult{Ok: res.Code == 0, Error: res.Stderr}, nil
 }
 
-// ReadStack returns the rendered stack YAML on disk for a slug so the control plane can
-// preview/diff it before a reroute.
+// ReadStack returns the rendered stack YAML on disk for a slug so the control plane can preview/diff it before a reroute.
 func (s *Service) ReadStack(ctx context.Context, ref *pb.StackRef) (*pb.ReadStackResponse, error) {
 	if err := validateSlug(ref.GetSlug()); err != nil {
 		return &pb.ReadStackResponse{Exists: false, Yaml: ""}, nil
@@ -709,9 +461,7 @@ func (s *Service) Inspect(ctx context.Context, req *pb.InspectRequest) (*pb.Insp
 	}, nil
 }
 
-// CheckPort reports whether a host TCP port is free to publish. We bind the IPv4
-// wildcard, which is what a Docker `ports: "<p>:<p>"` publish contends for on this
-// host; a bind failure (EADDRINUSE) => not available.
+// CheckPort reports whether a host TCP port is free to publish.
 func (s *Service) CheckPort(ctx context.Context, req *pb.CheckPortRequest) (*pb.CheckPortResponse, error) {
 	port := req.GetPort()
 	if port < 1 || port > 65535 {
@@ -721,9 +471,6 @@ func (s *Service) CheckPort(ctx context.Context, req *pb.CheckPortRequest) (*pb.
 		}, nil
 	}
 	addr := net.JoinHostPort("0.0.0.0", strconv.Itoa(int(port)))
-	// SO_REUSEADDR is NOT set (Go's default), so this bind contends for the port
-	// exactly as a fresh docker-proxy publish would - a TIME_WAIT or an active
-	// listener both make it fail, which is the answer we want.
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		return &pb.CheckPortResponse{
@@ -731,8 +478,6 @@ func (s *Service) CheckPort(ctx context.Context, req *pb.CheckPortRequest) (*pb.
 			Reason:    fmt.Sprintf("port %d is already in use on the host", port),
 		}, nil
 	}
-	// Release immediately - this was only a probe. Close errors are irrelevant
-	// (the OS reclaims the socket regardless); the port is confirmed bindable.
 	_ = ln.Close()
 	return &pb.CheckPortResponse{Available: true}, nil
 }
@@ -741,13 +486,10 @@ func (s *Service) stackPath(slug string) string {
 	return filepath.Join(s.stackDir, slug+".yml")
 }
 
-// legacyEnvPath is the pre-project-directory env-file, beside the stack file.
 func (s *Service) legacyEnvPath(slug string) string {
 	return filepath.Join(s.stackDir, slug+".env")
 }
 
-// composeCtl builds the argv for a lifecycle verb (`stop`, `start`, `down`) on a stack
-// that is already on disk.
 func (s *Service) composeCtl(slug string, verb ...string) []string {
 	args := []string{"compose", "-p", "deplo-" + slug, "-f", s.stackPath(slug)}
 	if dir := s.filesRoot(slug); isFile(filepath.Join(dir, ".env")) {
@@ -763,8 +505,6 @@ func isFile(path string) bool {
 	return err == nil && !st.IsDir()
 }
 
-// stackFailure picks what to report when BOTH the compose verb and the bare-container
-// fallback failed.
 func stackFailure(res dockercli.Result, err error, fb dockercli.Result, fbErr error) string {
 	for _, msg := range []string{errText(err), strings.TrimSpace(res.Stderr), errText(fbErr), strings.TrimSpace(fb.Stderr)} {
 		if msg != "" {

@@ -1,7 +1,5 @@
 package server
 
-// https://deplo.build/docs/operations/upgrade
-
 import (
 	"context"
 	"crypto/sha256"
@@ -22,20 +20,12 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
-// selfUpdateGrace is how long the handler waits after replying before re-execing, so
-// the SelfUpdateResponse is flushed to the control plane (and the gRPC stream torn
-// down) before this process is replaced.
 const selfUpdateGrace = 750 * time.Millisecond
 
-// reexec is the function that replaces the running process with the freshly swapped
-// binary. Overridable in tests (a real syscall.Exec never returns, which would kill the
-// test runner).
 var reexec = func(path string, argv []string, env []string) error {
 	return syscall.Exec(path, argv, env)
 }
 
-// downloadFile is the HTTP fetch, overridable in tests so they can serve bytes
-// without a network. Returns the raw body or an error.
 var downloadFile = func(ctx context.Context, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -49,18 +39,11 @@ var downloadFile = func(ctx context.Context, url string) ([]byte, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("download %s: HTTP %d", url, resp.StatusCode)
 	}
-	// Bound the read so a hostile/broken URL can't exhaust memory. The agent
-	// binary is ~20-30 MiB; 256 MiB is a generous ceiling that still fails closed.
 	return io.ReadAll(io.LimitReader(resp.Body, 256*1024*1024))
 }
 
-// SelfUpdate replaces the agent's own binary in place with a newer release and restarts
-// to run it, WITHOUT touching the mTLS materials, so the server keeps its identity and
-// pinned fingerprint across the upgrade (see the RPC's contract in proto/agent.proto).
+// SelfUpdate replaces the agent's own binary in place with a newer release and restarts to run it, WITHOUT touching the mTLS materials, so the server keeps its identity and pinned fingerprint across the upgrade (see the RPC's contract in proto/agent.proto).
 func (s *Service) SelfUpdate(ctx context.Context, req *pb.SelfUpdateRequest) (*pb.SelfUpdateResponse, error) {
-	// Where we live. Resolve symlinks so we replace the REAL file (install-agent.sh
-	// installs to /usr/local/bin/deplo-agent directly, but a packaged setup may
-	// symlink it; swapping the link target is what actually upgrades the binary).
 	exe, err := os.Executable()
 	if err != nil {
 		return nil, status.Errorf(codes.FailedPrecondition,
@@ -72,45 +55,31 @@ func (s *Service) SelfUpdate(ctx context.Context, req *pb.SelfUpdateRequest) (*p
 	return s.applyUpdate(ctx, exe, req)
 }
 
-// applyUpdate performs the verified swap of the binary AT exePath and schedules the
-// re-exec.
 func (s *Service) applyUpdate(ctx context.Context, exePath string, req *pb.SelfUpdateRequest) (*pb.SelfUpdateResponse, error) {
-	// Pick the asset for THIS host's architecture - the agent is the authority on its own
-	// arch (runtime.GOARCH), exactly as install-agent.sh selects by `uname -m`.
 	bin := req.GetBinaries()[runtime.GOARCH]
 	if bin == nil || bin.GetUrl() == "" || bin.GetSha256() == "" {
 		return nil, status.Errorf(codes.FailedPrecondition,
 			"the agent release has no binary for this host's architecture (%s); re-run the installer once a release includes it", runtime.GOARCH)
 	}
 
-	// Stage the new binary as a sibling temp file so the final rename is atomic and
-	// stays on the SAME filesystem (rename across mounts fails). A failure here
-	// leaves the running binary in place.
 	staged, err := s.stageVerifiedBinary(ctx, exePath, bin.GetUrl(), bin.GetSha256())
 	if err != nil {
 		return nil, err
 	}
 
-	// Atomic swap: on Linux you can rename over the file of a running process -
-	// the open text segment keeps the old inode until exit, the path now points at
-	// the new binary, and the next exec of this path runs the new code.
 	if err := os.Rename(staged, exePath); err != nil {
-		os.Remove(staged) // best-effort: don't leave the staged file behind
+		os.Remove(staged)
 		return nil, status.Errorf(codes.FailedPrecondition,
 			"cannot replace the agent binary at %s: %v (is the install dir writable? re-run the installer to upgrade)", exePath, err)
 	}
 	log.Printf("deplo-agent: self-update staged v%s at %s; restarting to apply", req.GetVersion(), exePath)
 
-	// Re-exec AFTER the response is flushed. We capture argv/env now (on the
-	// request goroutine) and hand them to the re-exec; the new process inherits the
-	// same flags, finds the existing materials under --agent-dir, and serves.
 	argv := append([]string{exePath}, os.Args[1:]...)
 	env := os.Environ()
 	go func() {
 		time.Sleep(selfUpdateGrace)
 		log.Printf("deplo-agent: re-execing %s to complete self-update to v%s", exePath, req.GetVersion())
 		if err := reexec(exePath, argv, env); err != nil {
-			// syscall.Exec only returns on failure.
 			log.Printf("deplo-agent: re-exec failed: %v (new binary is on disk; restart the service to apply)", err)
 		}
 	}()
@@ -118,9 +87,6 @@ func (s *Service) applyUpdate(ctx context.Context, exePath string, req *pb.SelfU
 	return &pb.SelfUpdateResponse{Version: req.GetVersion(), Restarting: true}, nil
 }
 
-// stageVerifiedBinary downloads url, verifies its bytes against wantSha256 (lowercase
-// hex), writes them to a 0755 temp file beside `exe`, and returns that temp file's
-// path.
 func (s *Service) stageVerifiedBinary(ctx context.Context, exe, url, wantSha256 string) (string, error) {
 	body, err := downloadFile(ctx, url)
 	if err != nil {

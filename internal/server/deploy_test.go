@@ -8,7 +8,6 @@ import (
 	"testing"
 )
 
-// tarball builds an in-memory tar from a list of (name, typeflag, body) entries.
 func tarball(t *testing.T, entries []tar.Header, bodies map[string]string) []byte {
 	t.Helper()
 	var buf bytes.Buffer
@@ -65,12 +64,8 @@ func TestMaterializeUpload_rejectsTraversal(t *testing.T) {
 		[]tar.Header{{Name: "../escape.txt", Typeflag: tar.TypeReg, Mode: 0o644}},
 		map[string]string{"../escape.txt": "pwned"},
 	)
-	// filepath.Clean("/" + "../escape.txt") == "/escape.txt", landing INSIDE the
-	// dir, so the malicious name is neutralised, never written outside. Assert
-	// nothing escaped the temp dir's PARENT.
 	dir, cleanup, err := s.materializeUpload(data, "demo")
 	if err != nil {
-		// Acceptable: rejected outright.
 		return
 	}
 	defer cleanup()

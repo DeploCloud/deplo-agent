@@ -10,9 +10,6 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
-// The credentials the control plane decrypts become a docker config the CLI reads
-// through DOCKER_CONFIG, and they leave nothing on the host once the deploy ends.
-
 func TestWriteDockerConfigWritesAuthsAndCleansUp(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
 	req := &pb.DeployRequest{
@@ -60,8 +57,7 @@ func TestWriteDockerConfigWritesAuthsAndCleansUp(t *testing.T) {
 	}
 }
 
-// A team with no registry must not get a DOCKER_CONFIG at all: an empty config dir
-// would MASK the host's own ~/.docker/config.json instead of adding to it.
+// A team with no registry must not get a DOCKER_CONFIG at all: an empty config dir would MASK the host's own ~/.docker/config.json instead of adding to it.
 func TestWriteDockerConfigIsANoOpWithoutCredentials(t *testing.T) {
 	t.Setenv("TMPDIR", t.TempDir())
 	req := &pb.DeployRequest{DeployId: "dep_none"}

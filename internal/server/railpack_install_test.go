@@ -12,12 +12,10 @@ import (
 	"testing"
 )
 
-// The download URL must name the per-arch musl asset railpack actually
-// publishes - a wrong shape 404s and the build method is dead on arrival.
+// The download URL must name the per-arch musl asset railpack actually publishes - a wrong shape 404s and the build method is dead on arrival.
 func TestRailpackDownloadURL(t *testing.T) {
 	url, err := railpackDownloadURL("0.35.0")
 	if err != nil {
-		// Non-linux/arch build hosts legitimately refuse; nothing to assert there.
 		t.Skipf("unsupported host for railpack auto-install: %v", err)
 	}
 	if !strings.HasPrefix(url, "https://github.com/railwayapp/railpack/releases/download/v0.35.0/railpack-v0.35.0-") {
@@ -28,9 +26,7 @@ func TestRailpackDownloadURL(t *testing.T) {
 	}
 }
 
-// railpackBinaryVersion parses the bare version out of `railpack --version`
-// ("railpack version 0.35.0"), which is what decides whether an operator's own
-// binary on PATH may be used instead of the pinned one.
+// railpackBinaryVersion parses the bare version out of `railpack --version` ("railpack version 0.35.0"), which is what decides whether an operator's own binary on PATH may be used instead of the pinned one.
 func TestRailpackBinaryVersion(t *testing.T) {
 	dir := t.TempDir()
 	fake := filepath.Join(dir, "railpack")
@@ -41,7 +37,6 @@ func TestRailpackBinaryVersion(t *testing.T) {
 		t.Fatalf("railpackBinaryVersion = %q; want 0.35.0", got)
 	}
 
-	// A `v` prefix is normalised away so it compares equal to the pinned string.
 	vpfx := filepath.Join(dir, "railpack-v")
 	if err := os.WriteFile(vpfx, []byte("#!/bin/sh\necho 'railpack version v0.35.0'\n"), 0o755); err != nil {
 		t.Fatal(err)
@@ -50,20 +45,16 @@ func TestRailpackBinaryVersion(t *testing.T) {
 		t.Fatalf("v-prefixed version = %q; want 0.35.0", got)
 	}
 
-	// A binary that cannot be asked reports "", never a version we'd trust.
 	if got := railpackBinaryVersion(context.Background(), filepath.Join(dir, "absent")); got != "" {
 		t.Fatalf("absent binary = %q; want empty", got)
 	}
 }
 
-// installTarBinary extracts the single named executable from a release tarball,
-// creates the tools dir on the way, and leaves it executable.
+// installTarBinary extracts the single named executable from a release tarball, creates the tools dir on the way, and leaves it executable.
 func TestInstallTarBinary(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		gz := gzip.NewWriter(w)
 		tw := tar.NewWriter(gz)
-		// A real release tarball ships LICENSE/README alongside the binary; only
-		// the named one may be extracted.
 		for _, f := range []struct{ name, body string }{
 			{"LICENSE", "MIT"},
 			{"railpack", "#!/bin/sh\ntrue\n"},
@@ -88,7 +79,6 @@ func TestInstallTarBinary(t *testing.T) {
 		t.Fatalf("wrong file extracted: %q (%v)", body, err)
 	}
 
-	// No `.part` temp file may survive - a leftover would be mistaken for a tool.
 	entries, _ := os.ReadDir(filepath.Dir(dest))
 	for _, e := range entries {
 		if strings.HasSuffix(e.Name(), ".part") {
@@ -97,8 +87,7 @@ func TestInstallTarBinary(t *testing.T) {
 	}
 }
 
-// A tarball without the requested binary must fail loudly rather than leave a
-// half-installed tool behind.
+// A tarball without the requested binary must fail loudly rather than leave a half-installed tool behind.
 func TestInstallTarBinaryMissingEntry(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		gz := gzip.NewWriter(w)
