@@ -675,6 +675,10 @@ message StackRef {
   // -v` finds. Every entry must start with `deplo-` (the agent refuses the rest), so
   // this can only ever reclaim volumes Deplo itself creates.
   repeated string reclaim_volumes = 3;
+  // StopStack only: stop just these compose services instead of the whole stack. Empty
+  // stops everything, which is what every caller before the restart-loop guard meant.
+  // Field 4 is ADDITIVE (contract stays V1); gated on the `stack.stop-services` capability.
+  repeated string services = 4;
 }
 
 message StackResult {

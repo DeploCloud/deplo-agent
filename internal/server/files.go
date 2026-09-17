@@ -28,6 +28,9 @@ const (
 
 var slugPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*(__[a-z0-9][a-z0-9-]*)?$`)
 
+// A compose service name. Refuses a leading "-", which docker would read as a flag.
+var servicePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
+
 func validateSlug(slug string) error {
 	if !slugPattern.MatchString(slug) {
 		return status.Errorf(codes.InvalidArgument, "invalid slug %q", slug)

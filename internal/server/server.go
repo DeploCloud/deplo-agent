@@ -95,6 +95,7 @@ var Capabilities = []string{
 	"teardown.missing-file-ok",
 	"host-path-copy.stack-files",
 	"control-plane.update",
+	"stack.stop-services",
 }
 
 // AgentVersion is the version this agent reports over Hello.
@@ -253,16 +254,27 @@ func (s *Service) driveDeploy(ctx context.Context, id string, req *pb.DeployRequ
 	})
 }
 
-// StopStack stops a compose-managed stack (falls back to the bare container).
+// StopStack stops a compose-managed stack, or just the named services (falls back to
+// the bare container only when stopping the whole stack).
 func (s *Service) StopStack(ctx context.Context, ref *pb.StackRef) (*pb.StackResult, error) {
 	slug := ref.GetSlug()
 	if err := validateSlug(slug); err != nil {
 		return nil, err
 	}
+	services := ref.GetServices()
+	for _, name := range services {
+		if !servicePattern.MatchString(name) {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid service %q", name)
+		}
+	}
 	defer s.lockStack(slug)()
-	res, err := dockercli.Run(ctx, time.Minute, s.composeCtl(slug, "stop")...)
+	res, err := dockercli.Run(ctx, time.Minute, s.composeCtl(slug, append([]string{"stop"}, services...)...)...)
 	if err == nil && res.Code == 0 {
 		return &pb.StackResult{Ok: true}, nil
+	}
+	// A single-image app has no compose service to name, so its fallback is the stack's own container.
+	if len(services) > 0 {
+		return &pb.StackResult{Ok: false, Error: stackFailure(res, err, dockercli.Result{}, nil)}, nil
 	}
 	r2, err2 := dockercli.Run(ctx, 30*time.Second, "stop", "deplo-"+slug)
 	if err2 == nil && r2.Code == 0 {
