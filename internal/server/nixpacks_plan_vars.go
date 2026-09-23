@@ -3,15 +3,16 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
 func nixpacksOwnVariables(ctx context.Context, bin, buildDir string, planFlags, spawnEnv, skip []string) (map[string]string, error) {
 	cctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(cctx, bin, append([]string{"plan", buildDir}, planFlags...)...)
+	cmd := dockercli.Command(cctx, bin, append([]string{"plan", buildDir}, planFlags...)...)
 	cmd.Env = append(cmd.Environ(), spawnEnv...)
 	var out strings.Builder
 	cmd.Stdout = &out

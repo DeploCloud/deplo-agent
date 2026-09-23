@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -190,7 +189,7 @@ func (r *roster) watchEvents(ctx context.Context) {
 }
 
 func (r *roster) streamEvents(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, "docker", "events",
+	cmd := dockercli.Command(ctx, "docker", "events",
 		"--filter", "type=container",
 		"--filter", "event=start",
 		"--filter", "event=die",

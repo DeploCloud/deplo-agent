@@ -1,18 +1,17 @@
 package server
 
 import (
-	"bufio"
 	"context"
 	"encoding/base64"
 	"fmt"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
+	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 	"github.com/DeploCloud/deplo-agent/internal/safepath"
 )
 
@@ -114,7 +113,7 @@ func basicAuthHeader(user, pass string) string {
 func runGit(ctx context.Context, e *emitter, dir, authHeader string, args ...string) error {
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(cctx, "git", args...)
+	cmd := dockercli.Command(cctx, "git", args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
@@ -126,17 +125,13 @@ func runGit(ctx context.Context, e *emitter, dir, authHeader string, args ...str
 			"GIT_CONFIG_VALUE_0="+authHeader,
 		)
 	}
-	stdout, _ := cmd.StdoutPipe()
-	cmd.Stderr = cmd.Stdout
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("git: %w", err)
-	}
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		e.log("info", sanitizeGitLine(scanner.Text()))
-	}
-	if err := cmd.Wait(); err != nil {
+	err := dockercli.RunLines(cctx, cmd, func(line string) {
+		e.log("info", sanitizeGitLine(line))
+	})
+	if err != nil {
+		if cmd.Process == nil {
+			return fmt.Errorf("git: %w", err)
+		}
 		return fmt.Errorf("git %s failed: %w", args[0], err)
 	}
 	return nil
@@ -145,7 +140,7 @@ func runGit(ctx context.Context, e *emitter, dir, authHeader string, args ...str
 func gitOutput(ctx context.Context, dir string, args ...string) (string, error) {
 	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(cctx, "git", args...)
+	cmd := dockercli.Command(cctx, "git", args...)
 	cmd.Dir = dir
 	out, err := cmd.Output()
 	return string(out), err

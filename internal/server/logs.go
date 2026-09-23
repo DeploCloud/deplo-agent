@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
+	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
 const defaultLogTail = 500
@@ -41,7 +42,7 @@ func (s *Service) FollowLogs(req *pb.FollowLogsRequest, stream pb.Agent_FollowLo
 		tail = maxLogTail
 	}
 
-	cmd := exec.CommandContext(ctx, "docker", logArgs(tail, req)...)
+	cmd := dockercli.Command(ctx, "docker", logArgs(tail, req)...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return err

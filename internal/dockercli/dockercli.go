@@ -1,7 +1,6 @@
 package dockercli
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -37,7 +36,7 @@ func RunEnv(ctx context.Context, timeout time.Duration, extraEnv []string, args 
 func capture(ctx context.Context, timeout time.Duration, extraEnv []string, redact bool, args ...string) (Result, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(cctx, "docker", args...)
+	cmd := Command(cctx, "docker", args...)
 	cmd.Env = scopedEnv(extraEnv)
 	var out, errb strings.Builder
 	cmd.Stdout = &out
@@ -62,7 +61,7 @@ func capture(ctx context.Context, timeout time.Duration, extraEnv []string, reda
 func Stream(ctx context.Context, timeout time.Duration, onLine LineFn, input string, args ...string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(cctx, "docker", args...)
+	cmd := Command(cctx, "docker", args...)
 	cmd.Env = scopedEnv(nil)
 	return streamCmd(cctx, timeout, onLine, input, cmd)
 }
@@ -71,7 +70,7 @@ func Stream(ctx context.Context, timeout time.Duration, onLine LineFn, input str
 func StreamEnv(ctx context.Context, timeout time.Duration, onLine LineFn, extraEnv []string, args ...string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(cctx, "docker", args...)
+	cmd := Command(cctx, "docker", args...)
 	cmd.Env = scopedEnv(extraEnv)
 	return streamCmd(cctx, timeout, onLine, "", cmd)
 }
@@ -80,7 +79,7 @@ func StreamEnv(ctx context.Context, timeout time.Duration, onLine LineFn, extraE
 func Spawn(ctx context.Context, timeout time.Duration, onLine LineFn, input, name string, args ...string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(cctx, name, args...)
+	cmd := Command(cctx, name, args...)
 	cmd.Env = scopedEnv(nil)
 	return streamCmd(cctx, timeout, onLine, input, cmd)
 }
@@ -89,7 +88,7 @@ func Spawn(ctx context.Context, timeout time.Duration, onLine LineFn, input, nam
 func SpawnEnv(ctx context.Context, timeout time.Duration, onLine LineFn, extraEnv []string, name string, args ...string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(cctx, name, args...)
+	cmd := Command(cctx, name, args...)
 	cmd.Env = scopedEnv(extraEnv)
 	return streamCmd(cctx, timeout, onLine, "", cmd)
 }
@@ -98,43 +97,22 @@ func SpawnEnv(ctx context.Context, timeout time.Duration, onLine LineFn, extraEn
 func StreamOut(ctx context.Context, timeout time.Duration, dst io.Writer, onLine LineFn, extraEnv []string, args ...string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(cctx, "docker", args...)
+	cmd := Command(cctx, "docker", args...)
 	cmd.Env = scopedEnv(extraEnv)
 	label := redactArgs(args)
 	cmd.Stdout = dst
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return -1, err
-	}
-	if err := cmd.Start(); err != nil {
+	err := RunLines(cctx, cmd, onLine)
+	if err != nil && cmd.Process == nil {
 		return -1, fmt.Errorf("docker %s: %w", label, err)
 	}
-	sc := bufio.NewScanner(stderr)
-	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
-	for sc.Scan() {
-		onLine(strings.TrimRight(sc.Text(), "\r"))
-	}
-	err = cmd.Wait()
-	if err != nil {
-		if cctx.Err() == context.DeadlineExceeded {
-			return -1, fmt.Errorf("docker %s timed out after %s", label, timeout)
-		}
-		if cctx.Err() == context.Canceled {
-			return -1, fmt.Errorf("docker %s canceled", label)
-		}
-		if ee, ok := err.(*exec.ExitError); ok && ee.ProcessState.Exited() {
-			return ee.ExitCode(), nil
-		}
-		return -1, err
-	}
-	return 0, nil
+	return exitStatus(cctx, err, timeout, "docker "+label)
 }
 
 // StreamPipes runs docker with stdout and stderr each copied straight into a writer - no line scanner in the way, so a single line longer than a scanner buffer (a 9 MB JSON dump on stderr) cannot stall the process on a full pipe.
 func StreamPipes(ctx context.Context, timeout time.Duration, stdout, stderr io.Writer, extraEnv []string, args ...string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(cctx, "docker", args...)
+	cmd := Command(cctx, "docker", args...)
 	cmd.Env = scopedEnv(extraEnv)
 	return runPipes(cctx, timeout, cmd, stdout, stderr, redactArgs(args))
 }
@@ -145,82 +123,42 @@ func runPipes(cctx context.Context, timeout time.Duration, cmd *exec.Cmd, stdout
 	if err := cmd.Start(); err != nil {
 		return -1, fmt.Errorf("docker %s: %w", label, err)
 	}
-	err := cmd.Wait()
-	if err != nil {
-		if cctx.Err() == context.DeadlineExceeded {
-			return -1, fmt.Errorf("docker %s timed out after %s", label, timeout)
-		}
-		if cctx.Err() == context.Canceled {
-			return -1, fmt.Errorf("docker %s canceled", label)
-		}
-		if ee, ok := err.(*exec.ExitError); ok && ee.ProcessState.Exited() {
-			return ee.ExitCode(), nil
-		}
-		return -1, err
-	}
-	return 0, nil
+	return exitStatus(cctx, cmd.Wait(), timeout, "docker "+label)
 }
 
 func streamCmd(cctx context.Context, timeout time.Duration, onLine LineFn, input string, cmd *exec.Cmd) (int, error) {
 	label := strings.Join(cmd.Args, " ")
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return -1, err
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return -1, err
-	}
 	if input != "" {
-		stdin, err := cmd.StdinPipe()
-		if err != nil {
-			return -1, err
-		}
-		go func() {
-			defer stdin.Close()
-			io.WriteString(stdin, input)
-		}()
+		cmd.Stdin = strings.NewReader(input)
 	}
-
-	if err := cmd.Start(); err != nil {
+	err := RunLines(cctx, cmd, onLine)
+	if err != nil && cmd.Process == nil {
 		return -1, fmt.Errorf("%s: %w", label, err)
 	}
+	return exitStatus(cctx, err, timeout, label)
+}
 
-	done := make(chan struct{}, 2)
-	scan := func(r io.Reader) {
-		defer func() { done <- struct{}{} }()
-		sc := bufio.NewScanner(r)
-		sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
-		for sc.Scan() {
-			onLine(strings.TrimRight(sc.Text(), "\r"))
-		}
+func exitStatus(cctx context.Context, err error, timeout time.Duration, label string) (int, error) {
+	if err == nil {
+		return 0, nil
 	}
-	go scan(stdout)
-	go scan(stderr)
-	<-done
-	<-done
-
-	err = cmd.Wait()
-	if err != nil {
-		if cctx.Err() == context.DeadlineExceeded {
-			return -1, fmt.Errorf("%s timed out after %s", label, timeout)
-		}
-		if cctx.Err() == context.Canceled {
-			return -1, fmt.Errorf("%s canceled", label)
-		}
-		if ee, ok := err.(*exec.ExitError); ok && ee.ProcessState.Exited() {
-			return ee.ExitCode(), nil
-		}
-		return -1, err
+	if cctx.Err() == context.DeadlineExceeded {
+		return -1, fmt.Errorf("%s timed out after %s", label, timeout)
 	}
-	return 0, nil
+	if cctx.Err() == context.Canceled {
+		return -1, fmt.Errorf("%s canceled", label)
+	}
+	if ee, ok := err.(*exec.ExitError); ok && ee.ProcessState.Exited() {
+		return ee.ExitCode(), nil
+	}
+	return -1, err
 }
 
 // PipeOut runs `docker <args>` and copies the child's RAW stdout into `dst` (bytes, not lines) while collecting stderr for diagnostics - for piping a dump tool's output (`docker exec <c> pg_dump …`) straight into the gzip→S3 pipeline with no temp file.
 func PipeOut(ctx context.Context, timeout time.Duration, dst io.Writer, extraEnv []string, args ...string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(cctx, "docker", args...)
+	cmd := Command(cctx, "docker", args...)
 	cmd.Env = scopedEnv(extraEnv)
 	var errb strings.Builder
 	cmd.Stdout = dst
@@ -243,7 +181,7 @@ func PipeOut(ctx context.Context, timeout time.Duration, dst io.Writer, extraEnv
 func PipeIn(ctx context.Context, timeout time.Duration, src io.Reader, extraEnv []string, args ...string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(cctx, "docker", args...)
+	cmd := Command(cctx, "docker", args...)
 	cmd.Env = scopedEnv(extraEnv)
 	var errb strings.Builder
 	cmd.Stdin = src
