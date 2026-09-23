@@ -26,7 +26,9 @@ var reexec = func(path string, argv []string, env []string) error {
 	return syscall.Exec(path, argv, env)
 }
 
-var downloadFile = func(ctx context.Context, url string) ([]byte, error) {
+const maxAgentBinary = 256 << 20
+
+var downloadFile = func(ctx context.Context, url string) (io.ReadCloser, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -35,11 +37,11 @@ var downloadFile = func(ctx context.Context, url string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
 		return nil, fmt.Errorf("download %s: HTTP %d", url, resp.StatusCode)
 	}
-	return io.ReadAll(io.LimitReader(resp.Body, 256*1024*1024))
+	return resp.Body, nil
 }
 
 // SelfUpdate replaces the agent's own binary in place with a newer release and restarts to run it, WITHOUT touching the mTLS materials, so the server keeps its identity and pinned fingerprint across the upgrade (see the RPC's contract in proto/agent.proto).
@@ -92,13 +94,7 @@ func (s *Service) stageVerifiedBinary(ctx context.Context, exe, url, wantSha256 
 	if err != nil {
 		return "", status.Errorf(codes.Unavailable, "download new agent binary: %v", err)
 	}
-
-	sum := sha256.Sum256(body)
-	got := hex.EncodeToString(sum[:])
-	if got != wantSha256 {
-		return "", status.Errorf(codes.FailedPrecondition,
-			"agent binary checksum mismatch: expected %s, got %s (refusing to install an unverified binary)", wantSha256, got)
-	}
+	defer body.Close()
 
 	dir := filepath.Dir(exe)
 	tmp, err := os.CreateTemp(dir, ".deplo-agent-update-*")
@@ -112,8 +108,18 @@ func (s *Service) stageVerifiedBinary(ctx context.Context, exe, url, wantSha256 
 		os.Remove(tmpPath)
 		return "", e
 	}
-	if _, err := tmp.Write(body); err != nil {
-		return cleanup(status.Errorf(codes.Internal, "write staged binary: %v", err))
+	// Streamed to disk while hashed: the binary never sits whole in memory.
+	h := sha256.New()
+	n, err := io.Copy(io.MultiWriter(tmp, h), io.LimitReader(body, maxAgentBinary+1))
+	if err != nil {
+		return cleanup(status.Errorf(codes.Unavailable, "download new agent binary: %v", err))
+	}
+	if n > maxAgentBinary {
+		return cleanup(status.Errorf(codes.FailedPrecondition, "agent binary is larger than %d bytes", maxAgentBinary))
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); got != wantSha256 {
+		return cleanup(status.Errorf(codes.FailedPrecondition,
+			"agent binary checksum mismatch: expected %s, got %s (refusing to install an unverified binary)", wantSha256, got))
 	}
 	if err := tmp.Chmod(0o755); err != nil {
 		return cleanup(status.Errorf(codes.Internal, "chmod staged binary: %v", err))

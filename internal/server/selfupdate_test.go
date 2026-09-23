@@ -1,9 +1,11 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -24,7 +26,12 @@ func binariesFor(url, sha string) map[string]*pb.ArchBinary {
 func stubDownload(t *testing.T, body []byte, err error) {
 	t.Helper()
 	orig := downloadFile
-	downloadFile = func(context.Context, string) ([]byte, error) { return body, err }
+	downloadFile = func(context.Context, string) (io.ReadCloser, error) {
+		if err != nil {
+			return nil, err
+		}
+		return io.NopCloser(bytes.NewReader(body)), nil
+	}
 	t.Cleanup(func() { downloadFile = orig })
 }
 
