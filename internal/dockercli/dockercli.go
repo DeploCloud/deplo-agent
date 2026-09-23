@@ -61,6 +61,8 @@ func capture(ctx context.Context, timeout time.Duration, extraEnv []string, reda
 func Stream(ctx context.Context, timeout time.Duration, onLine LineFn, input string, args ...string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	args, cleanup := ephemeral(args)
+	defer cleanupIfCancelled(cctx, cleanup)
 	cmd := Command(cctx, "docker", args...)
 	cmd.Env = scopedEnv(nil)
 	return streamCmd(cctx, timeout, onLine, input, cmd)
@@ -70,6 +72,8 @@ func Stream(ctx context.Context, timeout time.Duration, onLine LineFn, input str
 func StreamEnv(ctx context.Context, timeout time.Duration, onLine LineFn, extraEnv []string, args ...string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	args, cleanup := ephemeral(args)
+	defer cleanupIfCancelled(cctx, cleanup)
 	cmd := Command(cctx, "docker", args...)
 	cmd.Env = scopedEnv(extraEnv)
 	return streamCmd(cctx, timeout, onLine, "", cmd)
@@ -97,6 +101,8 @@ func SpawnEnv(ctx context.Context, timeout time.Duration, onLine LineFn, extraEn
 func StreamOut(ctx context.Context, timeout time.Duration, dst io.Writer, onLine LineFn, extraEnv []string, args ...string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	args, cleanup := ephemeral(args)
+	defer cleanupIfCancelled(cctx, cleanup)
 	cmd := Command(cctx, "docker", args...)
 	cmd.Env = scopedEnv(extraEnv)
 	label := redactArgs(args)
@@ -158,6 +164,8 @@ func exitStatus(cctx context.Context, err error, timeout time.Duration, label st
 func PipeOut(ctx context.Context, timeout time.Duration, dst io.Writer, extraEnv []string, args ...string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	args, cleanup := ephemeral(args)
+	defer cleanupIfCancelled(cctx, cleanup)
 	cmd := Command(cctx, "docker", args...)
 	cmd.Env = scopedEnv(extraEnv)
 	var errb strings.Builder
@@ -181,6 +189,8 @@ func PipeOut(ctx context.Context, timeout time.Duration, dst io.Writer, extraEnv
 func PipeIn(ctx context.Context, timeout time.Duration, src io.Reader, extraEnv []string, args ...string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	args, cleanup := ephemeral(args)
+	defer cleanupIfCancelled(cctx, cleanup)
 	cmd := Command(cctx, "docker", args...)
 	cmd.Env = scopedEnv(extraEnv)
 	var errb strings.Builder
