@@ -124,14 +124,38 @@ type Service struct {
 	pendingMu  sync.Mutex
 	pendingKey ed25519.PrivateKey
 
-	stackLocks sync.Map
+	stackLocksMu sync.Mutex
+	stackLocks   map[string]*stackLock
 }
 
+type stackLock struct {
+	sync.Mutex
+	refs int
+}
+
+// lockStack serializes operations on one stack; a slug's entry lives only while someone holds or waits on it.
 func (s *Service) lockStack(slug string) func() {
-	v, _ := s.stackLocks.LoadOrStore(slug, &sync.Mutex{})
-	mu := v.(*sync.Mutex)
-	mu.Lock()
-	return mu.Unlock
+	s.stackLocksMu.Lock()
+	if s.stackLocks == nil {
+		s.stackLocks = map[string]*stackLock{}
+	}
+	l := s.stackLocks[slug]
+	if l == nil {
+		l = &stackLock{}
+		s.stackLocks[slug] = l
+	}
+	l.refs++
+	s.stackLocksMu.Unlock()
+
+	l.Lock()
+	return func() {
+		l.Unlock()
+		s.stackLocksMu.Lock()
+		if l.refs--; l.refs == 0 {
+			delete(s.stackLocks, slug)
+		}
+		s.stackLocksMu.Unlock()
+	}
 }
 
 // New builds the service.

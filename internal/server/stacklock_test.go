@@ -58,3 +58,16 @@ func TestLockStackDoesNotSerializeAcrossSlugs(t *testing.T) {
 	}
 	close(release)
 }
+
+func TestLockStackForgetsAReleasedSlug(t *testing.T) {
+	s := &Service{}
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); s.lockStack("preview-42")() }()
+	}
+	wg.Wait()
+	if n := len(s.stackLocks); n != 0 {
+		t.Fatalf("%d stack locks left after every holder released", n)
+	}
+}
