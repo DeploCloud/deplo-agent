@@ -7,8 +7,10 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
@@ -98,29 +100,68 @@ func New(cfg Config) (*minio.Client, error) {
 		Region:       cfg.Region,
 		BucketLookup: bucketLookup(pathStyle),
 	}
-	tr, err := minio.DefaultTransport(secure)
-	if err != nil {
-		return nil, fmt.Errorf("s3: build transport: %w", err)
-	}
-	tr.DisableCompression = extra.noCompression
-	if extra.insecureSkipVerify {
-		if tr.TLSClientConfig == nil {
-			tr.TLSClientConfig = &tls.Config{}
-		}
-		tr.TLSClientConfig.InsecureSkipVerify = true
-	}
+	key := fmt.Sprintf("%t|%s|%t|%t", secure, endpoint, extra.noCompression, extra.insecureSkipVerify)
 	if vetted != nil {
-		base := tr.DialContext
-		tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			host, port, splitErr := net.SplitHostPort(addr)
-			if splitErr == nil && strings.EqualFold(host, vetted.host) {
-				addr = net.JoinHostPort(vetted.ip.String(), port)
-			}
-			return base(ctx, network, addr)
+		key += "|" + vetted.host + "|" + vetted.ip.String()
+	}
+	tr, err := sharedTransport(key, func() (*http.Transport, error) {
+		tr, err := minio.DefaultTransport(secure)
+		if err != nil {
+			return nil, fmt.Errorf("s3: build transport: %w", err)
 		}
+		tr.DisableCompression = extra.noCompression
+		if extra.insecureSkipVerify {
+			if tr.TLSClientConfig == nil {
+				tr.TLSClientConfig = &tls.Config{}
+			}
+			tr.TLSClientConfig.InsecureSkipVerify = true
+		}
+		if vetted != nil {
+			base := tr.DialContext
+			tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				host, port, splitErr := net.SplitHostPort(addr)
+				if splitErr == nil && strings.EqualFold(host, vetted.host) {
+					addr = net.JoinHostPort(vetted.ip.String(), port)
+				}
+				return base(ctx, network, addr)
+			}
+		}
+		return tr, nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	opts.Transport = tr
 	return minio.New(endpoint, opts)
+}
+
+const maxTransports = 16
+
+var (
+	transportsMu sync.Mutex
+	transports   = map[string]*http.Transport{}
+)
+
+// sharedTransport reuses one transport per destination shape, so a sweep of many calls shares its
+// connections instead of leaving a pool of idle ones behind every call.
+func sharedTransport(key string, build func() (*http.Transport, error)) (*http.Transport, error) {
+	transportsMu.Lock()
+	defer transportsMu.Unlock()
+	if tr := transports[key]; tr != nil {
+		return tr, nil
+	}
+	tr, err := build()
+	if err != nil {
+		return nil, err
+	}
+	if len(transports) >= maxTransports {
+		for k, old := range transports {
+			old.CloseIdleConnections()
+			delete(transports, k)
+		}
+	}
+	transports[key] = tr
+	return tr, nil
 }
 
 type vettedEndpoint struct {
