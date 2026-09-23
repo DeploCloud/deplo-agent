@@ -12,6 +12,7 @@ import (
 
 const (
 	maxRetainedLogBytes  = 4 << 20
+	maxFinishedLogBytes  = 32 << 20
 	maxRetainedLogEvents = 20000
 	logEventOverhead     = 64
 )
@@ -63,41 +64,40 @@ func (f *inflight) append(ev *pb.DeployEvent) *pb.DeployEvent {
 	return ev
 }
 
+// enforceLogBudget trims to 7/8 of the budget in one pass, so the O(n) compaction runs once per
+// many lines rather than on every line past the cap.
 func (f *inflight) enforceLogBudget() {
-	for (f.logBytes > maxRetainedLogBytes || f.logCount > maxRetainedLogEvents) && f.logCount > 1 {
-		idx := f.oldestEvictableLogIndex()
-		if idx < 0 {
-			return
-		}
-		victim := f.events[idx]
-		f.logBytes -= logEventSize(victim)
-		f.logCount--
-		if f.droppedLog == 0 {
-			f.noteSeq = victim.GetSeq()
-		}
-		f.droppedLog++
-		f.events = append(f.events[:idx], f.events[idx+1:]...)
-		if f.noteIdx < 0 {
-			f.events = append(f.events, nil)
-			copy(f.events[idx+1:], f.events[idx:])
-			f.events[idx] = f.newNote()
-			f.noteIdx = idx
-		} else {
-			f.events[f.noteIdx] = f.newNote()
-		}
+	if f.logBytes <= maxRetainedLogBytes && f.logCount <= maxRetainedLogEvents {
+		return
 	}
-}
-
-func (f *inflight) oldestEvictableLogIndex() int {
-	for i := range f.events {
-		if i == f.noteIdx {
+	wantBytes, wantCount := maxRetainedLogBytes*7/8, maxRetainedLogEvents*7/8
+	kept, notePos := f.events[:0], -1
+	for i, ev := range f.events {
+		if i != f.noteIdx && ev.GetLog() != nil && f.logCount > 1 &&
+			(f.logBytes > wantBytes || f.logCount > wantCount) {
+			f.logBytes -= logEventSize(ev)
+			f.logCount--
+			if f.droppedLog == 0 {
+				f.noteSeq = ev.GetSeq()
+			}
+			f.droppedLog++
+			if f.noteIdx < 0 && notePos < 0 {
+				notePos = len(kept)
+				kept = append(kept, nil)
+			}
 			continue
 		}
-		if f.events[i].GetLog() != nil {
-			return i
+		if i == f.noteIdx {
+			notePos = len(kept)
 		}
+		kept = append(kept, ev)
 	}
-	return -1
+	clear(f.events[len(kept):])
+	f.events = kept
+	if notePos >= 0 {
+		f.noteIdx = notePos
+		f.events[notePos] = f.newNote()
+	}
 }
 
 func (f *inflight) newNote() *pb.DeployEvent {
@@ -157,5 +157,35 @@ func (f *inflight) subscribe(ctx context.Context, fromSeq uint64, send func(*pb.
 		if finished {
 			return nil
 		}
+	}
+}
+
+// trimFinished forgets the oldest finished deploys once their retained logs together pass
+// maxFinishedLogBytes, so a burst of previews cannot hold N x 4 MiB. A running deploy is never dropped.
+func (s *Service) trimFinished() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	type rec struct {
+		id    string
+		at    time.Time
+		bytes int
+	}
+	var done []rec
+	total := 0
+	for id, f := range s.deploys {
+		f.mu.Lock()
+		if f.done {
+			done = append(done, rec{id, f.finished, f.logBytes})
+			total += f.logBytes
+		}
+		f.mu.Unlock()
+	}
+	sort.Slice(done, func(i, j int) bool { return done[i].at.Before(done[j].at) })
+	for _, r := range done {
+		if total <= maxFinishedLogBytes {
+			return
+		}
+		delete(s.deploys, r.id)
+		total -= r.bytes
 	}
 }

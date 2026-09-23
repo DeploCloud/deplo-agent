@@ -269,6 +269,7 @@ func (s *Service) driveDeploy(ctx context.Context, id string, req *pb.DeployRequ
 		}()
 		s.runDeploy(ctx, req, e)
 	}()
+	s.trimFinished()
 	time.AfterFunc(retainFinished, func() {
 		s.mu.Lock()
 		if s.deploys[id] == f {

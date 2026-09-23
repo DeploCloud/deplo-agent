@@ -238,3 +238,29 @@ func TestInflight_reattachAfterTrimMatchesLinearScan(t *testing.T) {
 		}
 	}
 }
+
+func TestTrimFinishedDropsTheOldestFinishedDeploysFirst(t *testing.T) {
+	s := &Service{deploys: map[string]*inflight{}}
+	base := time.Now()
+	add := func(id string, done bool, age time.Duration) {
+		f := newInflight(func() {})
+		f.done, f.finished, f.logBytes = done, base.Add(-age), maxRetainedLogBytes
+		s.deploys[id] = f
+	}
+	add("running", false, 0)
+	for i := 0; i < 10; i++ {
+		add(fmt.Sprintf("done-%d", i), true, time.Duration(i)*time.Minute)
+	}
+	s.trimFinished()
+
+	if s.deploys["running"] == nil {
+		t.Fatal("a running deploy was dropped")
+	}
+	kept := maxFinishedLogBytes / maxRetainedLogBytes
+	for i := 0; i < 10; i++ {
+		_, ok := s.deploys[fmt.Sprintf("done-%d", i)]
+		if ok != (i < kept) {
+			t.Fatalf("done-%d kept=%v, want the %d newest kept", i, ok, kept)
+		}
+	}
+}
