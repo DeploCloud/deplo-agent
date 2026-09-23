@@ -5,8 +5,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,6 +12,9 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
@@ -43,6 +44,11 @@ func (e *emitter) result(ready bool, errMsg, commitSha string) {
 }
 
 func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitter) {
+	s.runDeployFrom(ctx, req, "", e)
+}
+
+// runDeployFrom deploys, reading an upload's build context from contextFile when set, else from the request.
+func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, contextFile string, e *emitter) {
 	slug := req.GetSlug()
 	if err := validateSlug(slug); err != nil {
 		e.result(false, err.Error(), "")
@@ -104,7 +110,17 @@ func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitt
 			}
 		}
 	case pb.SourceKind_SOURCE_KIND_UPLOAD:
-		buildDir, cleanup, err := s.materializeUpload(req.GetContextTar(), slug)
+		var src io.Reader = bytes.NewReader(req.GetContextTar())
+		if contextFile != "" {
+			f, err := os.Open(contextFile)
+			if err != nil {
+				e.result(false, "materialise context: "+err.Error(), "")
+				return
+			}
+			defer f.Close()
+			src = f
+		}
+		buildDir, cleanup, err := s.materializeUploadFrom(src, slug)
 		if err != nil {
 			e.result(false, "materialise context: "+err.Error(), "")
 			return
@@ -483,13 +499,17 @@ func (s *Service) runBuild(ctx context.Context, req *pb.DeployRequest, args []st
 }
 
 func (s *Service) materializeUpload(tarBytes []byte, slug string) (string, func(), error) {
+	return s.materializeUploadFrom(bytes.NewReader(tarBytes), slug)
+}
+
+func (s *Service) materializeUploadFrom(src io.Reader, slug string) (string, func(), error) {
 	dir, err := os.MkdirTemp(s.buildTmpDir, "deplo-build-"+slug+"-")
 	if err != nil {
 		return "", func() {}, err
 	}
 	cleanup := func() { _ = os.RemoveAll(dir) }
 
-	tr := tar.NewReader(bytes.NewReader(tarBytes))
+	tr := tar.NewReader(src)
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {

@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -96,6 +98,7 @@ var Capabilities = []string{
 	"host-path-copy.stack-files",
 	"control-plane.update",
 	"stack.stop-services",
+	"deploy.context_stream",
 }
 
 // AgentVersion is the version this agent reports over Hello.
@@ -238,9 +241,88 @@ func (s *Service) Deploy(req *pb.DeployRequest, stream pb.Agent_DeployServer) er
 	s.deploys[id] = f
 	s.mu.Unlock()
 
-	go s.driveDeploy(deployCtx, id, req, f)
+	go s.driveDeploy(deployCtx, id, req, "", f)
 
 	return f.subscribe(stream.Context(), 0, stream.Send)
+}
+
+// maxContextBytes caps a streamed build context on disk.
+const maxContextBytes = 8 << 30
+
+// DeployStream is Deploy with the upload's build context sent in chunks and spooled to a file,
+// so a large archive never sits whole in memory.
+func (s *Service) DeployStream(stream pb.Agent_DeployStreamServer) error {
+	first, err := stream.Recv()
+	if err != nil {
+		return err
+	}
+	req := first.GetRequest()
+	if req == nil {
+		return status.Error(codes.InvalidArgument, "the first DeployStream frame must be the request")
+	}
+	id := req.GetDeployId()
+	if id == "" {
+		return status.Error(codes.InvalidArgument, "deploy_id is required")
+	}
+	s.mu.Lock()
+	existing := s.deploys[id]
+	s.mu.Unlock()
+	if existing != nil {
+		return existing.subscribe(stream.Context(), 0, stream.Send)
+	}
+
+	spool, err := s.spoolContext(stream)
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	if existing := s.deploys[id]; existing != nil {
+		s.mu.Unlock()
+		_ = os.Remove(spool)
+		return existing.subscribe(stream.Context(), 0, stream.Send)
+	}
+	deployCtx, cancel := context.WithCancel(context.Background())
+	f := newInflight(cancel)
+	s.deploys[id] = f
+	s.mu.Unlock()
+
+	go s.driveDeploy(deployCtx, id, req, spool, f)
+
+	return f.subscribe(stream.Context(), 0, stream.Send)
+}
+
+func (s *Service) spoolContext(stream pb.Agent_DeployStreamServer) (string, error) {
+	f, err := os.CreateTemp(s.buildTmpDir, "deplo-context-*.tar")
+	if err != nil {
+		return "", status.Errorf(codes.Internal, "spool build context: %v", err)
+	}
+	fail := func(err error) (string, error) {
+		f.Close()
+		_ = os.Remove(f.Name())
+		return "", err
+	}
+	var n int64
+	for {
+		in, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return fail(err)
+		}
+		chunk := in.GetContextChunk()
+		if n += int64(len(chunk)); n > maxContextBytes {
+			return fail(status.Errorf(codes.ResourceExhausted, "build context is larger than %d bytes", int64(maxContextBytes)))
+		}
+		if _, err := f.Write(chunk); err != nil {
+			return fail(status.Errorf(codes.Internal, "spool build context: %v", err))
+		}
+	}
+	if err := f.Close(); err != nil {
+		return fail(status.Errorf(codes.Internal, "spool build context: %v", err))
+	}
+	return f.Name(), nil
 }
 
 // ReattachDeploy reconnects to an in-flight or recently-finished deploy and replays events past from_seq, then follows it live to completion (D5).
@@ -255,8 +337,11 @@ func (s *Service) ReattachDeploy(req *pb.ReattachRequest, stream pb.Agent_Reatta
 	return f.subscribe(stream.Context(), req.GetFromSeq(), stream.Send)
 }
 
-func (s *Service) driveDeploy(ctx context.Context, id string, req *pb.DeployRequest, f *inflight) {
+func (s *Service) driveDeploy(ctx context.Context, id string, req *pb.DeployRequest, contextFile string, f *inflight) {
 	defer f.cancel()
+	if contextFile != "" {
+		defer os.Remove(contextFile)
+	}
 	e := &emitter{send: func(ev *pb.DeployEvent) error {
 		f.append(ev)
 		return nil
@@ -267,7 +352,7 @@ func (s *Service) driveDeploy(ctx context.Context, id string, req *pb.DeployRequ
 				e.result(false, fmt.Sprintf("deploy panicked: %v", r), "")
 			}
 		}()
-		s.runDeploy(ctx, req, e)
+		s.runDeployFrom(ctx, req, contextFile, e)
 	}()
 	s.trimFinished()
 	time.AfterFunc(retainFinished, func() {

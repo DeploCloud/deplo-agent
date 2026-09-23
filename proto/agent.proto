@@ -43,6 +43,11 @@ service Agent {
   // control plane missed (PLAN D5, Part-B half).
   rpc ReattachDeploy(ReattachRequest) returns (stream DeployEvent);
 
+  // Deploy with an upload's build context streamed in chunks and spooled to disk: the
+  // request frame first, then context_chunk frames, then half-close. Hello capability
+  // "deploy.context_stream"; events and reattach behave exactly as Deploy's.
+  rpc DeployStream(stream DeployUpload) returns (stream DeployEvent);
+
   // Lifecycle control over an already-deployed stack. These replace the direct
   // stop/start/destroy docker calls in lib/deploy/build.ts for agent-owned
   // stacks. (Wired in a later step; defined now so the boundary is complete.)
@@ -613,6 +618,14 @@ message DeployRequest {
 }
 
 // One event in the deploy stream. Exactly one of the oneof arms is set.
+message DeployUpload {
+  oneof frame {
+    // First frame only; context_tar is ignored here, the chunks carry the archive.
+    DeployRequest request = 1;
+    bytes context_chunk = 2;
+  }
+}
+
 message DeployEvent {
   oneof event {
     LogLine log = 1;
