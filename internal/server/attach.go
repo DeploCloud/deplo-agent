@@ -20,8 +20,11 @@ type attachClient interface {
 	write(data []byte)
 	resize(cols, rows int)
 	exitCode() int
+	closeInput()
 	close()
 }
+
+var attachBin = "docker"
 
 var attachArgs = func(name string) []string {
 	return []string{"attach", "--sig-proxy=false", name}
@@ -110,8 +113,13 @@ func (s *Service) Attach(stream pb.Agent_AttachServer) error {
 			return ctx.Err()
 		case fe := <-recvCh:
 			if fe.err == io.EOF {
-				<-outDone
-				return nil
+				client.closeInput()
+				select {
+				case <-outDone:
+					return nil
+				case <-ctx.Done():
+					return ctx.Err()
+				}
 			}
 			if fe.err != nil {
 				return fe.err
@@ -147,7 +155,7 @@ type attachPipes struct {
 }
 
 func newAttachPipes(name string) (*attachPipes, error) {
-	cmd := exec.Command("docker", attachArgs(name)...)
+	cmd := exec.Command(attachBin, attachArgs(name)...)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -223,6 +231,8 @@ func (a *attachPipes) write(data []byte) {
 
 func (a *attachPipes) resize(_, _ int) {}
 
+func (a *attachPipes) closeInput() { _ = a.stdin.Close() }
+
 func (a *attachPipes) exitCode() int { return a.code }
 
 func (a *attachPipes) close() {
@@ -250,7 +260,7 @@ func (a *attachPTY) reap() {
 }
 
 func newAttachPTY(name string, cols, rows int) (*attachPTY, error) {
-	cmd := exec.Command("docker", attachArgs(name)...)
+	cmd := exec.Command(attachBin, attachArgs(name)...)
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
 	if err != nil {
 		return nil, err
@@ -277,6 +287,9 @@ func (a *attachPTY) resize(cols, rows int) {
 }
 
 func (a *attachPTY) exitCode() int { return a.code }
+
+// closeInput is a no-op: a terminal has no half-close, its input ends with the session.
+func (a *attachPTY) closeInput() {}
 
 func (a *attachPTY) close() {
 	_ = a.ptmx.Close()
