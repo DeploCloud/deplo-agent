@@ -97,6 +97,7 @@ var Capabilities = []string{
 	"teardown.missing-file-ok",
 	"host-path-copy.stack-files",
 	"control-plane.update",
+	"control-plane.update.canary",
 	"stack.stop-services",
 	"deploy.context_stream",
 }

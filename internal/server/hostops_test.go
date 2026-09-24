@@ -252,11 +252,22 @@ func serviceWithTraefik(t *testing.T, yaml string) (*Service, string) {
 func TestUpdateControlPlaneRefusesAVersionThatIsNotOne(t *testing.T) {
 	svc := New(t.TempDir(), t.TempDir(), "/", "")
 
-	for _, version := range []string{"latest", "0.1", "0.1.1; rm -rf /", "$(id)", "0.1.1 --flag"} {
+	for _, version := range []string{"latest", "0.1", "0.1.1; rm -rf /", "$(id)", "0.1.1 --flag", "0.1.1-", "0.1.1-a..b", "0.1.1-$(id)"} {
 		res, err := svc.UpdateControlPlane(context.Background(),
 			&pb.UpdateControlPlaneRequest{ControlPlaneHint: "deplo", Version: version})
 		if err == nil {
 			t.Fatalf("version %q must be refused, got %+v", version, res)
+		}
+	}
+}
+
+func TestUpdateControlPlaneTakesACanaryVersion(t *testing.T) {
+	svc := New(t.TempDir(), t.TempDir(), "/", "")
+	for _, version := range []string{"0.3.0-canary.1", "1.0.0-rc.2"} {
+		_, err := svc.UpdateControlPlane(context.Background(),
+			&pb.UpdateControlPlaneRequest{ControlPlaneHint: "definitely-not-a-container-abc123", Version: version})
+		if err != nil {
+			t.Fatalf("version %q must be accepted, got %v", version, err)
 		}
 	}
 }
