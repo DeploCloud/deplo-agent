@@ -338,7 +338,8 @@ const controlPlaneUpdateLog = "/var/log/deplo-update.log"
 
 const controlPlaneUpdateUnit = "deplo-control-plane-update"
 
-var controlPlaneVersion = regexp.MustCompile(`^[0-9]{1,5}\.[0-9]{1,5}\.[0-9]{1,5}$`)
+// A release, or a canary of one (0.3.0-canary.1). It reaches the installer as an env var, never a shell word.
+var controlPlaneVersion = regexp.MustCompile(`^[0-9]{1,5}\.[0-9]{1,5}\.[0-9]{1,5}(-[0-9A-Za-z]{1,20}(\.[0-9A-Za-z]{1,20}){0,4})?$`)
 
 // UpdateControlPlane re-runs the Deplo installer on this host.
 func (s *Service) UpdateControlPlane(ctx context.Context, req *pb.UpdateControlPlaneRequest) (*pb.UpdateControlPlaneResponse, error) {

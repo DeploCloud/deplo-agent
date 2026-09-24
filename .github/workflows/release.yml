@@ -97,3 +97,7 @@ jobs:
             dist/checksums.txt
             dist/deplo-agent-${{ github.ref_name }}.spdx.json
           generate_release_notes: true
+          # A canary tag (v0.3.0-canary.1) is a pre-release, so `releases/latest` - what
+          # every stable server and install-agent.sh follow - never names it.
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ !contains(github.ref_name, '-') }}
