@@ -167,6 +167,7 @@ func applyIdentity(st *pb.ContainerStat, e rosterEntry, running bool) {
 	st.State = e.State
 	st.Health = e.Health
 	st.RestartCount = e.RestartCount
+	st.OomKills = e.OomKills
 	st.Running = running
 }
 

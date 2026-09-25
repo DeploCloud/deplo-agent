@@ -201,6 +201,7 @@ func (c *cgroupSampler) readOne(e rosterEntry, now time.Time, prev map[string]cg
 		State:        e.State,
 		Health:       e.Health,
 		RestartCount: e.RestartCount,
+		OomKills:     e.OomKills,
 		Running:      e.State == "running",
 		CpuPct:       cpuPct,
 		MemUsed:      memUsed,

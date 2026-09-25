@@ -1838,6 +1838,10 @@ message ContainerStat {
   // are then the whole machine's counters, so the agent reports them as 0 and
   // the panel points at the host chart instead.
   bool net_ns_host = 18;
+  // ADDITIVE (contract stays V1). How many times the kernel killed this container
+  // for running out of memory, counted from docker's `oom` events since the agent
+  // started. Keyed by container_id, so it never goes down for the same id.
+  int32 oom_kills = 19;
 }
 
 message ContainerStatsResponse {
