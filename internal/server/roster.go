@@ -33,6 +33,7 @@ type rosterEntry struct {
 	RestartCount int32
 	PID          int
 	CgroupPath   string
+	OomKills     int32
 }
 
 type roster struct {
@@ -40,6 +41,8 @@ type roster struct {
 	entries []rosterEntry
 	ids     map[string]struct{}
 	cgroups map[string]string
+	// Docker clears State.OOMKilled on the next start, so the `oom` event is the only reliable record.
+	ooms map[string]int32
 
 	dirty chan struct{}
 
@@ -72,6 +75,7 @@ func newRosterDefaults() *roster {
 	r := &roster{
 		ids:        map[string]struct{}{},
 		cgroups:    map[string]string{},
+		ooms:       map[string]int32{},
 		dirty:      make(chan struct{}, 1),
 		debounce:   rosterDebounce,
 		backstop:   rosterBackstop,
@@ -111,8 +115,16 @@ func (r *roster) start(ctx context.Context) {
 func (r *roster) Entries() []rosterEntry {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	return r.copyEntries()
+}
+
+// copyEntries needs r.mu held.
+func (r *roster) copyEntries() []rosterEntry {
 	out := make([]rosterEntry, len(r.entries))
 	copy(out, r.entries)
+	for i := range out {
+		out[i].OomKills = r.ooms[out[i].ID]
+	}
 	return out
 }
 
@@ -120,9 +132,7 @@ func (r *roster) Entries() []rosterEntry {
 func (r *roster) Snapshot() ([]rosterEntry, int) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	out := make([]rosterEntry, len(r.entries))
-	copy(out, r.entries)
-	return out, countRunning(r.entries)
+	return r.copyEntries(), countRunning(r.entries)
 }
 
 // RunningCount reports how many Deplo-managed containers are in the running state.
@@ -194,6 +204,7 @@ func (r *roster) streamEvents(ctx context.Context) error {
 		"--filter", "event=start",
 		"--filter", "event=die",
 		"--filter", "event=destroy",
+		"--filter", "event=oom",
 		"--format", "{{json .}}")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -211,6 +222,10 @@ func (r *roster) streamEvents(ctx context.Context) error {
 			continue
 		}
 		if !r.relevant(ev) {
+			continue
+		}
+		if ev.Action == "oom" {
+			r.recordOom(ev.ID)
 			continue
 		}
 		r.markDirty()
@@ -238,6 +253,12 @@ func (r *roster) relevant(ev dockerEvent) bool {
 	defer r.mu.RUnlock()
 	_, ok := r.ids[ev.ID]
 	return ok
+}
+
+func (r *roster) recordOom(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ooms[id]++
 }
 
 func (r *roster) markDirty() {
@@ -326,6 +347,11 @@ func (r *roster) rebuild(ctx context.Context) {
 	r.entries = entries
 	r.ids = ids2
 	r.cgroups = cgroups
+	for id := range r.ooms {
+		if _, ok := ids2[id]; !ok {
+			delete(r.ooms, id)
+		}
+	}
 	if ok {
 		r.hostRunning = hostRunning
 	}
@@ -481,7 +507,7 @@ func parseEventLine(line string) (dockerEvent, bool) {
 	if i := strings.IndexByte(action, ':'); i >= 0 {
 		action = strings.TrimSpace(action[:i])
 	}
-	if !isChurnAction(action) {
+	if !isChurnAction(action) && action != "oom" {
 		return dockerEvent{}, false
 	}
 	id := raw.Actor.ID
