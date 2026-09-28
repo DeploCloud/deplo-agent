@@ -88,14 +88,17 @@ func (c *cgroupSampler) Sample(entries []rosterEntry, now time.Time) []*pb.Conta
 			continue
 		}
 		expected++
-		if e.CgroupPath == "" {
-			failed++
-			carryCPUBaseline(next, prev, e.ID)
-			continue
+		var r cgroupRead
+		ok := false
+		if e.CgroupPath != "" {
+			r, ok = c.readOne(e, now, prev, hostNetNs)
 		}
-		r, ok := c.readOne(e, now, prev, hostNetNs)
 		if !ok {
+			// Identity-only, so the frame still carries the whole roster (oom.ts forgets an absent id).
 			failed++
+			st := &pb.ContainerStat{}
+			applyIdentity(st, e, false)
+			out = append(out, st)
 			carryCPUBaseline(next, prev, e.ID)
 			continue
 		}

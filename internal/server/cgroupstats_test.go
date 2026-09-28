@@ -437,25 +437,29 @@ func TestCgroupSampler_DegradesPerMetricNotPerSample(t *testing.T) {
 	}
 }
 
-// A RUNNING container the backend cannot read is ABSENT, never a zeroed row: a flat line at zero reads as "idle" instead of the "unknown" that actually happened.
-func TestCgroupSampler_UnreadableEntriesAreAbsentNotZeroed(t *testing.T) {
+// A RUNNING container the backend cannot read keeps an identity-only row: never zeroed usage
+// (running=false keeps it out of the totals), never absent (the OOM baseline would reset).
+func TestCgroupSampler_UnreadableRunningEntryStillAppearsInTheSample(t *testing.T) {
 	tmp := t.TempDir()
 	c := newTestSampler(t, filepath.Join(tmp, "proc"))
 
 	entries := []rosterEntry{
 		{ID: "gone", Name: "old", ProjectID: "prj_1", State: "exited", CgroupPath: filepath.Join(tmp, "nope")},
-		{ID: "unresolved", Name: "mystery", ProjectID: "prj_1", State: "running", CgroupPath: ""},
+		{ID: "unresolved", Name: "mystery", ProjectID: "prj_1", State: "running", CgroupPath: "", OomKills: 2},
+		{ID: "vanished", Name: "oomed", ProjectID: "prj_1", State: "running", CgroupPath: filepath.Join(tmp, "removed-scope"), OomKills: 1},
 	}
 	out := c.Sample(entries, time.Unix(6000, 0))
-	if len(out) != 1 {
-		t.Fatalf("got %d stats, want 1 (the exited container zeroed; the running-unresolved one dropped)", len(out))
+	if len(out) != len(entries) {
+		t.Fatalf("got %d stats, want %d (every roster entry, readable or not)", len(out), len(entries))
 	}
-	st := out[0]
-	if st.ContainerId != "gone" || st.State != "exited" || st.Running {
-		t.Errorf("emitted row = id %q/state %q/running %v, want gone/exited/false", st.ContainerId, st.State, st.Running)
-	}
-	if st.CpuPct != 0 || st.MemUsed != 0 {
-		t.Errorf("stopped container carried non-zero usage: cpu=%v mem=%d", st.CpuPct, st.MemUsed)
+	for i, st := range out {
+		e := entries[i]
+		if st.ContainerId != e.ID || st.State != e.State || st.OomKills != e.OomKills || st.Running {
+			t.Errorf("row %d = id %q/state %q/oom %d/running %v, want %s/%s/%d/false", i, st.ContainerId, st.State, st.OomKills, st.Running, e.ID, e.State, e.OomKills)
+		}
+		if st.CpuPct != 0 || st.MemUsed != 0 {
+			t.Errorf("row %d carried usage it never read: cpu=%v mem=%d", i, st.CpuPct, st.MemUsed)
+		}
 	}
 }
 
@@ -576,8 +580,8 @@ func TestCgroupSampler_WhollyUnreadableTickKeepsTheBaseline(t *testing.T) {
 
 	blind := e
 	blind.CgroupPath = filepath.Join(tmp, "missing")
-	if out := c.Sample([]rosterEntry{blind}, t0.Add(5*time.Second)); len(out) != 0 {
-		t.Fatalf("got %d stats for an unreadable cgroup, want 0", len(out))
+	if out := c.Sample([]rosterEntry{blind}, t0.Add(5*time.Second)); len(out) != 1 || out[0].Running {
+		t.Fatalf("got %d stats for an unreadable cgroup, want 1 identity-only row", len(out))
 	}
 	if _, ok := c.prev["c1"]; !ok {
 		t.Fatal("baseline dropped by a failed read; the container is still rostered, only the read failed")
