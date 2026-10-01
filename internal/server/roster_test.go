@@ -885,3 +885,46 @@ func TestRosterHostCountPublishesGenuineZero(t *testing.T) {
 		t.Errorf("HostRunningCount() = %d after a genuine empty read, want 0", got)
 	}
 }
+
+func TestParseEventLineOom(t *testing.T) {
+	const id = "cccc1c9e5b2d4a7c8e1f0b6d9a2c5e8f1b4d7a0c3e6f9b2d5a8c1e4f7b0d3a6c"
+	ev, ok := parseEventLine(`{"Type":"container","Action":"oom","Actor":{"ID":"` + id + `","Attributes":{"deplo.managed":"true"}}}`)
+	if !ok || ev.Action != "oom" || ev.ID != id || !ev.Managed {
+		t.Fatalf("parseEventLine(oom) = %+v, %v", ev, ok)
+	}
+	if isChurnAction("oom") {
+		t.Error("an oom must not trigger a rebuild on its own: the die that follows does")
+	}
+}
+
+func TestRosterCountsOomKillsPerContainer(t *testing.T) {
+	const idA = "aaaa1c9e5b2d4a7c8e1f0b6d9a2c5e8f1b4d7a0c3e6f9b2d5a8c1e4f7b0d3a6c"
+	const idB = "bbbb1c9e5b2d4a7c8e1f0b6d9a2c5e8f1b4d7a0c3e6f9b2d5a8c1e4f7b0d3a6c"
+	r := newRosterDefaults()
+	r.entries = []rosterEntry{{ID: idA}, {ID: idB}}
+	r.recordOom(idA)
+	r.recordOom(idA)
+
+	got := map[string]int32{}
+	for _, e := range r.Entries() {
+		got[e.ID] = e.OomKills
+	}
+	if got[idA] != 2 || got[idB] != 0 {
+		t.Fatalf("oom kills = %v, want A=2 B=0", got)
+	}
+	if r.entries[0].OomKills != 0 {
+		t.Error("Entries must hand out a copy, not write into the live roster")
+	}
+
+	r.listFn = func(context.Context) ([]rosterPsRow, error) {
+		return []rosterPsRow{{ID: idB, Name: "b", State: "running"}}, nil
+	}
+	r.inspectFn = func(context.Context, []string) (map[string]rosterDetail, error) {
+		return map[string]rosterDetail{}, nil
+	}
+	r.hostCountFn = func(context.Context) (int, bool) { return 1, true }
+	r.rebuild(context.Background())
+	if _, kept := r.ooms[idA]; kept {
+		t.Error("a container that left the roster must not keep its oom count")
+	}
+}
