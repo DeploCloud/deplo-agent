@@ -2,9 +2,10 @@ package server
 
 import "testing"
 
+const typicalStatsRow = `{"BlockIO":"1.2MB / 8.19kB","CPUPerc":"12.34%","Container":"abc","ID":"abc123","MemPerc":"5.50%","MemUsage":"10.5MiB / 1.944GiB","Name":"deplo-app","NetIO":"3.4kB / 5.6kB","PIDs":"7"}`
+
 func TestParseStatsLine_TypicalRow(t *testing.T) {
-	line := `{"BlockIO":"1.2MB / 8.19kB","CPUPerc":"12.34%","Container":"abc","ID":"abc123","MemPerc":"5.50%","MemUsage":"10.5MiB / 1.944GiB","Name":"deplo-app","NetIO":"3.4kB / 5.6kB","PIDs":"7"}`
-	st, ok := parseStatsLine(line)
+	st, ok := parseStatsLine(typicalStatsRow)
 	if !ok {
 		t.Fatal("expected the line to parse")
 	}
@@ -77,4 +78,20 @@ func TestParsePercentAndPids(t *testing.T) {
 	if v := parsePids(""); v != 0 {
 		t.Errorf("parsePids(empty) = %d, want 0", v)
 	}
+	// Past int32 it used to wrap around (2^32+1 read as 1); now it is unreadable, so 0.
+	if v := parsePids("4294967297"); v != 0 {
+		t.Errorf("parsePids(2^32+1) = %d, want 0", v)
+	}
+}
+
+// Whatever `docker stats` prints on a host must never crash the agent.
+func FuzzParseStatsLine(f *testing.F) {
+	for _, seed := range []string{typicalStatsRow, `{"PIDs":"4294967297","CPUPerc":"1e400%"}`, "", "{"} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, line string) {
+		if st, ok := parseStatsLine(line); ok && st == nil {
+			t.Fatal("parsed ok but returned no stat")
+		}
+	})
 }

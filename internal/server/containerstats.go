@@ -142,7 +142,7 @@ func parsePercent(s string) float64 {
 }
 
 func parsePids(s string) int32 {
-	n, err := strconv.Atoi(strings.TrimSpace(s))
+	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 32)
 	if err != nil {
 		return 0
 	}
