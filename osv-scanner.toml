@@ -1,0 +1,4 @@
+# Read by Scorecard's vulnerability check (OSV-Scanner).
+[[IgnoredVulns]]
+id = "GO-2026-5932"
+reason = "Only golang.org/x/crypto/openpgp is affected; the agent never imports it (x/crypto comes in for chacha20poly1305 via age)."
