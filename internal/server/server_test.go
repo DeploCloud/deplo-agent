@@ -56,6 +56,14 @@ func TestHello_reportsContractAndCapabilities(t *testing.T) {
 	if !containsString(resp.GetCapabilities(), "metrics.netns") {
 		t.Errorf("capabilities %v do not advertise metrics.netns", resp.GetCapabilities())
 	}
+	if !containsString(resp.GetCapabilities(), "host.addresses") {
+		t.Errorf("capabilities %v do not advertise host.addresses", resp.GetCapabilities())
+	}
+	for _, a := range resp.GetPublicAddresses() {
+		if ip := net.ParseIP(a); ip == nil || ip.IsPrivate() || ip.IsLoopback() {
+			t.Errorf("public address %q is not a public IP", a)
+		}
+	}
 }
 
 func TestMetrics_returnsHostShape(t *testing.T) {

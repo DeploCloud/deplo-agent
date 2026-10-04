@@ -20,6 +20,7 @@ import (
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
+	"github.com/DeploCloud/deplo-agent/internal/hostinfo"
 	"github.com/DeploCloud/deplo-agent/internal/hostmetrics"
 )
 
@@ -100,6 +101,7 @@ var Capabilities = []string{
 	"control-plane.update.canary",
 	"stack.stop-services",
 	"deploy.context_stream",
+	"host.addresses",
 }
 
 // AgentVersion is the version this agent reports over Hello.
@@ -189,6 +191,7 @@ func (s *Service) Hello(ctx context.Context, req *pb.HelloRequest) (*pb.HelloRes
 		Capabilities:    Capabilities,
 		TraefikRunning:  available && dockercli.TraefikRunning(ctx),
 		HostArch:        runtime.GOARCH,
+		PublicAddresses: hostinfo.PublicAddresses(),
 	}, nil
 }
 
