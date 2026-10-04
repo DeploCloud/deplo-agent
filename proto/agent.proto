@@ -352,6 +352,9 @@ message HelloResponse {
   // This host's CPU architecture, from Go's runtime.GOARCH: "amd64" or "arm64" (the two
   // the release publishes binaries for).
   string host_arch = 7;
+  // The host's public IPv4 and IPv6 addresses, read from its own interfaces. Trusted only
+  // with the "host.addresses" capability: an older agent leaves it empty.
+  repeated string public_addresses = 8;
 }
 
 // ---------------------------------------------------------------------------
