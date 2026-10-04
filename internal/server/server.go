@@ -102,6 +102,7 @@ var Capabilities = []string{
 	"stack.stop-services",
 	"deploy.context_stream",
 	"host.addresses",
+	"git.commit",
 }
 
 // AgentVersion is the version this agent reports over Hello.

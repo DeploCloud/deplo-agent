@@ -494,6 +494,9 @@ message GitSource {
   // relative to the clone root. Empty => the repo root. Re-validated against the
   // clone root inside the agent (anti-escape, like the Dockerfile paths).
   string subdir = 4;
+  // A full commit SHA to build instead of the branch tip (a rollback whose image
+  // was pruned). Advertised as `git.commit` in Hello; an older agent ignores it.
+  string commit = 5;
 }
 
 message DockerfileBuild {

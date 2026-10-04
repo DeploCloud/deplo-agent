@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -32,21 +33,28 @@ func (s *Service) materializeGit(
 
 	cloneURL, display, authHeader := authenticatedURL(g.GetUrl(), g.GetToken())
 
-	args := []string{"clone", "--depth", "1"}
-	if b := strings.TrimSpace(g.GetBranch()); b != "" {
-		args = append(args, "--branch", b, "--single-branch")
-	}
-	args = append(args, "--", cloneURL, dir)
+	if commit := strings.TrimSpace(g.GetCommit()); commit != "" {
+		if err := fetchCommit(ctx, e, dir, cloneURL, display, authHeader, commit); err != nil {
+			cleanup()
+			return "", "", func() {}, err
+		}
+	} else {
+		args := []string{"clone", "--depth", "1"}
+		if b := strings.TrimSpace(g.GetBranch()); b != "" {
+			args = append(args, "--branch", b, "--single-branch")
+		}
+		args = append(args, "--", cloneURL, dir)
 
-	branchNote := ""
-	if b := strings.TrimSpace(g.GetBranch()); b != "" {
-		branchNote = " (" + b + ")"
-	}
-	e.log("command", "git clone "+display+branchNote)
+		branchNote := ""
+		if b := strings.TrimSpace(g.GetBranch()); b != "" {
+			branchNote = " (" + b + ")"
+		}
+		e.log("command", "git clone "+display+branchNote)
 
-	if err := runGit(ctx, e, "", authHeader, args...); err != nil {
-		cleanup()
-		return "", "", func() {}, err
+		if err := runGit(ctx, e, "", authHeader, args...); err != nil {
+			cleanup()
+			return "", "", func() {}, err
+		}
 	}
 
 	sha, _ := gitOutput(ctx, dir, "rev-parse", "HEAD")
@@ -72,6 +80,31 @@ func (s *Service) materializeGit(
 		buildDir = joined
 	}
 	return buildDir, commitSha, cleanup, nil
+}
+
+var fullCommitSha = regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`)
+
+// fetchCommit checks out one commit by SHA. A server that refuses an unadvertised object
+// (protocol v0, some plain git servers) gets the whole history fetched instead.
+func fetchCommit(ctx context.Context, e *emitter, dir, cloneURL, display, authHeader, commit string) error {
+	if !fullCommitSha.MatchString(commit) {
+		return fmt.Errorf("git commit %q is not a full commit SHA", commit)
+	}
+	short := commit[:7]
+	if err := runGit(ctx, e, dir, "", "init", "-q"); err != nil {
+		return err
+	}
+	e.log("command", "git fetch "+display+" ("+short+")")
+	if err := runGit(ctx, e, dir, authHeader, "fetch", "--depth", "1", "--", cloneURL, commit); err != nil {
+		e.log("info", "This git server can't fetch a single commit, fetching the whole history instead")
+		if err := runGit(ctx, e, dir, authHeader, "fetch", "--tags", "--", cloneURL, "+refs/heads/*:refs/remotes/origin/*"); err != nil {
+			return err
+		}
+	}
+	if err := runGit(ctx, e, dir, "", "checkout", "-q", "--detach", commit+"^{commit}"); err != nil {
+		return fmt.Errorf("commit %s is no longer in the repository", short)
+	}
+	return nil
 }
 
 var volatileGitPaths = []string{"index", "logs"}

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
 func TestAuthenticatedURL_injectsToken(t *testing.T) {
@@ -155,4 +157,80 @@ func sameTree(t *testing.T, a, b string) bool {
 	}
 	t.Fatalf("diff: %v", err)
 	return false
+}
+
+// A rollback whose image was pruned rebuilds its commit, so the agent must land on that SHA, not the branch tip - including on a server that refuses to serve a single commit.
+func TestMaterializeGitChecksOutCommit(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	origin := t.TempDir()
+	run := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = origin
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	write := func(s string) {
+		if err := os.WriteFile(filepath.Join(origin, "app.txt"), []byte(s), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run("init", "-q", "-b", "main", ".")
+	write("old\n")
+	run("add", "-A")
+	run("commit", "-qm", "old")
+	old := run("rev-parse", "HEAD")
+	write("new\n")
+	run("commit", "-qam", "new")
+
+	for _, tc := range []struct{ name, protocol string }{{"shallow", "2"}, {"full history", "0"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GIT_CONFIG_COUNT", "1")
+			t.Setenv("GIT_CONFIG_KEY_0", "protocol.version")
+			t.Setenv("GIT_CONFIG_VALUE_0", tc.protocol)
+			var logs strings.Builder
+			s := &Service{buildTmpDir: t.TempDir()}
+			e := &emitter{send: func(ev *pb.DeployEvent) error {
+				logs.WriteString(ev.GetLog().GetText() + "\n")
+				return nil
+			}}
+			g := &pb.GitSource{Url: "file://" + origin, Branch: "main", Commit: old}
+			dir, sha, cleanup, err := s.materializeGit(context.Background(), g, "app", e)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cleanup()
+			if sha != old {
+				t.Fatalf("HEAD is %s, want %s", sha, old)
+			}
+			if b, _ := os.ReadFile(filepath.Join(dir, "app.txt")); string(b) != "old\n" {
+				t.Fatalf("checked out %q, want the old commit's tree", b)
+			}
+			if fellBack := strings.Contains(logs.String(), "whole history"); fellBack != (tc.protocol == "0") {
+				t.Fatalf("fell back to the whole history: %v\n%s", fellBack, logs.String())
+			}
+		})
+	}
+
+	s := &Service{buildTmpDir: t.TempDir()}
+	e := &emitter{send: func(*pb.DeployEvent) error { return nil }}
+	for _, bad := range []string{"--upload-pack=touch /tmp/x", old[:7], strings.Repeat("0", 40)} {
+		g := &pb.GitSource{Url: "file://" + origin, Commit: bad}
+		if _, _, _, err := s.materializeGit(context.Background(), g, "app", e); err == nil {
+			t.Fatalf("commit %q was accepted", bad)
+		}
+	}
+}
+
+func TestCapabilities_advertisesGitCommit(t *testing.T) {
+	if !containsString(Capabilities, "git.commit") {
+		t.Error(`Capabilities must advertise "git.commit"`)
+	}
 }
