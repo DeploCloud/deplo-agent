@@ -1443,9 +1443,10 @@ func TestDockerCleanup_buildCache_sweepsStaleBuildDirs(t *testing.T) {
 	h.install(t)
 	tmp := t.TempDir()
 	stale := filepath.Join(tmp, "deplo-git-web-123")
+	dockercfg := filepath.Join(tmp, "deplo-dockercfg-dpl_abc123")
 	live := filepath.Join(tmp, "deplo-build-web-456")
 	other := filepath.Join(tmp, "somebody-else")
-	for _, d := range []string{stale, live, other} {
+	for _, d := range []string{stale, dockercfg, live, other} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -1454,7 +1455,7 @@ func TestDockerCleanup_buildCache_sweepsStaleBuildDirs(t *testing.T) {
 		}
 	}
 	past := time.Now().Add(-3 * time.Hour)
-	for _, d := range []string{stale, other} {
+	for _, d := range []string{stale, dockercfg, other} {
 		if err := os.Chtimes(d, past, past); err != nil {
 			t.Fatal(err)
 		}
@@ -1470,6 +1471,9 @@ func TestDockerCleanup_buildCache_sweepsStaleBuildDirs(t *testing.T) {
 	r := resultFor(t, resp, pb.CleanupScope_CLEANUP_SCOPE_BUILD_CACHE)
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Fatalf("stale build dir should be gone, stat err=%v", err)
+	}
+	if _, err := os.Stat(dockercfg); !os.IsNotExist(err) {
+		t.Fatalf("stale registry-auth dir should be gone, stat err=%v", err)
 	}
 	for _, d := range []string{live, other} {
 		if _, err := os.Stat(d); err != nil {

@@ -289,6 +289,17 @@ const staleBuildDirAfter = 2 * time.Hour
 // Never evict cache a build running right now may still be reaching for.
 const buildCacheCeilingMinHours = 1
 
+var staleBuildDirPrefixes = []string{"deplo-git-", "deplo-build-", "deplo-dockercfg-"}
+
+func isStaleBuildDir(name string) bool {
+	for _, prefix := range staleBuildDirPrefixes {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func sweepStaleBuildDirs(p cleanupParams, r *pb.CleanupScopeResult) {
 	if p.buildTmpDir == "" {
 		return
@@ -300,7 +311,7 @@ func sweepStaleBuildDirs(p cleanupParams, r *pb.CleanupScopeResult) {
 	cutoff := time.Now().Add(-staleBuildDirAfter)
 	for _, e := range entries {
 		name := e.Name()
-		if !e.IsDir() || !(strings.HasPrefix(name, "deplo-git-") || strings.HasPrefix(name, "deplo-build-")) {
+		if !e.IsDir() || !isStaleBuildDir(name) {
 			continue
 		}
 		info, err := e.Info()
