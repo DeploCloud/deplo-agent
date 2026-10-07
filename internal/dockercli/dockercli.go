@@ -296,51 +296,6 @@ func resetImageExportProbe() {
 	imageExportKnown, imageExportOK = false, false
 }
 
-// Build-cache size caps.
-const (
-	// PruneCapModern accepts --max-used-space / --min-free-space.
-	PruneCapModern = "modern"
-	// PruneCapLegacy accepts only --keep-storage.
-	PruneCapLegacy = "legacy"
-	// PruneCapNone accepts no size cap at all - prune by age only.
-	PruneCapNone = "none"
-)
-
-var (
-	pruneCapMu    sync.Mutex
-	pruneCapKnown bool
-	pruneCapMode  string
-)
-
-// BuildCachePruneCap reports which size-ceiling flags `docker builder prune` accepts here.
-func BuildCachePruneCap(ctx context.Context) string {
-	pruneCapMu.Lock()
-	defer pruneCapMu.Unlock()
-	if pruneCapKnown {
-		return pruneCapMode
-	}
-	res, err := Run(ctx, 15*time.Second, "builder", "prune", "--help")
-	if err != nil {
-		return PruneCapNone
-	}
-	help := res.Stdout + res.Stderr
-	mode := PruneCapNone
-	switch {
-	case strings.Contains(help, "--max-used-space"):
-		mode = PruneCapModern
-	case strings.Contains(help, "--keep-storage"):
-		mode = PruneCapLegacy
-	}
-	pruneCapKnown, pruneCapMode = true, mode
-	return mode
-}
-
-func resetPruneCapProbe() {
-	pruneCapMu.Lock()
-	defer pruneCapMu.Unlock()
-	pruneCapKnown, pruneCapMode = false, ""
-}
-
 // EnsureNetwork creates the named external network if it is missing.
 func EnsureNetwork(ctx context.Context, name string) error {
 	if res, err := Run(ctx, 10*time.Second, "network", "inspect", name); err == nil && res.Code == 0 {

@@ -125,12 +125,16 @@ func (h *hostFixture) install(t *testing.T) {
 }
 
 func isCeilingPrune(args []string) bool {
+	all, filter := false, false
 	for _, a := range args {
-		if a == "--max-used-space" || a == "--keep-storage" {
-			return true
+		switch a {
+		case "--all":
+			all = true
+		case "--filter":
+			filter = true
 		}
 	}
-	return false
+	return all && filter
 }
 
 func (h *hostFixture) argv() []string {
@@ -251,19 +255,13 @@ func TestDockerCleanup_buildCacheArgv(t *testing.T) {
 			if len(got) == 0 || got[0] != tc.want {
 				t.Fatalf("argv = %q, want the first command to be %q", got, tc.want)
 			}
-			for _, a := range got {
-				if strings.Contains(a, "--filter") &&
-					(strings.Contains(a, "--max-used-space") || strings.Contains(a, "--keep-storage")) {
-					t.Fatalf("argv %q: the ceiling must not ride on the age-filtered prune", a)
+			for _, cmd := range got[1:] {
+				if !isCeilingPrune(strings.Fields(cmd)) {
+					t.Errorf("argv = %q: only the ceiling may add a second prune", got)
 				}
 			}
-			hasCeiling := hasSubstringIn(got, "--max-used-space") || hasSubstringIn(got, "--keep-storage")
-			capSupported := dockercli.BuildCachePruneCap(context.Background()) != dockercli.PruneCapNone
-			switch {
-			case tc.minAgeHours == 0 && hasCeiling:
+			if tc.minAgeHours == 0 && len(got) > 1 {
 				t.Errorf("argv = %q: `--all` already takes everything; no ceiling needed", got)
-			case tc.minAgeHours > 0 && capSupported && !hasCeiling:
-				t.Errorf("argv = %q: an age-filtered sweep must still bound the cache size", got)
 			}
 			r := resultFor(t, resp, pb.CleanupScope_CLEANUP_SCOPE_BUILD_CACHE)
 			if r.GetItemsRemoved() != 1 || r.GetItems()[0] != "cache-idle" {
@@ -1007,22 +1005,11 @@ func containsString(haystack []string, needle string) bool {
 	return false
 }
 
-func hasSubstringIn(haystack []string, needle string) bool {
-	for _, h := range haystack {
-		if strings.Contains(h, needle) {
-			return true
-		}
-	}
-	return false
-}
-
-// The size ceiling is what stops "builds are fast" from becoming "the disk filled up": the age filter drops nothing on a host whose apps all deploy daily, because no cache is ever idle long enough to qualify.
+// The size ceiling is what stops "builds are fast" from becoming "the disk filled up": the age filter drops nothing on a host whose apps all deploy daily, because no cache is ever idle long enough to qualify. 60GB clears any host's ceiling, which is a tenth of the disk capped at 50GB.
 func TestDockerCleanup_buildCacheCeiling_prunesWhatTheAgeFilterCannot(t *testing.T) {
-	if dockercli.BuildCachePruneCap(context.Background()) == dockercli.PruneCapNone {
-		t.Skip("this CLI takes no size cap")
-	}
 	h := newFixture(t)
-	h.buildCacheJSON = `[{"ID":"cache-live","Size":"1.2GB","InUse":"true","CreatedAt":"","LastUsedAt":""}]`
+	h.buildCacheJSON = `[{"ID":"cache-live","Size":"60GB","InUse":"true","CreatedAt":"","LastUsedAt":"` +
+		time.Now().Add(-100*time.Hour).Format(time.RFC3339Nano) + `"}]`
 	h.ceilingFrees = "ceil1record0000000000000\n\nTotal:\t2.5GB\n"
 	h.install(t)
 	orig := removeObject
@@ -1048,11 +1035,11 @@ func TestDockerCleanup_buildCacheCeiling_prunesWhatTheAgeFilterCannot(t *testing
 	if len(got) != 2 {
 		t.Fatalf("argv = %q, want the age prune AND the ceiling prune", got)
 	}
-	if !strings.Contains(got[1], "--max-used-space") && !strings.Contains(got[1], "--keep-storage") {
+	if !isCeilingPrune(strings.Fields(got[1])) {
 		t.Fatalf("second command %q is not the ceiling prune", got[1])
 	}
-	if strings.Contains(got[1], "--filter") {
-		t.Fatalf("the ceiling prune must carry no age filter, got %q", got[1])
+	if !strings.Contains(got[1], "--filter until=100h") {
+		t.Fatalf("ceiling prune %q must evict back to the oldest record that covers the overflow", got[1])
 	}
 
 	r := resultFor(t, resp, pb.CleanupScope_CLEANUP_SCOPE_BUILD_CACHE)
@@ -1421,6 +1408,36 @@ func TestDockerCleanup_leftoverNetworks_projectNetworksOfDeadSlugs(t *testing.T)
 }
 
 // A build directory a dead agent left behind is swept with the build cache once it is old enough to belong to nobody; a fresh one may be a build in flight.
+// A ceiling that cannot run has to say so IN the run: for as long as the failure only reached the host log, a broken ceiling and a ceiling with nothing to do looked identical in the UI.
+func TestDockerCleanup_buildCacheCeiling_failureReachesTheRun(t *testing.T) {
+	h := newFixture(t)
+	h.buildCacheJSON = `[{"ID":"cache-live","Size":"60GB","InUse":"true","CreatedAt":"","LastUsedAt":"` +
+		time.Now().Add(-100*time.Hour).Format(time.RFC3339Nano) + `"}]`
+	h.install(t)
+	orig := removeObject
+	removeObject = func(ctx context.Context, args ...string) (dockercli.Result, error) {
+		if isCeilingPrune(args) {
+			return dockercli.Result{Code: 1, Stderr: "no space left on device"}, nil
+		}
+		return orig(ctx, args...)
+	}
+
+	resp, err := newService(t).DockerCleanup(context.Background(), &pb.DockerCleanupRequest{
+		Scopes:      []pb.CleanupScope{pb.CleanupScope_CLEANUP_SCOPE_BUILD_CACHE},
+		MinAgeHours: 24,
+	})
+	if err != nil {
+		t.Fatalf("DockerCleanup: %v", err)
+	}
+	r := resultFor(t, resp, pb.CleanupScope_CLEANUP_SCOPE_BUILD_CACHE)
+	if !strings.Contains(r.GetError(), "no space left on device") {
+		t.Fatalf("error = %q; want the ceiling's own failure", r.GetError())
+	}
+	if r.GetReclaimedBytes() == 0 {
+		t.Error("the age prune's total must survive the ceiling's failure")
+	}
+}
+
 func TestDockerCleanup_buildCache_sweepsStaleBuildDirs(t *testing.T) {
 	h := newFixture(t)
 	h.install(t)

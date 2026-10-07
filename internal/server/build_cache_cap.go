@@ -1,44 +1,26 @@
 package server
 
 import (
-	"context"
-	"strconv"
 	"syscall"
-
-	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
 const (
 	buildCacheCapFraction = 10
 	buildCacheCapMin      = 2 << 30
 	buildCacheCapMax      = 50 << 30
-	buildCacheFreeFloor   = 2 << 30
-	buildCacheFreeCeiling = 20 << 30
 )
 
-func buildCacheCapArgs(ctx context.Context, dataDir string) []string {
-	total := filesystemBytes(dataDir)
-	if total <= 0 {
-		return nil
-	}
-	maxUsed, minFree := buildCacheCap(total)
-	switch dockercli.BuildCachePruneCap(ctx) {
-	case dockercli.PruneCapModern:
-		return []string{
-			"--max-used-space", strconv.FormatInt(maxUsed, 10),
-			"--min-free-space", strconv.FormatInt(minFree, 10),
-		}
-	case dockercli.PruneCapLegacy:
-		return []string{"--keep-storage", strconv.FormatInt(maxUsed, 10)}
-	default:
-		return nil
-	}
+// buildCacheCeiling is the most build cache this host may hold: a tenth of the
+// filesystem, bounded. 0 when the filesystem cannot be measured.
+func buildCacheCeiling(dataDir string) int64 {
+	return buildCacheCeilingFor(filesystemBytes(dataDir))
 }
 
-func buildCacheCap(totalBytes int64) (maxUsed, minFree int64) {
-	tenth := totalBytes / buildCacheCapFraction
-	return clampInt64(tenth, buildCacheCapMin, buildCacheCapMax),
-		clampInt64(tenth, buildCacheFreeFloor, buildCacheFreeCeiling)
+func buildCacheCeilingFor(totalBytes int64) int64 {
+	if totalBytes <= 0 {
+		return 0
+	}
+	return clampInt64(totalBytes/buildCacheCapFraction, buildCacheCapMin, buildCacheCapMax)
 }
 
 func clampInt64(v, lo, hi int64) int64 {

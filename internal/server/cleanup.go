@@ -261,6 +261,23 @@ type buildCacheRecord struct {
 	LastUsedAt string `json:"LastUsedAt"`
 }
 
+func readBuildCacheRecords(ctx context.Context) ([]buildCacheRecord, error) {
+	res, err := dockerQuery(ctx, cleanupQueryTimeout, "system", "df", "-v", "--format", "{{json .BuildCache}}")
+	if err != nil {
+		return nil, err
+	}
+	if res.Code != 0 {
+		return nil, errors.New(dockerErr("system df -v", res))
+	}
+	var records []buildCacheRecord
+	if out := strings.TrimSpace(res.Stdout); out != "" && out != "null" {
+		if err := json.Unmarshal([]byte(out), &records); err != nil {
+			return nil, errors.New("read the build cache: " + err.Error())
+		}
+	}
+	return records, nil
+}
+
 func cleanBuildCache(ctx context.Context, p cleanupParams) *pb.CleanupScopeResult {
 	r := pruneBuildCache(ctx, p)
 	sweepStaleBuildDirs(p, r)
@@ -268,6 +285,9 @@ func cleanBuildCache(ctx context.Context, p cleanupParams) *pb.CleanupScopeResul
 }
 
 const staleBuildDirAfter = 2 * time.Hour
+
+// Never evict cache a build running right now may still be reaching for.
+const buildCacheCeilingMinHours = 1
 
 func sweepStaleBuildDirs(p cleanupParams, r *pb.CleanupScopeResult) {
 	if p.buildTmpDir == "" {
@@ -305,18 +325,9 @@ func pruneBuildCache(ctx context.Context, p cleanupParams) *pb.CleanupScopeResul
 
 	var estimate int64
 	enumFailure := func() string {
-		res, err := dockerQuery(ctx, cleanupQueryTimeout, "system", "df", "-v", "--format", "{{json .BuildCache}}")
+		records, err := readBuildCacheRecords(ctx)
 		if err != nil {
 			return err.Error()
-		}
-		if res.Code != 0 {
-			return dockerErr("system df -v", res)
-		}
-		var records []buildCacheRecord
-		if out := strings.TrimSpace(res.Stdout); out != "" && out != "null" {
-			if err := json.Unmarshal([]byte(out), &records); err != nil {
-				return "read the build cache: " + err.Error()
-			}
 		}
 		for _, rec := range records {
 			if rec.InUse == "true" {
@@ -386,23 +397,36 @@ func pruneBuildCache(ctx context.Context, p cleanupParams) *pb.CleanupScopeResul
 	return r
 }
 
+// The daemon's own space flags are no-ops once the ceiling sits above what
+// docker calls reclaimable, so the age filter is what actually evicts.
 func enforceBuildCacheCeiling(ctx context.Context, p cleanupParams, r *pb.CleanupScopeResult) {
 	if p.dryRun || p.minAgeHours <= 0 {
 		return
 	}
-	capArgs := buildCacheCapArgs(ctx, p.dataDir)
-	if len(capArgs) == 0 {
+	ceiling := buildCacheCeiling(p.dataDir)
+	if ceiling <= 0 {
+		return
+	}
+	// A cache list we cannot read leaves the ceiling unknown, not breached:
+	// pruneBuildCache already logged the same failure.
+	records, err := readBuildCacheRecords(ctx)
+	if err != nil {
+		return
+	}
+	hours, over := ceilingEvictionHours(records, ceiling, time.Now())
+	if !over {
 		return
 	}
 	cctx, cancel := context.WithTimeout(ctx, cleanupBuilderPruneTimeout)
 	defer cancel()
-	res, err := removeObject(cctx, append([]string{"builder", "prune", "--force"}, capArgs...)...)
+	res, err := removeObject(cctx, "builder", "prune", "--force", "--all",
+		"--filter", "until="+strconv.Itoa(hours)+"h")
 	if err != nil {
-		log.Printf("deplo-agent: build-cache ceiling prune failed: %v", err)
+		addScopeError(r, "build-cache ceiling: "+err.Error())
 		return
 	}
 	if res.Code != 0 {
-		log.Printf("deplo-agent: build-cache ceiling prune failed: %s", dockerErr("builder prune", res))
+		addScopeError(r, "build-cache ceiling: "+dockerErr("builder prune", res))
 		return
 	}
 	freed, known := parsePrunedTotal(res.Stdout)
@@ -414,6 +438,51 @@ func enforceBuildCacheCeiling(ctx context.Context, p cleanupParams, r *pb.Cleanu
 		addItem(r, id)
 		r.ItemsRemoved++
 	}
+}
+
+// ceilingEvictionHours is the `until=` age that frees enough of the OLDEST
+// cache to land under the ceiling. over is false when nothing has to go.
+func ceilingEvictionHours(records []buildCacheRecord, ceiling int64, now time.Time) (hours int, over bool) {
+	type aged struct {
+		age  time.Duration
+		size int64
+	}
+	var total int64
+	dated := make([]aged, 0, len(records))
+	for _, rec := range records {
+		size := parseHumanSize(rec.Size)
+		total += size
+		at := rec.LastUsedAt
+		if at == "" {
+			at = rec.CreatedAt
+		}
+		t, ok := parseDockerTime(at)
+		if !ok {
+			continue
+		}
+		dated = append(dated, aged{now.Sub(t), size})
+	}
+	if total <= ceiling {
+		return 0, false
+	}
+	sort.Slice(dated, func(i, j int) bool { return dated[i].age > dated[j].age })
+	need := total - ceiling
+	var freed int64
+	for _, a := range dated {
+		freed += a.size
+		if freed >= need {
+			return max(int(a.age.Hours()), buildCacheCeilingMinHours), true
+		}
+	}
+	return buildCacheCeilingMinHours, true
+}
+
+func addScopeError(r *pb.CleanupScopeResult, msg string) {
+	if r.Error == "" {
+		r.Error = msg
+		return
+	}
+	r.Error += "; " + msg
 }
 
 func cleanDanglingImages(ctx context.Context, p cleanupParams) *pb.CleanupScopeResult {
