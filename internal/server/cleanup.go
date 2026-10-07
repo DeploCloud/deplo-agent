@@ -589,7 +589,18 @@ var anonymousVolume = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func cleanOrphanVolumes(ctx context.Context, p cleanupParams, idx *containerIndex) *pb.CleanupScopeResult {
 	return cleanDanglingVolumes(ctx, p, idx, pb.CleanupScope_CLEANUP_SCOPE_ORPHAN_VOLUMES,
-		func(name, _ string) bool { return anonymousVolume.MatchString(name) })
+		func(name, mountpoint string) bool {
+			return anonymousVolume.MatchString(name) ||
+				(strings.HasPrefix(name, deploVolumePrefix) && isEmptyDir(mountpoint))
+		})
+}
+
+const deploVolumePrefix = "deplo-"
+
+// isEmptyDir is the proof that removing a named volume loses nothing.
+func isEmptyDir(path string) bool {
+	entries, err := os.ReadDir(path)
+	return err == nil && len(entries) == 0
 }
 
 func cleanDanglingVolumes(ctx context.Context, p cleanupParams, idx *containerIndex, scope pb.CleanupScope, proof func(name, mountpoint string) bool) *pb.CleanupScopeResult {

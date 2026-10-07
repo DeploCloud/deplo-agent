@@ -1408,6 +1408,42 @@ func TestDockerCleanup_leftoverNetworks_projectNetworksOfDeadSlugs(t *testing.T)
 }
 
 // A build directory a dead agent left behind is swept with the build cache once it is old enough to belong to nobody; a fresh one may be a build in flight.
+// A NAMED volume goes only when it is provably empty, and only when it is Deplo's: the names are deterministic, so a prefix match on its own would reach another team's data, and an empty volume that belongs to somebody else's tool is still not ours to take.
+func TestDockerCleanup_orphanVolumes_namedOnlyWhenEmptyAndOurs(t *testing.T) {
+	h := newFixture(t)
+	empty := filepath.Join(t.TempDir(), "_data")
+	full := filepath.Join(t.TempDir(), "_data")
+	foreign := filepath.Join(t.TempDir(), "_data")
+	for _, d := range []string{empty, full, foreign} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(full, "PG_VERSION"), []byte("18"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h.danglingVolumes = append(h.danglingVolumes,
+		"deplo-shop_web-cache", "deplo-shop_db-data", "coder-ab12-home")
+	h.volumeMounts["deplo-shop_web-cache"] = empty
+	h.volumeMounts["deplo-shop_db-data"] = full
+	h.volumeMounts["coder-ab12-home"] = foreign
+	h.install(t)
+
+	resp, err := newService(t).DockerCleanup(context.Background(), &pb.DockerCleanupRequest{
+		Scopes:      []pb.CleanupScope{pb.CleanupScope_CLEANUP_SCOPE_ORPHAN_VOLUMES},
+		MinAgeHours: 24,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := h.argv(); len(got) != 1 || got[0] != "volume rm deplo-shop_web-cache" {
+		t.Fatalf("want only the empty Deplo volume removed, got %v", got)
+	}
+	if r := resultFor(t, resp, pb.CleanupScope_CLEANUP_SCOPE_ORPHAN_VOLUMES); r.GetItemsRemoved() != 1 {
+		t.Fatalf("result: %+v", r)
+	}
+}
+
 // A ceiling that cannot run has to say so IN the run: for as long as the failure only reached the host log, a broken ceiling and a ceiling with nothing to do looked identical in the UI.
 func TestDockerCleanup_buildCacheCeiling_failureReachesTheRun(t *testing.T) {
 	h := newFixture(t)
