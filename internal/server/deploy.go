@@ -319,6 +319,8 @@ func (s *Service) buildImage(ctx context.Context, req *pb.DeployRequest, buildDi
 		return s.buildNixpacks(ctx, req, buildDir, e)
 	case pb.BuildKind_BUILD_KIND_BUILDPACKS:
 		return s.buildBuildpacks(ctx, req, buildDir, e)
+	case pb.BuildKind_BUILD_KIND_DEPLOPACK:
+		return s.buildDeplopack(ctx, req, buildDir, e)
 	case pb.BuildKind_BUILD_KIND_RAILPACK:
 		return s.buildRailpack(ctx, req, buildDir, e)
 	default:

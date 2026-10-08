@@ -26,6 +26,8 @@ import (
 
 // Capabilities this agent advertises in Hello.
 var Capabilities = []string{
+	"repo.analyze.deplopack",
+	"deploy.deplopack",
 	"deploy.dockerfile",
 	"deploy.image",
 	"deploy.compose.single",
@@ -131,37 +133,59 @@ type Service struct {
 	pendingMu  sync.Mutex
 	pendingKey ed25519.PrivateKey
 
+	analysisSlots   chan struct{}
+	detectorMu      chan struct{}
+	detectorChecked time.Time
+	detectorPath    string
+	detectorVersion string
+	detectorWarning string
+
 	stackLocksMu sync.Mutex
 	stackLocks   map[string]*stackLock
 }
 
 type stackLock struct {
-	sync.Mutex
-	refs int
+	token chan struct{}
+	refs  int
 }
 
 // lockStack serializes operations on one stack; a slug's entry lives only while someone holds or waits on it.
 func (s *Service) lockStack(slug string) func() {
+	unlock, _ := s.lockStackContext(context.Background(), slug)
+	return unlock
+}
+
+func (s *Service) lockStackContext(ctx context.Context, slug string) (func(), error) {
 	s.stackLocksMu.Lock()
 	if s.stackLocks == nil {
 		s.stackLocks = map[string]*stackLock{}
 	}
 	l := s.stackLocks[slug]
 	if l == nil {
-		l = &stackLock{}
+		l = &stackLock{token: make(chan struct{}, 1)}
 		s.stackLocks[slug] = l
 	}
 	l.refs++
 	s.stackLocksMu.Unlock()
 
-	l.Lock()
-	return func() {
-		l.Unlock()
+	releaseRef := func() {
 		s.stackLocksMu.Lock()
 		if l.refs--; l.refs == 0 {
 			delete(s.stackLocks, slug)
 		}
 		s.stackLocksMu.Unlock()
+	}
+	select {
+	case l.token <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			<-l.token
+			releaseRef()
+			return nil, err
+		}
+		return func() { <-l.token; releaseRef() }, nil
+	case <-ctx.Done():
+		releaseRef()
+		return nil, ctx.Err()
 	}
 }
 
@@ -172,12 +196,14 @@ func New(stackDir, buildTmpDir, dataDir, dataBase string) *Service {
 	}
 	sweepDockerConfigs()
 	return &Service{
-		stackDir:    stackDir,
-		buildTmpDir: buildTmpDir,
-		dataDir:     dataDir,
-		dataBase:    dataBase,
-		deploys:     map[string]*inflight{},
-		jobs:        map[string]*job{},
+		analysisSlots: make(chan struct{}, 2),
+		detectorMu:    make(chan struct{}, 1),
+		stackDir:      stackDir,
+		buildTmpDir:   buildTmpDir,
+		dataDir:       dataDir,
+		dataBase:      dataBase,
+		deploys:       map[string]*inflight{},
+		jobs:          map[string]*job{},
 	}
 }
 

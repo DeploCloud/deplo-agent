@@ -23,6 +23,7 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
+	Agent_AnalyzeRepo_FullMethodName         = "/deplo.agent.v1.Agent/AnalyzeRepo"
 	Agent_Hello_FullMethodName               = "/deplo.agent.v1.Agent/Hello"
 	Agent_Metrics_FullMethodName             = "/deplo.agent.v1.Agent/Metrics"
 	Agent_ContainerStats_FullMethodName      = "/deplo.agent.v1.Agent/ContainerStats"
@@ -96,6 +97,8 @@ const (
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type AgentClient interface {
+	// Analyze a temporary Git checkout without building or deploying.
+	AnalyzeRepo(ctx context.Context, in *AnalyzeRepoRequest, opts ...grpc.CallOption) (*AnalyzeRepoResponse, error)
 	// Health + identity handshake. The control plane calls this as a mandatory
 	// pre-flight before every deploy (PLAN P5): if the agent does not answer, the
 	// deploy fails immediately with "server unreachable" rather than hanging.
@@ -303,6 +306,16 @@ type agentClient struct {
 
 func NewAgentClient(cc grpc.ClientConnInterface) AgentClient {
 	return &agentClient{cc}
+}
+
+func (c *agentClient) AnalyzeRepo(ctx context.Context, in *AnalyzeRepoRequest, opts ...grpc.CallOption) (*AnalyzeRepoResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AnalyzeRepoResponse)
+	err := c.cc.Invoke(ctx, Agent_AnalyzeRepo_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (c *agentClient) Hello(ctx context.Context, in *HelloRequest, opts ...grpc.CallOption) (*HelloResponse, error) {
@@ -1120,6 +1133,8 @@ func (c *agentClient) UpdateControlPlane(ctx context.Context, in *UpdateControlP
 // All implementations must embed UnimplementedAgentServer
 // for forward compatibility.
 type AgentServer interface {
+	// Analyze a temporary Git checkout without building or deploying.
+	AnalyzeRepo(context.Context, *AnalyzeRepoRequest) (*AnalyzeRepoResponse, error)
 	// Health + identity handshake. The control plane calls this as a mandatory
 	// pre-flight before every deploy (PLAN P5): if the agent does not answer, the
 	// deploy fails immediately with "server unreachable" rather than hanging.
@@ -1329,6 +1344,9 @@ type AgentServer interface {
 // pointer dereference when methods are called.
 type UnimplementedAgentServer struct{}
 
+func (UnimplementedAgentServer) AnalyzeRepo(context.Context, *AnalyzeRepoRequest) (*AnalyzeRepoResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AnalyzeRepo not implemented")
+}
 func (UnimplementedAgentServer) Hello(context.Context, *HelloRequest) (*HelloResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Hello not implemented")
 }
@@ -1549,6 +1567,24 @@ func RegisterAgentServer(s grpc.ServiceRegistrar, srv AgentServer) {
 		t.testEmbeddedByValue()
 	}
 	s.RegisterService(&Agent_ServiceDesc, srv)
+}
+
+func _Agent_AnalyzeRepo_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AnalyzeRepoRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).AnalyzeRepo(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_AnalyzeRepo_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).AnalyzeRepo(ctx, req.(*AnalyzeRepoRequest))
+	}
+	return interceptor(ctx, in, info, handler)
 }
 
 func _Agent_Hello_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
@@ -2585,6 +2621,10 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 	ServiceName: "deplo.agent.v1.Agent",
 	HandlerType: (*AgentServer)(nil),
 	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "AnalyzeRepo",
+			Handler:    _Agent_AnalyzeRepo_Handler,
+		},
 		{
 			MethodName: "Hello",
 			Handler:    _Agent_Hello_Handler,

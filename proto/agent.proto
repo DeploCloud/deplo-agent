@@ -1,5 +1,7 @@
 syntax = "proto3";
 
+import "google/protobuf/struct.proto";
+
 // The Deplo server-agent contract: the second system boundary, alongside GraphQL (UI
 // <-> control plane). See docs/research/server-agent/PLAN.md and
 // docs/adr/0006-server-agent-is-a-per-host-go-binary.md.
@@ -16,6 +18,9 @@ enum ContractVersion {
 }
 
 service Agent {
+  // Analyze a temporary Git checkout without building or deploying.
+  rpc AnalyzeRepo(AnalyzeRepoRequest) returns (AnalyzeRepoResponse);
+
   // Health + identity handshake. The control plane calls this as a mandatory
   // pre-flight before every deploy (PLAN P5): if the agent does not answer, the
   // deploy fails immediately with "server unreachable" rather than hanging.
@@ -430,6 +435,7 @@ enum BuildKind {
   BUILD_KIND_STATIC = 3;      // nginx serves a build output (buildStatic)
   BUILD_KIND_NIXPACKS = 4;    // nixpacks generates a Dockerfile, then docker build
   BUILD_KIND_BUILDPACKS = 5;  // Cloud Native Buildpacks via `pack` (heroku|paketo)
+  BUILD_KIND_DEPLOPACK = 7;
   BUILD_KIND_RAILPACK = 6;    // railpack plan + buildkitd/buildctl
 }
 
@@ -476,6 +482,10 @@ message BuildSpec {
   // it detects, which is the safe direction.
   bool skip_install = 13;
   bool skip_build = 14;
+  string deplopack_version = 15;
+  string deplopack_provider = 16;
+  string deplopack_path = 17;
+  map<string, string> deplopack_environment = 18;
 }
 
 // A git source the agent clones itself (SOURCE_KIND_GIT, D3). The token is the only
@@ -1997,4 +2007,16 @@ message UpdateControlPlaneResponse {
   string error = 2;
   // Where the run is transcribed on the host, for an update that did not take.
   string log_path = 3;
+}
+
+message AnalyzeRepoRequest {
+  GitSource source = 1;
+  map<string, string> environment = 2;
+}
+
+message AnalyzeRepoResponse {
+  string commit_sha = 1;
+  string root_directory = 2;
+  string detector_version = 3;
+  google.protobuf.Struct result = 4;
 }
