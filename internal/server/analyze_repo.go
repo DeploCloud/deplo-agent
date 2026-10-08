@@ -156,7 +156,10 @@ func analysisGit(ctx context.Context, dir, auth, input string, args ...string) (
 	cmd := dockercli.Command(ctx, "git", args...)
 	cmd.Dir = dir
 	cmd.WaitDelay = dockercli.WaitDelay
-	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME"), "GIT_SSL_CAINFO=" + os.Getenv("GIT_SSL_CAINFO"), "GIT_TERMINAL_PROMPT=0", "GIT_LFS_SKIP_SMUDGE=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1"}
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME"), "GIT_TERMINAL_PROMPT=0", "GIT_LFS_SKIP_SMUDGE=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1"}
+	if ca := os.Getenv("GIT_SSL_CAINFO"); ca != "" {
+		cmd.Env = append(cmd.Env, "GIT_SSL_CAINFO="+ca)
+	}
 	if auth != "" {
 		cmd.Env = append(cmd.Env, "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=http.extraHeader", "GIT_CONFIG_VALUE_0="+auth)
 	}
