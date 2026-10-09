@@ -51,7 +51,11 @@ func (s *Service) AnalyzeRepo(ctx context.Context, req *pb.AnalyzeRepoRequest) (
 	if err != nil {
 		return nil, analysisError(ctx, codes.Unavailable, err)
 	}
-	dir, sha, cleanup, err := s.analysisCheckout(ctx, req.GetSource(), req.GetEnvironment())
+	spec, err := readCheckoutSpec(ctx, binary)
+	if err != nil {
+		return nil, analysisError(ctx, codes.Unavailable, err)
+	}
+	dir, sha, cleanup, err := s.analysisCheckout(ctx, req.GetSource(), req.GetEnvironment(), spec)
 	if err != nil {
 		return nil, analysisError(ctx, codes.InvalidArgument, err)
 	}
@@ -59,6 +63,10 @@ func (s *Service) AnalyzeRepo(ctx context.Context, req *pb.AnalyzeRepoRequest) (
 	result, err := executeDetector(ctx, binary, dir, req.GetEnvironment())
 	if err != nil {
 		return nil, analysisError(ctx, codes.DataLoss, err)
+	}
+	if spec == nil {
+		logs, _ := result["logs"].([]any)
+		result["logs"] = append(logs, map[string]any{"Level": "info", "Msg": "Detector checkout specification unavailable or unsupported; using a complete checkout", "DocsPath": ""})
 	}
 	if warning != "" {
 		logs, _ := result["logs"].([]any)

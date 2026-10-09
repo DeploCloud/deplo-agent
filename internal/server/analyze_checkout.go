@@ -7,15 +7,12 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"slices"
 	"strings"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
-var analysisMedia = []string{".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".ico", ".mp4", ".mov", ".mkv", ".webm"}
-
-func (s *Service) analysisCheckout(ctx context.Context, source *pb.GitSource, env map[string]string) (string, string, func(), error) {
+func (s *Service) analysisCheckout(ctx context.Context, source *pb.GitSource, env map[string]string, spec *checkoutSpec) (string, string, func(), error) {
 	noop := func() {}
 	parsed, err := validateAnalysisSource(source)
 	if err != nil {
@@ -56,7 +53,7 @@ func (s *Service) analysisCheckout(ctx context.Context, source *pb.GitSource, en
 	if source.GetCommit() != "" {
 		ref = source.GetCommit()
 	}
-	// Fetch has no checkout, so ignored media blobs stay lazy on supporting servers.
+	// Content is downloaded only when selected paths are checked out.
 	if _, err := run("", "fetch", "--depth=1", "--filter=blob:none", "origin", ref); err != nil {
 		if _, err := run("", "fetch", "--depth=1", "origin", ref); err != nil {
 			return fail(err)
@@ -74,11 +71,16 @@ func (s *Service) analysisCheckout(ctx context.Context, source *pb.GitSource, en
 	if err != nil {
 		return fail(err)
 	}
-	patterns := []string{"/*"}
+	patterns := []string{"!/*"}
+	selective := spec != nil
+	files := map[string]os.FileMode{}
 	forced := []string{}
 	directories := map[string]bool{}
 	links := []string{}
 	for _, entry := range strings.Split(tree, "\x00") {
+		if err := ctx.Err(); err != nil {
+			return fail(err)
+		}
 		if entry == "" {
 			continue
 		}
@@ -86,8 +88,16 @@ func (s *Service) analysisCheckout(ctx context.Context, source *pb.GitSource, en
 		if !ok || !analysisRelative(name) || strings.ContainsAny(name, "\r\n") {
 			return fail(fmt.Errorf("repository contains an unsupported path"))
 		}
-		if slices.Contains(analysisMedia, strings.ToLower(path.Ext(name))) {
-			patterns = append(patterns, "!"+sparseLiteral(name))
+		if spec != nil && spec.needsFullCheckout(name) {
+			selective = false
+		}
+		if spec != nil && spec.needsContent(name) {
+			patterns = append(patterns, sparseLiteral(name))
+		}
+		if strings.HasPrefix(header, "100644 ") {
+			files[name] = 0644
+		} else if strings.HasPrefix(header, "100755 ") {
+			files[name] = 0755
 		}
 		for d := path.Dir(name); d != "."; d = path.Dir(d) {
 			directories[d] = true
@@ -112,13 +122,20 @@ func (s *Service) analysisCheckout(ctx context.Context, source *pb.GitSource, en
 		}
 	}
 	patterns = append(patterns, forced...)
-	for _, key := range []string{"DEPLOPACK_CONFIG_FILE", "DEPLOPACK_SHELL_SCRIPT"} {
+	pathEnvs := []string{"DEPLOPACK_CONFIG_FILE", "DEPLOPACK_SHELL_SCRIPT"}
+	if spec != nil {
+		pathEnvs = spec.PathEnvironment
+	}
+	for _, key := range pathEnvs {
 		if rel := env[key]; rel != "" {
 			if !analysisRelative(rel) {
 				return fail(fmt.Errorf("configuration path must be inside the project"))
 			}
 			patterns = append(patterns, sparseLiteral(path.Join(filepath.ToSlash(sub), rel)))
 		}
+	}
+	if !selective {
+		patterns = []string{"/*"}
 	}
 	if _, err := run(strings.Join(patterns, "\n")+"\n", "sparse-checkout", "set", "--no-cone", "--stdin"); err != nil {
 		return fail(err)
@@ -139,6 +156,27 @@ func (s *Service) analysisCheckout(ctx context.Context, source *pb.GitSource, en
 		}
 		if real != root && !strings.HasPrefix(real, root+string(os.PathSeparator)) {
 			return fail(fmt.Errorf("repository symlink escapes the checkout"))
+		}
+	}
+	if selective {
+		// Preserve existence checks and globs without fetching unused file contents.
+		for name, mode := range files {
+			if err := ctx.Err(); err != nil {
+				return fail(err)
+			}
+			file := filepath.Join(root, filepath.FromSlash(name))
+			if _, err := os.Lstat(file); err == nil {
+				continue
+			} else if !os.IsNotExist(err) {
+				return fail(err)
+			}
+			f, err := os.OpenFile(file, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+			if err != nil {
+				return fail(err)
+			}
+			if err := f.Close(); err != nil {
+				return fail(err)
+			}
 		}
 	}
 	dir := filepath.Join(root, sub)
