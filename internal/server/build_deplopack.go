@@ -16,6 +16,7 @@ import (
 )
 
 func (s *Service) buildDeplopack(ctx context.Context, req *pb.DeployRequest, buildDir string, e *emitter) bool {
+	e.log("command", "deplopack prepare")
 	spec := req.GetBuildSpec()
 	fail := func(err error) bool { e.result(false, "DeploPack: "+err.Error(), ""); return false }
 	if spec.GetDeplopackProvider() == "" {
@@ -129,7 +130,14 @@ func (s *Service) buildDeplopack(ctx context.Context, req *pb.DeployRequest, bui
 	if spec.GetDeplopackPath() != "" {
 		e.log("info", "Selected repository file: "+spec.GetDeplopackPath())
 	}
-	code, err := dockercli.StreamEnv(ctx, 20*time.Minute, func(line string) { e.log("info", line) }, append(envKV(env, keys), dockerConfigEnv(req)...), args...)
+	building := false
+	code, err := dockercli.StreamEnv(ctx, 20*time.Minute, func(line string) {
+		if !building && strings.TrimSpace(line) == "Starting Docker Build..." {
+			building = true
+			e.log("command", "deplopack build")
+		}
+		e.log("info", line)
+	}, append(envKV(env, keys), dockerConfigEnv(req)...), args...)
 	defer func() { _, _ = dockercli.Run(context.Background(), 30*time.Second, "image", "rm", image) }()
 	if err != nil {
 		return fail(err)
