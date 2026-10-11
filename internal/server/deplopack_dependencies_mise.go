@@ -48,7 +48,7 @@ func (s *Service) installDependencyMise(ctx context.Context, dep packDependency)
 	want := ""
 	for _, line := range strings.Split(string(sums), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) == 2 && strings.TrimPrefix(fields[1], "*") == dep.Asset {
+		if len(fields) == 2 && strings.TrimPrefix(strings.TrimPrefix(fields[1], "*"), "./") == dep.Asset {
 			if want != "" || !detectorDigest.MatchString(fields[0]) {
 				return fmt.Errorf("invalid Mise archive checksum")
 			}
