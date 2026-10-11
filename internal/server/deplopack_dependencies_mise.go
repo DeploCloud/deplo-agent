@@ -80,7 +80,8 @@ func (s *Service) installDependencyMise(ctx context.Context, dep packDependency)
 	if _, err := archive.Seek(0, 0); err != nil {
 		return err
 	}
-	staged, err := os.CreateTemp(dependencyMiseDir, ".deplopack-mise-binary-*")
+	// Mise interprets other executable names as tool shims, even for --version.
+	staged, err := os.CreateTemp(dependencyMiseDir, "mise-deplopack-binary-*")
 	if err != nil {
 		return err
 	}
