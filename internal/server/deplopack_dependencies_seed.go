@@ -21,6 +21,7 @@ type dependencyVolume struct {
 type dependencySeedMarker struct {
 	Catalog  string `json:"catalog"`
 	Platform string `json:"platform"`
+	Format   string `json:"format"`
 }
 
 func inspectDependencyVolume(ctx context.Context, name string) (*dependencyVolume, error) {
@@ -94,7 +95,7 @@ func (s *Service) prepareDependencySeed(ctx context.Context, prep *dependencyPre
 			return fmt.Errorf("seed volume is not owned by this catalog")
 		}
 		var marker dependencySeedMarker
-		if data, err := os.ReadFile(filepath.Join(volume.Mountpoint, ".deplopack-seed.json")); err == nil && json.Unmarshal(data, &marker) == nil && marker.Catalog == spec.fingerprint && marker.Platform == spec.Platform {
+		if data, err := os.ReadFile(filepath.Join(volume.Mountpoint, ".deplopack-seed.json")); err == nil && json.Unmarshal(data, &marker) == nil && marker.Catalog == spec.fingerprint && marker.Platform == spec.Platform && marker.Format == "buildkit-local-v1" && validateDependencyExports(volume.Mountpoint, spec) == nil {
 			log.Printf("DeploPack seed already ready: %s", prep.seed)
 			return nil
 		}
@@ -109,16 +110,31 @@ func (s *Service) prepareDependencySeed(ctx context.Context, prep *dependencyPre
 	if err := dependencyDocker(ctx, "volume", "create", "--label", "deplo.deplopack-seed="+spec.fingerprint, prep.seed); err != nil {
 		return err
 	}
-	ready := false
+	work := prep.seed + "-work"
+	ready, workOwned := false, false
 	defer func() {
 		dockercli.ForceRemove(kit)
+		cleanup, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if workOwned {
+			_ = dependencyDocker(cleanup, "volume", "rm", work)
+		}
 		if !ready {
-			cleanup, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
 			_ = dependencyDocker(cleanup, "volume", "rm", prep.seed)
 		}
 	}()
-	if err := dependencyDocker(ctx, "run", "-d", "--privileged", "--name", kit, "-v", prep.seed+":/var/lib/buildkit", spec.resource("buildkit").Image); err != nil {
+	existingWork, err := inspectDependencyVolume(ctx, work)
+	if err != nil {
+		return err
+	}
+	if existingWork != nil && existingWork.Labels["deplo.deplopack-preparation"] != spec.fingerprint {
+		return fmt.Errorf("preparation volume is not owned by this catalog")
+	}
+	workOwned = true
+	if err := dependencyDocker(ctx, "volume", "create", "--label", "deplo.deplopack-preparation="+spec.fingerprint, work); err != nil {
+		return err
+	}
+	if err := dependencyDocker(ctx, "run", "-d", "--privileged", "--name", kit, "-v", work+":/var/lib/buildkit", "-v", prep.seed+":/deplopack-cache", spec.resource("buildkit").Image); err != nil {
 		return err
 	}
 	if err := waitDependencyWorker(ctx, kit); err != nil {
@@ -147,7 +163,7 @@ func (s *Service) prepareDependencySeed(ctx context.Context, prep *dependencyPre
 			return err
 		}
 		log.Printf("DeploPack seed image start: %s", dep.Image)
-		code, err := dockercli.Stream(ctx, 20*time.Minute, func(line string) { log.Printf("DeploPack seed %s: %s", dep.ID, line) }, "", "exec", kit, "buildctl", "build", "--frontend", "dockerfile.v0", "--local", "context=/tmp/deplo-seed", "--local", "dockerfile=/tmp/deplo-seed", "--opt", "platform="+spec.Platform, "--progress", "plain")
+		code, err := dockercli.Stream(ctx, 20*time.Minute, func(line string) { log.Printf("DeploPack seed %s: %s", dep.ID, line) }, "", "exec", kit, "buildctl", "build", "--frontend", "dockerfile.v0", "--local", "context=/tmp/deplo-seed", "--local", "dockerfile=/tmp/deplo-seed", "--opt", "platform="+spec.Platform, "--progress", "plain", "--export-cache", "type=local,mode=max,dest=/deplopack-cache/"+dep.ID)
 		if err != nil {
 			return err
 		}
@@ -165,43 +181,37 @@ func (s *Service) prepareDependencySeed(ctx context.Context, prep *dependencyPre
 	if volume == nil {
 		return fmt.Errorf("seed volume disappeared")
 	}
-	if err := writeDependencyMarker(filepath.Join(volume.Mountpoint, ".deplopack-seed.json"), dependencySeedMarker{Catalog: spec.fingerprint, Platform: spec.Platform}); err != nil {
+	if err := validateDependencyExports(volume.Mountpoint, spec); err != nil {
+		return err
+	}
+	if err := writeDependencyMarker(filepath.Join(volume.Mountpoint, ".deplopack-seed.json"), dependencySeedMarker{Catalog: spec.fingerprint, Platform: spec.Platform, Format: "buildkit-local-v1"}); err != nil {
 		return err
 	}
 	ready = true
 	return nil
 }
 
-func (s *Service) initializeDependencyCache(ctx context.Context, volume, projectID, jobKey string, prep *dependencyPreparation, e *emitter) (bool, error) {
-	existing, err := inspectDependencyVolume(ctx, volume)
-	if err != nil {
-		return false, err
-	}
-	if existing != nil {
-		return false, nil
-	}
-	if err := dependencyDocker(ctx, "volume", "create", "--label", "deplo.deplopack-cache="+projectID, volume); err != nil {
-		return false, err
-	}
-	initialized := false
-	helper := "deplo-pack-copy-" + jobKey
-	defer func() {
-		dockercli.ForceRemove(helper)
-		if !initialized {
-			cleanup, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			_ = dependencyDocker(cleanup, "volume", "rm", volume)
+func validateDependencyExports(root string, spec *dependencySpec) error {
+	for _, dep := range spec.Dependencies {
+		if dep.Target != "buildkit-cache" {
+			continue
 		}
-	}()
-	e.log("info", "Copying the prepared DeploPack build environment into the new App cache")
-	// Copy independently; linking the seed metadata database would corrupt both caches.
-	code, err := dockercli.Stream(ctx, 20*time.Minute, func(line string) { e.log("info", line) }, "", "run", "--rm", "--network", "none", "--name", helper, "-v", prep.seed+":/seed:ro", "-v", volume+":/target", "--entrypoint", "sh", prep.spec.resource("docker-cli").Image, "-c", "cp -a /seed/. /target/")
-	if err != nil {
-		return false, err
+		index := filepath.Join(root, dep.ID, "index.json")
+		info, err := os.Lstat(index)
+		if err != nil || !info.Mode().IsRegular() || info.Size() > 64<<10 {
+			return fmt.Errorf("dependency cache index missing or invalid: %s", dep.ID)
+		}
+		data, err := os.ReadFile(index)
+		if err != nil {
+			return err
+		}
+		var document struct {
+			SchemaVersion int               `json:"schemaVersion"`
+			Manifests     []json.RawMessage `json:"manifests"`
+		}
+		if json.Unmarshal(data, &document) != nil || document.SchemaVersion != 2 || len(document.Manifests) == 0 {
+			return fmt.Errorf("invalid OCI cache index: %s", dep.ID)
+		}
 	}
-	if code != 0 {
-		return false, fmt.Errorf("initial App cache copy failed")
-	}
-	initialized = true
-	return true, nil
+	return nil
 }
