@@ -125,7 +125,7 @@ func (s *Service) prepareDeplopack(spec *dependencySpec, retry bool) *dependency
 			return previous
 		}
 	}
-	preparation := &dependencyPreparation{spec: spec, miseDone: make(chan struct{}), done: make(chan struct{}), attempts: attempts, seed: "deplo-deplopack-export-" + spec.fingerprint[:20]}
+	preparation := &dependencyPreparation{spec: spec, miseDone: make(chan struct{}), done: make(chan struct{}), attempts: attempts, seed: "deplo-deplopack-images-" + spec.fingerprint[:20]}
 	state.preparations[spec.fingerprint] = preparation
 	state.wg.Add(1)
 	go func() {

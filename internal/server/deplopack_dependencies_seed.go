@@ -95,7 +95,7 @@ func (s *Service) prepareDependencySeed(ctx context.Context, prep *dependencyPre
 			return fmt.Errorf("seed volume is not owned by this catalog")
 		}
 		var marker dependencySeedMarker
-		if data, err := os.ReadFile(filepath.Join(volume.Mountpoint, ".deplopack-seed.json")); err == nil && json.Unmarshal(data, &marker) == nil && marker.Catalog == spec.fingerprint && marker.Platform == spec.Platform && marker.Format == "buildkit-local-v1" && validateDependencyExports(volume.Mountpoint, spec) == nil {
+		if data, err := os.ReadFile(filepath.Join(volume.Mountpoint, ".deplopack-seed.json")); err == nil && json.Unmarshal(data, &marker) == nil && marker.Catalog == spec.fingerprint && marker.Platform == spec.Platform && marker.Format == "oci-images-v1" && validateDependencyExports(volume.Mountpoint, spec) == nil {
 			log.Printf("DeploPack seed already ready: %s", prep.seed)
 			return nil
 		}
@@ -134,7 +134,7 @@ func (s *Service) prepareDependencySeed(ctx context.Context, prep *dependencyPre
 	if err := dependencyDocker(ctx, "volume", "create", "--label", "deplo.deplopack-preparation="+spec.fingerprint, work); err != nil {
 		return err
 	}
-	if err := dependencyDocker(ctx, "run", "-d", "--privileged", "--name", kit, "-v", work+":/var/lib/buildkit", "-v", prep.seed+":/deplopack-cache", spec.resource("buildkit").Image); err != nil {
+	if err := dependencyDocker(ctx, "run", "-d", "--privileged", "--name", kit, "-v", work+":/var/lib/buildkit", "-v", prep.seed+":/deplopack-images", spec.resource("buildkit").Image); err != nil {
 		return err
 	}
 	if err := waitDependencyWorker(ctx, kit); err != nil {
@@ -155,15 +155,15 @@ func (s *Service) prepareDependencySeed(ctx context.Context, prep *dependencyPre
 		if dep.Target != "buildkit-cache" {
 			continue
 		}
-		// RUN forces lazy image layers to be downloaded and unpacked, not merely resolved.
-		if err := os.WriteFile(filepath.Join(root, "Dockerfile"), []byte("FROM "+dep.Image+"\nRUN true\n"), 0600); err != nil {
+		// The OCI exporter materializes the image blobs without copying BuildKit internals.
+		if err := os.WriteFile(filepath.Join(root, "Dockerfile"), []byte("FROM "+dep.Image+"\n"), 0600); err != nil {
 			return err
 		}
 		if err := dependencyDocker(ctx, "cp", filepath.Join(root, "Dockerfile"), kit+":/tmp/deplo-seed/Dockerfile"); err != nil {
 			return err
 		}
 		log.Printf("DeploPack seed image start: %s", dep.Image)
-		code, err := dockercli.Stream(ctx, 20*time.Minute, func(line string) { log.Printf("DeploPack seed %s: %s", dep.ID, line) }, "", "exec", kit, "buildctl", "build", "--frontend", "dockerfile.v0", "--local", "context=/tmp/deplo-seed", "--local", "dockerfile=/tmp/deplo-seed", "--opt", "platform="+spec.Platform, "--progress", "plain", "--export-cache", "type=local,mode=max,dest=/deplopack-cache/"+dep.ID)
+		code, err := dockercli.Stream(ctx, 20*time.Minute, func(line string) { log.Printf("DeploPack seed %s: %s", dep.ID, line) }, "", "exec", kit, "buildctl", "build", "--frontend", "dockerfile.v0", "--local", "context=/tmp/deplo-seed", "--local", "dockerfile=/tmp/deplo-seed", "--opt", "platform="+spec.Platform, "--progress", "plain", "--output", "type=oci,tar=false,dest=/deplopack-images/"+dep.ID)
 		if err != nil {
 			return err
 		}
@@ -184,7 +184,7 @@ func (s *Service) prepareDependencySeed(ctx context.Context, prep *dependencyPre
 	if err := validateDependencyExports(volume.Mountpoint, spec); err != nil {
 		return err
 	}
-	if err := writeDependencyMarker(filepath.Join(volume.Mountpoint, ".deplopack-seed.json"), dependencySeedMarker{Catalog: spec.fingerprint, Platform: spec.Platform, Format: "buildkit-local-v1"}); err != nil {
+	if err := writeDependencyMarker(filepath.Join(volume.Mountpoint, ".deplopack-seed.json"), dependencySeedMarker{Catalog: spec.fingerprint, Platform: spec.Platform, Format: "oci-images-v1"}); err != nil {
 		return err
 	}
 	ready = true
@@ -206,10 +206,12 @@ func validateDependencyExports(root string, spec *dependencySpec) error {
 			return err
 		}
 		var document struct {
-			SchemaVersion int               `json:"schemaVersion"`
-			Manifests     []json.RawMessage `json:"manifests"`
+			SchemaVersion int `json:"schemaVersion"`
+			Manifests     []struct {
+				Digest string `json:"digest"`
+			} `json:"manifests"`
 		}
-		if json.Unmarshal(data, &document) != nil || document.SchemaVersion != 2 || len(document.Manifests) == 0 {
+		if json.Unmarshal(data, &document) != nil || document.SchemaVersion != 2 || len(document.Manifests) != 1 || !strings.HasPrefix(document.Manifests[0].Digest, "sha256:") || !detectorDigest.MatchString(strings.TrimPrefix(document.Manifests[0].Digest, "sha256:")) {
 			return fmt.Errorf("invalid OCI cache index: %s", dep.ID)
 		}
 	}

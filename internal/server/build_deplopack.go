@@ -24,7 +24,7 @@ func (s *Service) buildDeplopack(ctx context.Context, req *pb.DeployRequest, bui
 		return fail(fmt.Errorf("select a repository detection"))
 	}
 	for key, value := range spec.GetDeplopackEnvironment() {
-		if !analysisEnvName.MatchString(key) || (key == "DEPLOPACK_PROVIDER" || key == "DEPLOPACK_CACHE_IMPORTS") || strings.ContainsRune(value, 0) {
+		if !analysisEnvName.MatchString(key) || (key == "DEPLOPACK_PROVIDER" || key == "DEPLOPACK_CACHE_IMPORTS" || key == "DEPLOPACK_OCI_IMAGES") || strings.ContainsRune(value, 0) {
 			return fail(fmt.Errorf("invalid build configuration"))
 		}
 		if (key == "DEPLOPACK_CONFIG_FILE" || key == "DEPLOPACK_SHELL_SCRIPT") && !analysisRelative(value) {
@@ -124,18 +124,18 @@ func (s *Service) buildDeplopack(ctx context.Context, req *pb.DeployRequest, bui
 	workdir := "/build/" + image
 	args := []string{"run", "--rm", "--mount", deplopackMount(absolute, workdir, false), "--mount", deplopackMount(builder, "/usr/local/bin/deplopack-builder", true), "-v", "/var/run/docker.sock:/var/run/docker.sock", "--mount", deplopackMount("/tmp/railpack/mise", "/tmp/railpack/mise", false), "-w", workdir, "-e", "BUILDKIT_HOST=docker-container://" + kit, "-e", "DEPLOPACK_PROVIDER=" + spec.GetDeplopackProvider(), "--entrypoint", "/usr/local/bin/deplopack-builder"}
 	if preparation != nil {
-		var imports []string
+		images := map[string]string{}
 		for _, dep := range dependencies.Dependencies {
 			if dep.Target == "buildkit-cache" {
-				imports = append(imports, "type=local,src=/deplopack-cache/"+dep.ID)
+				images[dep.Image] = "/deplopack-images/" + dep.ID
 			}
 		}
-		encoded, err := json.Marshal(imports)
+		encoded, err := json.Marshal(images)
 		if err != nil {
 			return fail(err)
 		}
-		args = append(args, "-v", preparation.seed+":/deplopack-cache:ro", "-e", "DEPLOPACK_CACHE_IMPORTS="+string(encoded))
-		e.log("info", "Using the prepared DeploPack image cache through BuildKit local imports")
+		args = append(args, "-v", preparation.seed+":/deplopack-images:ro", "-e", "DEPLOPACK_OCI_IMAGES="+string(encoded))
+		e.log("info", "Using prepared DeploPack images through local OCI sources")
 	}
 	env := map[string]string{}
 	for _, key := range dropReservedBuildEnv(buildEnvKeys(req.GetEnv())) {
