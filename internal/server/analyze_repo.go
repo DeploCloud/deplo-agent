@@ -51,6 +51,15 @@ func (s *Service) AnalyzeRepo(ctx context.Context, req *pb.AnalyzeRepoRequest) (
 	if err != nil {
 		return nil, analysisError(ctx, codes.Unavailable, err)
 	}
+	dependencies, err := readDependencySpec(ctx, binary)
+	if err != nil {
+		return nil, analysisError(ctx, codes.Unavailable, err)
+	}
+	if dependencies != nil {
+		if _, err := s.awaitDeplopackPreparation(ctx, dependencies, true, nil); err != nil {
+			return nil, analysisError(ctx, codes.Unavailable, err)
+		}
+	}
 	spec, err := readCheckoutSpec(ctx, binary)
 	if err != nil {
 		return nil, analysisError(ctx, codes.Unavailable, err)

@@ -29,7 +29,11 @@ type detectorInstall struct {
 }
 
 func (s *Service) ensureDetector(ctx context.Context) (string, string, string, error) {
-	return s.ensureLatestDetector(ctx)
+	binary, version, warning, err := s.ensureLatestDetector(ctx)
+	if err == nil {
+		s.queueDeplopackPreparation(binary)
+	}
+	return binary, version, warning, err
 }
 
 func (s *Service) ensureLatestDetector(ctx context.Context) (string, string, string, error) {
@@ -119,6 +123,14 @@ func (s *Service) updateDetector(ctx context.Context, tools, marker string) (str
 }
 
 func (s *Service) ensureBuilder(ctx context.Context, version string) (string, error) {
+	binary, err := s.ensureVersionBuilder(ctx, version)
+	if err == nil {
+		s.queueDeplopackPreparation(binary)
+	}
+	return binary, err
+}
+
+func (s *Service) ensureVersionBuilder(ctx context.Context, version string) (string, error) {
 	if !detectorTag.MatchString(version) || strings.HasPrefix(version, "v") {
 		return "", fmt.Errorf("invalid DeploPack version")
 	}

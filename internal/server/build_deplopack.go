@@ -41,6 +41,24 @@ func (s *Service) buildDeplopack(ctx context.Context, req *pb.DeployRequest, bui
 	if err != nil {
 		return fail(err)
 	}
+	dependencies, err := readDependencySpec(ctx, builder)
+	if err != nil {
+		return fail(err)
+	}
+	var preparation *dependencyPreparation
+	if dependencies != nil {
+		preparation, err = s.awaitDeplopackPreparation(ctx, dependencies, false, e)
+		if err != nil {
+			return fail(err)
+		}
+	} else {
+		e.log("warn", "DeploPack dependency catalog unavailable or unsupported; using legacy preparation")
+	}
+	buildkitImage, dockerImage := "moby/buildkit:latest", "docker:29-cli"
+	if dependencies != nil {
+		buildkitImage = dependencies.resource("buildkit").Image
+		dockerImage = dependencies.resource("docker-cli").Image
+	}
 	cacheKey := fmt.Sprintf("%x", sha256.Sum256([]byte(req.GetProjectId())))[:20]
 	unlock, err := s.lockStackContext(ctx, "deplopack-cache/"+cacheKey)
 	if err != nil {
@@ -72,11 +90,16 @@ func (s *Service) buildDeplopack(ctx context.Context, req *pb.DeployRequest, bui
 			}
 		}
 	}
+	if preparation != nil {
+		if _, err := s.initializeDependencyCache(ctx, volume, req.GetProjectId(), jobKey, preparation, e); err != nil {
+			return fail(err)
+		}
+	}
 	if err := run("volume", "create", "--label", "deplo.deplopack-cache="+req.GetProjectId(), volume); err != nil {
 		return fail(err)
 	}
 	defer dockercli.ForceRemove(kit)
-	if err := run("run", "-d", "--rm", "--privileged", "--name", kit, "-v", volume+":/var/lib/buildkit", "moby/buildkit:latest"); err != nil {
+	if err := run("run", "-d", "--rm", "--privileged", "--name", kit, "-v", volume+":/var/lib/buildkit", buildkitImage); err != nil {
 		return fail(err)
 	}
 	ready := false
@@ -125,7 +148,7 @@ func (s *Service) buildDeplopack(ctx context.Context, req *pb.DeployRequest, bui
 	if len(dockerConfigEnv(req)) > 0 {
 		args = append(args, "--mount", deplopackMount(dockerConfigDir(req.GetDeployId()), "/docker-config", true), "-e", "DOCKER_CONFIG=/docker-config")
 	}
-	args = append(args, "docker:29-cli")
+	args = append(args, dockerImage)
 	e.log("info", "Building with DeploPack "+spec.GetDeplopackVersion()+" ("+spec.GetDeplopackProvider()+")")
 	if spec.GetDeplopackPath() != "" {
 		e.log("info", "Selected repository file: "+spec.GetDeplopackPath())

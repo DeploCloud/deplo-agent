@@ -139,6 +139,7 @@ type Service struct {
 	detectorPath    string
 	detectorVersion string
 	detectorWarning string
+	dependencies    dependencyState
 
 	stackLocksMu sync.Mutex
 	stackLocks   map[string]*stackLock
