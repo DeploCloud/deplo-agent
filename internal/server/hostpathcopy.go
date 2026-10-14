@@ -28,13 +28,16 @@ var deniedHostRoots = []string{
 // Whole subtrees no service keeps its data in: the OS, the container runtime and Deplo itself.
 var deniedHostSubtrees = []string{
 	"/proc", "/sys", "/dev", "/run", "/var/run", "/boot", "/bin", "/sbin",
-	"/lib", "/lib32", "/lib64", "/libx32", "/usr", "/etc", "/root", "/home",
+	"/lib", "/lib32", "/lib64", "/libx32", "/usr", "/etc", "/root",
 	"/var/lib/docker", "/var/lib/containerd", "/var/lib/deplo-agent", "/var/spool",
 	"/opt/deplo", "/data/stacks", "/data/backups",
 }
 
 // A platform a migration leaves keeps its apps' data under /etc/<platform>.
 var allowedHostSubtrees = []string{"/etc/dokploy"}
+
+// An app may keep data in a home folder, never its owner's credentials (nor the whole home, which holds them).
+var homeCredentialDirs = []string{".ssh", ".gnupg", ".docker", ".kube", ".aws"}
 
 func (s *Service) validateHostPath(p string) (string, error) {
 	if strings.TrimSpace(p) == "" {
@@ -96,6 +99,15 @@ func (s *Service) refuseSystemPath(clean string) error {
 			return status.Errorf(
 				codes.PermissionDenied,
 				"%q is under %s, which is never a service's own data", clean, root,
+			)
+		}
+	}
+	if rest, ok := strings.CutPrefix(clean, "/home/"); ok {
+		parts := strings.SplitN(rest, "/", 3)
+		if len(parts) == 1 || slices.Contains(homeCredentialDirs, parts[1]) {
+			return status.Errorf(
+				codes.PermissionDenied,
+				"%q holds a user's sign-in keys and is not something Deplo will copy", clean,
 			)
 		}
 	}

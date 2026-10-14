@@ -80,6 +80,25 @@ func TestValidateHostPath_refusesTheSystem(t *testing.T) {
 	}
 }
 
+// Another panel's apps keep data under a home folder; the copy carries that, never the owner's keys.
+func TestValidateHostPath_homeFoldersButNotCredentials(t *testing.T) {
+	svc := &Service{stackDir: "/data/stacks", dataBase: "/data"}
+	for _, good := range []string{"/home/ubuntu/app-data", "/home/deploy/apps/web/uploads", "/home/ubuntu/.local/share/app"} {
+		if _, err := svc.validateHostPath(good); err != nil {
+			t.Errorf("validateHostPath(%q) should be allowed: %v", good, err)
+		}
+	}
+	for _, bad := range []string{
+		"/home", "/home/ubuntu", "/home/ubuntu/.ssh", "/home/ubuntu/.ssh/authorized_keys",
+		"/home/deploy/.gnupg", "/home/deploy/.docker/config.json", "/home/u/.kube", "/home/u/.aws/credentials",
+		"/root/app-data",
+	} {
+		if _, err := svc.validateHostPath(bad); err == nil {
+			t.Errorf("validateHostPath(%q) should have been refused", bad)
+		}
+	}
+}
+
 // The files allowance follows the configured stack dir, not the default spelling of it.
 func TestValidateHostPath_filesAllowanceFollowsTheStackDir(t *testing.T) {
 	svc := &Service{stackDir: "/srv/deplo/stacks", dataBase: "/srv/deplo"}
