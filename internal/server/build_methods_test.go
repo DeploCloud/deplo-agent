@@ -280,3 +280,63 @@ func TestBuildpacksBuilderIsNeverPackTrusted(t *testing.T) {
 		}
 	}
 }
+
+// nixpacks and railpack read the repo as root on the host, so a link that resolves outside the
+// checkout (absolute, via .., or through another link) is gone before either runs.
+func TestHostToolsNeverSeeALinkOutOfTheCheckout(t *testing.T) {
+	out, bin := t.TempDir(), t.TempDir()
+	probe := "#!/bin/sh\n[ \"$1\" = --version ] && { echo railpack v" + railpackVersion + "; exit 0; }\n" +
+		"for f in Procfile package.json inside; do if [ -L \"$2/$f\" ]; then echo \"$f link\"; " +
+		"elif [ -e \"$2/$f\" ]; then echo \"$f file\"; else echo \"$f gone\"; fi; done > " + out + "/seen\nexit 1\n"
+	for _, tool := range []string{"nixpacks", "railpack"} {
+		if err := os.WriteFile(filepath.Join(bin, tool), []byte(probe), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+
+	s := New(t.TempDir(), t.TempDir(), "/", "")
+	for _, kind := range []pb.BuildKind{pb.BuildKind_BUILD_KIND_NIXPACKS, pb.BuildKind_BUILD_KIND_RAILPACK} {
+		base := t.TempDir()
+		dir := filepath.Join(base, "repo")
+		mustWrite(t, filepath.Join(base, "host-package.json"), `{"secret":true}`)
+		mustWrite(t, filepath.Join(dir, "sub", "real.txt"), "mine\n")
+		for name, target := range map[string]string{
+			"Procfile": filepath.Join(base, "host-package.json"), "package.json": "../host-package.json", "inside": "sub/real.txt",
+		} {
+			if err := os.Symlink(target, filepath.Join(dir, name)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		_ = os.Remove(filepath.Join(out, "seen"))
+		req := &pb.DeployRequest{Slug: "deplo-agent-test-links", ProjectId: "prj", ImageRef: "deplo/deplo-agent-test-links:t",
+			BuildKind: kind, BuildSpec: &pb.BuildSpec{}}
+		_ = s.buildImage(context.Background(), req, dir, &emitter{send: func(*pb.DeployEvent) error { return nil }})
+		seen, err := os.ReadFile(filepath.Join(out, "seen"))
+		if err != nil {
+			t.Fatalf("%v: the tool never ran: %v", kind, err)
+		}
+		if want := "Procfile gone\npackage.json gone\ninside link\n"; string(seen) != want {
+			t.Fatalf("%v: the tool saw\n%s\nwant\n%s", kind, seen, want)
+		}
+	}
+}
+
+// A relative link that climbs out through another link is caught by resolving it, not by its text.
+func TestStripEscapingSymlinksResolvesChains(t *testing.T) {
+	base := t.TempDir()
+	dir := filepath.Join(base, "repo")
+	mustWrite(t, filepath.Join(dir, "a", "keep.txt"), "x")
+	for link, target := range map[string]string{"s": ".", "a/z": "../s/..", "a/ok": "../s/a/keep.txt", "dangling": "nope"} {
+		if err := os.Symlink(target, filepath.Join(dir, link)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	removed, err := stripEscapingSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(removed, ",") != "a/z" {
+		t.Fatalf("removed %v, want only a/z", removed)
+	}
+}

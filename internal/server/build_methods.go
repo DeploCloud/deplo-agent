@@ -168,6 +168,52 @@ func stripSymlinks(path string) error {
 	})
 }
 
+func stripHostLinks(buildDir string, e *emitter) bool {
+	removed, err := stripEscapingSymlinks(buildDir)
+	if err != nil {
+		e.result(false, "check the repository's links: "+err.Error(), "")
+		return false
+	}
+	if len(removed) > 0 {
+		e.log("warn", "Ignoring links that point outside the repository: "+strings.Join(removed, ", "))
+	}
+	return true
+}
+
+// stripEscapingSymlinks removes the links under root that resolve outside it, so nixpacks or
+// railpack reading the repo as root cannot read a host file through one. Returns what it removed.
+func stripEscapingSymlinks(root string) ([]string, error) {
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return nil, err
+	}
+	var removed []string
+	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || p == root || d.Type()&fs.ModeSymlink == 0 {
+			return err
+		}
+		target, err := os.Readlink(p)
+		if err != nil {
+			return err
+		}
+		escapes := filepath.IsAbs(target) || !within(root, filepath.Join(filepath.Dir(p), target))
+		if real, rerr := filepath.EvalSymlinks(p); rerr == nil && !within(realRoot, real) {
+			escapes = true
+		}
+		if !escapes {
+			return nil
+		}
+		rel, _ := filepath.Rel(root, p)
+		removed = append(removed, rel)
+		return os.Remove(p)
+	})
+	return removed, err
+}
+
+func within(base, p string) bool {
+	return p == base || strings.HasPrefix(p, base+string(os.PathSeparator))
+}
+
 func buildArgLines(keys []string) string {
 	var b strings.Builder
 	for _, k := range keys {
@@ -202,6 +248,9 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 	}
 	if err := stripSymlinks(filepath.Join(buildDir, ".nixpacks")); err != nil {
 		e.result(false, "prepare the nixpacks output: "+err.Error(), "")
+		return false
+	}
+	if !stripHostLinks(buildDir, e) {
 		return false
 	}
 
@@ -458,6 +507,9 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 	railpack, err := s.ensureRailpack(ctx, version, e)
 	if err != nil {
 		e.result(false, "railpack unavailable: "+err.Error(), "")
+		return false
+	}
+	if !stripHostLinks(buildDir, e) {
 		return false
 	}
 
