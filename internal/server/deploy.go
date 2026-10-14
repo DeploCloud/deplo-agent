@@ -170,26 +170,13 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 		e.result(false, "deploy request missing rendered compose", "")
 		return
 	}
-	if err := os.WriteFile(stackFile, []byte(req.GetComposeYaml()), 0o600); err != nil {
-		e.result(false, "write stack file: "+err.Error(), "")
-		return
-	}
-	if err := os.Chmod(stackFile, 0o600); err != nil {
-		e.result(false, "secure stack file: "+err.Error(), "")
-		return
-	}
-
-	envFile := ""
-	projectDir := ""
-	if isCompose {
-		var err error
-		if envFile, projectDir, err = s.writeComposeEnv(slug, req.GetEnv()); err != nil {
-			e.result(false, "write env file: "+err.Error(), "")
-			return
-		}
-	}
 	var admitErr error
 	if isCompose {
+		// compose pull/build read the stack from disk; startStack writes it again under the lock.
+		envFile, projectDir, ok := s.writeStackFiles(req, e)
+		if !ok {
+			return
+		}
 		images, ok := s.prepareStackImages(ctx, req, composeBaseArgs(name, stackFile, envFile, projectDir), e)
 		if !ok {
 			return
@@ -206,23 +193,7 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 		e.result(false, admitErr.Error(), "")
 		return
 	}
-	composeArgs := composeUpArgs(name, stackFile, envFile, projectDir, req.GetForceRecreate(), req.GetComposeUpArgs())
-	upLog := "docker compose up -d"
-	if req.GetForceRecreate() {
-		upLog += " --force-recreate"
-	}
-	if extra := sanitizeComposeArgs(req.GetComposeUpArgs()); len(extra) > 0 {
-		upLog += " " + strings.Join(extra, " ")
-	}
-	e.log("command", upLog)
-	code, err := dockercli.StreamEnv(ctx, 15*time.Minute, func(l string) { e.log("info", l) },
-		dockerConfigEnv(req), composeArgs...)
-	if err != nil {
-		e.result(false, "compose up: "+err.Error(), "")
-		return
-	}
-	if code != 0 {
-		e.result(false, fmt.Sprintf("docker compose up failed (exit %d)", code), "")
+	if !s.startStack(ctx, req, e) {
 		return
 	}
 
@@ -246,6 +217,58 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 		return
 	}
 	e.result(false, "Container did not reach a running state", commitSha)
+}
+
+// startStack writes the admitted stack and brings it up under the stack lock, so a Reroute, Stop
+// or Destroy of the same app cannot interleave with it. Builds stay outside the lock.
+func (s *Service) startStack(ctx context.Context, req *pb.DeployRequest, e *emitter) bool {
+	defer s.lockStack(req.GetSlug())()
+	envFile, projectDir, ok := s.writeStackFiles(req, e)
+	if !ok {
+		return false
+	}
+	composeArgs := composeUpArgs("deplo-"+req.GetSlug(), s.stackPath(req.GetSlug()), envFile, projectDir,
+		req.GetForceRecreate(), req.GetComposeUpArgs())
+	upLog := "docker compose up -d"
+	if req.GetForceRecreate() {
+		upLog += " --force-recreate"
+	}
+	if extra := sanitizeComposeArgs(req.GetComposeUpArgs()); len(extra) > 0 {
+		upLog += " " + strings.Join(extra, " ")
+	}
+	e.log("command", upLog)
+	code, err := dockercli.StreamEnv(ctx, 15*time.Minute, func(l string) { e.log("info", l) },
+		dockerConfigEnv(req), composeArgs...)
+	if err != nil {
+		e.result(false, "compose up: "+err.Error(), "")
+		return false
+	}
+	if code != 0 {
+		e.result(false, fmt.Sprintf("docker compose up failed (exit %d)", code), "")
+		return false
+	}
+	return true
+}
+
+func (s *Service) writeStackFiles(req *pb.DeployRequest, e *emitter) (envFile, projectDir string, ok bool) {
+	stackFile := s.stackPath(req.GetSlug())
+	if err := os.WriteFile(stackFile, []byte(req.GetComposeYaml()), 0o600); err != nil {
+		e.result(false, "write stack file: "+err.Error(), "")
+		return "", "", false
+	}
+	if err := os.Chmod(stackFile, 0o600); err != nil {
+		e.result(false, "secure stack file: "+err.Error(), "")
+		return "", "", false
+	}
+	if req.GetSourceKind() != pb.SourceKind_SOURCE_KIND_COMPOSE {
+		return "", "", true
+	}
+	envFile, projectDir, err := s.writeComposeEnv(req.GetSlug(), req.GetEnv())
+	if err != nil {
+		e.result(false, "write env file: "+err.Error(), "")
+		return "", "", false
+	}
+	return envFile, projectDir, true
 }
 
 func pullImage(ctx context.Context, req *pb.DeployRequest, e *emitter) error {

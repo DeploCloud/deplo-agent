@@ -62,6 +62,7 @@ echo "$*" >> $D/calls
 case "$*" in
 *" config --images"*) cat $D/images ;;
 "pull "*|*" pull "*) for f in $D/pullable/*; do [ -e "$f" ] && mv "$f" $D/present/; done ;;
+"inspect -f {{.State.Running}} "*) echo true ;;
 "image inspect "*)
 	for last; do :; done
 	f=$D/present/$(echo "$last" | tr '/:' '__')
