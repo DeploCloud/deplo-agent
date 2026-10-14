@@ -1453,9 +1453,8 @@ message StartJobRequest {
   int32 timeout_seconds = 6;   // agent-side hard deadline; 0 => 3600
   string workdir = 7;          // docker exec -w
   string user = 8;             // docker exec -u
-  // Injected with `docker exec -e KEY` + the value in the docker CLIENT's own
-  // environment, so a secret never rides argv where every user on the host can
-  // read it out of `ps`. Same discipline as the REDISCLI_AUTH path in backup.go.
+  // Reaches the container through a 0600 `--env-file`, never argv or the docker client's
+  // environment. A name must be an identifier, and a value must hold no line break.
   repeated CronEnvVar env = 9;
 }
 

@@ -6342,9 +6342,8 @@ type StartJobRequest struct {
 	TimeoutSeconds int32  `protobuf:"varint,6,opt,name=timeout_seconds,json=timeoutSeconds,proto3" json:"timeout_seconds,omitempty"` // agent-side hard deadline; 0 => 3600
 	Workdir        string `protobuf:"bytes,7,opt,name=workdir,proto3" json:"workdir,omitempty"`                                      // docker exec -w
 	User           string `protobuf:"bytes,8,opt,name=user,proto3" json:"user,omitempty"`                                            // docker exec -u
-	// Injected with `docker exec -e KEY` + the value in the docker CLIENT's own
-	// environment, so a secret never rides argv where every user on the host can
-	// read it out of `ps`. Same discipline as the REDISCLI_AUTH path in backup.go.
+	// Reaches the container through a 0600 `--env-file`, never argv or the docker client's
+	// environment. A name must be an identifier, and a value must hold no line break.
 	Env           []*CronEnvVar `protobuf:"bytes,9,rep,name=env,proto3" json:"env,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
