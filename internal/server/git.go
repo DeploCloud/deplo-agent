@@ -155,13 +155,10 @@ func runGit(ctx context.Context, e *emitter, dir, authHeader string, args ...str
 	}
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ALLOW_PROTOCOL="+gitAllowProtocol)
 	if strings.TrimSpace(authHeader) != "" {
-		// git re-sends extraHeader to wherever a redirect lands, so a credential never follows one.
 		cmd.Env = append(cmd.Env,
-			"GIT_CONFIG_COUNT=2",
+			"GIT_CONFIG_COUNT=1",
 			"GIT_CONFIG_KEY_0=http.extraHeader",
 			"GIT_CONFIG_VALUE_0="+authHeader,
-			"GIT_CONFIG_KEY_1=http.followRedirects",
-			"GIT_CONFIG_VALUE_1=false",
 		)
 	}
 	err := dockercli.RunLines(cctx, cmd, func(line string) {

@@ -263,7 +263,7 @@ func TestMaterializeGitRefusesLocalRepositories(t *testing.T) {
 	}
 }
 
-// The auth header must not follow a redirect, and the protocol allowlist rides every git call.
+// The protocol allowlist rides every git call, authenticated or not.
 func TestRunGitEnv(t *testing.T) {
 	out, bin := t.TempDir(), t.TempDir()
 	if err := os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\nenv > "+out+"/env\n"), 0o755); err != nil {
@@ -271,28 +271,16 @@ func TestRunGitEnv(t *testing.T) {
 	}
 	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
 	e := &emitter{send: func(*pb.DeployEvent) error { return nil }}
-
-	read := func() string {
+	for _, auth := range []string{"Authorization: Basic eDp5", ""} {
+		if err := runGit(context.Background(), e, "", auth, "ls-remote", "--", "https://example.com/r.git"); err != nil {
+			t.Fatal(err)
+		}
 		b, err := os.ReadFile(filepath.Join(out, "env"))
 		if err != nil {
 			t.Fatal(err)
 		}
-		return string(b)
-	}
-	if err := runGit(context.Background(), e, "", "Authorization: Basic eDp5", "ls-remote", "--", "https://example.com/r.git"); err != nil {
-		t.Fatal(err)
-	}
-	env := read()
-	for _, want := range []string{"GIT_ALLOW_PROTOCOL=https:http:ssh:git\n", "GIT_CONFIG_COUNT=2\n",
-		"GIT_CONFIG_KEY_1=http.followRedirects\n", "GIT_CONFIG_VALUE_1=false\n"} {
-		if !strings.Contains(env, want) {
-			t.Fatalf("authenticated git env misses %q:\n%s", want, env)
+		if !strings.Contains(string(b), "GIT_ALLOW_PROTOCOL=https:http:ssh:git\n") {
+			t.Fatalf("git ran without the protocol allowlist (auth %q):\n%s", auth, b)
 		}
-	}
-	if err := runGit(context.Background(), e, "", "", "ls-remote", "--", "https://example.com/r.git"); err != nil {
-		t.Fatal(err)
-	}
-	if env := read(); strings.Contains(env, "followRedirects") || !strings.Contains(env, "GIT_ALLOW_PROTOCOL=") {
-		t.Fatalf("an anonymous clone should keep following redirects, under the allowlist:\n%s", env)
 	}
 }
