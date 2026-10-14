@@ -29,6 +29,20 @@ func TestBuildEnvKeys(t *testing.T) {
 	}
 }
 
+// A tenant variable rides into root host processes, so a name that configures one never passes.
+func TestBuildEnvKeysDropsReservedNames(t *testing.T) {
+	env := map[string]string{"DOCKERFILE_FLAVOR": "kept", "APP_HOME": "kept"}
+	for _, k := range []string{"HOME", "PATH", "LD_PRELOAD", "LD_AUDIT", "DOCKER_CONFIG", "DOCKER_CLI_PLUGIN_EXTRA_DIRS",
+		"BUILDKIT_CACHE_MOUNT_NS", "BUILDX_CONFIG", "COMPOSE_FILE", "XDG_CONFIG_HOME", jobMarkerEnv, "GLIBC_TUNABLES"} {
+		env[k] = "drop"
+	}
+	got := buildEnvKeys(env)
+	want := []string{"APP_HOME", "DOCKERFILE_FLAVOR"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("buildEnvKeys = %v; want %v", got, want)
+	}
+}
+
 // declaredArgNames must catch single-name, =default, BuildKit multi-name and continuation forms, in any stage, case-insensitively, and only those.
 func TestDeclaredArgNames(t *testing.T) {
 	df := `FROM node:20 AS builder

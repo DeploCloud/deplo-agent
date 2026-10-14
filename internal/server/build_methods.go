@@ -67,22 +67,6 @@ func (s *Service) relabel(ctx context.Context, req *pb.DeployRequest, e *emitter
 	return true
 }
 
-var reservedBuildEnvKeys = map[string]bool{
-	"DOCKER_HOST":       true,
-	"DOCKER_CONFIG":     true,
-	"DOCKER_CONTEXT":    true,
-	"DOCKER_CERT_PATH":  true,
-	"DOCKER_TLS_VERIFY": true,
-	"BUILDKIT_HOST":     true,
-	"LD_PRELOAD":        true,
-	"LD_LIBRARY_PATH":   true,
-	"PATH":              true,
-}
-
-func dropReservedBuildEnv(keys []string) []string {
-	return filterKeys(keys, func(k string) bool { return !reservedBuildEnvKeys[k] })
-}
-
 func (s *Service) buildStatic(ctx context.Context, req *pb.DeployRequest, buildDir string, e *emitter) bool {
 	spec := req.GetBuildSpec()
 	e.log("info", "Building with Static (nginx)")
@@ -102,7 +86,7 @@ func (s *Service) buildStatic(ctx context.Context, req *pb.DeployRequest, buildD
 	}
 
 	buildCmd := strings.TrimSpace(spec.GetBuildCommand())
-	envKeys := dropReservedBuildEnv(buildEnvKeys(req.GetEnv()))
+	envKeys := buildEnvKeys(req.GetEnv())
 	var dockerfile string
 	if buildCmd != "" {
 		node := "20"
@@ -182,7 +166,7 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 	}
 
 	port := buildPort(spec)
-	envKeys := filterKeys(dropReservedBuildEnv(buildEnvKeys(req.GetEnv())), func(k string) bool {
+	envKeys := filterKeys(buildEnvKeys(req.GetEnv()), func(k string) bool {
 		return k != "PORT" && !strings.HasPrefix(k, "NIXPACKS_")
 	})
 	planFlags := []string{"--env", fmt.Sprintf("PORT=%d", port)}
@@ -380,7 +364,7 @@ func (s *Service) buildBuildpacks(ctx context.Context, req *pb.DeployRequest, bu
 	e.log("info", "Building with "+label)
 	e.phase(pb.DeployPhase_DEPLOY_PHASE_BUILDING)
 
-	envKeys := filterKeys(dropReservedBuildEnv(buildEnvKeys(req.GetEnv())), func(k string) bool { return k != "PORT" })
+	envKeys := filterKeys(buildEnvKeys(req.GetEnv()), func(k string) bool { return k != "PORT" })
 	args := []string{
 		"run", "--rm",
 		"-v", "/var/run/docker.sock:/var/run/docker.sock",
@@ -455,7 +439,7 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 		buildCmd = ""
 	}
 	startCmd := strings.TrimSpace(spec.GetStartCommand())
-	envKeys := filterKeys(dropReservedBuildEnv(buildEnvKeys(req.GetEnv())), func(k string) bool {
+	envKeys := filterKeys(buildEnvKeys(req.GetEnv()), func(k string) bool {
 		return !strings.HasPrefix(k, "RAILPACK_")
 	})
 	spaDir := relativeDir(spec.GetOutputDirectory())
@@ -580,7 +564,7 @@ var validRailpackSecret = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 func sanitizeSecretNames(names []string) []string {
 	out := make([]string, 0, len(names))
 	for _, n := range names {
-		if validRailpackSecret.MatchString(n) {
+		if validRailpackSecret.MatchString(n) && !reservedEnvName(n) {
 			out = append(out, n)
 		}
 	}

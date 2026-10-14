@@ -46,7 +46,7 @@ func TestSanitizeSecretNames(t *testing.T) {
 		"RAILPACK_NODE_VERSION", "RAILPACK_BUILD_CMD", "_ok", "a1",
 		"x; rm -rf / #",
 		"foo,src=/etc/passwd",
-		"has space", "-flag", "", "WITH-DASH", "uni¢ode",
+		"has space", "-flag", "", "WITH-DASH", "uni¢ode", "HOME", "DOCKER_HOST",
 	}
 	got := sanitizeSecretNames(in)
 	want := []string{"RAILPACK_NODE_VERSION", "RAILPACK_BUILD_CMD", "_ok", "a1"}

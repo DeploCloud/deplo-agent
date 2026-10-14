@@ -3,12 +3,37 @@ package server
 import (
 	"sort"
 	"strings"
+
+	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
+
+// A tenant variable reaches root host processes (the docker client, nixpacks, railpack), so it
+// never takes a name that configures one: the loader, docker, BuildKit, or glibc's setuid list.
+var reservedEnvPrefixes = []string{"LD_", "DOCKER_", "BUILDKIT_", "BUILDX_", "COMPOSE_", "XDG_"}
+
+var reservedEnvNames = map[string]bool{
+	"HOME": true, "PATH": true, dockercli.MarkerEnv: true,
+	"GCONV_PATH": true, "GETCONF_DIR": true, "GLIBC_TUNABLES": true, "HOSTALIASES": true,
+	"LOCALDOMAIN": true, "LOCPATH": true, "MALLOC_TRACE": true, "NIS_PATH": true, "NLSPATH": true,
+	"RESOLV_HOST_CONF": true, "RES_OPTIONS": true, "TMPDIR": true, "TZDIR": true,
+}
+
+func reservedEnvName(k string) bool {
+	if reservedEnvNames[k] {
+		return true
+	}
+	for _, p := range reservedEnvPrefixes {
+		if strings.HasPrefix(k, p) {
+			return true
+		}
+	}
+	return false
+}
 
 func buildEnvKeys(env map[string]string) []string {
 	keys := make([]string, 0, len(env))
 	for k := range env {
-		if validRailpackSecret.MatchString(k) {
+		if validRailpackSecret.MatchString(k) && !reservedEnvName(k) {
 			keys = append(keys, k)
 		}
 	}
@@ -62,10 +87,10 @@ func declaredArgNames(dockerfile string) map[string]struct{} {
 
 func dockerfileEnvKeys(dockerfile string, env map[string]string) []string {
 	declared := declaredArgNames(dockerfile)
-	return dropReservedBuildEnv(filterKeys(buildEnvKeys(env), func(k string) bool {
+	return filterKeys(buildEnvKeys(env), func(k string) bool {
 		_, ok := declared[k]
 		return ok
-	}))
+	})
 }
 
 func appendBuildArgValues(args []string, vars map[string]string) []string {
