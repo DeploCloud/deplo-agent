@@ -621,6 +621,10 @@ message DeployRequest {
   // Environment (or its team when it has none). The agent creates it if missing and
   // connects Traefik to it. Empty is REJECTED - there is no shared default any more.
   string network = 22;
+
+  // Every mount source under <stack_dir>/files/<slug>/, relative to it. The agent refuses
+  // to bring the stack up when one resolves (through links) outside that directory.
+  repeated string files_bind_sources = 23;
 }
 
 // One event in the deploy stream. Exactly one of the oneof arms is set.
@@ -869,6 +873,8 @@ message RerouteRequest {
   // Same contract as DeployRequest.network - a reroute brings the stack up too, so
   // the network must exist and Traefik must be on it.
   string network = 6;
+  // Same contract as DeployRequest.files_bind_sources.
+  repeated string files_bind_sources = 7;
 }
 
 message ReadStackResponse {
@@ -1054,6 +1060,9 @@ message DatabaseDescriptor {
   string user = 4;
   // The engine password, decrypted by the control plane.
   string password = 5;
+  // The container's deplo.project label. When set, the agent refuses a container that
+  // does not carry it, before any exec.
+  string project_id = 6;
 }
 
 // The project descriptor for a PROJECT backup/restore. The control plane resolves

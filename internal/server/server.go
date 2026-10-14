@@ -103,6 +103,7 @@ var Capabilities = []string{
 	"deploy.context_stream",
 	"host.addresses",
 	"git.commit",
+	"deploy.files-bind-check",
 }
 
 // AgentVersion is the version this agent reports over Hello.
@@ -521,6 +522,9 @@ func (s *Service) Reroute(ctx context.Context, req *pb.RerouteRequest) (*pb.Stac
 
 	if req.GetComposeYaml() == "" {
 		return &pb.StackResult{Ok: false, Error: "reroute request missing rendered compose"}, nil
+	}
+	if err := s.checkFilesBinds(slug, req.GetFilesBindSources()); err != nil {
+		return &pb.StackResult{Ok: false, Error: err.Error()}, nil
 	}
 
 	if err := os.MkdirAll(s.stackDir, 0o755); err != nil {

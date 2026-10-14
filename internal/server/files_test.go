@@ -142,6 +142,76 @@ func TestFiles_RejectSymlinkEscape(t *testing.T) {
 	}
 }
 
+// A link an app's container planted in its files dir must not become a host mount on the next deploy.
+func TestCheckFilesBinds(t *testing.T) {
+	const slug = "deplo-agent-test-binds"
+	s, root := newFilesService(t, slug)
+	if err := os.MkdirAll(filepath.Join(root, "data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/", filepath.Join(root, "data", "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("data", filepath.Join(root, "current")); err != nil {
+		t.Fatal(err)
+	}
+	for _, ok := range []string{"", "data", "data/new/conf.yml", "current", "current/x"} {
+		if err := s.checkFilesBinds(slug, []string{ok}); err != nil {
+			t.Errorf("%q must be mountable: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"data/link", "data/link/etc", "current/link", "../other"} {
+		if err := s.checkFilesBinds(slug, []string{"data", bad}); err == nil {
+			t.Errorf("%q must be refused", bad)
+		}
+	}
+}
+
+func TestReroute_refusesALinkOutOfTheFilesDir(t *testing.T) {
+	const slug = "deplo-agent-test-binds"
+	s, root := newFilesService(t, slug)
+	if err := os.Symlink("/etc", filepath.Join(root, "conf")); err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.Reroute(context.Background(), &pb.RerouteRequest{
+		Slug: slug, ComposeYaml: "services: {}\n", Network: "deplo-env-agent-selftest",
+		FilesBindSources: []string{"conf"},
+	})
+	if err != nil || res.GetOk() || !strings.Contains(res.GetError(), "links outside") {
+		t.Fatalf("want a refusal naming the link, got %+v / %v", res, err)
+	}
+	if _, err := os.Stat(s.stackPath(slug)); err == nil {
+		t.Error("the refused stack was written to disk")
+	}
+}
+
+func TestDeploy_refusesALinkOutOfTheFilesDir(t *testing.T) {
+	argv := dockerOnPath(t, "exit 0")
+	const slug = "deplo-agent-test-binds"
+	s, root := newFilesService(t, slug)
+	if err := os.Symlink("/", filepath.Join(root, "data")); err != nil {
+		t.Fatal(err)
+	}
+	var res *pb.DeployResult
+	s.runDeploy(context.Background(), &pb.DeployRequest{
+		Slug: slug, SourceKind: pb.SourceKind_SOURCE_KIND_COMPOSE, ComposeYaml: "services: {}\n",
+		Network: "deplo-env-agent-selftest", FilesBindSources: []string{"data"},
+	}, &emitter{send: func(ev *pb.DeployEvent) error {
+		if r := ev.GetResult(); r != nil {
+			res = r
+		}
+		return nil
+	}})
+	if res == nil || res.GetReady() || !strings.Contains(res.GetError(), "links outside") {
+		t.Fatalf("want the deploy refused, got %+v", res)
+	}
+	for _, a := range argv() {
+		if strings.HasPrefix(a, "compose") {
+			t.Fatalf("compose ran after the refusal: %q", a)
+		}
+	}
+}
+
 func TestFiles_RefuseClobberDir(t *testing.T) {
 	ctx := context.Background()
 	s, _ := newFilesService(t, "app")

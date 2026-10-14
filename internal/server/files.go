@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path"
@@ -40,6 +41,29 @@ func validateSlug(slug string) error {
 
 func (s *Service) filesRoot(slug string) string {
 	return filepath.Join(s.stackDir, "files", slug)
+}
+
+// checkFilesBinds refuses a mount source under the app's files dir that resolves outside it: the
+// app's containers can write that dir, and Docker follows a link they planted to anywhere on the host.
+func (s *Service) checkFilesBinds(slug string, rels []string) error {
+	root, err := resolveHostPath(s.filesRoot(slug))
+	if err != nil {
+		return err
+	}
+	for _, rel := range rels {
+		p, ok := safepath.Join(s.filesRoot(slug), rel)
+		if !ok {
+			return fmt.Errorf("%s climbs out of this app's files", rel)
+		}
+		real, err := resolveHostPath(p)
+		if err != nil {
+			return fmt.Errorf("%s: %v", rel, err)
+		}
+		if real != root && !strings.HasPrefix(real, root+string(os.PathSeparator)) {
+			return fmt.Errorf("%s in this app's files links outside them, so it is not mounted", rel)
+		}
+	}
+	return nil
 }
 
 func normalizeRel(rel string) (string, error) {

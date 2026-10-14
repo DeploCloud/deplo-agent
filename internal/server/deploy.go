@@ -170,6 +170,10 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 		e.result(false, "deploy request missing rendered compose", "")
 		return
 	}
+	if err := s.checkFilesBinds(slug, req.GetFilesBindSources()); err != nil {
+		e.result(false, err.Error(), "")
+		return
+	}
 	var admitErr error
 	if isCompose {
 		// compose pull/build read the stack from disk; startStack writes it again under the lock.
