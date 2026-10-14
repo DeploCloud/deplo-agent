@@ -117,14 +117,7 @@ func (s *Service) Restore(req *pb.RestoreRequest, stream pb.Agent_RestoreServer)
 		e.result(false, statusMessage(err))
 		return nil
 	}
-	switch req.GetKind() {
-	case pb.BackupKind_BACKUP_KIND_DATABASE:
-		s.restoreDatabase(ctx, req.GetDatabase(), src, e)
-	case pb.BackupKind_BACKUP_KIND_PROJECT:
-		s.restoreProject(ctx, req.GetProject(), src, e)
-	default:
-		e.result(false, "unknown restore kind")
-	}
+	s.restoreArtifact(ctx, req.GetKind(), req.GetDatabase(), req.GetProject(), src, e)
 	return nil
 }
 
@@ -320,6 +313,13 @@ func (s *Service) restoreRedis(ctx context.Context, d *pb.DatabaseDescriptor, sr
 	}
 	rdbPath := dir + "/" + dbfile
 
+	// Opened first: a missing or undecryptable artifact must fail before FLUSHALL empties redis.
+	rd, closeSrc, oerr := src.open(ctx)
+	if oerr != nil {
+		e.result(false, statusMessage(oerr))
+		return
+	}
+	defer closeSrc()
 	if res, err := dockercli.RunEnv(ctx, 15*time.Second, cliEnv, cli("CONFIG", "SET", "save", "")...); err != nil || res.Code != 0 {
 		e.result(false, "redis CONFIG SET save: "+combineErr(err, res.Stderr))
 		return
@@ -328,13 +328,6 @@ func (s *Service) restoreRedis(ctx context.Context, d *pb.DatabaseDescriptor, sr
 		e.result(false, "redis FLUSHALL: "+combineErr(err, res.Stderr))
 		return
 	}
-
-	rd, closeSrc, oerr := src.open(ctx)
-	if oerr != nil {
-		e.result(false, statusMessage(oerr))
-		return
-	}
-	defer closeSrc()
 	if code, werr := dockercli.PipeIn(ctx, backupStepTimeout, rd, nil,
 		"exec", "-i", c, "sh", "-c", "cat > "+shellQuote(rdbPath)); werr != nil {
 		e.result(false, "write RDB into container: "+werr.Error())

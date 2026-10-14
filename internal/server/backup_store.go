@@ -418,6 +418,7 @@ type artifactSource struct {
 	integrityProven bool
 	configUntrusted bool
 	stream          io.Reader
+	spooled         string
 	label           string
 }
 
@@ -453,28 +454,35 @@ func sourceFromRestore(s *Service, req *pb.RestoreRequest) (*artifactSource, err
 	}
 }
 
-func (a *artifactSource) open(ctx context.Context) (io.Reader, func(), error) {
-	var (
-		raw    io.Reader
-		closes []func()
-	)
+func (a *artifactSource) openRaw(ctx context.Context) (io.Reader, func(), error) {
 	switch {
+	case a.spooled != "":
+		f, err := os.Open(a.spooled)
+		if err != nil {
+			return nil, nil, err
+		}
+		return f, func() { _ = f.Close() }, nil
 	case a.stream != nil:
-		raw = a.stream
+		return a.stream, func() {}, nil
 	case a.store != nil:
 		f, err := storeOpen(a.store.GetRoot(), a.store.GetObjectKey())
 		if err != nil {
 			return nil, nil, err
 		}
-		raw = f
-		closes = append(closes, func() { _ = f.Close() })
+		return f, func() { _ = f.Close() }, nil
 	default:
 		obj, err := s3client.Download(ctx, s3cfg(a.s3), a.s3.GetObjectKey())
 		if err != nil {
 			return nil, nil, fmt.Errorf("open S3 object: %w", err)
 		}
-		raw = obj
-		closes = append(closes, func() { _ = obj.Close() })
+		return obj, func() { _ = obj.Close() }, nil
+	}
+}
+
+func (a *artifactSource) open(ctx context.Context) (io.Reader, func(), error) {
+	raw, closeRaw, err := a.openRaw(ctx)
+	if err != nil {
+		return nil, nil, err
 	}
 	if a.expectedSha256 != "" {
 		a.verifier = &verifyingReader{r: raw, sum: sha256.New(), expected: a.expectedSha256}
@@ -482,16 +490,12 @@ func (a *artifactSource) open(ctx context.Context) (io.Reader, func(), error) {
 	}
 	rc, err := openArtifactReader(raw, a.identity)
 	if err != nil {
-		for _, c := range closes {
-			c()
-		}
+		closeRaw()
 		return nil, nil, err
 	}
-	closes = append([]func(){func() { _ = rc.Close() }}, closes...)
 	return rc, func() {
-		for _, c := range closes {
-			c()
-		}
+		_ = rc.Close()
+		closeRaw()
 	}, nil
 }
 
@@ -804,14 +808,7 @@ func (s *Service) RestoreFrom(stream pb.Agent_RestoreFromServer) error {
 		configUntrusted: h.GetUntrustedConfig(),
 		label:           "the control plane",
 	}
-	switch h.GetKind() {
-	case pb.BackupKind_BACKUP_KIND_DATABASE:
-		s.restoreDatabase(ctx, h.GetDatabase(), src, e)
-	case pb.BackupKind_BACKUP_KIND_PROJECT:
-		s.restoreProject(ctx, h.GetProject(), src, e)
-	default:
-		e.result(false, "unknown restore kind")
-	}
+	s.restoreArtifact(ctx, h.GetKind(), h.GetDatabase(), h.GetProject(), src, e)
 	return nil
 }
 
