@@ -332,7 +332,16 @@ func removePreviewNetworks(ctx context.Context, names []string) {
 	}
 }
 
-var installerURL = "https://raw.githubusercontent.com/DeploCloud/deplo/main/install.sh"
+var installerBase = "https://raw.githubusercontent.com/DeploCloud/deplo/"
+
+// installerURL is the installer as tagged with the requested release; main only when none is named.
+func installerURL(version string) string {
+	ref := "main"
+	if version != "" {
+		ref = "v" + version
+	}
+	return installerBase + ref + "/install.sh"
+}
 
 const controlPlaneUpdateLog = "/var/log/deplo-update.log"
 
@@ -362,7 +371,7 @@ func (s *Service) UpdateControlPlane(ctx context.Context, req *pb.UpdateControlP
 			Error: "The agent cannot find the directory Deplo was installed in on this host.",
 		}, nil
 	}
-	script, err := installerScript(ctx, dir)
+	script, err := installerScript(ctx, dir, version)
 	if err != nil {
 		return &pb.UpdateControlPlaneResponse{Ok: false, Error: err.Error()}, nil
 	}
@@ -388,9 +397,9 @@ func controlPlaneDir(ctx context.Context, id string) string {
 	return ""
 }
 
-func installerScript(ctx context.Context, dir string) (string, error) {
+func installerScript(ctx context.Context, dir, version string) (string, error) {
 	path := filepath.Join(dir, ".deplo-update.sh")
-	body, err := fetchInstaller(ctx)
+	body, err := fetchInstaller(ctx, installerURL(version))
 	if err != nil {
 		local := filepath.Join(dir, "install.sh")
 		if _, statErr := os.Stat(local); statErr == nil {
@@ -398,16 +407,33 @@ func installerScript(ctx context.Context, dir string) (string, error) {
 		}
 		return "", fmt.Errorf("could not download the Deplo installer: %v", err)
 	}
-	if err := os.WriteFile(path, body, 0o700); err != nil {
+	if err := writeNoFollow(path, body, 0o700); err != nil {
 		return "", fmt.Errorf("could not write the installer to %s: %v", path, err)
 	}
 	return path, nil
 }
 
-func fetchInstaller(ctx context.Context) ([]byte, error) {
+// writeNoFollow writes a file that runs as root, refusing a symlink planted at its path.
+func writeNoFollow(path string, body []byte, perm os.FileMode) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, perm)
+	if err != nil {
+		return err
+	}
+	if err := f.Chmod(perm); err != nil {
+		f.Close()
+		return err
+	}
+	if _, err := f.Write(body); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+func fetchInstaller(ctx context.Context, src string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, installerURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, src, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -417,14 +443,14 @@ func fetchInstaller(ctx context.Context) ([]byte, error) {
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s answered %d", installerURL, res.StatusCode)
+		return nil, fmt.Errorf("%s answered %d", src, res.StatusCode)
 	}
 	body, err := io.ReadAll(io.LimitReader(res.Body, 4<<20))
 	if err != nil {
 		return nil, err
 	}
 	if !bytes.HasPrefix(body, []byte("#!")) {
-		return nil, fmt.Errorf("%s did not answer with a script", installerURL)
+		return nil, fmt.Errorf("%s did not answer with a script", src)
 	}
 	return body, nil
 }

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -296,11 +297,11 @@ func TestInstallerScriptRefusesABodyThatIsNotAScript(t *testing.T) {
 		w.Write([]byte("<html>Sign in to this network</html>"))
 	}))
 	defer srv.Close()
-	restore := installerURL
-	installerURL = srv.URL
-	defer func() { installerURL = restore }()
+	restore := installerBase
+	installerBase = srv.URL + "/"
+	defer func() { installerBase = restore }()
 
-	if _, err := installerScript(context.Background(), dir); err == nil {
+	if _, err := installerScript(context.Background(), dir, "0.5.0"); err == nil {
 		t.Fatal("an HTML body must not be accepted as the installer")
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".deplo-update.sh")); err == nil {
@@ -314,11 +315,11 @@ func TestInstallerScriptWritesTheDownloadedScript(t *testing.T) {
 		w.Write([]byte("#!/usr/bin/env bash\necho deplo\n"))
 	}))
 	defer srv.Close()
-	restore := installerURL
-	installerURL = srv.URL
-	defer func() { installerURL = restore }()
+	restore := installerBase
+	installerBase = srv.URL + "/"
+	defer func() { installerBase = restore }()
 
-	path, err := installerScript(context.Background(), dir)
+	path, err := installerScript(context.Background(), dir, "0.5.0")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -337,15 +338,62 @@ func TestInstallerScriptFallsBackToTheCopyOnDisk(t *testing.T) {
 	if err := os.WriteFile(local, []byte("#!/bin/bash\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	restore := installerURL
-	installerURL = "https://127.0.0.1:1/install.sh"
-	defer func() { installerURL = restore }()
+	restore := installerBase
+	installerBase = "https://127.0.0.1:1/"
+	defer func() { installerBase = restore }()
 
-	path, err := installerScript(context.Background(), dir)
+	path, err := installerScript(context.Background(), dir, "0.5.0")
 	if err != nil {
 		t.Fatalf("a host that cannot reach GitHub must still update: %v", err)
 	}
 	if path != local {
 		t.Errorf("path = %q, want the copy on disk %q", path, local)
+	}
+}
+
+func TestInstallerComesFromTheRequestedReleaseTag(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.Write([]byte("#!/usr/bin/env bash\n"))
+	}))
+	defer srv.Close()
+	restore := installerBase
+	installerBase = srv.URL + "/"
+	defer func() { installerBase = restore }()
+
+	for _, version := range []string{"0.5.0-canary.18", ""} {
+		if _, err := installerScript(context.Background(), t.TempDir(), version); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := []string{"/v0.5.0-canary.18/install.sh", "/main/install.sh"}
+	if !reflect.DeepEqual(paths, want) {
+		t.Fatalf("fetched %v, want %v", paths, want)
+	}
+}
+
+func TestInstallerScriptDoesNotWriteThroughASymlink(t *testing.T) {
+	dir := t.TempDir()
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, filepath.Join(dir, ".deplo-update.sh")); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte("#!/usr/bin/env bash\necho deplo\n"))
+	}))
+	defer srv.Close()
+	restore := installerBase
+	installerBase = srv.URL + "/"
+	defer func() { installerBase = restore }()
+
+	if _, err := installerScript(context.Background(), dir, "0.5.0"); err == nil {
+		t.Fatal("a symlink at the installer path must be refused")
+	}
+	if got, _ := os.ReadFile(victim); string(got) != "keep" {
+		t.Fatalf("the symlink target was overwritten: %q", got)
 	}
 }
