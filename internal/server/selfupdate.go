@@ -4,13 +4,19 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -28,18 +34,45 @@ var reexec = func(path string, argv []string, env []string) error {
 
 const maxAgentBinary = 256 << 20
 
-var downloadFile = func(ctx context.Context, url string) (io.ReadCloser, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+var updateClient = &http.Client{
+	Timeout: 10 * time.Minute,
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return checkDownloadURL(req.URL)
+	},
+}
+
+// checkDownloadURL allows https only; plain http is for a loopback test server.
+func checkDownloadURL(u *url.URL) error {
+	host := u.Hostname()
+	ip := net.ParseIP(host)
+	if u.Scheme == "https" || u.Scheme == "http" && (host == "localhost" || ip != nil && ip.IsLoopback()) {
+		return nil
+	}
+	return fmt.Errorf("refusing to download the agent from %s://%s: only https is allowed", u.Scheme, u.Host)
+}
+
+var downloadFile = func(ctx context.Context, rawURL string) (io.ReadCloser, error) {
+	u, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	if err := checkDownloadURL(u); err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := updateClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()
-		return nil, fmt.Errorf("download %s: HTTP %d", url, resp.StatusCode)
+		return nil, fmt.Errorf("download %s: HTTP %d", rawURL, resp.StatusCode)
 	}
 	return resp.Body, nil
 }
@@ -64,6 +97,11 @@ func (s *Service) applyUpdate(ctx context.Context, exePath string, req *pb.SelfU
 			"the agent release has no binary for this host's architecture (%s); re-run the installer once a release includes it", runtime.GOARCH)
 	}
 
+	// Forward-only, like the control plane (DeploCloud/deplo docs/agents/fleet-rollout.md section 10).
+	if versionNewer(AgentVersion, req.GetVersion()) {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"refusing to downgrade the agent from v%s to v%s", AgentVersion, req.GetVersion())
+	}
 	staged, err := s.stageVerifiedBinary(ctx, exePath, bin.GetUrl(), bin.GetSha256())
 	if err != nil {
 		return nil, err
@@ -129,4 +167,69 @@ func (s *Service) stageVerifiedBinary(ctx context.Context, exe, url, wantSha256 
 		return "", status.Errorf(codes.Internal, "close staged binary: %v", err)
 	}
 	return tmpPath, nil
+}
+
+var (
+	semverPattern  = regexp.MustCompile(`^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?`)
+	describeSuffix = regexp.MustCompile(`^\d+-g[0-9a-f]{4,}(-dirty)?$`)
+)
+
+// versionNewer reports whether a outranks b by the control plane's isNewer (lib/version.ts);
+// an unparseable side ("dev") never outranks anything.
+func versionNewer(a, b string) bool {
+	ma, mb := semverPattern.FindStringSubmatch(strings.TrimSpace(a)), semverPattern.FindStringSubmatch(strings.TrimSpace(b))
+	if ma == nil || mb == nil {
+		return false
+	}
+	for i := 1; i <= 3; i++ {
+		na, _ := strconv.Atoi(ma[i])
+		nb, _ := strconv.Atoi(mb[i])
+		if na != nb {
+			return na > nb
+		}
+	}
+	return comparePre(preRelease(ma[4]), preRelease(mb[4])) > 0
+}
+
+// preRelease drops a `git describe` suffix (0.2.0-8-gb39f8a7), a build after the tag, not a canary.
+func preRelease(p string) []string {
+	if p == "" || describeSuffix.MatchString(p) {
+		return nil
+	}
+	return strings.Split(p, ".")
+}
+
+func comparePre(a, b []string) int {
+	if len(a) == 0 || len(b) == 0 {
+		return len(b) - len(a)
+	}
+	for i := 0; i < len(a) || i < len(b); i++ {
+		if i >= len(a) {
+			return -1
+		}
+		if i >= len(b) {
+			return 1
+		}
+		na, oka := preNum(a[i])
+		nb, okb := preNum(b[i])
+		switch {
+		case oka && okb && na != nb:
+			return na - nb
+		case oka && !okb:
+			return -1
+		case !oka && okb:
+			return 1
+		case !oka && !okb && a[i] != b[i]:
+			return strings.Compare(a[i], b[i])
+		}
+	}
+	return 0
+}
+
+func preNum(s string) (int, bool) {
+	if s == "" || strings.Trim(s, "0123456789") != "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s)
+	return n, err == nil
 }

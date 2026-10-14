@@ -6,6 +6,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -177,6 +179,79 @@ func TestSelfUpdate_noBinaryForThisArch(t *testing.T) {
 	for _, req := range cases {
 		if _, err := s.applyUpdate(context.Background(), filepath.Join(t.TempDir(), "x"), req); status.Code(err) != codes.FailedPrecondition {
 			t.Errorf("expected FailedPrecondition for %+v, got %v", req, err)
+		}
+	}
+}
+
+func TestVersionNewerMatchesTheControlPlane(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"0.8.0", "0.7.9", true},
+		{"0.7.9", "0.8.0", false},
+		{"0.8.0", "0.8.0", false},
+		{"0.8.0", "0.8.0-canary.3", true},
+		{"0.8.0-canary.10", "0.8.0-canary.9", true},
+		{"0.8.0-canary.1", "0.7.5", true},
+		{"0.8.0-3-gb39f8a7", "0.8.0", false},
+		{"0.8.0-3-gb39f8a7-dirty", "0.7.0", true},
+		{"v1.0.0", "0.9.0", true},
+		{"dev", "0.1.0", false},
+		{"0.1.0", "dev", false},
+	}
+	for _, c := range cases {
+		if got := versionNewer(c.a, c.b); got != c.want {
+			t.Errorf("versionNewer(%q, %q) = %v, want %v", c.a, c.b, got, c.want)
+		}
+	}
+}
+
+func TestSelfUpdate_refusesADowngrade(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "deplo-agent")
+	if err := os.WriteFile(exe, []byte("CURRENT"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orig := AgentVersion
+	AgentVersion = "0.9.0"
+	t.Cleanup(func() { AgentVersion = orig })
+	old := []byte("OLDER-BINARY")
+	stubDownload(t, old, nil)
+	fired, _ := captureReexec(t)
+
+	_, err := New(t.TempDir(), t.TempDir(), "/", "").applyUpdate(context.Background(), exe, &pb.SelfUpdateRequest{
+		Version:  "0.8.4",
+		Binaries: binariesFor("https://example/deplo-agent", sha256Hex(old)),
+	})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("a downgrade must be refused, got %v", err)
+	}
+	if got, _ := os.ReadFile(exe); string(got) != "CURRENT" || fired() {
+		t.Fatal("a refused downgrade must leave the running binary alone")
+	}
+}
+
+func TestDownloadFileIsHTTPSOnly(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/redirect" {
+			http.Redirect(w, r, "http://example.com/deplo-agent", http.StatusFound)
+			return
+		}
+		w.Write([]byte("BIN"))
+	}))
+	defer srv.Close()
+	ctx := context.Background()
+
+	if body, err := downloadFile(ctx, srv.URL+"/bin"); err != nil {
+		t.Fatalf("a loopback test server must be reachable: %v", err)
+	} else {
+		body.Close()
+	}
+	for _, u := range []string{"http://example.com/deplo-agent", "ftp://example.com/x", srv.URL + "/redirect"} {
+		if body, err := downloadFile(ctx, u); err == nil {
+			body.Close()
+			t.Errorf("%s must be refused", u)
 		}
 	}
 }
