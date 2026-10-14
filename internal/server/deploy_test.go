@@ -3,9 +3,13 @@ package server
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
 func tarball(t *testing.T, entries []tar.Header, bodies map[string]string) []byte {
@@ -82,5 +86,30 @@ func TestMaterializeUpload_rejectsSymlink(t *testing.T) {
 	)
 	if _, _, err := s.materializeUpload(data, "demo"); err == nil {
 		t.Fatal("expected symlink entry to be rejected")
+	}
+}
+
+// image_ref reaches pack's argv and, with project_id, the relabel Dockerfile: a leading "-" is a
+// flag and a newline is another instruction, so a build refuses both before anything runs.
+func TestRunDeployRefusesAnUnsafeImageRefOrProjectID(t *testing.T) {
+	s := newTestService(t)
+	for _, req := range []*pb.DeployRequest{
+		{ImageRef: "--network=host"},
+		{ImageRef: "deplo/app:1\nRUN touch /pwned"},
+		{ImageRef: "nginx:latest"},
+		{ImageRef: "deplo/app:1", ProjectId: "prj\nLABEL x=y"},
+		{ImageRef: "deplo/app:1", ProjectId: "-prj"},
+	} {
+		req.Slug, req.SourceKind = "deplo-agent-test-ref", pb.SourceKind_SOURCE_KIND_GIT
+		var got *pb.DeployResult
+		s.runDeploy(context.Background(), req, &emitter{send: func(ev *pb.DeployEvent) error {
+			if r := ev.GetResult(); r != nil && got == nil {
+				got = r
+			}
+			return nil
+		}})
+		if got == nil || got.GetReady() || !strings.Contains(got.GetError(), "unsafe image ref") && !strings.Contains(got.GetError(), "invalid project id") {
+			t.Fatalf("%q / %q was not refused up front: %v", req.GetImageRef(), req.GetProjectId(), got)
+		}
 	}
 }

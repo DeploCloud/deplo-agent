@@ -54,6 +54,17 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 		e.result(false, err.Error(), "")
 		return
 	}
+	// Both reach pack's argv and the relabel Dockerfile, where a "-" or a newline would be read as more.
+	if k := req.GetSourceKind(); k == pb.SourceKind_SOURCE_KIND_UPLOAD || k == pb.SourceKind_SOURCE_KIND_GIT {
+		if err := validateImageRef(req.GetImageRef()); err != nil {
+			e.result(false, err.Error(), "")
+			return
+		}
+	}
+	if p := req.GetProjectId(); p != "" && !servicePattern.MatchString(p) {
+		e.result(false, fmt.Sprintf("invalid project id %q", p), "")
+		return
+	}
 	name := "deplo-" + slug
 	stackFile := s.stackPath(slug)
 
