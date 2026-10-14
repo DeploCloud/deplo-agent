@@ -190,6 +190,7 @@ func TestMaterializeGitChecksOutCommit(t *testing.T) {
 	write("new\n")
 	run("commit", "-qam", "new")
 
+	allowFileGit(t)
 	for _, tc := range []struct{ name, protocol string }{{"shallow", "2"}, {"full history", "0"}} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("GIT_CONFIG_COUNT", "1")
@@ -232,5 +233,66 @@ func TestMaterializeGitChecksOutCommit(t *testing.T) {
 func TestCapabilities_advertisesGitCommit(t *testing.T) {
 	if !containsString(Capabilities, "git.commit") {
 		t.Error(`Capabilities must advertise "git.commit"`)
+	}
+}
+
+func allowFileGit(t *testing.T) {
+	t.Helper()
+	prev := gitAllowProtocol
+	gitAllowProtocol += ":file"
+	t.Cleanup(func() { gitAllowProtocol = prev })
+}
+
+// A clone URL is tenant input: file:// or a bare path would copy any git repo on the host into the build.
+func TestMaterializeGitRefusesLocalRepositories(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	origin := t.TempDir()
+	cmd := exec.Command("git", "init", "-q", "-b", "main", origin)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	s := &Service{buildTmpDir: t.TempDir()}
+	e := &emitter{send: func(*pb.DeployEvent) error { return nil }}
+	for _, url := range []string{"file://" + origin, origin, "ext::sh -c touch% /tmp/deplo-agent-test-ext"} {
+		if _, _, cleanup, err := s.materializeGit(context.Background(), &pb.GitSource{Url: url}, "deplo-agent-test-git", e); err == nil {
+			cleanup()
+			t.Fatalf("clone of %q was allowed", url)
+		}
+	}
+}
+
+// The auth header must not follow a redirect, and the protocol allowlist rides every git call.
+func TestRunGitEnv(t *testing.T) {
+	out, bin := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\nenv > "+out+"/env\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	e := &emitter{send: func(*pb.DeployEvent) error { return nil }}
+
+	read := func() string {
+		b, err := os.ReadFile(filepath.Join(out, "env"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	if err := runGit(context.Background(), e, "", "Authorization: Basic eDp5", "ls-remote", "--", "https://example.com/r.git"); err != nil {
+		t.Fatal(err)
+	}
+	env := read()
+	for _, want := range []string{"GIT_ALLOW_PROTOCOL=https:http:ssh:git\n", "GIT_CONFIG_COUNT=2\n",
+		"GIT_CONFIG_KEY_1=http.followRedirects\n", "GIT_CONFIG_VALUE_1=false\n"} {
+		if !strings.Contains(env, want) {
+			t.Fatalf("authenticated git env misses %q:\n%s", want, env)
+		}
+	}
+	if err := runGit(context.Background(), e, "", "", "ls-remote", "--", "https://example.com/r.git"); err != nil {
+		t.Fatal(err)
+	}
+	if env := read(); strings.Contains(env, "followRedirects") || !strings.Contains(env, "GIT_ALLOW_PROTOCOL=") {
+		t.Fatalf("an anonymous clone should keep following redirects, under the allowlist:\n%s", env)
 	}
 }
