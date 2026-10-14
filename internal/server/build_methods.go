@@ -378,27 +378,24 @@ CMD ["nginx", "-g", "daemon off;"]
 	return s.runBuild(ctx, req, args, nil, e)
 }
 
+// pack trusts a builder it knows by its exact short name and then runs the repo's buildpacks in
+// one container with the docker socket; the qualified name keeps the socket out of their phases.
 var herokuBuilders = map[string]string{
-	"22": "heroku/builder:22",
-	"24": "heroku/builder:24",
-	"26": "heroku/builder:26",
+	"22": "docker.io/heroku/builder:22",
+	"24": "docker.io/heroku/builder:24",
+	"26": "docker.io/heroku/builder:26",
 }
 
 func (s *Service) buildBuildpacks(ctx context.Context, req *pb.DeployRequest, buildDir string, e *emitter) bool {
 	spec := req.GetBuildSpec()
 	flavor := spec.GetMethod()
-	builder := "paketobuildpacks/ubuntu-noble-builder"
+	builder := "docker.io/paketobuildpacks/ubuntu-noble-builder"
 	label := "Paketo buildpacks"
 	if flavor == "heroku" {
 		label = "Heroku buildpacks"
-		ver := strings.TrimSpace(spec.GetHerokuVersion())
-		if ver == "" {
-			ver = "24"
-		}
-		if b, ok := herokuBuilders[ver]; ok {
+		builder = herokuBuilders["24"]
+		if b, ok := herokuBuilders[strings.TrimSpace(spec.GetHerokuVersion())]; ok {
 			builder = b
-		} else {
-			builder = "heroku/builder:24"
 		}
 	}
 	e.log("info", "Building with "+label)

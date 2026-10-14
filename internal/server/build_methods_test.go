@@ -245,3 +245,38 @@ func TestStripSymlinksClearsNixpacksOutput(t *testing.T) {
 		t.Fatalf("a missing directory must be a no-op: %v", err)
 	}
 }
+
+// pack trusts its known builders by exact short name, and a trusted builder runs the repo's
+// buildpacks with the docker socket; every builder Deplo picks must take the untrusted phases.
+func TestBuildpacksBuilderIsNeverPackTrusted(t *testing.T) {
+	out, bin := t.TempDir(), t.TempDir()
+	script := "#!/bin/sh\n[ \"$1\" = run ] && printf '%s\\n' \"$@\" >> " + out + "/args\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	packTrusted := map[string]bool{"heroku/builder:22": true, "heroku/builder:24": true,
+		"heroku/builder:26": true, "paketobuildpacks/ubuntu-noble-builder": true}
+
+	s := New(t.TempDir(), t.TempDir(), "/", "")
+	for _, spec := range []*pb.BuildSpec{{Method: "paketo"}, {Method: "heroku"}, {Method: "heroku", HerokuVersion: "22"},
+		{Method: "heroku", HerokuVersion: "26"}, {Method: "heroku", HerokuVersion: "99"}} {
+		_ = os.Remove(filepath.Join(out, "args"))
+		req := &pb.DeployRequest{Slug: "deplo-agent-test-bp", ProjectId: "prj", ImageRef: "deplo/deplo-agent-test-bp:t", BuildSpec: spec}
+		_ = s.buildBuildpacks(context.Background(), req, t.TempDir(), &emitter{send: func(*pb.DeployEvent) error { return nil }})
+		b, err := os.ReadFile(filepath.Join(out, "args"))
+		if err != nil {
+			t.Fatalf("%v: pack never ran: %v", spec, err)
+		}
+		args := strings.Split(strings.TrimSpace(string(b)), "\n")
+		builder := ""
+		for i, a := range args {
+			if a == "--builder" && i+1 < len(args) {
+				builder = args[i+1]
+			}
+		}
+		if builder == "" || packTrusted[builder] || !strings.HasPrefix(builder, "docker.io/") {
+			t.Fatalf("%v: builder %q would run trusted, with the docker socket next to the repo's buildpacks", spec, builder)
+		}
+	}
+}

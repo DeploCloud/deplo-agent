@@ -170,7 +170,7 @@ func cleanUnusedAppImages(ctx context.Context, p cleanupParams, idx *containerIn
 }
 
 var buildToolingImages = []string{
-	"buildpacksio/pack", "heroku/builder", "paketobuildpacks/", "moby/buildkit",
+	"buildpacksio/", "heroku/builder", "paketobuildpacks/", "moby/buildkit",
 	"ghcr.io/railwayapp/nixpacks", "ghcr.io/railwayapp/railpack", "docker/dockerfile",
 }
 
