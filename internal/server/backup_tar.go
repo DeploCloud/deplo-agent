@@ -97,27 +97,37 @@ func extractToDir(root, rel string, hdr *tar.Header, r io.Reader) error {
 			return fmt.Errorf("archive entry %q escapes the target dir", rel)
 		}
 	}
-	target := filepath.Join(root, filepath.Clean("/"+rel))
-	if target != root && !strings.HasPrefix(target, root+string(os.PathSeparator)) {
-		return fmt.Errorf("archive entry %q escapes the target dir", rel)
-	}
-	switch hdr.Typeflag {
-	case tar.TypeDir:
-		return os.MkdirAll(target, 0o755)
-	case tar.TypeReg:
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-			return err
-		}
-		f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(hdr.Mode&0o777))
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		_, err = io.Copy(f, r)
-		return err
-	default:
+	name := strings.TrimPrefix(filepath.Clean("/"+rel), "/")
+	if hdr.Typeflag != tar.TypeDir && hdr.Typeflag != tar.TypeReg {
 		return nil
 	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return err
+	}
+	// The files dir is writable by the app's own containers: os.Root refuses any link out of it, race-free.
+	dir, err := os.OpenRoot(root)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	if hdr.Typeflag == tar.TypeDir {
+		if name == "" {
+			return nil
+		}
+		return dir.MkdirAll(name, 0o755)
+	}
+	if parent := filepath.Dir(name); parent != "." {
+		if err := dir.MkdirAll(parent, 0o755); err != nil {
+			return err
+		}
+	}
+	f, err := dir.OpenFile(name, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(hdr.Mode&0o777))
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = io.Copy(f, r)
+	return err
 }
 
 func wipeVolume(ctx context.Context, vol string) error {

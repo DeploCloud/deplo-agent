@@ -319,6 +319,29 @@ func TestExtractToDir_rejectsTraversal(t *testing.T) {
 	}
 }
 
+// A link an app's container left in its files dir must not carry an extract out of it.
+func TestExtractToDir_refusesExistingSymlinks(t *testing.T) {
+	dst, outside := t.TempDir(), t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(dst, "dir")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "f.txt"), filepath.Join(dst, "f.txt")); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{"dir/x.txt", "f.txt", "dir/sub/y.txt"} {
+		hdr := &tar.Header{Name: rel, Typeflag: tar.TypeReg, Size: 3, Mode: 0o644}
+		if err := extractToDir(dst, rel, hdr, strings.NewReader("bad")); err == nil {
+			t.Errorf("%s: an extract through a link out of the dir must fail", rel)
+		}
+	}
+	if err := extractToDir(dst, "dir/d", &tar.Header{Typeflag: tar.TypeDir}, nil); err == nil {
+		t.Error("a directory entry through a link out of the dir must fail")
+	}
+	if entries, _ := os.ReadDir(outside); len(entries) != 0 {
+		t.Fatalf("the extract wrote outside its root: %v", entries)
+	}
+}
+
 // addBytesToTar then read it back - the snapshot path relies on this.
 func TestAddBytesToTar(t *testing.T) {
 	var buf bytes.Buffer
