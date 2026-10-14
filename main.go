@@ -43,6 +43,10 @@ func main() {
 		_ = os.Unsetenv(k)
 	}
 
+	if *insecure && !loopbackAddr(*addr) {
+		log.Fatalf("deplo-agent: --insecure serves without mTLS, so it only listens on loopback (got --addr %s)", *addr)
+	}
+
 	if err := os.MkdirAll(*buildTmpDir, 0o755); err != nil {
 		log.Fatalf("deplo-agent: build-tmp: %v", err)
 	}
@@ -138,6 +142,15 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func loopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return host == "localhost" || ip != nil && ip.IsLoopback()
 }
 
 func portFromAddr(addr string) int {
