@@ -26,7 +26,8 @@ func (s *Service) prepareStackImages(ctx context.Context, req *pb.DeployRequest,
 	env := dockerConfigEnv(req)
 	steps := [][]string{
 		append(append([]string{}, base...), "pull", "--ignore-buildable", "--quiet"),
-		append(append([]string{}, base...), "build"),
+		append(append([]string{}, base...), "build",
+			"--build-arg", "BUILDKIT_CACHE_MOUNT_NS="+s.cacheNamespace(req.GetSlug())),
 	}
 	for _, args := range steps {
 		code, err := dockercli.StreamEnv(ctx, 15*time.Minute, func(l string) { e.log("info", l) }, env, args...)
