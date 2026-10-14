@@ -81,8 +81,7 @@ func New(cfg Config) (*minio.Client, error) {
 	if endpoint == "" {
 		return nil, fmt.Errorf("s3: empty endpoint")
 	}
-	vetted, err := validateEndpointHost(endpoint, cfg.AllowPrivateEndpoint)
-	if err != nil {
+	if err := validateEndpointHost(endpoint, cfg.AllowPrivateEndpoint); err != nil {
 		return nil, err
 	}
 	extra, unknown := parseExtraArgs(cfg.ExtraArgs)
@@ -100,10 +99,7 @@ func New(cfg Config) (*minio.Client, error) {
 		Region:       cfg.Region,
 		BucketLookup: bucketLookup(pathStyle),
 	}
-	key := fmt.Sprintf("%t|%s|%t|%t", secure, endpoint, extra.noCompression, extra.insecureSkipVerify)
-	if vetted != nil {
-		key += "|" + vetted.host + "|" + vetted.ip.String()
-	}
+	key := fmt.Sprintf("%t|%s|%t|%t|%t", secure, endpoint, extra.noCompression, extra.insecureSkipVerify, cfg.AllowPrivateEndpoint)
 	tr, err := sharedTransport(key, func() (*http.Transport, error) {
 		tr, err := minio.DefaultTransport(secure)
 		if err != nil {
@@ -116,15 +112,8 @@ func New(cfg Config) (*minio.Client, error) {
 			}
 			tr.TLSClientConfig.InsecureSkipVerify = true
 		}
-		if vetted != nil {
-			base := tr.DialContext
-			tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-				host, port, splitErr := net.SplitHostPort(addr)
-				if splitErr == nil && strings.EqualFold(host, vetted.host) {
-					addr = net.JoinHostPort(vetted.ip.String(), port)
-				}
-				return base(ctx, network, addr)
-			}
+		if !cfg.AllowPrivateEndpoint {
+			tr.DialContext = guardedDial(tr.DialContext)
 		}
 		return tr, nil
 	})
@@ -164,11 +153,6 @@ func sharedTransport(key string, build func() (*http.Transport, error)) (*http.T
 	return tr, nil
 }
 
-type vettedEndpoint struct {
-	host string
-	ip   net.IP
-}
-
 func bucketLookup(pathStyle bool) minio.BucketLookupType {
 	if pathStyle {
 		return minio.BucketLookupPath
@@ -176,9 +160,14 @@ func bucketLookup(pathStyle bool) minio.BucketLookupType {
 	return minio.BucketLookupDNS
 }
 
-func validateEndpointHost(endpoint string, allowPrivate bool) (*vettedEndpoint, error) {
+// lookupIP is swapped by tests that need a resolver they control.
+var lookupIP = func(ctx context.Context, host string) ([]net.IP, error) {
+	return net.DefaultResolver.LookupIP(ctx, "ip", host)
+}
+
+func validateEndpointHost(endpoint string, allowPrivate bool) error {
 	if allowPrivate {
-		return nil, nil
+		return nil
 	}
 	host := endpoint
 	if i := strings.IndexByte(host, '/'); i >= 0 {
@@ -189,30 +178,56 @@ func validateEndpointHost(endpoint string, allowPrivate bool) (*vettedEndpoint, 
 	}
 	host = strings.TrimSpace(host)
 	if host == "" {
-		return nil, fmt.Errorf("s3: empty endpoint host")
+		return fmt.Errorf("s3: empty endpoint host")
 	}
+	_, err := allowedIPs(context.Background(), host)
+	return err
+}
 
-	var ips []net.IP
-	literal := net.ParseIP(host) != nil
-	if literal {
-		ips = []net.IP{net.ParseIP(host)}
-	} else {
-		resolved, err := net.LookupIP(host)
+func allowedIPs(ctx context.Context, host string) ([]net.IP, error) {
+	ips := []net.IP{net.ParseIP(host)}
+	if ips[0] == nil {
+		resolved, err := lookupIP(ctx, host)
 		if err != nil {
 			return nil, fmt.Errorf("s3: cannot resolve endpoint host %q: %w", host, err)
 		}
 		ips = resolved
+	}
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("s3: endpoint host %q has no address", host)
 	}
 	for _, ip := range ips {
 		if reason := blockedIPReason(ip); reason != "" {
 			return nil, fmt.Errorf("s3: endpoint host %q resolves to a disallowed %s address %s; refusing to connect (SSRF guard)", host, reason, ip)
 		}
 	}
-	if literal || len(ips) == 0 {
-		return nil, nil
-	}
-	return &vettedEndpoint{host: host, ip: ips[0]}, nil
+	return ips, nil
 }
+
+// guardedDial vets EVERY host the client dials (a virtual-host bucket is <bucket>.<endpoint>) and
+// dials the address it vetted, so a rebinding resolver cannot swap it after the check.
+func guardedDial(base func(ctx context.Context, network, addr string) (net.Conn, error)) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		ips, err := allowedIPs(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+		return base(ctx, network, net.JoinHostPort(ips[0].String(), port))
+	}
+}
+
+var blockedNets = func() []*net.IPNet {
+	var out []*net.IPNet
+	for _, c := range []string{"0.0.0.0/8", "100.64.0.0/10", "198.18.0.0/15", "240.0.0.0/4", "64:ff9b::/96"} {
+		_, n, _ := net.ParseCIDR(c)
+		out = append(out, n)
+	}
+	return out
+}()
 
 func blockedIPReason(ip net.IP) string {
 	switch {
@@ -224,6 +239,11 @@ func blockedIPReason(ip net.IP) string {
 		return "link-local"
 	case ip.IsPrivate():
 		return "private"
+	}
+	for _, n := range blockedNets {
+		if n.Contains(ip) {
+			return "reserved"
+		}
 	}
 	return ""
 }

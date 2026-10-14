@@ -1,8 +1,15 @@
 package s3client
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/minio/minio-go/v7"
 )
 
 // New derives the endpoint host + TLS flag from the scheme the control plane sends: https:// (or no scheme) => TLS; http:// => plaintext (a local MinIO).
@@ -131,5 +138,63 @@ func TestNew_withExtraArgs(t *testing.T) {
 	}
 	if _, err := New(cfg); err != nil {
 		t.Fatalf("New with extra args: %v", err)
+	}
+}
+
+func fakeResolver(t *testing.T, answers map[string]string) {
+	t.Helper()
+	orig := lookupIP
+	lookupIP = func(_ context.Context, host string) ([]net.IP, error) {
+		if ip, ok := answers[host]; ok {
+			return []net.IP{net.ParseIP(ip)}, nil
+		}
+		return nil, fmt.Errorf("no such host %q", host)
+	}
+	t.Cleanup(func() { lookupIP = orig })
+}
+
+// A virtual-host bucket dials <bucket>.<endpoint>, a name the endpoint check never saw: the dial itself must vet it.
+func TestGuardedDial_vetsEveryHost(t *testing.T) {
+	fakeResolver(t, map[string]string{"evil.test": "8.8.8.8", "xyz.evil.test": "127.0.0.1"})
+	var dialed []string
+	dial := guardedDial(func(_ context.Context, _, addr string) (net.Conn, error) {
+		dialed = append(dialed, addr)
+		return nil, errors.New("not dialing in a test")
+	})
+	if _, err := dial(context.Background(), "tcp", "xyz.evil.test:9000"); err == nil || !strings.Contains(err.Error(), "SSRF guard") {
+		t.Fatalf("bucket host resolving to loopback: want an SSRF-guard error, got %v", err)
+	}
+	_, _ = dial(context.Background(), "tcp", "evil.test:9000")
+	if len(dialed) != 1 || dialed[0] != "8.8.8.8:9000" {
+		t.Fatalf("want only the vetted address dialed, got %v", dialed)
+	}
+}
+
+func TestNew_virtualHostBucketIsVetted(t *testing.T) {
+	fakeResolver(t, map[string]string{"evil.test": "8.8.8.8", "xyz.evil.test": "127.0.0.1"})
+	orig := minio.MaxRetry
+	minio.MaxRetry = 1
+	t.Cleanup(func() { minio.MaxRetry = orig })
+	cl, err := New(Config{Endpoint: "http://evil.test:9000", Region: "us-east-1", Bucket: "xyz", AccessKey: "a", SecretKey: "s"})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := cl.BucketExists(ctx, "xyz"); err == nil || !strings.Contains(err.Error(), "SSRF guard") {
+		t.Fatalf("want the bucket host refused by the SSRF guard, got %v", err)
+	}
+}
+
+func TestBlockedIPReason_reservedRanges(t *testing.T) {
+	for _, ip := range []string{"100.64.0.1", "100.127.255.254", "0.1.2.3", "198.18.0.1", "198.19.255.1", "240.0.0.1", "255.255.255.255", "64:ff9b::7f00:1"} {
+		if blockedIPReason(net.ParseIP(ip)) == "" {
+			t.Errorf("%s should be refused", ip)
+		}
+	}
+	for _, ip := range []string{"8.8.8.8", "100.128.0.1", "198.20.0.1", "2606:4700::1111"} {
+		if r := blockedIPReason(net.ParseIP(ip)); r != "" {
+			t.Errorf("%s refused as %s", ip, r)
+		}
 	}
 }
