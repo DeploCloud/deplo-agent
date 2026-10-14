@@ -94,7 +94,6 @@ func Run(cfg Config) (Materials, error) {
 	if err != nil {
 		return mats, fmt.Errorf("create CSR: %w", err)
 	}
-	_ = pub
 	csrPem := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER}))
 
 	resp, rawBody, mac, err := callHome(cfg, csrPem)
@@ -108,13 +107,17 @@ func Run(cfg Config) (Materials, error) {
 		return mats, fmt.Errorf("control plane returned no certificate")
 	}
 
-	if cfg.Fingerprint == "" {
+	// The scheme decides, not the flags: a fingerprint does nothing for a plain-HTTP call.
+	if !isHTTPS(cfg.ControlPlaneURL) {
 		if mac == "" {
 			return mats, fmt.Errorf("control plane did not sign the bootstrap response (refusing over plain HTTP)")
 		}
 		if !verifyMAC(cfg.Token, rawBody, mac) {
 			return mats, fmt.Errorf("bootstrap response HMAC did not verify - possible tampering")
 		}
+	}
+	if err := verifyIssued(pub, resp.CertPem, resp.CAPem); err != nil {
+		return mats, err
 	}
 
 	keyDER, err := x509.MarshalPKCS8PrivateKey(priv)
@@ -164,7 +167,7 @@ func callHome(cfg Config, csrPem string) (callHomeResponse, []byte, string, erro
 	url := strings.TrimRight(cfg.ControlPlaneURL, "/") + "/api/agent/bootstrap"
 
 	client := &http.Client{Timeout: 30 * time.Second}
-	if strings.HasPrefix(strings.ToLower(url), "https://") {
+	if isHTTPS(url) {
 		if cfg.Fingerprint == "" {
 			return callHomeResponse{}, nil, "", fmt.Errorf("HTTPS control plane requires a pinned fingerprint")
 		}
@@ -192,6 +195,39 @@ func callHome(cfg Config, csrPem string) (callHomeResponse, []byte, string, erro
 		parsed.Error = fmt.Sprintf("HTTP %d", res.StatusCode)
 	}
 	return parsed, raw, res.Header.Get("x-deplo-bootstrap-mac"), nil
+}
+
+func isHTTPS(url string) bool {
+	return strings.HasPrefix(strings.ToLower(url), "https://")
+}
+
+// verifyIssued refuses a certificate that is not for this agent's key or does not chain to the
+// returned CA, before anything is written.
+func verifyIssued(pub ed25519.PublicKey, certPem, caPem string) error {
+	block, _ := pem.Decode([]byte(certPem))
+	if block == nil {
+		return fmt.Errorf("control plane returned an unreadable certificate")
+	}
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return fmt.Errorf("control plane returned an unreadable certificate: %w", err)
+	}
+	if !pub.Equal(leaf.PublicKey) {
+		return fmt.Errorf("control plane returned a certificate for a different key")
+	}
+	roots := x509.NewCertPool()
+	if !roots.AppendCertsFromPEM([]byte(caPem)) {
+		return fmt.Errorf("control plane returned an unreadable CA")
+	}
+	// Checked at the cert's own start, so a host clock behind the control plane's still bootstraps.
+	if _, err := leaf.Verify(x509.VerifyOptions{
+		Roots:       roots,
+		CurrentTime: leaf.NotBefore,
+		KeyUsages:   []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}); err != nil {
+		return fmt.Errorf("control plane returned a certificate its CA did not sign: %w", err)
+	}
+	return nil
 }
 
 func pinnedTransport(expected string) *http.Transport {

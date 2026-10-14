@@ -19,6 +19,12 @@ import (
 )
 
 func fakeControlPlane(t *testing.T, token string, tamperMAC bool) *httptest.Server {
+	return fakeControlPlaneIssuing(t, token, tamperMAC, "")
+}
+
+// fakeControlPlaneIssuing answers like the control plane; forge "key" signs a stranger's key,
+// forge "ca" signs the CSR with a CA other than the one it returns.
+func fakeControlPlaneIssuing(t *testing.T, token string, tamperMAC bool, forge string) *httptest.Server {
 	t.Helper()
 	caPub, caPriv, _ := ed25519.GenerateKey(rand.Reader)
 	caTmpl := &x509.Certificate{
@@ -55,7 +61,17 @@ func fakeControlPlane(t *testing.T, token string, tamperMAC bool) *httptest.Serv
 			NotBefore:    time.Now().Add(-time.Minute),
 			NotAfter:     time.Now().Add(time.Hour),
 		}
-		leafDER, _ := x509.CreateCertificate(rand.Reader, leafTmpl, caCert, csr.PublicKey, caPriv)
+		leafPub, signer, signerKey := csr.PublicKey, caCert, caPriv
+		switch forge {
+		case "key":
+			leafPub, _, _ = ed25519.GenerateKey(rand.Reader)
+		case "ca":
+			otherPub, otherPriv, _ := ed25519.GenerateKey(rand.Reader)
+			otherDER, _ := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, otherPub, otherPriv)
+			signer, _ = x509.ParseCertificate(otherDER)
+			signerKey = otherPriv
+		}
+		leafDER, _ := x509.CreateCertificate(rand.Reader, leafTmpl, signer, leafPub, signerKey)
 		leafPem := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER})
 
 		payload, _ := json.Marshal(callHomeResponse{CertPem: string(leafPem), CAPem: string(caPem)})
@@ -125,5 +141,36 @@ func TestBootstrap_rejectsBadToken(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("expected rejection for a bad token")
+	}
+}
+
+// http plus a hand-added fingerprint used to skip the MAC while pinning nothing.
+func TestBootstrap_httpWithAFingerprintStillNeedsTheMAC(t *testing.T) {
+	srv := fakeControlPlane(t, "tok-123", true)
+	defer srv.Close()
+	dir := t.TempDir()
+	_, err := Run(Config{
+		ControlPlaneURL: srv.URL,
+		Token:           "tok-123",
+		Fingerprint:     "aa:bb",
+		AgentDir:        dir,
+	})
+	if err == nil || Provisioned(dir) {
+		t.Fatalf("a plain-HTTP answer with a bad MAC must be refused whatever the flags say (err=%v)", err)
+	}
+}
+
+func TestBootstrap_refusesACertThatIsNotOurs(t *testing.T) {
+	for _, forge := range []string{"key", "ca"} {
+		srv := fakeControlPlaneIssuing(t, "tok-123", false, forge)
+		dir := t.TempDir()
+		_, err := Run(Config{ControlPlaneURL: srv.URL, Token: "tok-123", AgentDir: dir})
+		srv.Close()
+		if err == nil {
+			t.Errorf("forge %q: a certificate that is not for our key or not from the returned CA must be refused", forge)
+		}
+		if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+			t.Errorf("forge %q: nothing may be written, found %d files", forge, len(entries))
+		}
 	}
 }
