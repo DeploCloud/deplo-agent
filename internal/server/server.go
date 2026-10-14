@@ -170,7 +170,7 @@ func New(stackDir, buildTmpDir, dataDir, dataBase string) *Service {
 	if dataBase == "" {
 		dataBase = filepath.Dir(stackDir)
 	}
-	sweepDockerConfigs()
+	sweepTempSecrets()
 	return &Service{
 		stackDir:    stackDir,
 		buildTmpDir: buildTmpDir,

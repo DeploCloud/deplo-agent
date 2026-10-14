@@ -68,12 +68,12 @@ func writeDockerConfig(req *pb.DeployRequest) (func(), error) {
 	return cleanup, nil
 }
 
-func sweepDockerConfigs() {
-	matches, err := filepath.Glob(filepath.Join(os.TempDir(), "deplo-dockercfg-*"))
-	if err != nil {
-		return
-	}
-	for _, m := range matches {
-		_ = os.RemoveAll(m)
+// sweepTempSecrets removes the credential files a crash left behind: registry auth and cron variables.
+func sweepTempSecrets() {
+	for _, pattern := range []string{"deplo-dockercfg-*", jobEnvFilePrefix + "*"} {
+		matches, _ := filepath.Glob(filepath.Join(os.TempDir(), pattern))
+		for _, m := range matches {
+			_ = os.RemoveAll(m)
+		}
 	}
 }

@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -72,6 +74,12 @@ func TestStartJobRejectsBadInput(t *testing.T) {
 		{"no project", &pb.StartJobRequest{Container: "c", Command: "date"}},
 		{"no command", &pb.StartJobRequest{ProjectId: "prj_1", Container: "c", Command: "  "}},
 		{"unknown shell", &pb.StartJobRequest{ProjectId: "prj_1", Container: "c", Command: "date", Shell: "zsh"}},
+		{"bad env name", &pb.StartJobRequest{ProjectId: "prj_1", Container: "c", Command: "date",
+			Env: []*pb.CronEnvVar{{Name: "BAD-NAME", Value: "x"}}}},
+		{"marker env name", &pb.StartJobRequest{ProjectId: "prj_1", Container: "c", Command: "date",
+			Env: []*pb.CronEnvVar{{Name: jobMarkerEnv, Value: "x"}}}},
+		{"multi-line value", &pb.StartJobRequest{ProjectId: "prj_1", Container: "c", Command: "date",
+			Env: []*pb.CronEnvVar{{Name: "KEY", Value: "a\nb"}}}},
 	}
 	for _, c := range cases {
 		_, err := s.StartJob(context.Background(), c.req)
@@ -235,5 +243,76 @@ func TestTailBufKeepsTextAroundAStrayByte(t *testing.T) {
 	got := b.String()
 	if !utf8.ValidString(got) || !strings.HasPrefix(got, "ok") || !strings.HasSuffix(got, "end\n") {
 		t.Fatalf("tail = %q, want ok...end with the stray bytes replaced", got)
+	}
+}
+
+// A job's variables reach the container through a 0600 env-file, never the root docker client's
+// own environment, where LD_PRELOAD or DOCKER_HOST would configure the client itself.
+func TestJobEnvNeverReachesTheDockerClient(t *testing.T) {
+	out := t.TempDir()
+	t.Setenv("TMPDIR", t.TempDir())
+	bin := t.TempDir()
+	script := "#!/bin/sh\n[ \"$1\" = inspect ] && { echo prj_deplo-agent-test; exit 0; }\n" +
+		"case \" $* \" in *\" -e " + jobMarkerEnv + " \"*) ;; *) exit 0;; esac\n" +
+		"env > " + out + "/env; printf '%s\\n' \"$@\" > " + out + "/args\n" +
+		"while [ $# -gt 0 ]; do [ \"$1\" = --env-file ] && cp \"$2\" " + out + "/envfile; shift; done\n"
+	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+
+	s := newTestService(t)
+	resp, err := s.StartJob(context.Background(), &pb.StartJobRequest{
+		ProjectId: "prj_deplo-agent-test", Container: "deplo-agent-test-cron", Shell: "sh", Command: "date",
+		Env: []*pb.CronEnvVar{{Name: "API_KEY", Value: "s3cret value"}, {Name: "LD_PRELOAD", Value: "/x/evil.so"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		p, _ := s.PollJob(context.Background(), &pb.PollJobRequest{JobId: resp.GetJobId()})
+		if !p.GetRunning() {
+			if p.GetExitCode() != 0 {
+				t.Fatalf("job failed: %s", p.GetStderr())
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("job never settled")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	read := func(name string) string {
+		b, err := os.ReadFile(filepath.Join(out, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	if env := read("env"); strings.Contains(env, "API_KEY") || strings.Contains(env, "evil.so") {
+		t.Fatalf("a job variable reached the docker client's environment:\n%s", env)
+	}
+	if args := read("args"); strings.Contains(args, "s3cret") {
+		t.Fatalf("a job variable's value rode argv:\n%s", args)
+	}
+	if got, want := read("envfile"), "API_KEY=s3cret value\nLD_PRELOAD=/x/evil.so\n"; got != want {
+		t.Fatalf("env-file = %q, want %q", got, want)
+	}
+	if left, _ := filepath.Glob(filepath.Join(os.TempDir(), jobEnvFilePrefix+"*")); len(left) != 0 {
+		t.Fatalf("the env-file outlived the job: %v", left)
+	}
+}
+
+func TestSweepTempSecretsRemovesCronEnvFiles(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	stale := filepath.Join(os.TempDir(), jobEnvFilePrefix+"stale")
+	if err := os.WriteFile(stale, []byte("K=v\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sweepTempSecrets()
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("a stale cron env-file survived the boot sweep: %v", err)
 	}
 }

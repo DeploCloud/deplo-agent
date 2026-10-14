@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -104,6 +105,16 @@ func (s *Service) StartJob(ctx context.Context, req *pb.StartJobRequest) (*pb.St
 	default:
 		return nil, status.Errorf(codes.InvalidArgument, "unknown shell %q", req.GetShell())
 	}
+	for _, e := range req.GetEnv() {
+		name := strings.TrimSpace(e.GetName())
+		switch {
+		case name == "":
+		case !validRailpackSecret.MatchString(name) || name == jobMarkerEnv:
+			return nil, status.Errorf(codes.InvalidArgument, "%q cannot be the name of a variable", name)
+		case strings.ContainsAny(e.GetValue(), "\r\n"):
+			return nil, status.Errorf(codes.InvalidArgument, "the value of %s has a line break, which a cron job cannot pass", name)
+		}
+	}
 
 	s.mu.Lock()
 	live := 0
@@ -194,17 +205,17 @@ func (s *Service) runJob(ctx context.Context, id string, req *pb.StartJobRequest
 	if u := strings.TrimSpace(req.GetUser()); u != "" {
 		args = append(args, "-u", u)
 	}
-	extraEnv := make([]string, 0, len(req.GetEnv()))
-	for _, e := range req.GetEnv() {
-		name := strings.TrimSpace(e.GetName())
-		if name == "" {
-			continue
-		}
-		args = append(args, "-e", name)
-		extraEnv = append(extraEnv, name+"="+e.GetValue())
+	envFile, err := writeJobEnvFile(req.GetEnv())
+	if err != nil {
+		s.finishJob(j, -1, false, "", "write the job's variables: "+err.Error())
+		return
+	}
+	if envFile != "" {
+		defer os.Remove(envFile)
+		args = append(args, "--env-file", envFile)
 	}
 	args = append(args, "-e", jobMarkerEnv)
-	extraEnv = append(extraEnv, jobMarkerEnv+"="+id)
+	extraEnv := []string{jobMarkerEnv + "=" + id}
 	args = append(args, container)
 	args = append(args, prefix...)
 	args = append(args, req.GetCommand())
@@ -232,6 +243,35 @@ func (s *Service) runJob(ctx context.Context, id string, req *pb.StartJobRequest
 		return
 	}
 	s.finishJob(j, int32(code), false, "", "")
+}
+
+const jobEnvFilePrefix = "deplo-cronenv-"
+
+// writeJobEnvFile hands the job's variables to the container through a 0600 file, never through
+// the root docker client's own environment, where a name like LD_PRELOAD would configure it.
+func writeJobEnvFile(env []*pb.CronEnvVar) (string, error) {
+	var b strings.Builder
+	for _, e := range env {
+		if name := strings.TrimSpace(e.GetName()); name != "" {
+			b.WriteString(name + "=" + e.GetValue() + "\n")
+		}
+	}
+	if b.Len() == 0 {
+		return "", nil
+	}
+	f, err := os.CreateTemp("", jobEnvFilePrefix+"*")
+	if err != nil {
+		return "", err
+	}
+	_, err = f.WriteString(b.String())
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		_ = os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
 }
 
 func (s *Service) finishJob(j *job, code int32, timedOut bool, extraOut, extraErr string) {
