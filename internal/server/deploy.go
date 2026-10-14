@@ -108,15 +108,8 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 	switch req.GetSourceKind() {
 	case pb.SourceKind_SOURCE_KIND_IMAGE:
 		if req.GetPullImage() {
-			e.log("command", "docker pull "+imageRef)
-			code, err := dockercli.StreamEnv(ctx, 10*time.Minute, func(l string) { e.log("info", l) },
-				dockerConfigEnv(req), "pull", imageRef)
-			if err != nil {
-				e.result(false, "docker pull: "+err.Error(), "")
-				return
-			}
-			if code != 0 {
-				e.result(false, fmt.Sprintf("docker pull failed (exit %d)", code), "")
+			if err := pullImage(ctx, req, e); err != nil {
+				e.result(false, err.Error(), "")
 				return
 			}
 		}
@@ -195,12 +188,22 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 			return
 		}
 	}
+	var admitErr error
 	if isCompose {
 		images, ok := s.prepareStackImages(ctx, req, composeBaseArgs(name, stackFile, envFile, projectDir), e)
-		if !ok || !refuseTraefikImageLabels(ctx, images, e) {
+		if !ok {
 			return
 		}
-	} else if !refuseTraefikImageLabels(ctx, []string{imageRef}, e) {
+		admitErr = admitImages(ctx, images, nil)
+	} else {
+		var pull func() error
+		if req.GetSourceKind() == pb.SourceKind_SOURCE_KIND_IMAGE {
+			pull = func() error { return pullImage(ctx, req, e) }
+		}
+		admitErr = admitImages(ctx, []string{imageRef}, pull)
+	}
+	if admitErr != nil {
+		e.result(false, admitErr.Error(), "")
 		return
 	}
 	composeArgs := composeUpArgs(name, stackFile, envFile, projectDir, req.GetForceRecreate(), req.GetComposeUpArgs())
@@ -243,6 +246,19 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 		return
 	}
 	e.result(false, "Container did not reach a running state", commitSha)
+}
+
+func pullImage(ctx context.Context, req *pb.DeployRequest, e *emitter) error {
+	e.log("command", "docker pull "+req.GetImageRef())
+	code, err := dockercli.StreamEnv(ctx, 10*time.Minute, func(l string) { e.log("info", l) },
+		dockerConfigEnv(req), "pull", req.GetImageRef())
+	if err != nil {
+		return fmt.Errorf("docker pull: %w", err)
+	}
+	if code != 0 {
+		return fmt.Errorf("docker pull failed (exit %d)", code)
+	}
+	return nil
 }
 
 func renderEnvFile(env map[string]string) string {

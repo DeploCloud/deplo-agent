@@ -553,6 +553,9 @@ func (s *Service) Reroute(ctx context.Context, req *pb.RerouteRequest) (*pb.Stac
 			return &pb.StackResult{Ok: false, Error: "write env file: " + err.Error()}, nil
 		}
 	}
+	if err := admitStackImages(ctx, composeBaseArgs(name, stackFile, envFile, projectDir)); err != nil {
+		return &pb.StackResult{Ok: false, Error: err.Error()}, nil
+	}
 	composeArgs := composeUpArgs(name, stackFile, envFile, projectDir, false, req.GetComposeUpArgs())
 
 	res, err := dockercli.Run(ctx, 120*time.Second, composeArgs...)

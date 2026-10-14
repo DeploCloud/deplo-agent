@@ -40,34 +40,74 @@ func (s *Service) prepareStackImages(ctx context.Context, req *pb.DeployRequest,
 			return nil, false
 		}
 	}
-	res, err := dockercli.RunEnv(ctx, 2*time.Minute, env, append(append([]string{}, base...), "config", "--images")...)
-	if err != nil || res.Code != 0 {
-		e.result(false, "docker compose config --images: "+strings.TrimSpace(res.Stderr), "")
+	images, err := composeImages(ctx, env, base)
+	if err != nil {
+		e.result(false, err.Error(), "")
 		return nil, false
-	}
-	var images []string
-	for _, line := range strings.Split(res.Stdout, "\n") {
-		if l := strings.TrimSpace(line); l != "" {
-			images = append(images, l)
-		}
 	}
 	return images, true
 }
 
-func refuseTraefikImageLabels(ctx context.Context, images []string, e *emitter) bool {
+func composeImages(ctx context.Context, env, base []string) ([]string, error) {
+	res, err := dockercli.RunEnv(ctx, 2*time.Minute, env, append(append([]string{}, base...), "config", "--images")...)
+	if err != nil || res.Code != 0 {
+		return nil, fmt.Errorf("docker compose config --images: %s", strings.TrimSpace(res.Stderr))
+	}
+	return splitLines(res.Stdout), nil
+}
+
+// admitStackImages is Deploy's image admission for a stack already on disk: present images cost
+// one inspect each, and only a missing one is pulled, as `up` itself would have.
+func admitStackImages(ctx context.Context, base []string) error {
+	images, err := composeImages(ctx, nil, base)
+	if err != nil {
+		return err
+	}
+	return admitImages(ctx, images, func() error {
+		res, err := dockercli.Run(ctx, 2*time.Minute,
+			append(append([]string{}, base...), "pull", "--ignore-buildable", "--policy", "missing", "--quiet")...)
+		if err == nil && res.Code != 0 {
+			err = fmt.Errorf("docker compose pull: %s", strings.TrimSpace(res.Stderr))
+		}
+		return err
+	})
+}
+
+// admitImages refuses an image that brings traefik.* labels. One that cannot be inspected is
+// pulled once when pull is set, then refused if it still cannot: an unchecked image never starts.
+func admitImages(ctx context.Context, images []string, pull func() error) error {
+	missing, err := traefikImageCheck(ctx, images)
+	if err != nil || len(missing) == 0 {
+		return err
+	}
+	if pull != nil {
+		if err := pull(); err != nil {
+			return err
+		}
+		if missing, err = traefikImageCheck(ctx, missing); err != nil {
+			return err
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("the image %s could not be inspected on this server, so it was not started", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+func traefikImageCheck(ctx context.Context, images []string) (missing []string, err error) {
 	for _, img := range images {
-		res, err := dockercli.Run(ctx, 30*time.Second, "image", "inspect", "--format", "{{json .Config.Labels}}", img)
-		if err != nil || res.Code != 0 {
+		res, rerr := dockercli.Run(ctx, 30*time.Second, "image", "inspect", "--format", "{{json .Config.Labels}}", img)
+		if rerr != nil || res.Code != 0 {
+			missing = append(missing, img)
 			continue
 		}
 		if keys := traefikLabelKeys(res.Stdout); len(keys) > 0 {
-			e.result(false, fmt.Sprintf(
+			return nil, fmt.Errorf(
 				"the image %s carries Traefik labels (%s); Deplo routes apps itself, so an image must not bring its own routing",
-				img, strings.Join(keys, ", ")), "")
-			return false
+				img, strings.Join(keys, ", "))
 		}
 	}
-	return true
+	return missing, nil
 }
 
 func traefikLabelKeys(labelsJSON string) []string {
