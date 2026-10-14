@@ -166,3 +166,82 @@ func TestNixpacksDownloadURL_arch(t *testing.T) {
 		t.Errorf("malformed nixpacks URL: %s", url)
 	}
 }
+
+// A checkout's Dockerfile or deplo-nginx.conf may be a symlink to a host path: the root agent must
+// replace the link, never write through it.
+func TestBuildStaticNeverWritesThroughASymlink(t *testing.T) {
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+
+	host, dir := t.TempDir(), t.TempDir()
+	created, existing := filepath.Join(host, "authorized_keys"), filepath.Join(host, "passwd")
+	mustWrite(t, existing, "keep\n")
+	mustWrite(t, filepath.Join(dir, "index.html"), "<html></html>\n")
+	for name, target := range map[string]string{"Dockerfile": created, "deplo-nginx.conf": existing, ".nvmrc": created + ".nvmrc"} {
+		if err := os.Symlink(target, filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	s := New(t.TempDir(), t.TempDir(), "/", "")
+	req := &pb.DeployRequest{
+		Slug: "deplo-agent-test-static", ProjectId: "prj", ImageRef: "deplo/deplo-agent-test-static:t",
+		BuildKind: pb.BuildKind_BUILD_KIND_STATIC,
+		BuildSpec: &pb.BuildSpec{Method: "static", BuildCommand: "true\nssh-ed25519 AAAA evil"},
+	}
+	_ = s.buildStatic(context.Background(), req, dir, &emitter{send: func(*pb.DeployEvent) error { return nil }})
+	if _, err := writeNodeVersionPin(dir, "20"); err != nil {
+		t.Fatal(err)
+	}
+
+	if b, _ := os.ReadFile(existing); string(b) != "keep\n" {
+		t.Fatalf("the symlinked deplo-nginx.conf overwrote its host target: %q", b)
+	}
+	if left, _ := filepath.Glob(filepath.Join(host, "authorized_keys*")); len(left) != 0 {
+		t.Fatalf("a dangling symlink let the agent create a host file: %v", left)
+	}
+	for _, name := range []string{"Dockerfile", "deplo-nginx.conf", ".nvmrc"} {
+		if li, err := os.Lstat(filepath.Join(dir, name)); err != nil || !li.Mode().IsRegular() {
+			t.Fatalf("%s should now be a regular file in the checkout: %v %v", name, li, err)
+		}
+	}
+}
+
+// nixpacks writes its output under .nixpacks as root, so no symlink may survive there.
+func TestStripSymlinksClearsNixpacksOutput(t *testing.T) {
+	host, dir := t.TempDir(), t.TempDir()
+	mustWrite(t, filepath.Join(host, "cron"), "keep\n")
+	out := filepath.Join(dir, ".nixpacks")
+	if err := os.Symlink(host, out); err != nil {
+		t.Fatal(err)
+	}
+	if err := stripSymlinks(out); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(out); !os.IsNotExist(err) {
+		t.Fatalf("a symlinked .nixpacks survived: %v", err)
+	}
+
+	mustWrite(t, filepath.Join(out, "assets", "kept.txt"), "mine\n")
+	if err := os.Symlink(filepath.Join(host, "cron"), filepath.Join(out, "Dockerfile")); err != nil {
+		t.Fatal(err)
+	}
+	if err := stripSymlinks(out); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(out, "Dockerfile")); !os.IsNotExist(err) {
+		t.Fatalf("a symlink inside .nixpacks survived: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(out, "assets", "kept.txt")); err != nil {
+		t.Fatalf("a regular file under .nixpacks was removed: %v", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(host, "cron")); string(b) != "keep\n" {
+		t.Fatalf("the link target was touched: %q", b)
+	}
+	if err := stripSymlinks(filepath.Join(dir, "missing")); err != nil {
+		t.Fatalf("a missing directory must be a no-op: %v", err)
+	}
+}

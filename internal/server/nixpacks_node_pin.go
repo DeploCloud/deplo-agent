@@ -31,5 +31,5 @@ func writeNodeVersionPin(dir, version string) (bool, error) {
 	if version == "" || repoPinsNodeVersion(dir) {
 		return false, nil
 	}
-	return true, os.WriteFile(filepath.Join(dir, ".nvmrc"), []byte(version+"\n"), 0o644)
+	return true, writeBuildFile(filepath.Join(dir, ".nvmrc"), []byte(version+"\n"))
 }

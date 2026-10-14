@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
@@ -79,8 +81,7 @@ func (s *Service) buildStatic(ctx context.Context, req *pb.DeployRequest, buildD
 	}
 	spa := spec.GetStaticSinglePageApp()
 
-	if err := os.WriteFile(filepath.Join(buildDir, "deplo-nginx.conf"),
-		[]byte(nginxConf(port, spa)), 0o644); err != nil {
+	if err := writeBuildFile(filepath.Join(buildDir, "deplo-nginx.conf"), []byte(nginxConf(port, spa))); err != nil {
 		e.result(false, "write nginx conf: "+err.Error(), "")
 		return false
 	}
@@ -120,7 +121,7 @@ CMD ["nginx", "-g", "daemon off;"]
 `, outputDir, port)
 	}
 
-	if err := os.WriteFile(filepath.Join(buildDir, "Dockerfile"), []byte(dockerfile), 0o644); err != nil {
+	if err := writeBuildFile(filepath.Join(buildDir, "Dockerfile"), []byte(dockerfile)); err != nil {
 		e.result(false, "write Dockerfile: "+err.Error(), "")
 		return false
 	}
@@ -130,6 +131,41 @@ CMD ["nginx", "-g", "daemon off;"]
 	args = append(args, labelArgs(req)...)
 	args = append(args, buildDir)
 	return s.runBuild(ctx, req, args, envKV(req.GetEnv(), envKeys), e)
+}
+
+// writeBuildFile writes an agent-owned file into a checkout, replacing a symlink the repo put
+// there instead of writing through it to wherever it points on the host.
+func writeBuildFile(path string, data []byte) error {
+	if li, err := os.Lstat(path); err == nil && li.Mode()&os.ModeSymlink != 0 {
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0o644)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(data)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
+}
+
+// stripSymlinks removes every symlink at or under path, so a host tool writing there stays inside.
+func stripSymlinks(path string) error {
+	return filepath.WalkDir(path, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			return os.Remove(p)
+		}
+		return nil
+	})
 }
 
 func buildArgLines(keys []string) string {
@@ -162,6 +198,10 @@ func (s *Service) buildNixpacks(ctx context.Context, req *pb.DeployRequest, buil
 	nixpacks, err := s.ensureNixpacks(ctx, e)
 	if err != nil {
 		e.result(false, "nixpacks unavailable: "+err.Error(), "")
+		return false
+	}
+	if err := stripSymlinks(filepath.Join(buildDir, ".nixpacks")); err != nil {
+		e.result(false, "prepare the nixpacks output: "+err.Error(), "")
 		return false
 	}
 
@@ -313,8 +353,8 @@ func relativeDir(dir string) string {
 func (s *Service) nginxWrap(ctx context.Context, req *pb.DeployRequest, buildDir, fromImage, srcPath string, e *emitter) bool {
 	spec := req.GetBuildSpec()
 	port := buildPort(spec)
-	if err := os.WriteFile(filepath.Join(buildDir, "deplo-nginx.conf"),
-		[]byte(nginxConf(port, spec.GetStaticSinglePageApp())), 0o644); err != nil {
+	if err := writeBuildFile(filepath.Join(buildDir, "deplo-nginx.conf"),
+		[]byte(nginxConf(port, spec.GetStaticSinglePageApp()))); err != nil {
 		e.result(false, "write nginx conf: "+err.Error(), "")
 		return false
 	}
@@ -327,7 +367,7 @@ EXPOSE %d
 CMD ["nginx", "-g", "daemon off;"]
 `, fromImage, srcPath, port)
 	wrapperPath := filepath.Join(buildDir, "deplo-static.Dockerfile")
-	if err := os.WriteFile(wrapperPath, []byte(wrapper), 0o644); err != nil {
+	if err := writeBuildFile(wrapperPath, []byte(wrapper)); err != nil {
 		e.result(false, "write wrapper Dockerfile: "+err.Error(), "")
 		return false
 	}

@@ -97,7 +97,7 @@ func writeNixpacksConfig(tmpDir, slug string, files []string, skipInstall, skipB
 		return "", err
 	}
 	path := filepath.Join(tmpDir, "deplo-nixpacks-"+slug+".json")
-	if err := os.WriteFile(path, body, 0o644); err != nil {
+	if err := writeBuildFile(path, body); err != nil {
 		return "", err
 	}
 	return path, nil
@@ -122,7 +122,7 @@ func writeRailpackSkipConfig(buildDir string, skipInstall, skipBuild bool) (stri
 	if err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(filepath.Join(buildDir, railpackSkipConfigName), body, 0o644); err != nil {
+	if err := writeBuildFile(filepath.Join(buildDir, railpackSkipConfigName), body); err != nil {
 		return "", err
 	}
 	return railpackSkipConfigName, nil

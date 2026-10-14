@@ -336,7 +336,7 @@ func (s *Service) buildDockerfile(ctx context.Context, req *pb.DeployRequest, bu
 	if df.GetGenerated() {
 		dfPath := filepath.Join(buildDir, "Dockerfile")
 		if _, err := os.Stat(dfPath); err != nil {
-			if err := os.WriteFile(dfPath, []byte(df.GetGeneratedDockerfile()), 0o644); err != nil {
+			if err := writeBuildFile(dfPath, []byte(df.GetGeneratedDockerfile())); err != nil {
 				e.result(false, "write generated Dockerfile: "+err.Error(), "")
 				return false
 			}

@@ -191,7 +191,7 @@ func deferAppEnvBelowInstall(path string, envKeys []string, buildDir, installCmd
 	if len(moved) == 0 {
 		return nil, nil
 	}
-	if err := os.WriteFile(path, []byte(strings.Join(rewritten, "\n")), 0o644); err != nil {
+	if err := writeBuildFile(path, []byte(strings.Join(rewritten, "\n"))); err != nil {
 		return nil, err
 	}
 	return moved, nil
@@ -245,7 +245,7 @@ func stripAppEnvFromDockerfile(path string, envKeys []string) ([]string, error) 
 	if len(dropped) == 0 {
 		return nil, nil
 	}
-	if err := os.WriteFile(path, []byte(strings.Join(rewritten, "\n")), 0o644); err != nil {
+	if err := writeBuildFile(path, []byte(strings.Join(rewritten, "\n"))); err != nil {
 		return nil, err
 	}
 	return dropped, nil
