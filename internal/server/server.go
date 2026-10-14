@@ -104,6 +104,7 @@ var Capabilities = []string{
 	"host.addresses",
 	"git.commit",
 	"deploy.files-bind-check",
+	"backup.db-owner-check",
 }
 
 // AgentVersion is the version this agent reports over Hello.

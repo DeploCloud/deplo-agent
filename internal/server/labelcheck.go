@@ -8,8 +8,17 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
+
+// assertDatabaseOwned checks a backup/restore container's label; an older control plane sends no project_id.
+func assertDatabaseOwned(ctx context.Context, d *pb.DatabaseDescriptor) error {
+	if d.GetProjectId() == "" {
+		return nil
+	}
+	return assertOwned(ctx, d.GetContainer(), d.GetProjectId())
+}
 
 func assertOwned(ctx context.Context, container, projectID string) error {
 	if container == "" {
@@ -19,7 +28,7 @@ func assertOwned(ctx context.Context, container, projectID string) error {
 		return status.Error(codes.InvalidArgument, "project_id is required")
 	}
 	res, err := dockercli.Run(ctx, 5*time.Second,
-		"inspect", "-f", `{{index .Config.Labels "deplo.project"}}`, container)
+		"inspect", "--type", "container", "-f", `{{index .Config.Labels "deplo.project"}}`, container)
 	if err != nil {
 		return status.Errorf(codes.Unavailable, "inspect %s: %v", container, err)
 	}

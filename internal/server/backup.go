@@ -217,6 +217,10 @@ func (s *Service) backupDatabase(ctx context.Context, d *pb.DatabaseDescriptor, 
 		e.result(false, "database backup request missing descriptor / container", "", 0)
 		return
 	}
+	if err := assertDatabaseOwned(ctx, d); err != nil {
+		e.result(false, statusMessage(err), "", 0)
+		return
+	}
 	e.log("info", fmt.Sprintf("Dumping %s database %q from container %q", d.GetDbType(), d.GetDbName(), d.GetContainer()))
 
 	var produce func(w io.Writer) error
@@ -253,6 +257,10 @@ func (s *Service) backupDatabase(ctx context.Context, d *pb.DatabaseDescriptor, 
 func (s *Service) restoreDatabase(ctx context.Context, d *pb.DatabaseDescriptor, src *artifactSource, e *rsEmitter) {
 	if d == nil || d.GetContainer() == "" {
 		e.result(false, "database restore request missing descriptor / container")
+		return
+	}
+	if err := assertDatabaseOwned(ctx, d); err != nil {
+		e.result(false, statusMessage(err))
 		return
 	}
 	argv, env, err := restoreArgv(d)
