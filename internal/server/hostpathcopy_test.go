@@ -50,27 +50,45 @@ func (f *fakeHostPathImportStream) RecvMsg(any) error            { return nil }
 
 // TestValidateHostPath_refusesTheSystem pins the guardrail: the roots a migration never legitimately names are refused, while a real service directory UNDER one of them is allowed - the other platform keeps its data at /etc/<platform>/..., so a blanket subtree ban would refuse the actual use case.
 func TestValidateHostPath_refusesTheSystem(t *testing.T) {
+	svc := &Service{stackDir: "/data/stacks", dataBase: "/data", agentDir: "/etc/deplo-agent"}
 	for _, bad := range []string{
 		"", "relative/path", "/", "/etc", "/root", "/var/lib/docker",
 		"/var/lib/docker/volumes/someone-elses", "/proc/1", "/sys/kernel",
 		"/data/../etc",
 		"/data/stacks", "/data/stacks/api.env", "/data/stacks/files",
-		"/data/backups/app",
+		"/data/backups/app", "/data/tools/nixpacks",
+		"/etc/profile.d", "/etc/cron.hourly", "/etc/letsencrypt/live", "/etc/deplo-agent",
+		"/usr/local/bin", "/usr/lib/systemd/system", "/opt/deplo", "/opt/deplo/.env",
+		"/var/spool/cron", "/boot/grub", "/lib64/security", "/run/secrets",
 	} {
-		if _, err := validateHostPath(bad); err == nil {
+		if _, err := svc.validateHostPath(bad); err == nil {
 			t.Errorf("validateHostPath(%q) should have been refused", bad)
 		}
 	}
 	for _, good := range []string{
-		"/etc/dokploy/applications/app/files", "/data/myapp", "/srv/app/uploads",
+		"/etc/dokploy/applications/app/files", "/etc/dokploy/compose/shop/files/conf",
+		"/data/coolify/applications/abc", "/data/myapp", "/srv/app/uploads", "/opt/myapp/data",
 		"/data/stacks/files/sucabase", "/data/stacks/files/sucabase/volumes/db",
 	} {
-		got, err := validateHostPath(good)
+		got, err := svc.validateHostPath(good)
 		if err != nil {
 			t.Errorf("validateHostPath(%q) should be allowed: %v", good, err)
 		}
 		if got != filepath.Clean(good) {
 			t.Errorf("validateHostPath(%q) = %q", good, got)
+		}
+	}
+}
+
+// The files allowance follows the configured stack dir, not the default spelling of it.
+func TestValidateHostPath_filesAllowanceFollowsTheStackDir(t *testing.T) {
+	svc := &Service{stackDir: "/srv/deplo/stacks", dataBase: "/srv/deplo"}
+	if _, err := svc.validateHostPath("/srv/deplo/stacks/files/web/uploads"); err != nil {
+		t.Errorf("the configured files dir must be copyable: %v", err)
+	}
+	for _, bad := range []string{"/srv/deplo/stacks/web.yml", "/srv/deplo/backups/x", "/data/stacks/files/web"} {
+		if _, err := svc.validateHostPath(bad); err == nil {
+			t.Errorf("validateHostPath(%q) should have been refused", bad)
 		}
 	}
 }
@@ -240,8 +258,9 @@ func TestValidateHostPath_judgesTheResolvedPath(t *testing.T) {
 	if err := os.Symlink("/", filepath.Join(tmp, "poison")); err != nil {
 		t.Fatal(err)
 	}
+	svc := &Service{}
 
-	got, err := validateHostPath(filepath.Join(tmp, "link"))
+	got, err := svc.validateHostPath(filepath.Join(tmp, "link"))
 	if err != nil {
 		t.Fatalf("a symlink to a legitimate directory must be copyable: %v", err)
 	}
@@ -249,13 +268,13 @@ func TestValidateHostPath_judgesTheResolvedPath(t *testing.T) {
 		t.Errorf("validateHostPath returned %q, want the resolved %q", got, want)
 	}
 
-	if _, err := validateHostPath(filepath.Join(tmp, "poison")); err == nil {
+	if _, err := svc.validateHostPath(filepath.Join(tmp, "poison")); err == nil {
 		t.Error("a symlink to / passed the deny-list - that path wipes the host")
 	} else if status.Code(err) != codes.PermissionDenied {
 		t.Errorf("want PermissionDenied, got %v", err)
 	}
 
-	if _, err := validateHostPath(filepath.Join(tmp, "poison", "proc", "new")); err == nil {
+	if _, err := svc.validateHostPath(filepath.Join(tmp, "poison", "proc", "new")); err == nil {
 		t.Error("a not-yet-created path under a poisoned parent passed the deny-list")
 	}
 }

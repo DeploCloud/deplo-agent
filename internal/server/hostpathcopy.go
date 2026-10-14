@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"google.golang.org/grpc/codes"
@@ -24,16 +25,18 @@ var deniedHostRoots = []string{
 	"/tmp", "/usr", "/var", "/var/lib", "/var/lib/docker", "/var/run",
 }
 
+// Whole subtrees no service keeps its data in: the OS, the container runtime and Deplo itself.
 var deniedHostSubtrees = []string{
-	"/proc", "/sys", "/dev", "/var/lib/docker", "/var/lib/containerd",
-	"/root", "/home", "/etc/ssh", "/etc/ssl/private", "/etc/cron.d", "/etc/cron.daily",
-	"/etc/systemd", "/etc/sudoers.d", "/var/lib/deplo-agent",
-	"/data/stacks", "/data/backups",
+	"/proc", "/sys", "/dev", "/run", "/var/run", "/boot", "/bin", "/sbin",
+	"/lib", "/lib32", "/lib64", "/libx32", "/usr", "/etc", "/root", "/home",
+	"/var/lib/docker", "/var/lib/containerd", "/var/lib/deplo-agent", "/var/spool",
+	"/opt/deplo", "/data/stacks", "/data/backups",
 }
 
-var allowedHostSubtrees = []string{"/data/stacks/files"}
+// A platform a migration leaves keeps its apps' data under /etc/<platform>.
+var allowedHostSubtrees = []string{"/etc/dokploy"}
 
-func validateHostPath(p string) (string, error) {
+func (s *Service) validateHostPath(p string) (string, error) {
 	if strings.TrimSpace(p) == "" {
 		return "", status.Error(codes.InvalidArgument, "no path given")
 	}
@@ -44,7 +47,7 @@ func validateHostPath(p string) (string, error) {
 	if strings.Contains(clean, "..") {
 		return "", status.Errorf(codes.InvalidArgument, "host path %q climbs out of itself", p)
 	}
-	if err := refuseSystemPath(clean); err != nil {
+	if err := s.refuseSystemPath(clean); err != nil {
 		return "", err
 	}
 	real, err := resolveHostPath(clean)
@@ -52,15 +55,30 @@ func validateHostPath(p string) (string, error) {
 		return "", status.Errorf(codes.InvalidArgument, "host path %q cannot be resolved: %v", p, err)
 	}
 	if real != clean {
-		if err := refuseSystemPath(real); err != nil {
+		if err := s.refuseSystemPath(real); err != nil {
 			return "", err
 		}
 	}
 	return real, nil
 }
 
-func refuseSystemPath(clean string) error {
-	for _, root := range allowedHostSubtrees {
+// ownHostDirs are this agent's configured directories, wherever the install put them.
+func (s *Service) ownHostDirs() []string {
+	var out []string
+	for _, d := range []string{s.stackDir, s.managedStoreRoot(), filepath.Join(s.dataBase, "tools"), s.agentDir} {
+		if filepath.IsAbs(d) {
+			out = append(out, filepath.Clean(d))
+		}
+	}
+	return out
+}
+
+func (s *Service) refuseSystemPath(clean string) error {
+	allowed := allowedHostSubtrees
+	if filepath.IsAbs(s.stackDir) {
+		allowed = append([]string{filepath.Join(s.stackDir, "files")}, allowed...)
+	}
+	for _, root := range allowed {
 		if strings.HasPrefix(clean, root+"/") {
 			return nil
 		}
@@ -73,7 +91,7 @@ func refuseSystemPath(clean string) error {
 			)
 		}
 	}
-	for _, root := range deniedHostSubtrees {
+	for _, root := range slices.Concat(deniedHostSubtrees, s.ownHostDirs()) {
 		if clean == root || strings.HasPrefix(clean, root+"/") {
 			return status.Errorf(
 				codes.PermissionDenied,
@@ -108,7 +126,7 @@ func (s *Service) ExportHostPath(
 	req *pb.ExportHostPathRequest,
 	stream pb.Agent_ExportHostPathServer,
 ) error {
-	path, err := validateHostPath(req.GetPath())
+	path, err := s.validateHostPath(req.GetPath())
 	if err != nil {
 		return err
 	}
@@ -122,7 +140,7 @@ func (s *Service) ExportHostPath(
 			return status.Errorf(codes.InvalidArgument, "%s is a file, not a directory", path)
 		}
 		mount, entry = filepath.Dir(path), filepath.Base(path)
-		if err := refuseSystemPath(mount); err != nil {
+		if err := s.refuseSystemPath(mount); err != nil {
 			return err
 		}
 	}
@@ -163,7 +181,7 @@ func (s *Service) ImportHostPath(stream pb.Agent_ImportHostPathServer) error {
 	if hdr == nil {
 		return sendHostPathResult(stream, false, 0, "", "first message must carry a header (path)")
 	}
-	path, verr := validateHostPath(hdr.GetPath())
+	path, verr := s.validateHostPath(hdr.GetPath())
 	if verr != nil {
 		return sendHostPathResult(stream, false, 0, "", verr.Error())
 	}
@@ -171,7 +189,7 @@ func (s *Service) ImportHostPath(stream pb.Agent_ImportHostPathServer) error {
 	extractInto := path
 	if isFile {
 		dir := filepath.Dir(path)
-		if err := refuseSystemPath(dir); err != nil {
+		if err := s.refuseSystemPath(dir); err != nil {
 			return sendHostPathResult(stream, false, 0, "", err.Error())
 		}
 		if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
