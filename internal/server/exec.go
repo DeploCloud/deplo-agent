@@ -39,6 +39,9 @@ var shellCandidates = []shellCandidate{
 
 const shellTTL = 5 * time.Minute
 
+// execOutputTailBytes bounds what a container can make the agent buffer per stream on one Exec.
+const execOutputTailBytes = 1 << 20
+
 const shellCacheMax = 1024
 
 type shellCacheEntry struct {
@@ -85,7 +88,7 @@ func resolveShellPlan(ctx context.Context, name, image string) shellPlan {
 	plan := shellPlan{run: nil}
 	for _, c := range shellCandidates {
 		args := append([]string{"exec", name}, c.probe...)
-		res, err := dockercli.Run(ctx, 5*time.Second, args...)
+		res, err := dockercli.RunTail(ctx, 5*time.Second, execOutputTailBytes, args...)
 		if err != nil {
 			return shellPlan{run: nil}
 		}
@@ -166,7 +169,7 @@ func (s *Service) Exec(ctx context.Context, req *pb.ExecRequest) (*pb.ExecRespon
 	plan := resolveShellPlan(ctx, name, req.GetImage())
 	if !plan.raw() {
 		args := append(append([]string{"exec", name}, plan.run...), command)
-		res, err := dockercli.Run(ctx, 30*time.Second, args...)
+		res, err := dockercli.RunTail(ctx, 30*time.Second, execOutputTailBytes, args...)
 		if err != nil {
 			return nil, err
 		}
@@ -183,7 +186,7 @@ func (s *Service) Exec(ctx context.Context, req *pb.ExecRequest) (*pb.ExecRespon
 		return &pb.ExecResponse{Code: 0, RawMode: true}, nil
 	}
 	args := append([]string{"exec", name}, argv...)
-	res, err := dockercli.Run(ctx, 30*time.Second, args...)
+	res, err := dockercli.RunTail(ctx, 30*time.Second, execOutputTailBytes, args...)
 	if err != nil {
 		return nil, err
 	}

@@ -25,22 +25,31 @@ type Result struct {
 
 // Run runs `docker <args>` with a timeout, capturing output.
 func Run(ctx context.Context, timeout time.Duration, args ...string) (Result, error) {
-	return capture(ctx, timeout, nil, false, args...)
+	return capture(ctx, timeout, nil, false, &strings.Builder{}, &strings.Builder{}, args...)
+}
+
+// RunTail is Run keeping only the last max bytes of each stream, for output a container controls.
+func RunTail(ctx context.Context, timeout time.Duration, max int, args ...string) (Result, error) {
+	return capture(ctx, timeout, nil, false, NewTailBuf(max), NewTailBuf(max), args...)
 }
 
 // RunEnv is Run with extra "KEY=VALUE" host-process env layered on (e.g.
 func RunEnv(ctx context.Context, timeout time.Duration, extraEnv []string, args ...string) (Result, error) {
-	return capture(ctx, timeout, extraEnv, true, args...)
+	return capture(ctx, timeout, extraEnv, true, &strings.Builder{}, &strings.Builder{}, args...)
 }
 
-func capture(ctx context.Context, timeout time.Duration, extraEnv []string, redact bool, args ...string) (Result, error) {
+type stringWriter interface {
+	io.Writer
+	String() string
+}
+
+func capture(ctx context.Context, timeout time.Duration, extraEnv []string, redact bool, out, errb stringWriter, args ...string) (Result, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := Command(cctx, "docker", args...)
 	cmd.Env = scopedEnv(extraEnv)
-	var out, errb strings.Builder
-	cmd.Stdout = &out
-	cmd.Stderr = &errb
+	cmd.Stdout = out
+	cmd.Stderr = errb
 	err := cmd.Run()
 	res := Result{Stdout: out.String(), Stderr: errb.String()}
 	if err == nil {

@@ -8,7 +8,6 @@ import (
 	"os"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -29,55 +28,14 @@ const (
 	jobKillGrace = 3 * time.Second
 )
 
-type tailBuf struct {
-	buf  []byte
-	max  int
-	over bool
-}
-
-func newTailBuf(max int) *tailBuf { return &tailBuf{max: max} }
-
-func (t *tailBuf) Write(p []byte) (int, error) {
-	n := len(p)
-	if len(t.buf)+n <= t.max {
-		t.buf = append(t.buf, p...)
-		return n, nil
-	}
-	t.over = true
-	if n >= t.max {
-		t.buf = append(t.buf[:0], p[n-t.max:]...)
-		return n, nil
-	}
-	t.buf = append(t.buf, p...)
-	t.buf = append(t.buf[:0], t.buf[len(t.buf)-t.max:]...)
-	return n, nil
-}
-
-// String returns the retained tail, prefixed with a note when anything was dropped.
-func (t *tailBuf) String() string {
-	b := t.buf
-	for len(b) > 0 && !utf8.RuneStart(b[0]) {
-		b = b[1:]
-	}
-	text := strings.ToValidUTF8(string(b), "\uFFFD")
-	if !t.over {
-		return text
-	}
-	kept := fmt.Sprintf("%d KiB", t.max>>10)
-	if t.max < 1<<10 {
-		kept = fmt.Sprintf("%d bytes", t.max)
-	}
-	return fmt.Sprintf("[deplo] earlier output trimmed - showing the last %s\n%s", kept, text)
-}
-
 type job struct {
 	startedAt  time.Time
 	finishedAt time.Time
 	done       bool
 	exitCode   int32
 	timedOut   bool
-	stdout     *tailBuf
-	stderr     *tailBuf
+	stdout     *dockercli.TailBuf
+	stderr     *dockercli.TailBuf
 	cancel     context.CancelFunc
 }
 
@@ -132,8 +90,8 @@ func (s *Service) StartJob(ctx context.Context, req *pb.StartJobRequest) (*pb.St
 	jobCtx, cancel := context.WithCancel(context.Background())
 	j := &job{
 		startedAt: time.Now(),
-		stdout:    newTailBuf(cronOutputTailBytes),
-		stderr:    newTailBuf(cronOutputTailBytes),
+		stdout:    dockercli.NewTailBuf(cronOutputTailBytes),
+		stderr:    dockercli.NewTailBuf(cronOutputTailBytes),
 		cancel:    cancel,
 	}
 	if s.jobs == nil {
