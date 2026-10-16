@@ -129,7 +129,34 @@ func TestDependencyExportDetectsCorruptBlobs(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(blobDir, strings.TrimPrefix(layer.Digest, "sha256:"))
+	original, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := filepath.Join(t.TempDir(), "replacement")
+	if err := os.WriteFile(replacement, []byte("wrong"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(replacement, original.ModTime(), original.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatal(err)
+	}
+	if validateDependencyExport(root, "base") == nil {
+		t.Fatal("replacement with unchanged size and timestamp was accepted")
+	}
+	if err := os.WriteFile(path, []byte("layer"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateDependencyExport(root, "base"); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, []byte("wrong"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	changed := time.Now().Add(time.Second)
+	if err := os.Chtimes(path, changed, changed); err != nil {
 		t.Fatal(err)
 	}
 	if validateDependencyExport(root, "base") == nil {

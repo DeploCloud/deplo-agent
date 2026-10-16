@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
@@ -212,6 +213,8 @@ type dependencyDescriptor struct {
 	Size   int64  `json:"size"`
 }
 
+var verifiedDependencyBlobs sync.Map
+
 func validateDependencyExport(root, id string) error {
 	root = filepath.Join(root, id)
 	data, err := readDependencyJSON(filepath.Join(root, "index.json"))
@@ -267,6 +270,13 @@ func validateDependencyBlob(root string, descriptor dependencyDescriptor) (strin
 	if err != nil || !info.Mode().IsRegular() || info.Size() != descriptor.Size {
 		return "", fmt.Errorf("OCI blob missing or invalid: %s", descriptor.Digest)
 	}
+	// OCI blobs are immutable; rehash when their file identity or metadata changes.
+	if cached, ok := verifiedDependencyBlobs.Load(path); ok {
+		previous := cached.(os.FileInfo)
+		if os.SameFile(info, previous) && info.Size() == previous.Size() && info.ModTime() == previous.ModTime() {
+			return path, nil
+		}
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return "", err
@@ -279,5 +289,6 @@ func validateDependencyBlob(root string, descriptor dependencyDescriptor) (strin
 	if fmt.Sprintf("%x", hash.Sum(nil)) != digest {
 		return "", fmt.Errorf("OCI blob checksum mismatch: %s", descriptor.Digest)
 	}
+	verifiedDependencyBlobs.Store(path, info)
 	return path, nil
 }

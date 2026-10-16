@@ -125,3 +125,26 @@ func TestE2E_DeplopackPreparedImagesAndCache(t *testing.T) {
 	}
 	t.Log("cleanup preserves tooling; missing CLI repaired after successful preparation")
 }
+
+func TestE2E_DeplopackSeedRevalidation(t *testing.T) {
+	builder := os.Getenv("DEPLOPACK_E2E_BUILDER")
+	if builder == "" {
+		t.Skip("set DEPLOPACK_E2E_BUILDER on an isolated test host")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	s := New(t.TempDir(), t.TempDir(), "/", t.TempDir())
+	s.dependencies = dependencyState{ctx: ctx, cancel: cancel, binaries: map[string]bool{}, preparations: map[string]*dependencyPreparation{}, jobs: map[string]*dependencyJob{}}
+	defer s.StopDeplopackPreparation()
+	spec, err := readDependencySpec(ctx, builder)
+	if err != nil || spec == nil {
+		t.Fatalf("catalog: %v", err)
+	}
+	for _, phase := range []string{"initial verification", "unchanged resources"} {
+		start := time.Now()
+		if _, err := s.awaitDeplopackPreparation(ctx, spec, false, nil); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("%s: %s", phase, time.Since(start))
+	}
+}
