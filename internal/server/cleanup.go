@@ -49,6 +49,7 @@ type cleanupParams struct {
 	cutoff           time.Time
 	appImageCutoff   time.Time
 	filesCutoff      time.Time
+	preparedImages   map[string]bool
 }
 
 func (p cleanupParams) keepImagesFor(slug string) int {
@@ -68,6 +69,7 @@ func (s *Service) DockerCleanup(ctx context.Context, req *pb.DockerCleanupReques
 	defer cancel()
 
 	params := cleanupParams{
+		preparedImages:   s.preparedDependencyImages(),
 		dryRun:           req.GetDryRun(),
 		minAgeHours:      int(req.GetMinAgeHours()),
 		keepImagesPerApp: int(req.GetKeepImagesPerApp()),

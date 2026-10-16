@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -59,6 +61,7 @@ func dependencyPullImage(ctx context.Context, platform, image string) error {
 		log.Printf("DeploPack image already available: %s", image)
 		return nil
 	}
+	log.Printf("DeploPack image missing; restoring: %s", image)
 	code, err := dockercli.Stream(ctx, 20*time.Minute, func(line string) { log.Printf("DeploPack pull %s: %s", image, line) }, "", "pull", "--platform", platform, image)
 	if err != nil {
 		return err
@@ -100,27 +103,20 @@ func (s *Service) prepareDependencySeed(ctx context.Context, prep *dependencyPre
 			return nil
 		}
 	}
+	log.Printf("DeploPack seed missing or invalid; repairing: %s", prep.seed)
 	kit := "deplo-pack-seed-" + spec.fingerprint[:20]
 	dockercli.ForceRemove(kit)
-	if volume != nil {
-		if err := dependencyDocker(ctx, "volume", "rm", prep.seed); err != nil {
-			return err
-		}
-	}
 	if err := dependencyDocker(ctx, "volume", "create", "--label", "deplo.deplopack-seed="+spec.fingerprint, prep.seed); err != nil {
 		return err
 	}
 	work := prep.seed + "-work"
-	ready, workOwned := false, false
+	workOwned := false
 	defer func() {
 		dockercli.ForceRemove(kit)
 		cleanup, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if workOwned {
 			_ = dependencyDocker(cleanup, "volume", "rm", work)
-		}
-		if !ready {
-			_ = dependencyDocker(cleanup, "volume", "rm", prep.seed)
 		}
 	}()
 	existingWork, err := inspectDependencyVolume(ctx, work)
@@ -155,6 +151,15 @@ func (s *Service) prepareDependencySeed(ctx context.Context, prep *dependencyPre
 		if dep.Target != "buildkit-cache" {
 			continue
 		}
+		if volume != nil && validateDependencyExport(volume.Mountpoint, dep.ID) == nil {
+			log.Printf("DeploPack seed image reused: %s", dep.Image)
+			continue
+		}
+		if volume != nil {
+			if err := os.RemoveAll(filepath.Join(volume.Mountpoint, dep.ID)); err != nil {
+				return err
+			}
+		}
 		// The OCI exporter materializes the image blobs without copying BuildKit internals.
 		if err := os.WriteFile(filepath.Join(root, "Dockerfile"), []byte("FROM "+dep.Image+"\n"), 0600); err != nil {
 			return err
@@ -187,7 +192,6 @@ func (s *Service) prepareDependencySeed(ctx context.Context, prep *dependencyPre
 	if err := writeDependencyMarker(filepath.Join(volume.Mountpoint, ".deplopack-seed.json"), dependencySeedMarker{Catalog: spec.fingerprint, Platform: spec.Platform, Format: "oci-images-v1"}); err != nil {
 		return err
 	}
-	ready = true
 	return nil
 }
 
@@ -196,24 +200,84 @@ func validateDependencyExports(root string, spec *dependencySpec) error {
 		if dep.Target != "buildkit-cache" {
 			continue
 		}
-		index := filepath.Join(root, dep.ID, "index.json")
-		info, err := os.Lstat(index)
-		if err != nil || !info.Mode().IsRegular() || info.Size() > 64<<10 {
-			return fmt.Errorf("dependency cache index missing or invalid: %s", dep.ID)
-		}
-		data, err := os.ReadFile(index)
-		if err != nil {
+		if err := validateDependencyExport(root, dep.ID); err != nil {
 			return err
-		}
-		var document struct {
-			SchemaVersion int `json:"schemaVersion"`
-			Manifests     []struct {
-				Digest string `json:"digest"`
-			} `json:"manifests"`
-		}
-		if json.Unmarshal(data, &document) != nil || document.SchemaVersion != 2 || len(document.Manifests) != 1 || !strings.HasPrefix(document.Manifests[0].Digest, "sha256:") || !detectorDigest.MatchString(strings.TrimPrefix(document.Manifests[0].Digest, "sha256:")) {
-			return fmt.Errorf("invalid OCI cache index: %s", dep.ID)
 		}
 	}
 	return nil
+}
+
+type dependencyDescriptor struct {
+	Digest string `json:"digest"`
+	Size   int64  `json:"size"`
+}
+
+func validateDependencyExport(root, id string) error {
+	root = filepath.Join(root, id)
+	data, err := readDependencyJSON(filepath.Join(root, "index.json"))
+	if err != nil {
+		return err
+	}
+	var index struct {
+		SchemaVersion int                    `json:"schemaVersion"`
+		Manifests     []dependencyDescriptor `json:"manifests"`
+	}
+	if json.Unmarshal(data, &index) != nil || index.SchemaVersion != 2 || len(index.Manifests) != 1 {
+		return fmt.Errorf("invalid OCI cache index: %s", id)
+	}
+	manifestPath, err := validateDependencyBlob(root, index.Manifests[0])
+	if err != nil {
+		return err
+	}
+	data, err = readDependencyJSON(manifestPath)
+	if err != nil {
+		return err
+	}
+	var manifest struct {
+		SchemaVersion int                    `json:"schemaVersion"`
+		Config        dependencyDescriptor   `json:"config"`
+		Layers        []dependencyDescriptor `json:"layers"`
+	}
+	if json.Unmarshal(data, &manifest) != nil || manifest.SchemaVersion != 2 {
+		return fmt.Errorf("invalid OCI cache manifest: %s", id)
+	}
+	for _, descriptor := range append(manifest.Layers, manifest.Config) {
+		if _, err := validateDependencyBlob(root, descriptor); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func readDependencyJSON(path string) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > 64<<10 {
+		return nil, fmt.Errorf("dependency JSON missing or invalid: %s", path)
+	}
+	return os.ReadFile(path)
+}
+
+func validateDependencyBlob(root string, descriptor dependencyDescriptor) (string, error) {
+	digest, ok := strings.CutPrefix(descriptor.Digest, "sha256:")
+	if !ok || !detectorDigest.MatchString(digest) || descriptor.Size < 0 {
+		return "", fmt.Errorf("invalid OCI blob descriptor")
+	}
+	path := filepath.Join(root, "blobs", "sha256", digest)
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() != descriptor.Size {
+		return "", fmt.Errorf("OCI blob missing or invalid: %s", descriptor.Digest)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	if fmt.Sprintf("%x", hash.Sum(nil)) != digest {
+		return "", fmt.Errorf("OCI blob checksum mismatch: %s", descriptor.Digest)
+	}
+	return path, nil
 }

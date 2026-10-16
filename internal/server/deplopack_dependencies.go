@@ -33,6 +33,20 @@ type dependencyState struct {
 	jobs         map[string]*dependencyJob
 }
 
+func (s *Service) preparedDependencyImages() map[string]bool {
+	images := map[string]bool{"docker": true, "docker.io/library/docker": true}
+	s.dependencies.mu.Lock()
+	defer s.dependencies.mu.Unlock()
+	for _, prep := range s.dependencies.preparations {
+		for _, dep := range prep.spec.Dependencies {
+			if dep.Kind == "docker-image" && dep.Target == "host" {
+				images[repoOf(dep.Image)] = true
+			}
+		}
+	}
+	return images
+}
+
 // The service owns preparation; an RPC cancellation only stops its waiter.
 func (s *Service) StartDeplopackPreparation(parent context.Context) {
 	if runtime.GOOS != "linux" || (runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64") {
@@ -117,10 +131,12 @@ func (s *Service) prepareDeplopack(spec *dependencySpec, retry bool) *dependency
 	if previous != nil {
 		select {
 		case <-previous.done:
-			if previous.err == nil || !retry || previous.attempts >= 2 {
+			if previous.err != nil && (!retry || previous.attempts >= 2) {
 				return previous
 			}
-			attempts = previous.attempts + 1
+			if previous.err != nil {
+				attempts = previous.attempts + 1
+			}
 		default:
 			return previous
 		}
@@ -168,7 +184,8 @@ func (s *Service) dependencyResource(ctx context.Context, key string, retry bool
 	if job != nil {
 		select {
 		case <-job.done:
-			if retry && job.err != nil {
+			// Successful work must revalidate disk state after cleanup or external removal.
+			if job.err == nil || retry {
 				job = nil
 			}
 		default:

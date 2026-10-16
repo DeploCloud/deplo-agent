@@ -24,7 +24,7 @@ func (s *Service) buildDeplopack(ctx context.Context, req *pb.DeployRequest, bui
 		return fail(fmt.Errorf("select a repository detection"))
 	}
 	for key, value := range spec.GetDeplopackEnvironment() {
-		if !analysisEnvName.MatchString(key) || (key == "DEPLOPACK_PROVIDER" || key == "DEPLOPACK_CACHE_IMPORTS" || key == "DEPLOPACK_OCI_IMAGES") || strings.ContainsRune(value, 0) {
+		if !analysisEnvName.MatchString(key) || (key == "DEPLOPACK_PROVIDER" || key == "DEPLOPACK_CACHE_IMPORTS" || key == "DEPLOPACK_OCI_IMAGES" || key == "DEPLOPACK_ENV_NAMES") || strings.ContainsRune(value, 0) {
 			return fail(fmt.Errorf("invalid build configuration"))
 		}
 		if (key == "DEPLOPACK_CONFIG_FILE" || key == "DEPLOPACK_SHELL_SCRIPT") && !analysisRelative(value) {
@@ -152,6 +152,11 @@ func (s *Service) buildDeplopack(ctx context.Context, req *pb.DeployRequest, bui
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
+	allowedNames, err := json.Marshal(keys)
+	if err != nil {
+		return fail(err)
+	}
+	args = append(args, "-e", "DEPLOPACK_ENV_NAMES="+string(allowedNames))
 	for _, key := range keys {
 		args = append(args, "-e", key)
 	}
