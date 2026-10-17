@@ -66,7 +66,7 @@ func TestDockerCleanup_orphanVolumes_anonymousOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	held := strings.Repeat("cd", 32)
-	h.danglingVolumes = append(h.danglingVolumes, anon, held)
+	h.danglingVolumes = []string{"mongo-data", anon, held}
 	h.volumeMounts[anon] = anonMount
 	h.volumeMounts[held] = anonMount
 	h.inspectRows = append(h.inspectRows, "sha256:fff|"+held+",")
@@ -103,8 +103,9 @@ func TestDockerCleanup_orphanVolumes_namedOnlyWhenEmptyAndOurs(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(full, "PG_VERSION"), []byte("18"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	h.danglingVolumes = append(h.danglingVolumes,
-		"deplo-shop_web-cache", "deplo-shop_db-data", "coder-ab12-home")
+	h.danglingVolumes = []string{
+		"deplo-shop_web-cache", "deplo-shop_db-data", "coder-ab12-home",
+	}
 	h.volumeMounts["deplo-shop_web-cache"] = empty
 	h.volumeMounts["deplo-shop_db-data"] = full
 	h.volumeMounts["coder-ab12-home"] = foreign

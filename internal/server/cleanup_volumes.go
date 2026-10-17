@@ -12,9 +12,13 @@ import (
 func cleanOrphanBuildkitCache(ctx context.Context, p cleanupParams, idx *containerIndex) *pb.CleanupScopeResult {
 	return cleanDanglingVolumes(ctx, p, idx, pb.CleanupScope_CLEANUP_SCOPE_ORPHAN_BUILDKIT_CACHE,
 		func(_, mountpoint string) bool {
-			_, err := os.Stat(filepath.Join(mountpoint, buildkitSentinel))
-			return err == nil
+			return isBuildkitCache(mountpoint)
 		})
+}
+
+func isBuildkitCache(mountpoint string) bool {
+	info, err := os.Lstat(filepath.Join(mountpoint, buildkitSentinel))
+	return err == nil && info.Mode().IsRegular()
 }
 
 var anonymousVolume = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -22,7 +26,7 @@ var anonymousVolume = regexp.MustCompile(`^[0-9a-f]{64}$`)
 func cleanOrphanVolumes(ctx context.Context, p cleanupParams, idx *containerIndex) *pb.CleanupScopeResult {
 	return cleanDanglingVolumes(ctx, p, idx, pb.CleanupScope_CLEANUP_SCOPE_ORPHAN_VOLUMES,
 		func(name, mountpoint string) bool {
-			return anonymousVolume.MatchString(name) ||
+			return isBuildkitCache(mountpoint) || anonymousVolume.MatchString(name) ||
 				(strings.HasPrefix(name, deploVolumePrefix) && isEmptyDir(mountpoint))
 		})
 }
@@ -49,7 +53,7 @@ func cleanDanglingVolumes(ctx context.Context, p cleanupParams, idx *containerIn
 
 	var failures scopeFailures
 	for _, name := range uniqueLines(res.Stdout) {
-		if idx.volumes[name] {
+		if idx.volumes[name] || p.seenVolumes[name] {
 			continue
 		}
 		vres, err := dockerQuery(ctx, cleanupQueryTimeout,
@@ -81,6 +85,9 @@ func cleanDanglingVolumes(ctx context.Context, p cleanupParams, idx *containerIn
 				failures.add(name, dockerErr("volume rm", rres))
 				continue
 			}
+		}
+		if p.seenVolumes != nil {
+			p.seenVolumes[name] = true
 		}
 		r.ReclaimedBytes += size
 		addItem(r, name)

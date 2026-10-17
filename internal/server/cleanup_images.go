@@ -204,7 +204,7 @@ func cleanUnusedPulledImages(ctx context.Context, p cleanupParams, idx *containe
 
 	var failures scopeFailures
 	for _, im := range images {
-		if im.managed || idx.images[im.id] || isBuildTooling(im.repo) || len(im.tags) == 0 {
+		if idx.images[im.id] || !im.recoverableFromRegistry() {
 			continue
 		}
 		if t, ok := parseDockerTime(im.lastTag); !ok || t.IsZero() {
@@ -253,6 +253,27 @@ type imageInfo struct {
 	managed bool
 	lastTag string
 	tags    []string
+	digests []string
+}
+
+func (im imageInfo) recoverableFromRegistry() bool {
+	if im.managed || len(im.tags) == 0 {
+		return false
+	}
+	repositories := make(map[string]bool)
+	for _, digest := range im.digests {
+		repo, hash, ok := strings.Cut(digest, "@sha256:")
+		if ok && len(hash) == 64 {
+			repositories[repo] = true
+		}
+	}
+	for _, tag := range im.tags {
+		repo := repoOf(tag)
+		if !repositories[repo] || isBuildTooling(repo) {
+			return false
+		}
+	}
+	return true
 }
 
 func inspectImages(ctx context.Context, ids []string) ([]imageInfo, error) {
@@ -263,7 +284,7 @@ func inspectImages(ctx context.Context, ids []string) ([]imageInfo, error) {
 		`{{.Id}}|{{with (index .Config "Labels")}}{{index . "deplo.slug"}}|{{index . "deplo.service"}}{{else}}|{{end}}|{{.Created}}|{{.Size}}|` +
 			`{{if .RepoTags}}{{index .RepoTags 0}}{{else if .RepoDigests}}{{index .RepoDigests 0}}{{end}}|` +
 			`{{with (index .Config "Labels")}}{{index . "deplo.managed"}}{{end}}|` +
-			`{{with (index . "Metadata")}}{{with (index . "LastTagTime")}}{{json .}}{{end}}{{end}}|{{join .RepoTags ","}}`}, ids...)
+			`{{with (index . "Metadata")}}{{with (index . "LastTagTime")}}{{json .}}{{end}}{{end}}|{{join .RepoTags ","}}|{{join .RepoDigests ","}}`}, ids...)
 	res, err := dockerQuery(ctx, cleanupQueryTimeout, args...)
 	if err != nil {
 		return nil, err
@@ -310,6 +331,9 @@ func inspectImages(ctx context.Context, ids []string) ([]imageInfo, error) {
 					im.tags = append(im.tags, t)
 				}
 			}
+		}
+		if len(parts) > 9 {
+			im.digests = strings.FieldsFunc(parts[9], func(r rune) bool { return r == ',' })
 		}
 		out = append(out, im)
 	}

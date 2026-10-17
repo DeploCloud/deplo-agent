@@ -46,6 +46,7 @@ type cleanupParams struct {
 	buildTmpDir      string
 	liveSlugs        map[string]bool
 	liveNetworks     map[string]bool
+	seenVolumes      map[string]bool
 	cutoff           time.Time
 	appImageCutoff   time.Time
 	filesCutoff      time.Time
@@ -74,6 +75,7 @@ func (s *Service) DockerCleanup(ctx context.Context, req *pb.DockerCleanupReques
 		dataDir:          s.dataDir,
 		stackDir:         s.stackDir,
 		buildTmpDir:      s.buildTmpDir,
+		seenVolumes:      make(map[string]bool),
 	}
 	if live := req.GetLiveSlugs(); len(live) > 0 {
 		params.liveSlugs = make(map[string]bool, len(live))
@@ -172,6 +174,17 @@ func (s *Service) DockerCleanup(ctx context.Context, req *pb.DockerCleanupReques
 
 		resp.Results = append(resp.Results, r)
 		resp.ReclaimedBytes += r.GetReclaimedBytes()
+		if r.GetError() != "" || r.GetSkipped() {
+			resp.Ok = false
+			message := r.GetError()
+			if message == "" {
+				message = "scope was skipped"
+			}
+			if resp.Error != "" {
+				resp.Error += "; "
+			}
+			resp.Error += strings.ToLower(strings.TrimPrefix(scope.String(), "CLEANUP_SCOPE_")) + ": " + message
+		}
 	}
 
 	items := 0

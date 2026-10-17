@@ -366,7 +366,7 @@ func TestDockerCleanup_unusedPulledImages_allowList(t *testing.T) {
 	fresh := time.Now().Format(time.RFC3339Nano)
 	row := func(id, managed, lastTag, tags string) string {
 		return "sha256:" + id + "|<no value>|<no value>|" + old + "|300000000|" +
-			strings.Split(tags, ",")[0] + "|" + managed + "|\"" + lastTag + "\"|" + tags
+			strings.Split(tags, ",")[0] + "|" + managed + "|\"" + lastTag + "\"|" + tags + "|" + repoOf(strings.Split(tags, ",")[0]) + "@sha256:" + strings.Repeat("a", 64)
 	}
 	h.taggedImages = []string{"p1", "p2", "p3", "p4", "p5", "p6"}
 	h.imageRows["p1"] = row("p1", "", old, "kanboard/kanboard:latest")

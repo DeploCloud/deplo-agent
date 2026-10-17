@@ -171,8 +171,8 @@ func TestDockerCleanup_skipsIndexScopesWhenIndexFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DockerCleanup: %v", err)
 	}
-	if !resp.GetOk() {
-		t.Error("ok = false; a skipped scope is not a failed sweep")
+	if resp.GetOk() {
+		t.Error("a skipped scope must fail the sweep without stopping other scopes")
 	}
 	for _, scope := range []pb.CleanupScope{
 		pb.CleanupScope_CLEANUP_SCOPE_ORPHAN_BUILDKIT_CACHE,
@@ -269,8 +269,8 @@ func TestDockerCleanup_removalFailureIsNonFatal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DockerCleanup: %v", err)
 	}
-	if !resp.GetOk() {
-		t.Error("ok = false; a failed rmi is a per-scope error, not a failed sweep")
+	if resp.GetOk() {
+		t.Error("failed removals must fail the sweep without stopping other removals")
 	}
 	r := resultFor(t, resp, pb.CleanupScope_CLEANUP_SCOPE_UNUSED_APP_IMAGES)
 	if r.GetError() == "" {

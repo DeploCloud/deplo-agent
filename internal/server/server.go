@@ -82,6 +82,7 @@ var Capabilities = []string{
 	"cleanup.leftover-networks",
 	"cleanup.orphan-volumes",
 	"cleanup.pulled-images",
+	"cleanup.safe-prune",
 	"deploy.network",
 	"cert-renewal",
 	"hostops",
