@@ -21,6 +21,12 @@ func TestE2E_RepositoryCompose(t *testing.T) {
 	if os.Getenv("DEPLO_COMPOSE_GIT_E2E") != "1" {
 		t.Skip("enable only with an isolated Docker test app")
 	}
+	for _, composePath := range []string{"compose.yml", "deploy/compose.yml"} {
+		t.Run(composePath, func(t *testing.T) { testRepositoryCompose(t, composePath) })
+	}
+}
+
+func testRepositoryCompose(t *testing.T, composePath string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	workspace := t.TempDir()
@@ -32,30 +38,36 @@ func TestE2E_RepositoryCompose(t *testing.T) {
 	slug := "compose-git-test-" + suffix
 	image := "deplo-compose-git-test:" + suffix
 	network := "deplo-team-composegit-" + suffix
+	base := filepath.Dir(composePath)
+	contextPath, bindPath, dockerfile, build := ".", "./payload", "Dockerfile", "build: ."
+	if base != "." {
+		contextPath, bindPath, dockerfile = "..", "../payload", "dockerfile"
+		build = "build: {context: .., dockerfile: dockerfile}"
+	}
 	compose := fmt.Sprintf(`services:
   app:
     image: %s
     labels: {deplo.slug: %s}
-    build: {context: .., dockerfile: dockerfile}
+    %s
     command: [sleep, "300"]
     environment:
       CONFIG_VALUE: ${CONFIG_VALUE}
     env_file: service.env
-    volumes: ["../payload:/bound:ro"]
+    volumes: ["%s:/bound:ro"]
   sidecar:
     image: busybox:1.37
     labels: {deplo.slug: %s}
     command: [sleep, "300"]
 networks:
   default: {external: true, name: %s}
-`, image, slug, slug, network)
+`, image, slug, build, bindPath, slug, network)
 	for path, contents := range map[string]string{
-		"dockerfile":         "FROM busybox:1.37\nCOPY payload /payload\n",
-		".dockerignore":      ".git\n",
-		"payload":            "first",
-		"deploy/compose.yml": compose,
-		"deploy/.env":        "CONFIG_VALUE=repository\n",
-		"deploy/service.env": "FILE_VALUE=from-repository-file\n",
+		dockerfile:                         "FROM busybox:1.37\nCOPY payload /payload\n",
+		".dockerignore":                    ".git\n",
+		"payload":                          "first",
+		composePath:                        compose,
+		filepath.Join(base, ".env"):        "CONFIG_VALUE=repository\n",
+		filepath.Join(base, "service.env"): "FILE_VALUE=from-repository-file\n",
 	} {
 		if err := os.WriteFile(filepath.Join(source, path), []byte(contents), 0644); err != nil {
 			t.Fatal(err)
@@ -110,14 +122,18 @@ networks:
 		_, _ = dockercli.Run(context.Background(), time.Minute, "network", "rm", network)
 	})
 	sourceRef := &pb.GitSource{Url: "git://" + address + "/repo", Commit: firstSHA}
-	read, err := s.ReadRepoCompose(ctx, &pb.ReadRepoComposeRequest{Source: sourceRef, ComposePath: "deploy/compose.yml"})
+	read, err := s.ReadRepoCompose(ctx, &pb.ReadRepoComposeRequest{Source: sourceRef, ComposePath: composePath})
 	if err != nil || read.GetCommitSha() != firstSHA || read.GetComposeYaml() != compose {
 		t.Fatalf("read: %v %+v", err, read)
 	}
 	deploy := func(sha, expected string) {
 		t.Helper()
+		read, err := s.ReadRepoCompose(ctx, &pb.ReadRepoComposeRequest{Source: &pb.GitSource{Url: sourceRef.Url, Commit: sha}, ComposePath: composePath})
+		if err != nil {
+			t.Fatal(err)
+		}
 		request := &pb.DeployRequest{DeployId: "dpl_test_" + suffix, Slug: slug, ProjectId: "prj_test_" + suffix, SourceKind: pb.SourceKind_SOURCE_KIND_COMPOSE,
-			Git: &pb.GitSource{Url: sourceRef.Url, Commit: sha}, ComposePath: "deploy/compose.yml", ComposeYaml: compose, Network: network,
+			Git: &pb.GitSource{Url: sourceRef.Url, Commit: sha}, ComposePath: composePath, ComposeYaml: read.GetComposeYaml(), Network: network,
 			Env: map[string]string{"CONFIG_VALUE": "app-value"}, ReadyTimeoutMs: 30000}
 		var result *pb.DeployResult
 		var logs []string
@@ -150,7 +166,22 @@ networks:
 	if err := os.WriteFile(filepath.Join(source, "payload"), []byte("second"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	git("add", "payload")
+	if err := os.Mkdir(filepath.Join(source, "next"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	for file, contents := range map[string]string{
+		"next/Dockerfile.next": "FROM busybox:1.37\nCOPY payload /payload\n",
+		"next/payload":         "second",
+	} {
+		if err := os.WriteFile(filepath.Join(source, file), []byte(contents), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	compose = strings.Replace(compose, build, "build: {context: "+filepath.Join(contextPath, "next")+", dockerfile: Dockerfile.next}", 1)
+	if err := os.WriteFile(filepath.Join(source, composePath), []byte(compose), 0644); err != nil {
+		t.Fatal(err)
+	}
+	git("add", ".")
 	git("commit", "-qm", "second")
 	deploy(git("rev-parse", "HEAD"), "second")
 	entries, err := os.ReadDir(filepath.Join(s.filesRoot(slug), "repositories"))
