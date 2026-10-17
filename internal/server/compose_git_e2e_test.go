@@ -177,6 +177,9 @@ networks:
 			t.Fatal(err)
 		}
 	}
+	if err := os.Remove(filepath.Join(source, dockerfile)); err != nil {
+		t.Fatal(err)
+	}
 	compose = strings.Replace(compose, build, "build: {context: "+filepath.Join(contextPath, "next")+", dockerfile: Dockerfile.next}", 1)
 	if err := os.WriteFile(filepath.Join(source, composePath), []byte(compose), 0644); err != nil {
 		t.Fatal(err)
