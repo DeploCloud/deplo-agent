@@ -20,6 +20,7 @@ enum ContractVersion {
 service Agent {
   // Analyze a temporary Git checkout without building or deploying.
   rpc AnalyzeRepo(AnalyzeRepoRequest) returns (AnalyzeRepoResponse);
+  rpc ReadRepoCompose(ReadRepoComposeRequest) returns (ReadRepoComposeResponse);
 
   // Health + identity handshake. The control plane calls this as a mandatory
   // pre-flight before every deploy (PLAN P5): if the agent does not answer, the
@@ -631,6 +632,8 @@ message DeployRequest {
   // Environment (or its team when it has none). The agent creates it if missing and
   // connects Traefik to it. Empty is REJECTED - there is no shared default any more.
   string network = 22;
+  // A repository Compose path, relative to git.subdir. Used with SOURCE_KIND_COMPOSE.
+  string compose_path = 23;
 }
 
 // One event in the deploy stream. Exactly one of the oneof arms is set.
@@ -2012,6 +2015,16 @@ message UpdateControlPlaneResponse {
 message AnalyzeRepoRequest {
   GitSource source = 1;
   map<string, string> environment = 2;
+}
+
+message ReadRepoComposeRequest {
+  GitSource source = 1;
+  string compose_path = 2;
+}
+
+message ReadRepoComposeResponse {
+  string commit_sha = 1;
+  string compose_yaml = 2;
 }
 
 message AnalyzeRepoResponse {

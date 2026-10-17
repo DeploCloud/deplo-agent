@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -92,6 +93,8 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 
 	imageRef := req.GetImageRef()
 	commitSha := ""
+	stackYaml := req.GetComposeYaml()
+	var repository *composeRepository
 
 	e.phase(pb.DeployPhase_DEPLOY_PHASE_PREPARING)
 	switch req.GetSourceKind() {
@@ -148,6 +151,14 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 			e.result(false, "write mount files: "+err.Error(), "")
 			return
 		}
+		if req.GetComposePath() != "" {
+			repository, commitSha, err = s.checkoutRepositoryCompose(ctx, req, e)
+			if err != nil {
+				e.result(false, "repository Compose: "+err.Error(), "")
+				return
+			}
+			defer s.cleanComposeRepositories(context.WithoutCancel(ctx), slug)
+		}
 	default:
 		e.result(false, "unknown source kind", "")
 		return
@@ -162,19 +173,10 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 	isCompose := req.GetSourceKind() == pb.SourceKind_SOURCE_KIND_COMPOSE
 
 	e.phase(pb.DeployPhase_DEPLOY_PHASE_STARTING)
-	if req.GetComposeYaml() == "" {
+	if stackYaml == "" {
 		e.result(false, "deploy request missing rendered compose", "")
 		return
 	}
-	if err := os.WriteFile(stackFile, []byte(req.GetComposeYaml()), 0o600); err != nil {
-		e.result(false, "write stack file: "+err.Error(), "")
-		return
-	}
-	if err := os.Chmod(stackFile, 0o600); err != nil {
-		e.result(false, "secure stack file: "+err.Error(), "")
-		return
-	}
-
 	envFile := ""
 	projectDir := ""
 	if isCompose {
@@ -183,6 +185,21 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 			e.result(false, "write env file: "+err.Error(), "")
 			return
 		}
+	}
+	if repository != nil {
+		stackYaml, err = s.resolveRepositoryCompose(ctx, slug, stackYaml, envFile, *repository)
+		if err != nil {
+			e.result(false, "repository Compose: "+err.Error(), "")
+			return
+		}
+	}
+	if err := os.WriteFile(stackFile, []byte(stackYaml), 0o600); err != nil {
+		e.result(false, "write stack file: "+err.Error(), "")
+		return
+	}
+	if err := os.Chmod(stackFile, 0o600); err != nil {
+		e.result(false, "secure stack file: "+err.Error(), "")
+		return
 	}
 	if isCompose {
 		images, ok := s.prepareStackImages(ctx, req, composeBaseArgs(name, stackFile, envFile, projectDir), e)
@@ -210,6 +227,20 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 	if code != 0 {
 		e.result(false, fmt.Sprintf("docker compose up failed (exit %d)", code), "")
 		return
+	}
+	if repository != nil {
+		data, marshalErr := json.Marshal(repository)
+		if marshalErr != nil {
+			e.result(false, marshalErr.Error(), "")
+			return
+		}
+		if err := os.WriteFile(s.repositoryStatePath(slug), data, 0600); err != nil {
+			e.result(false, "save repository checkout: "+err.Error(), "")
+			return
+		}
+	} else {
+		_ = os.Remove(s.repositoryStatePath(slug))
+		s.cleanComposeRepositories(ctx, slug)
 	}
 
 	e.phase(pb.DeployPhase_DEPLOY_PHASE_WAITING)

@@ -22,10 +22,14 @@ func (s *Service) materializeGit(
 	slug string,
 	e *emitter,
 ) (buildDir string, commitSha string, cleanup func(), err error) {
+	return s.materializeGitIn(ctx, g, slug, e, s.buildTmpDir)
+}
+
+func (s *Service) materializeGitIn(ctx context.Context, g *pb.GitSource, slug string, e *emitter, parent string) (buildDir string, commitSha string, cleanup func(), err error) {
 	if g == nil || strings.TrimSpace(g.GetUrl()) == "" {
 		return "", "", func() {}, fmt.Errorf("git source missing url")
 	}
-	dir, mkErr := os.MkdirTemp(s.buildTmpDir, "deplo-git-"+slug+"-")
+	dir, mkErr := os.MkdirTemp(parent, "deplo-git-"+slug+"-")
 	if mkErr != nil {
 		return "", "", func() {}, mkErr
 	}
@@ -69,9 +73,12 @@ func (s *Service) materializeGit(
 			cleanup()
 			return "", "", func() {}, fmt.Errorf("git subdir %q escapes the clone", sub)
 		}
-		if real, rErr := safepath.Inside(dir, joined); rErr == nil {
-			joined = real
+		resolved, resolveErr := repositoryPath(dir, dir, sub)
+		if resolveErr != nil {
+			cleanup()
+			return "", "", func() {}, resolveErr
 		}
+		joined = resolved
 		info, statErr := os.Stat(joined)
 		if statErr != nil || !info.IsDir() {
 			cleanup()
