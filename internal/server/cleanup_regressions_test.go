@@ -33,7 +33,7 @@ func TestDockerCleanupRegression_preservesLocalWorkspaceImage(t *testing.T) {
 	h := newFixture(t)
 	old := time.Now().Add(-72 * time.Hour).Format(time.RFC3339Nano)
 	h.taggedImages = []string{"workspace"}
-	h.imageRows["workspace"] = "sha256:workspace|||" + old + "|7000000000|neoncoder-acp-workspace:local||" + old + "|neoncoder-acp-workspace:local|"
+	h.imageRows["workspace"] = "sha256:workspace|||" + old + "|7000000000|neoncoder-acp-workspace:local||" + old + "|neoncoder-acp-workspace:local|neoncoder-acp-workspace@sha256:" + strings.Repeat("a", 64)
 	h.install(t)
 	_, err := newService(t).DockerCleanup(context.Background(), &pb.DockerCleanupRequest{
 		Scopes:      []pb.CleanupScope{pb.CleanupScope_CLEANUP_SCOPE_UNUSED_PULLED_IMAGES},
@@ -174,9 +174,37 @@ func TestDockerCleanupRegression_pulledImageRequiresAllRepositories(t *testing.T
 		{"build tooling", []string{"moby/buildkit:latest"}, []string{"moby/buildkit@sha256:" + strings.Repeat("a", 64)}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			h := newFixture(t)
+			h.registryRefs[digest] = true
+			h.registryRefs["nginx:alpine"] = true
+			h.install(t)
 			im := imageInfo{tags: tc.tags, digests: tc.digests}
-			if im.recoverableFromRegistry() != tc.want {
+			if im.recoverableFromRegistry(context.Background()) != tc.want {
 				t.Fatalf("unexpected eligibility for %s", tc.name)
+			}
+		})
+	}
+}
+
+func TestDockerCleanupRegression_registryMustHaveTagAndDigest(t *testing.T) {
+	digest := "nginx@sha256:" + strings.Repeat("a", 64)
+	for _, tc := range []struct {
+		name        string
+		tag, digest bool
+	}{
+		{"registry unreachable", false, false},
+		{"local tag on a pulled image", false, true},
+		{"local rebuild of a published tag", true, false},
+		{"downloadable image", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newFixture(t)
+			h.registryRefs["nginx:alpine"] = tc.tag
+			h.registryRefs[digest] = tc.digest
+			h.install(t)
+			im := imageInfo{tags: []string{"nginx:alpine"}, digests: []string{digest}}
+			if got := im.recoverableFromRegistry(context.Background()); got != (tc.tag && tc.digest) {
+				t.Fatalf("recoverable=%v with tag=%v digest=%v", got, tc.tag, tc.digest)
 			}
 		})
 	}

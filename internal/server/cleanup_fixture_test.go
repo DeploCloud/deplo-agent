@@ -23,6 +23,7 @@ type hostFixture struct {
 	volumeMounts    map[string]string
 	volumeCreated   string
 	taggedImages    []string
+	registryRefs    map[string]bool
 	networks        []string
 	networkStates   map[string]string
 
@@ -38,6 +39,11 @@ func okResult(stdout string) dockercli.Result { return dockercli.Result{Stdout: 
 func (h *hostFixture) query(args []string) (dockercli.Result, error) {
 	key := strings.Join(args, " ")
 	switch {
+	case strings.HasPrefix(key, "manifest inspect "):
+		if h.registryRefs[args[2]] {
+			return okResult("{}"), nil
+		}
+		return dockercli.Result{Code: 1, Stderr: "manifest unavailable"}, nil
 	case key == "ps -aq":
 		if h.psFails {
 			return dockercli.Result{Code: 1, Stderr: "Cannot connect to the Docker daemon"}, nil
@@ -162,7 +168,8 @@ func newFixture(t *testing.T) *hostFixture {
 	}
 
 	return &hostFixture{
-		containers: []string{"c1", "c2"},
+		registryRefs: make(map[string]bool),
+		containers:   []string{"c1", "c2"},
 		inspectRows: []string{
 			"sha256:aaa|app-data,",
 			"sha256:bbb|",

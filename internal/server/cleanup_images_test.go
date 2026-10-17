@@ -368,6 +368,10 @@ func TestDockerCleanup_unusedPulledImages_allowList(t *testing.T) {
 		return "sha256:" + id + "|<no value>|<no value>|" + old + "|300000000|" +
 			strings.Split(tags, ",")[0] + "|" + managed + "|\"" + lastTag + "\"|" + tags + "|" + repoOf(strings.Split(tags, ",")[0]) + "@sha256:" + strings.Repeat("a", 64)
 	}
+	for _, tag := range []string{"kanboard/kanboard:latest", "louislam/uptime-kuma:2", "louislam/uptime-kuma:2.1.0"} {
+		h.registryRefs[tag] = true
+		h.registryRefs[repoOf(tag)+"@sha256:"+strings.Repeat("a", 64)] = true
+	}
 	h.taggedImages = []string{"p1", "p2", "p3", "p4", "p5", "p6"}
 	h.imageRows["p1"] = row("p1", "", old, "kanboard/kanboard:latest")
 	h.imageRows["p2"] = row("p2", "", old, "louislam/uptime-kuma:2,louislam/uptime-kuma:2.1.0")

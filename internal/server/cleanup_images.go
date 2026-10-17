@@ -204,13 +204,16 @@ func cleanUnusedPulledImages(ctx context.Context, p cleanupParams, idx *containe
 
 	var failures scopeFailures
 	for _, im := range images {
-		if idx.images[im.id] || !im.recoverableFromRegistry() {
+		if idx.images[im.id] || im.managed {
 			continue
 		}
 		if t, ok := parseDockerTime(im.lastTag); !ok || t.IsZero() {
 			continue
 		}
 		if !olderThan(im.lastTag, p.cutoff) || !olderThan(im.lastTag, p.appImageCutoff) {
+			continue
+		}
+		if !im.recoverableFromRegistry(ctx) {
 			continue
 		}
 		if !p.dryRun {
@@ -256,20 +259,30 @@ type imageInfo struct {
 	digests []string
 }
 
-func (im imageInfo) recoverableFromRegistry() bool {
+func (im imageInfo) recoverableFromRegistry(ctx context.Context) bool {
 	if im.managed || len(im.tags) == 0 {
 		return false
 	}
-	repositories := make(map[string]bool)
+	repositories := make(map[string]string)
+	refs := make(map[string]bool)
 	for _, digest := range im.digests {
 		repo, hash, ok := strings.Cut(digest, "@sha256:")
 		if ok && len(hash) == 64 {
-			repositories[repo] = true
+			repositories[repo] = digest
 		}
 	}
 	for _, tag := range im.tags {
 		repo := repoOf(tag)
-		if !repositories[repo] || isBuildTooling(repo) {
+		if repositories[repo] == "" || isBuildTooling(repo) {
+			return false
+		}
+		refs[tag] = true
+		refs[repositories[repo]] = true
+	}
+	// Docker's containerd store also assigns RepoDigests to local-only builds.
+	for ref := range refs {
+		res, err := dockerQuery(ctx, cleanupQueryTimeout, "manifest", "inspect", ref)
+		if err != nil || res.Code != 0 {
 			return false
 		}
 	}
