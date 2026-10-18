@@ -26,10 +26,13 @@ import (
 
 // Capabilities this agent advertises in Hello.
 var Capabilities = []string{
+	"repo.analyze.deplopack",
+	"deploy.deplopack",
 	"deploy.dockerfile",
 	"deploy.image",
 	"deploy.compose.single",
 	"deploy.compose.multi",
+	"deploy.compose.git",
 	"deploy.static",
 	"deploy.nixpacks",
 	"deploy.buildpacks",
@@ -134,37 +137,60 @@ type Service struct {
 	pendingMu  sync.Mutex
 	pendingKey ed25519.PrivateKey
 
+	analysisSlots   chan struct{}
+	detectorMu      chan struct{}
+	detectorChecked time.Time
+	detectorPath    string
+	detectorVersion string
+	detectorWarning string
+	dependencies    dependencyState
+
 	stackLocksMu sync.Mutex
 	stackLocks   map[string]*stackLock
 }
 
 type stackLock struct {
-	sync.Mutex
-	refs int
+	token chan struct{}
+	refs  int
 }
 
 // lockStack serializes operations on one stack; a slug's entry lives only while someone holds or waits on it.
 func (s *Service) lockStack(slug string) func() {
+	unlock, _ := s.lockStackContext(context.Background(), slug)
+	return unlock
+}
+
+func (s *Service) lockStackContext(ctx context.Context, slug string) (func(), error) {
 	s.stackLocksMu.Lock()
 	if s.stackLocks == nil {
 		s.stackLocks = map[string]*stackLock{}
 	}
 	l := s.stackLocks[slug]
 	if l == nil {
-		l = &stackLock{}
+		l = &stackLock{token: make(chan struct{}, 1)}
 		s.stackLocks[slug] = l
 	}
 	l.refs++
 	s.stackLocksMu.Unlock()
 
-	l.Lock()
-	return func() {
-		l.Unlock()
+	releaseRef := func() {
 		s.stackLocksMu.Lock()
 		if l.refs--; l.refs == 0 {
 			delete(s.stackLocks, slug)
 		}
 		s.stackLocksMu.Unlock()
+	}
+	select {
+	case l.token <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			<-l.token
+			releaseRef()
+			return nil, err
+		}
+		return func() { <-l.token; releaseRef() }, nil
+	case <-ctx.Done():
+		releaseRef()
+		return nil, ctx.Err()
 	}
 }
 
@@ -175,12 +201,14 @@ func New(stackDir, buildTmpDir, dataDir, dataBase string) *Service {
 	}
 	sweepTempSecrets()
 	return &Service{
-		stackDir:    stackDir,
-		buildTmpDir: buildTmpDir,
-		dataDir:     dataDir,
-		dataBase:    dataBase,
-		deploys:     map[string]*inflight{},
-		jobs:        map[string]*job{},
+		analysisSlots: make(chan struct{}, 2),
+		detectorMu:    make(chan struct{}, 1),
+		stackDir:      stackDir,
+		buildTmpDir:   buildTmpDir,
+		dataDir:       dataDir,
+		dataBase:      dataBase,
+		deploys:       map[string]*inflight{},
+		jobs:          map[string]*job{},
 	}
 }
 
@@ -434,6 +462,7 @@ func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.Stack
 		}
 		reclaimed := s.reclaimVolumes(ctx, ref.GetReclaimVolumes())
 		if r2.Code == 0 {
+			s.removeStackFiles(slug)
 			removePreviewNetworks(ctx, previewNets)
 			return &pb.StackResult{Ok: true, Error: reclaimed}, nil
 		}
@@ -540,10 +569,6 @@ func (s *Service) Reroute(ctx context.Context, req *pb.RerouteRequest) (*pb.Stac
 	if err := os.Chmod(stackFile, 0o600); err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
-	if err := os.WriteFile(stackFile, []byte(req.GetComposeYaml()), 0o600); err != nil {
-		return &pb.StackResult{Ok: false, Error: "write stack file: " + err.Error()}, nil
-	}
-
 	if len(req.GetMounts()) > 0 {
 		discard := &emitter{send: func(*pb.DeployEvent) error { return nil }}
 		if err := s.writeMountFiles(slug, req.GetMounts(), discard); err != nil {
@@ -553,11 +578,26 @@ func (s *Service) Reroute(ctx context.Context, req *pb.RerouteRequest) (*pb.Stac
 
 	envFile := ""
 	projectDir := ""
-	if len(req.GetEnv()) > 0 {
+	repository, repoErr := s.loadComposeRepository(slug)
+	if repoErr != nil {
+		return nil, repoErr
+	}
+	if len(req.GetEnv()) > 0 || repository != nil {
 		var err error
 		if envFile, projectDir, err = s.writeComposeEnv(slug, req.GetEnv()); err != nil {
 			return &pb.StackResult{Ok: false, Error: "write env file: " + err.Error()}, nil
 		}
+	}
+	contents := req.GetComposeYaml()
+	if repository != nil {
+		var err error
+		contents, err = s.resolveRepositoryCompose(ctx, slug, contents, envFile, *repository)
+		if err != nil {
+			return &pb.StackResult{Ok: false, Error: err.Error()}, nil
+		}
+	}
+	if err := os.WriteFile(stackFile, []byte(contents), 0o600); err != nil {
+		return &pb.StackResult{Ok: false, Error: "write stack file: " + err.Error()}, nil
 	}
 	if err := admitStackImages(ctx, composeBaseArgs(name, stackFile, envFile, projectDir)); err != nil {
 		return &pb.StackResult{Ok: false, Error: err.Error()}, nil

@@ -372,13 +372,14 @@ func TestDockerCleanup_unusedPulledImages_allowList(t *testing.T) {
 		h.registryRefs[tag] = true
 		h.registryRefs[repoOf(tag)+"@sha256:"+strings.Repeat("a", 64)] = true
 	}
-	h.taggedImages = []string{"p1", "p2", "p3", "p4", "p5", "p6"}
+	h.taggedImages = []string{"p1", "p2", "p3", "p4", "p5", "p6", "p7"}
 	h.imageRows["p1"] = row("p1", "", old, "kanboard/kanboard:latest")
 	h.imageRows["p2"] = row("p2", "", old, "louislam/uptime-kuma:2,louislam/uptime-kuma:2.1.0")
 	h.imageRows["p3"] = row("p3", "true", old, "deplo/web:dpl_1")
 	h.imageRows["p4"] = row("p4", "", fresh, "nginx:alpine")
 	h.imageRows["p5"] = row("p5", "", old, "heroku/builder:24")
 	h.imageRows["p6"] = row("aaa", "", old, "postgres:16-alpine")
+	h.imageRows["p7"] = row("p7", "", old, "example/alias:latest,docker:29-cli")
 	h.install(t)
 
 	resp, err := newService(t).DockerCleanup(context.Background(), &pb.DockerCleanupRequest{

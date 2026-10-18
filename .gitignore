@@ -11,3 +11,6 @@ coverage.txt
 
 # Formatting tooling
 /node_modules/
+
+# Local implementation self-checks and tooling
+/tmp/

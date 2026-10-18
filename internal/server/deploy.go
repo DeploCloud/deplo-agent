@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -103,6 +104,8 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 
 	imageRef := req.GetImageRef()
 	commitSha := ""
+	stackYaml := req.GetComposeYaml()
+	var repository *composeRepository
 
 	e.phase(pb.DeployPhase_DEPLOY_PHASE_PREPARING)
 	switch req.GetSourceKind() {
@@ -152,6 +155,14 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 			e.result(false, "write mount files: "+err.Error(), "")
 			return
 		}
+		if req.GetComposePath() != "" {
+			repository, commitSha, err = s.checkoutRepositoryCompose(ctx, req, e)
+			if err != nil {
+				e.result(false, "repository Compose: "+err.Error(), "")
+				return
+			}
+			defer s.cleanComposeRepositories(context.WithoutCancel(ctx), slug)
+		}
 	default:
 		e.result(false, "unknown source kind", "")
 		return
@@ -166,7 +177,7 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 	isCompose := req.GetSourceKind() == pb.SourceKind_SOURCE_KIND_COMPOSE
 
 	e.phase(pb.DeployPhase_DEPLOY_PHASE_STARTING)
-	if req.GetComposeYaml() == "" {
+	if stackYaml == "" {
 		e.result(false, "deploy request missing rendered compose", "")
 		return
 	}
@@ -180,6 +191,18 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 		envFile, projectDir, ok := s.writeStackFiles(req, e)
 		if !ok {
 			return
+		}
+		if repository != nil {
+			stackYaml, err = s.resolveRepositoryCompose(ctx, slug, stackYaml, envFile, *repository)
+			if err != nil {
+				e.result(false, "repository Compose: "+err.Error(), "")
+				return
+			}
+			req.ComposeYaml = stackYaml
+			if err := os.WriteFile(stackFile, []byte(stackYaml), 0o600); err != nil {
+				e.result(false, "write stack file: "+err.Error(), "")
+				return
+			}
 		}
 		images, ok := s.prepareStackImages(ctx, req, composeBaseArgs(name, stackFile, envFile, projectDir), e)
 		if !ok {
@@ -199,6 +222,20 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 	}
 	if !s.startStack(ctx, req, e) {
 		return
+	}
+	if repository != nil {
+		data, marshalErr := json.Marshal(repository)
+		if marshalErr != nil {
+			e.result(false, marshalErr.Error(), "")
+			return
+		}
+		if err := os.WriteFile(s.repositoryStatePath(slug), data, 0600); err != nil {
+			e.result(false, "save repository checkout: "+err.Error(), "")
+			return
+		}
+	} else {
+		_ = os.Remove(s.repositoryStatePath(slug))
+		s.cleanComposeRepositories(ctx, slug)
 	}
 
 	e.phase(pb.DeployPhase_DEPLOY_PHASE_WAITING)
@@ -373,6 +410,8 @@ func (s *Service) buildImage(ctx context.Context, req *pb.DeployRequest, buildDi
 		return s.buildNixpacks(ctx, req, buildDir, e)
 	case pb.BuildKind_BUILD_KIND_BUILDPACKS:
 		return s.buildBuildpacks(ctx, req, buildDir, e)
+	case pb.BuildKind_BUILD_KIND_DEPLOPACK:
+		return s.buildDeplopack(ctx, req, buildDir, e)
 	case pb.BuildKind_BUILD_KIND_RAILPACK:
 		return s.buildRailpack(ctx, req, buildDir, e)
 	default:

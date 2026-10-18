@@ -118,6 +118,8 @@ func main() {
 	defer stop()
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.Serve(lis) }()
+	svc.StartDeplopackPreparation(ctx)
+	defer svc.StopDeplopackPreparation()
 	select {
 	case err := <-serveErr:
 		if err != nil {
