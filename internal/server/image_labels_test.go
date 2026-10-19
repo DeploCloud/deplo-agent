@@ -13,19 +13,19 @@ import (
 )
 
 func TestTraefikLabelKeys(t *testing.T) {
-	got := traefikLabelKeys(`{"org.opencontainers.image.source":"x","traefik.enable":"true","Traefik.http.routers.evil.rule":"Host(` + "`victim.com`" + `)"}`)
+	got, err := traefikLabelKeys(`{"org.opencontainers.image.source":"x","traefik.enable":"true","Traefik.http.routers.evil.rule":"Host(` + "`victim.com`" + `)"}`)
 	want := []string{"Traefik.http.routers.evil.rule", "traefik.enable"}
-	if !reflect.DeepEqual(got, want) {
+	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("keys = %v, want %v", got, want)
 	}
-	if k := traefikLabelKeys(`{"deplo.project":"prj_1"}`); len(k) != 0 {
+	if k, err := traefikLabelKeys(`{"deplo.project":"prj_1"}`); err != nil || len(k) != 0 {
 		t.Fatalf("an ordinary label set must pass: %v", k)
 	}
-	if k := traefikLabelKeys("null"); len(k) != 0 {
+	if k, err := traefikLabelKeys("null"); err != nil || len(k) != 0 {
 		t.Fatalf("an image with no labels must pass: %v", k)
 	}
-	if k := traefikLabelKeys("not json"); len(k) != 0 {
-		t.Fatalf("unreadable output must not refuse: %v", k)
+	if _, err := traefikLabelKeys("not json"); err == nil {
+		t.Fatal("unreadable image labels must be refused")
 	}
 }
 
@@ -190,5 +190,34 @@ func TestPrepareStackImagesNamespacesTheBuildCache(t *testing.T) {
 	want := " build --build-arg BUILDKIT_CACHE_MOUNT_NS=" + s.cacheNamespace(req.GetSlug())
 	if !strings.Contains(string(calls), want) {
 		t.Fatalf("compose build is not namespaced (want %q):\n%s", want, calls)
+	}
+}
+
+func TestRerouteRefusesMalformedImageLabels(t *testing.T) {
+	for _, output := range []string{"", "not json", "[]", `{"traefik.enable":true}`} {
+		t.Run(output, func(t *testing.T) {
+			calls := fakeImageDocker(t, []string{"deplo-agent-test-img:1"},
+				map[string]string{"deplo-agent-test-img:1": output}, nil)
+			res, err := rerouteWithFake(t)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.GetOk() || !strings.Contains(res.GetError(), "unreadable labels") {
+				t.Fatalf("malformed image labels must be refused: %v", res)
+			}
+			if strings.Contains(readCalls(t, calls), " up ") {
+				t.Fatal("unchecked image started")
+			}
+		})
+	}
+}
+
+func TestImageAdmissionNeverExposesLabelValues(t *testing.T) {
+	fakeImageDocker(t, nil, map[string]string{
+		"deplo-agent-test-img:1": `{"traefik.http.middlewares.auth.basicauth.users":"private-value"}`,
+	}, nil)
+	err := admitImages(context.Background(), []string{"deplo-agent-test-img:1"}, nil)
+	if err == nil || strings.Contains(err.Error(), "private-value") {
+		t.Fatalf("expected rejection without the secret value, got %v", err)
 	}
 }

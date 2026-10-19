@@ -101,19 +101,23 @@ func traefikImageCheck(ctx context.Context, images []string) (missing []string, 
 			missing = append(missing, img)
 			continue
 		}
-		if keys := traefikLabelKeys(res.Stdout); len(keys) > 0 {
+		keys, err := traefikLabelKeys(res.Stdout)
+		if err != nil {
+			return nil, fmt.Errorf("the image %s returned unreadable labels, so it was not started", img)
+		}
+		if len(keys) > 0 {
 			return nil, fmt.Errorf(
-				"the image %s carries Traefik labels (%s); Deplo routes apps itself, so an image must not bring its own routing",
+				"the image %s carries Traefik labels (%s); put proxy labels in Compose or the app label editor instead of the image",
 				img, strings.Join(keys, ", "))
 		}
 	}
 	return missing, nil
 }
 
-func traefikLabelKeys(labelsJSON string) []string {
+func traefikLabelKeys(labelsJSON string) ([]string, error) {
 	var labels map[string]string
 	if err := json.Unmarshal([]byte(strings.TrimSpace(labelsJSON)), &labels); err != nil {
-		return nil
+		return nil, err
 	}
 	var keys []string
 	for k := range labels {
@@ -122,7 +126,7 @@ func traefikLabelKeys(labelsJSON string) []string {
 		}
 	}
 	sortStrings(keys)
-	return keys
+	return keys, nil
 }
 
 func sortStrings(a []string) {
