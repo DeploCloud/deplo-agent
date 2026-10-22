@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -529,7 +530,7 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 	}
 	startCmd := strings.TrimSpace(spec.GetStartCommand())
 	envKeys := filterKeys(buildEnvKeys(req.GetEnv()), func(k string) bool {
-		return !strings.HasPrefix(k, "RAILPACK_")
+		return !slices.Contains(railpackManagedEnv, k)
 	})
 	spaDir := relativeDir(spec.GetOutputDirectory())
 	prepareArgs := []string{"prepare", buildDir,
@@ -602,21 +603,29 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 	}
 
 	args := railpackBuildArgs(frontend, planPath, buildDir, secretNames,
-		imageOutputArgs(ctx, req.GetImageRef()), req.GetNoBuildCache(), s.cacheNamespace(req.GetSlug()))
+		imageOutputArgs(ctx, req.GetImageRef()), req.GetNoBuildCache(), s.cacheNamespace(req.GetSlug()),
+		s.secretsHash(secretEnv))
 	if !s.runBuildKit(ctx, req, 20*time.Minute, args, secretEnv, e) {
 		return false
 	}
 	return s.relabel(ctx, req, e)
 }
 
-func railpackBuildArgs(frontend, planPath, contextDir string, secretNames, output []string, noCache bool, cacheNS string) []string {
+// Deplo sets these from the build spec; a user env var must not override them.
+var railpackManagedEnv = []string{"RAILPACK_NODE_VERSION", "RAILPACK_BUILD_CMD", "RAILPACK_START_CMD", "RAILPACK_SPA_OUTPUT_DIR"}
+
+func railpackBuildArgs(frontend, planPath, contextDir string, secretNames, output []string, noCache bool, cacheNS, secretsHash string) []string {
 	args := []string{"build"}
 	if noCache {
 		args = append(args, "--no-cache")
 	}
 	args = append(args, "--build-arg", "BUILDKIT_SYNTAX="+frontend, "-f", planPath)
 	if cacheNS != "" {
-		args = append(args, "--build-arg", "BUILDKIT_CACHE_MOUNT_NS="+cacheNS)
+		// The railpack frontend namespaces its cache mounts by cache-key only.
+		args = append(args, "--build-arg", "BUILDKIT_CACHE_MOUNT_NS="+cacheNS, "--build-arg", "cache-key="+cacheNS)
+	}
+	if secretsHash != "" {
+		args = append(args, "--build-arg", "secrets-hash="+secretsHash)
 	}
 	for _, name := range secretNames {
 		args = append(args, "--secret", "id="+name+",env="+name)
