@@ -26,3 +26,14 @@ func TestCacheNamespace_isStableAndUnguessable(t *testing.T) {
 		t.Fatal("the salt must be persisted")
 	}
 }
+
+func TestSecretsHash(t *testing.T) {
+	s := &Service{agentDir: t.TempDir()}
+	a := s.secretsHash([]string{"A=1", "B=2"})
+	if a != s.secretsHash([]string{"B=2", "A=1"}) {
+		t.Fatal("secrets hash must not depend on order")
+	}
+	if a == s.secretsHash([]string{"A=1", "B=3"}) {
+		t.Fatal("secrets hash must change with a value")
+	}
+}

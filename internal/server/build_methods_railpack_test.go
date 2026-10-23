@@ -64,7 +64,7 @@ func TestRailpackBuildArgs(t *testing.T) {
 	args := railpackBuildArgs(
 		"ghcr.io/railwayapp/railpack-frontend:v0.35.0",
 		"/tmp/plan/railpack-plan.json", "/tmp/ctx", names,
-		[]string{"-t", "deplo/cwars:dpl_abc"}, false, "",
+		[]string{"-t", "deplo/cwars:dpl_abc"}, false, "ns123", "hash456",
 	)
 
 	if slices.Contains(args, "sh") || slices.Contains(args, "-c") {
@@ -77,6 +77,8 @@ func TestRailpackBuildArgs(t *testing.T) {
 		"--secret id=RAILPACK_NODE_VERSION,env=RAILPACK_NODE_VERSION",
 		"--secret id=RAILPACK_BUILD_CMD,env=RAILPACK_BUILD_CMD",
 		"-t deplo/cwars:dpl_abc",
+		"--build-arg cache-key=ns123",
+		"--build-arg secrets-hash=hash456",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("argv missing %q in: %s", want, joined)
@@ -90,12 +92,12 @@ func TestRailpackBuildArgs(t *testing.T) {
 	}
 
 	evil := "x; rm -rf / #"
-	adv := railpackBuildArgs("front", "plan.json", "ctx", []string{evil}, nil, false, "")
+	adv := railpackBuildArgs("front", "plan.json", "ctx", []string{evil}, nil, false, "", "")
 	if !slices.Contains(adv, "--secret") || !slices.Contains(adv, "id="+evil+",env="+evil) {
 		t.Fatalf("hostile name not a single --secret token: %v", adv)
 	}
 
-	fresh := railpackBuildArgs("front", "plan.json", "ctx", nil, nil, true, "")
+	fresh := railpackBuildArgs("front", "plan.json", "ctx", nil, nil, true, "", "")
 	if fresh[0] != "build" || fresh[1] != "--no-cache" {
 		t.Fatalf("no-cache railpack argv = %v, want build --no-cache first", fresh)
 	}
