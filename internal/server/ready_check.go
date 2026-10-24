@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -98,14 +99,21 @@ func portList(ports []int32) string {
 	return "ports " + strings.Join(s, ", ")
 }
 
-// startHint names the usual cause of a start that failed at once: a program missing from the image.
+// startHint names the usual cause of a start that failed at once: a program or a script missing from the image.
 func startHint(exitCode int, lines []string) string {
-	text := strings.ToLower(strings.Join(lines, "\n"))
+	joined := strings.Join(lines, "\n")
+	text := strings.ToLower(joined)
 	if exitCode == 127 || strings.Contains(text, "command not found") || strings.Contains(text, "executable file not found") {
 		return "The start command runs a program that is not in the image: check the Start command in Settings -> Build & output."
 	}
+	if m := missingEntry.FindStringSubmatch(joined); m != nil {
+		return "The start command runs " + m[1] + ", which is not in the app: check the Start command in Settings -> Build & output."
+	}
 	return ""
 }
+
+// Node's and Python's words for a start script that is not there (Railpack builds into /app).
+var missingEntry = regexp.MustCompile(`(?:Cannot find module|can't open file) '/app/([^']+)'`)
 
 // sampleReady inspects the app's container, or every container of its stack.
 func sampleReady(ctx context.Context, slug string, stack bool) []readySample {

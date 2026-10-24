@@ -425,3 +425,17 @@ func TestReadyCheckNamesOnlyAnExitCodeItSaw(t *testing.T) {
 		t.Fatalf("seen exit: %+v", v)
 	}
 }
+
+func TestStartHintNamesAStartScriptThatIsNotThere(t *testing.T) {
+	for line, want := range map[string]string{
+		"Error: Cannot find module '/app/index.js'":                                   "runs index.js, which is not in the app",
+		"python: can't open file '/app/main.py': [Errno 2] No such file or directory": "runs main.py, which is not in the app",
+	} {
+		if got := startHint(1, []string{line}); !strings.Contains(got, want) {
+			t.Errorf("%s: got %q", line, got)
+		}
+	}
+	if got := startHint(1, []string{"Error: Cannot find module 'express'"}); got != "" {
+		t.Errorf("a missing dependency is not a missing start script: %q", got)
+	}
+}
