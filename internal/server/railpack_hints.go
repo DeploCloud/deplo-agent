@@ -161,6 +161,7 @@ var nodeTooOldErrors = []*regexp.Regexp{
 	regexp.MustCompile(`You are using Node\.js (?P<got>[\d.]+)\. For Next\.js, Node\.js version "(?P<want>[^"]+)" is required`),
 	regexp.MustCompile(`You are using Node\.js (?P<got>[\d.]+)\. Vite requires Node\.js version (?P<want>[\d.+ or]+[\d+])`),
 	regexp.MustCompile(`The engine "node" is incompatible with this module\. Expected version "(?P<want>[^"]+)"\. Got "(?P<got>[^"]+)"`),
+	regexp.MustCompile(`Your Node version is incompatible with [^\n]*(?:\n[^\n]*){0,3}?Expected version: (?P<want>[^\n]+)\n[^\n]*Got: v?(?P<got>[\d.]+)`),
 }
 
 func nodeTooOld(text string) (want, got string) {

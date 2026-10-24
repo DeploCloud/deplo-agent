@@ -150,8 +150,10 @@ func TestBuildHintNamesANodeTooOldForTheCode(t *testing.T) {
 		`#27 1.461 You are using Node.js 18.20.8. For Next.js, Node.js version ">=20.9.0" is required.`,
 		`error vite@7.1.0: The engine "node" is incompatible with this module. Expected version "^20.19.0 || >=22.12.0". Got "18.20.8"`,
 		`You are using Node.js 18.20.8. Vite requires Node.js version 20.19+ or 22.12+. Please upgrade your Node.js version.`,
+		"#21 1.685 Your Node version is incompatible with \"registry.npmjs.org/@eslint/js/10.0.1\".\n#21 1.685 \n" +
+			"#21 1.685 Expected version: ^20.19.0 || ^22.13.0 || >=24\n#21 1.685 Got: v18.20.8",
 	} {
-		got := buildHint([]string{line}, false, "")
+		got := buildHint(strings.Split(line, "\n"), false, "")
 		if !strings.Contains(got, "and the build used Node 18.20.8") || !strings.Contains(got, "pick a newer Node.js version") {
 			t.Errorf("%s: got %q", line, got)
 		}
