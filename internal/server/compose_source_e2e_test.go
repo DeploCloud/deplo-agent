@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -26,6 +27,7 @@ func TestE2E_ComposeFromSourceKeepsItsDataUntilDestroyed(t *testing.T) {
 	wc := s.srcDir(slug)
 	t.Cleanup(func() {
 		ctx := context.Background()
+		giveBackToTestUser(t, wc)
 		_, _ = s.DestroyStack(ctx, &pb.StackRef{Slug: slug, RemoveVolumes: true})
 		_, _ = dockercli.Run(ctx, 60*time.Second, "rmi", "-f", image)
 		_, _ = dockercli.Run(ctx, 20*time.Second, "network", "disconnect", "-f", testNetwork, traefikContainer)
@@ -66,12 +68,24 @@ func TestE2E_ComposeFromSourceKeepsItsDataUntilDestroyed(t *testing.T) {
 	if b, _ := os.ReadFile(filepath.Join(wc, "data", "boots")); strings.TrimSpace(string(b)) == "" {
 		t.Fatal("the redeploy lost what the service wrote")
 	}
+	giveBackToTestUser(t, wc)
 	if res, err := s.DestroyStack(ctx, &pb.StackRef{Slug: slug, RemoveVolumes: true}); err != nil || !res.GetOk() {
 		t.Fatalf("destroy: %v %v", res, err)
 	}
 	if _, err := os.Stat(wc); !os.IsNotExist(err) {
 		t.Fatalf("DestroyStack left the working copy: %v", err)
 	}
+}
+
+// giveBackToTestUser hands what a container wrote as root back to the test's user: a non-root CI
+// runner cannot delete it otherwise, where the agent itself runs as root. A no-op as root.
+func giveBackToTestUser(t *testing.T, dir string) {
+	t.Helper()
+	if _, err := os.Stat(dir); os.Geteuid() == 0 || err != nil {
+		return
+	}
+	owner := fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid())
+	_, _ = dockercli.Run(context.Background(), 60*time.Second, "run", "--rm", "-v", dir+":/d", "busybox:1.37", "chown", "-R", owner, "/d")
 }
 
 // End-to-end (real docker): a service mounting the whole working copy writable while another

@@ -89,10 +89,13 @@ func TestE2E_ReadyCheckWaitsOutAStackServiceThatCrashesWhileItsDatabaseBoots(t *
 		t.Skip("docker not available")
 	}
 	const slug = "deplo-agent-test-ready-stack"
-	s := New(t.TempDir(), t.TempDir(), "/", "")
+	stacks, files := t.TempDir(), t.TempDir()
+	s := New(stacks, files, "/", "")
 	t.Cleanup(func() {
 		ctx := context.Background()
 		_, _ = s.DestroyStack(ctx, &pb.StackRef{Slug: slug, RemoveVolumes: true})
+		giveBackToTestUser(t, stacks)
+		giveBackToTestUser(t, files)
 		_, _ = dockercli.Run(ctx, 20*time.Second, "network", "disconnect", "-f", testNetwork, traefikContainer)
 		_, _ = dockercli.Run(ctx, 20*time.Second, "network", "rm", testNetwork)
 	})
