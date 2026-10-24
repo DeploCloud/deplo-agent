@@ -153,12 +153,22 @@ func streamCmd(cctx context.Context, timeout time.Duration, onLine LineFn, input
 	return exitStatus(cctx, err, timeout, label)
 }
 
+// timeoutError reads like the plain message but answers errors.Is(err, context.DeadlineExceeded).
+type timeoutError struct{ msg string }
+
+func (e timeoutError) Error() string { return e.msg }
+func (e timeoutError) Unwrap() error { return context.DeadlineExceeded }
+
+func timedOut(label string, timeout time.Duration) error {
+	return timeoutError{fmt.Sprintf("%s timed out after %s", label, timeout)}
+}
+
 func exitStatus(cctx context.Context, err error, timeout time.Duration, label string) (int, error) {
 	if err == nil {
 		return 0, nil
 	}
 	if cctx.Err() == context.DeadlineExceeded {
-		return -1, fmt.Errorf("%s timed out after %s", label, timeout)
+		return -1, timedOut(label, timeout)
 	}
 	if cctx.Err() == context.Canceled {
 		return -1, fmt.Errorf("%s canceled", label)
@@ -184,7 +194,7 @@ func PipeOut(ctx context.Context, timeout time.Duration, dst io.Writer, extraEnv
 	if err != nil {
 		label := redactArgs(args)
 		if cctx.Err() == context.DeadlineExceeded {
-			return -1, fmt.Errorf("docker %s timed out after %s", label, timeout)
+			return -1, timedOut("docker "+label, timeout)
 		}
 		if ee, ok := err.(*exec.ExitError); ok && ee.ProcessState.Exited() {
 			return ee.ExitCode(), fmt.Errorf("docker %s exited %d: %s", label, ee.ExitCode(), strings.TrimSpace(errb.String()))
@@ -209,7 +219,7 @@ func PipeIn(ctx context.Context, timeout time.Duration, src io.Reader, extraEnv 
 	if err != nil {
 		label := redactArgs(args)
 		if cctx.Err() == context.DeadlineExceeded {
-			return -1, fmt.Errorf("docker %s timed out after %s", label, timeout)
+			return -1, timedOut("docker "+label, timeout)
 		}
 		if ee, ok := err.(*exec.ExitError); ok && ee.ProcessState.Exited() {
 			return ee.ExitCode(), fmt.Errorf("docker %s exited %d: %s", label, ee.ExitCode(), strings.TrimSpace(errb.String()))

@@ -2,6 +2,7 @@ package dockercli
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -50,5 +51,16 @@ func TestScanLines(t *testing.T) {
 	want := []string{"a", "", "bcde" + truncatedMark, "last"}
 	if err != nil || strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("got %q err=%v", got, err)
+	}
+}
+
+// A timeout keeps its message and is told apart by errors.Is, so a caller can say it in words.
+func TestSpawnTimeoutIsADeadline(t *testing.T) {
+	_, err := Spawn(context.Background(), 50*time.Millisecond, func(string) {}, "", "sleep", "5")
+	if !errors.Is(err, context.DeadlineExceeded) || err.Error() != "sleep 5 timed out after 50ms" {
+		t.Fatalf("err = %v", err)
+	}
+	if _, err := Spawn(context.Background(), time.Minute, func(string) {}, "", "sh", "-c", "exit 3"); errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("a plain exit read as a timeout: %v", err)
 	}
 }

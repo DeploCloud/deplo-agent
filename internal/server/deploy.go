@@ -600,7 +600,7 @@ func (s *Service) runBuild(ctx context.Context, req *pb.DeployRequest, args []st
 	if dockercli.ImageExportOptsSupported(ctx) {
 		extraEnv = append([]string{"DOCKER_BUILDKIT=1"}, extraEnv...)
 	}
-	return s.streamBuild(ctx, req, 15*time.Minute, args, extraEnv, e, "")
+	return s.streamBuild(ctx, req, args, extraEnv, e, "")
 }
 
 func (s *Service) materializeUpload(tarBytes []byte, slug string) (string, func(), error) {

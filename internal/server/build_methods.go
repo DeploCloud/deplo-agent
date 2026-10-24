@@ -247,7 +247,7 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 	args := railpackBuildArgs(railpackFrontend, planPath, buildDir, secretNames,
 		imageOutputArgs(ctx, req.GetImageRef()), req.GetNoBuildCache(), s.cacheNamespace(req.GetSlug()),
 		s.secretsHash(secretEnv))
-	if !s.runBuildKit(ctx, req, 20*time.Minute, args, secretEnv, e, info.major("node")) {
+	if !s.runBuildKit(ctx, req, args, secretEnv, e, info.major("node")) {
 		return false
 	}
 	return s.relabel(ctx, req, e)
@@ -299,20 +299,32 @@ func railpackBuildArgs(frontend, planPath, contextDir string, secretNames, outpu
 	return append(args, contextDir)
 }
 
-func (s *Service) runBuildKit(ctx context.Context, req *pb.DeployRequest, timeout time.Duration, args []string, extraEnv []string, e *emitter, nodeMajor string) bool {
-	return s.streamBuild(ctx, req, timeout, args, append([]string{"DOCKER_BUILDKIT=1"}, extraEnv...), e, nodeMajor)
+func (s *Service) runBuildKit(ctx context.Context, req *pb.DeployRequest, args []string, extraEnv []string, e *emitter, nodeMajor string) bool {
+	return s.streamBuild(ctx, req, args, append([]string{"DOCKER_BUILDKIT=1"}, extraEnv...), e, nodeMajor)
+}
+
+// buildTimeout is the longest any build may run: a Dockerfile, railpack's or a stack's.
+const buildTimeout = 45 * time.Minute
+
+// buildRunError is the deploy error for a build that could not finish, a timeout said in words.
+func buildRunError(what string, err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Sprintf("The build took longer than %d minutes, the most a build may take on this server.",
+			int(buildTimeout/time.Minute))
+	}
+	return what + ": " + err.Error()
 }
 
 // streamBuild runs one `docker build` and, when it fails, names a cause its output shows.
-func (s *Service) streamBuild(ctx context.Context, req *pb.DeployRequest, timeout time.Duration, args []string, env []string, e *emitter, nodeMajor string) bool {
+func (s *Service) streamBuild(ctx context.Context, req *pb.DeployRequest, args []string, env []string, e *emitter, nodeMajor string) bool {
 	env = append(env, dockerConfigEnv(req)...)
 	e.log("command", "docker "+strings.Join(args, " "))
 	limit, release := capBuildSteps()
 	defer release()
 	tail := &lineTail{max: 200}
-	code, err := dockercli.StreamEnv(ctx, timeout, func(l string) { tail.add(l); e.log("info", l) }, env, args...)
+	code, err := dockercli.StreamEnv(ctx, buildTimeout, func(l string) { tail.add(l); e.log("info", l) }, env, args...)
 	if err != nil {
-		e.result(false, "docker build: "+err.Error(), "")
+		e.result(false, buildRunError("docker build", err), "")
 		return false
 	}
 	if code != 0 {

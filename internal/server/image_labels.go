@@ -32,15 +32,20 @@ func (s *Service) prepareStackImages(ctx context.Context, req *pb.DeployRequest,
 	for _, args := range steps {
 		verb := args[len(base)]
 		var limit int64
+		timeout := 15 * time.Minute
 		if verb == "build" {
 			l, release := capBuildSteps()
 			defer release()
-			limit = l
+			limit, timeout = l, buildTimeout
 		}
 		tail := &lineTail{max: 200}
-		code, err := dockercli.StreamEnv(ctx, 15*time.Minute, func(l string) { tail.add(l); e.log("info", l) }, env, args...)
+		code, err := dockercli.StreamEnv(ctx, timeout, func(l string) { tail.add(l); e.log("info", l) }, env, args...)
 		if err != nil {
-			e.result(false, "docker "+verb+": "+err.Error(), "")
+			msg := "docker " + verb + ": " + err.Error()
+			if verb == "build" {
+				msg = buildRunError("docker compose build", err)
+			}
+			e.result(false, msg, "")
 			return nil, false
 		}
 		if code != 0 {

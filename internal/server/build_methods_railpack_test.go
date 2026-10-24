@@ -2,12 +2,15 @@ package server
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
 )
@@ -258,5 +261,37 @@ func TestBuildRailpackNeverSkipsAStaticSitesBuild(t *testing.T) {
 	runs := strings.Split(strings.TrimSpace(string(b)), "\n")
 	if len(runs) != 2 || !strings.Contains(runs[0], "--config-file "+railpackSkipConfigName) || strings.Contains(runs[1], "--config-file") {
 		t.Fatalf("prepare runs:\n%s", b)
+	}
+}
+
+// A build that outlives the one build limit says so in words, never as the docker command line.
+func TestBuildRunErrorSaysATimeoutInWords(t *testing.T) {
+	want := "The build took longer than 45 minutes, the most a build may take on this server."
+	if got := buildRunError("docker build", fmt.Errorf("docker build --build-arg X timed out: %w", context.DeadlineExceeded)); got != want {
+		t.Fatalf("timeout = %q", got)
+	}
+	if got := buildRunError("docker build", errors.New("boom")); got != "docker build: boom" {
+		t.Fatalf("other error = %q", got)
+	}
+
+	// Through the build runner, a fake docker that outlives its deadline.
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte("#!/bin/sh\n[ \"$1\" = info ] && exit 1\nexec sleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	var res *pb.DeployResult
+	s := New(t.TempDir(), t.TempDir(), "/", "")
+	ok := s.streamBuild(ctx, railpackReq(&pb.BuildSpec{}), []string{"build", "--build-arg", "SECRET_NAME", "."}, nil,
+		&emitter{send: func(ev *pb.DeployEvent) error {
+			if r := ev.GetResult(); r != nil {
+				res = r
+			}
+			return nil
+		}}, "")
+	if ok || res.GetError() != want {
+		t.Fatalf("result = %v", res)
 	}
 }
