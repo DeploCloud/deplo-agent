@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -140,5 +141,30 @@ func TestJavaFromGradle(t *testing.T) {
 	}
 	if got := javaFromGradle(t.TempDir()); got != "" {
 		t.Errorf("no Gradle build: got %q", got)
+	}
+}
+
+func TestFixGradleStartFindsASingleModuleJar(t *testing.T) {
+	dir := t.TempDir()
+	plan := filepath.Join(dir, "plan.json")
+	write := func(start string) {
+		body := `{"caches":{"gradle":{"directory":"/root/.gradle","type":"shared"}},"deploy":{"startCommand":` +
+			strconv.Quote(start) + `,"variables":{"RAILPACK_VERSION":"0.43.0"}},"steps":[{"name":"build","size":12345678901}]}`
+		if err := os.WriteFile(plan, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("java $JAVA_OPTS -jar -Dserver.port=$PORT $(ls -1 */build/libs/*jar | grep -v plain)")
+	if fixed, err := fixGradleStart(plan); err != nil || !fixed {
+		t.Fatalf("fixed=%v err=%v", fixed, err)
+	}
+	b, _ := os.ReadFile(plan)
+	if !strings.Contains(string(b), "ls -1 build/libs/*jar */build/libs/*jar 2>/dev/null | grep -v plain") ||
+		!strings.Contains(string(b), `"size":12345678901`) || !strings.Contains(string(b), `"RAILPACK_VERSION":"0.43.0"`) {
+		t.Fatalf("plan after the fix: %s", b)
+	}
+	write("./gradlew bootRun")
+	if fixed, _ := fixGradleStart(plan); fixed {
+		t.Fatal("a start command the user wrote was changed")
 	}
 }

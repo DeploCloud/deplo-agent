@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/DeploCloud/deplo-agent/internal/safepath"
 )
@@ -128,4 +129,35 @@ func javaFromGradle(buildDir string) string {
 		}
 	}
 	return ""
+}
+
+// railpackGradleStart is the jar lookup Railpack plans for Gradle; it only searches one folder down,
+// so a single-module project (its jar in build/libs) starts java with no jar at all.
+const railpackGradleStart = "ls -1 */build/libs/*jar"
+
+// fixGradleStart widens that lookup to build/libs too; any other start command is left as it is.
+func fixGradleStart(planPath string) (bool, error) {
+	b, err := os.ReadFile(planPath)
+	if err != nil || !bytes.Contains(b, []byte(railpackGradleStart)) {
+		return false, err
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	var plan map[string]any
+	if err := dec.Decode(&plan); err != nil {
+		return false, err
+	}
+	deploy, _ := plan["deploy"].(map[string]any)
+	start, _ := deploy["startCommand"].(string)
+	if !strings.Contains(start, railpackGradleStart) {
+		return false, nil
+	}
+	deploy["startCommand"] = strings.Replace(start, railpackGradleStart, "ls -1 build/libs/*jar */build/libs/*jar 2>/dev/null", 1)
+	var out bytes.Buffer
+	enc := json.NewEncoder(&out)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(plan); err != nil {
+		return false, err
+	}
+	return true, os.WriteFile(planPath, out.Bytes(), 0o644)
 }

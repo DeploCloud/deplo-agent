@@ -238,6 +238,13 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 		info = readRailpackInfo(infoPath)
 	}
 
+	if fixed, err := fixGradleStart(planPath); err != nil {
+		e.result(false, "read the railpack plan: "+err.Error(), "")
+		return false
+	} else if fixed {
+		e.log("info", "Looking for the Gradle jar in build/libs too")
+	}
+
 	secretNames, ok := readPlanSecrets(planPath)
 	if !ok {
 		secretNames = names
