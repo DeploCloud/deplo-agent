@@ -2,12 +2,14 @@ package server
 
 import (
 	"encoding/hex"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // procRoot is the host's /proc: a container's sockets are read through its main process.
@@ -85,9 +87,25 @@ func splitListeners(ls []listener) (public, loopback []int32) {
 // Ports a process opens next to its real one: debuggers, profilers, metrics exporters.
 var sidePorts = map[int32]bool{5005: true, 6060: true, 9090: true, 9091: true, 9100: true, 9229: true, 9464: true}
 
+// Ports of services that never answer a browser: an app's own SSH, mail, DNS, database or queue.
+var nonHTTPPorts = map[int32]bool{22: true, 25: true, 53: true, 110: true, 143: true, 465: true, 587: true,
+	993: true, 995: true, 1883: true, 3306: true, 5432: true, 5672: true, 6379: true, 11211: true, 27017: true}
+
 // pickPort is the port to route to when the app did not open the expected one: the lowest that
-// is not a well-known side port, else the lowest.
-func pickPort(public []int32) int32 {
+// answers HTTP, else the lowest that is neither a side port nor a known non-web one, else the lowest.
+func pickPort(public []int32, speaksHTTP func(int32) bool) int32 {
+	if speaksHTTP != nil {
+		for _, p := range public {
+			if !sidePorts[p] && speaksHTTP(p) {
+				return p
+			}
+		}
+	}
+	for _, p := range public {
+		if !sidePorts[p] && !nonHTTPPorts[p] {
+			return p
+		}
+	}
 	for _, p := range public {
 		if !sidePorts[p] {
 			return p
@@ -97,4 +115,20 @@ func pickPort(public []int32) int32 {
 		return public[0]
 	}
 	return 0
+}
+
+// speaksHTTP sends a plain GET and reads whether the reply is HTTP; an SSH banner or a database's is not.
+func speaksHTTP(ip string, port int32) bool {
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip, strconv.Itoa(int(port))), time.Second)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	if _, err := conn.Write([]byte("GET / HTTP/1.0\r\nHost: localhost\r\n\r\n")); err != nil {
+		return false
+	}
+	buf := make([]byte, 5)
+	n, _ := io.ReadFull(conn, buf)
+	return n == 5 && string(buf) == "HTTP/"
 }

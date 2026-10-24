@@ -28,6 +28,7 @@ type readySample struct {
 	oomKilled         bool
 	health            string
 	restartPolicy     string
+	ip                string
 	listeners         []listener
 }
 
@@ -38,6 +39,9 @@ type readyCheck struct {
 	service  string
 	stack    bool
 	since    time.Time // the deploy's start: a stack container made after it has every restart counted
+
+	// speaksHTTP tells which of a container's ports answers HTTP; nil keeps the choice to the port list.
+	speaksHTTP func(ip string, port int32) bool
 
 	first     map[string]readySample
 	exits     map[string]int
@@ -87,6 +91,13 @@ func (r *readyCheck) exitNote(c readySample) string {
 		return fmt.Sprintf(" (exit code %d)", r.exitOf(c))
 	}
 	return ""
+}
+
+func (r *readyCheck) httpOn(c readySample) func(int32) bool {
+	if r.speaksHTTP == nil || c.ip == "" {
+		return nil
+	}
+	return func(p int32) bool { return r.speaksHTTP(c.ip, p) }
 }
 
 func (r *readyCheck) wait(c readySample, msg string) {
@@ -204,7 +215,7 @@ func (r *readyCheck) observe(now time.Time, samples []readySample) readyVerdict 
 			}
 		}
 		if now.Sub(first) >= readyPortGrace {
-			v.done, v.ok, v.observed = true, true, pickPort(others)
+			v.done, v.ok, v.observed = true, true, pickPort(others, r.httpOn(culprit))
 		}
 	case len(loop) > 0:
 		lp := loop[0]

@@ -21,7 +21,8 @@ const readyInspectTemplate = `{"id":{{json .ID}},"name":{{json .Name}},` +
 	`"startedAt":{{json .State.StartedAt}},"pid":{{json .State.Pid}},` +
 	`"exitCode":{{json .State.ExitCode}},"oomKilled":{{json .State.OOMKilled}},` +
 	`"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}""{{end}},` +
-	`"restartPolicy":{{json .HostConfig.RestartPolicy.Name}}}`
+	`"restartPolicy":{{json .HostConfig.RestartPolicy.Name}},` +
+	`"ip":"{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}"}`
 
 // waitReady holds the deploy until every container has stayed up through the settle window and
 // the app listens where it is routed, failing fast on a restart, an exit or a failing health check.
@@ -29,6 +30,7 @@ func (s *Service) waitReady(ctx context.Context, req *pb.DeployRequest, stack bo
 	ready := req.GetReady()
 	rc := newReadyCheck(ready.GetPort(), ready.GetPortRequired(), ready.GetService(), stack)
 	rc.since = since
+	rc.speaksHTTP = speaksHTTP
 	timeout := time.Duration(req.GetReadyTimeoutMs()) * time.Millisecond
 	if timeout <= 0 {
 		timeout = 60 * time.Second
@@ -151,9 +153,9 @@ func parseReadySamples(out string) []readySample {
 	var samples []readySample
 	for _, line := range splitLines(out) {
 		var raw struct {
-			ID, Name, Service, Status, Created, StartedAt, Health, RestartPolicy string
-			Restarts, Pid, ExitCode                                              int
-			OOMKilled                                                            bool
+			ID, Name, Service, Status, Created, StartedAt, Health, RestartPolicy, IP string
+			Restarts, Pid, ExitCode                                                  int
+			OOMKilled                                                                bool
 		}
 		if json.Unmarshal([]byte(line), &raw) != nil || raw.ID == "" {
 			continue
@@ -166,6 +168,9 @@ func parseReadySamples(out string) []readySample {
 		c := readySample{id: raw.ID, name: strings.TrimPrefix(raw.Name, "/"), service: raw.Service, status: raw.Status,
 			restarts: raw.Restarts, created: created, startedAt: started, pid: raw.Pid, exitCode: raw.ExitCode,
 			oomKilled: raw.OOMKilled, health: raw.Health, restartPolicy: raw.RestartPolicy}
+		if ips := strings.Fields(raw.IP); len(ips) > 0 {
+			c.ip = ips[0]
+		}
 		if c.status == "running" {
 			c.listeners = containerListeners(c.pid)
 		}

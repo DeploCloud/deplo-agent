@@ -2,8 +2,12 @@ package server
 
 import (
 	"context"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -60,9 +64,11 @@ func TestPickPort(t *testing.T) {
 		{[]int32{8080, 9090, 9229}, 8080},
 		{[]int32{4000, 5005, 8080}, 4000},
 		{[]int32{9090, 9229}, 9090},
+		{[]int32{22, 3000}, 3000},
+		{[]int32{5432}, 5432},
 		{nil, 0},
 	} {
-		if got := pickPort(c.in); got != c.want {
+		if got := pickPort(c.in, nil); got != c.want {
 			t.Errorf("pickPort(%v) = %d, want %d", c.in, got, c.want)
 		}
 	}
@@ -238,13 +244,13 @@ func TestReadyCheckExpiresWithWhatWasMissing(t *testing.T) {
 }
 
 func TestParseReadySamples(t *testing.T) {
-	out := `{"id":"abc","name":"/deplo-web-web-1","service":"web","status":"running","restarts":2,"created":"2026-10-24T11:59:58Z","startedAt":"2026-10-24T12:00:00.123456789Z","pid":0,"exitCode":0,"oomKilled":false,"health":"healthy","restartPolicy":"unless-stopped"}
+	out := `{"id":"abc","name":"/deplo-web-web-1","service":"web","status":"running","restarts":2,"created":"2026-10-24T11:59:58Z","startedAt":"2026-10-24T12:00:00.123456789Z","pid":0,"exitCode":0,"oomKilled":false,"health":"healthy","restartPolicy":"unless-stopped","ip":"10.200.4.10 172.18.0.5 "}
 {"id":"def","name":"/deplo-web-job-1","service":"job","status":"created","restarts":0,"startedAt":"0001-01-01T00:00:00Z","pid":0,"exitCode":127,"oomKilled":true,"health":"","restartPolicy":"no"}
 not json`
 	got := parseReadySamples(out)
 	if len(got) != 2 || got[0].name != "deplo-web-web-1" || got[0].restarts != 2 || got[0].health != "healthy" ||
 		got[0].startedAt.Nanosecond() != 123456789 || !got[0].created.Equal(t0.Add(-2*time.Second)) ||
-		!got[1].startedAt.IsZero() || got[1].exitCode != 127 || !got[1].oomKilled {
+		!got[1].startedAt.IsZero() || got[1].exitCode != 127 || !got[1].oomKilled || got[0].ip != "10.200.4.10" || got[1].ip != "" {
 		t.Fatalf("samples = %+v", got)
 	}
 }
@@ -450,5 +456,36 @@ func TestReadyCheckNamesAHealthCheckThatMissesTheAppsPort(t *testing.T) {
 	v := runReady(newReadyCheck(3000, true, "", false), step(at(1), up("app", t0, public(3000))), step(at(4), sick))
 	if !v.done || v.ok || !strings.Contains(v.err, "answers on port 3000, but its own health check") {
 		t.Fatalf("verdict = %+v", v)
+	}
+}
+
+// gitea listens on 22 (its SSH) and 3000 (its web): the port that answers HTTP is the one routed.
+func TestPickPortPrefersThePortThatAnswersHTTP(t *testing.T) {
+	web := func(p int32) bool { return p == 8081 }
+	if got := pickPort([]int32{3000, 8081}, web); got != 8081 {
+		t.Fatalf("got %d, want the port that answers HTTP", got)
+	}
+	if got := pickPort([]int32{22, 3000}, func(int32) bool { return false }); got != 3000 {
+		t.Fatalf("got %d, want the web port when nothing answers yet", got)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	defer srv.Close()
+	host, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
+	n, _ := strconv.Atoi(port)
+	if !speaksHTTP(host, int32(n)) {
+		t.Fatal("a web server was not recognised")
+	}
+	ssh, _ := net.Listen("tcp", "127.0.0.1:0")
+	defer ssh.Close()
+	go func() {
+		if c, err := ssh.Accept(); err == nil {
+			_, _ = c.Write([]byte("SSH-2.0-OpenSSH_9.9\r\n"))
+			_ = c.Close()
+		}
+	}()
+	_, sp, _ := net.SplitHostPort(ssh.Addr().String())
+	n, _ = strconv.Atoi(sp)
+	if speaksHTTP("127.0.0.1", int32(n)) {
+		t.Fatal("an SSH banner was taken for HTTP")
 	}
 }
