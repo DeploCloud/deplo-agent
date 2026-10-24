@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -144,6 +145,10 @@ func buildHint(lines []string, haveToken bool, nodeMajor string) string {
 	if strings.Contains(low, `module '"@prisma/client"' has no exported member`) || strings.Contains(low, "@prisma/client did not initialize yet") {
 		return "Prisma's client was not generated before the build: put `npx prisma generate && ` in front of the Build command in Settings -> Build & output."
 	}
+	if exts := missingPHPExtensions(strings.Join(lines, "\n")); len(exts) > 0 {
+		return "A package needs PHP's " + strings.Join(exts, ", ") + " extension: set RAILPACK_PHP_EXTENSIONS=" +
+			strings.Join(exts, ",") + " in the app's variables."
+	}
 	if want, got := nodeTooOld(strings.Join(lines, "\n")); want != "" {
 		return "The code needs Node " + want + " and the build used Node " + got +
 			": pick a newer Node.js version in Settings -> Build & output."
@@ -171,6 +176,19 @@ func nodeTooOld(text string) (want, got string) {
 		}
 	}
 	return "", ""
+}
+
+var phpExtMissing = regexp.MustCompile(`requires ext-([a-z0-9_]+) \S* -> it is missing from your system`)
+
+// missingPHPExtensions lists the extensions composer refused the install over, each once.
+func missingPHPExtensions(text string) []string {
+	var out []string
+	for _, m := range phpExtMissing.FindAllStringSubmatch(text, -1) {
+		if !slices.Contains(out, m[1]) {
+			out = append(out, m[1])
+		}
+	}
+	return out
 }
 
 var copyNotFound = regexp.MustCompile(`failed to calculate checksum of ref [^ ]+: "([^"]+)": not found`)

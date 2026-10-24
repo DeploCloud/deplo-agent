@@ -166,3 +166,14 @@ func TestBuildHintNamesAPrismaClientNeverGenerated(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestBuildHintNamesAMissingPHPExtension(t *testing.T) {
+	lines := []string{
+		"0.832     - cron/cron-bundle 3.1.1 requires ext-pcntl * -> it is missing from your system. Install or enable PHP's pcntl extension.",
+		"0.833     - acme/queue 1.0 requires ext-pcntl * -> it is missing from your system. Install or enable PHP's pcntl extension.",
+		"0.834     - acme/img 2.0 requires ext-gd * -> it is missing from your system. Install or enable PHP's gd extension.",
+	}
+	if got := buildHint(lines, false, ""); !strings.Contains(got, "RAILPACK_PHP_EXTENSIONS=pcntl,gd") {
+		t.Fatalf("got %q", got)
+	}
+}
