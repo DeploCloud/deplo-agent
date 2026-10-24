@@ -145,6 +145,11 @@ func buildHint(lines []string, haveToken bool, nodeMajor string) string {
 	if strings.Contains(low, `module '"@prisma/client"' has no exported member`) || strings.Contains(low, "@prisma/client did not initialize yet") {
 		return "Prisma's client was not generated before the build: put `npx prisma generate && ` in front of the Build command in Settings -> Build & output."
 	}
+	if strings.Contains(low, "your lockfile needs to be updated") || strings.Contains(low, "err_pnpm_outdated_lockfile") ||
+		strings.Contains(low, "can only install packages when your package.json and package-lock.json") {
+		return "The repository's lockfile does not match its package.json: commit an updated lockfile, or set the " +
+			"Install command (npm install, yarn install or pnpm install) in Settings -> Build & output."
+	}
 	if exts := missingPHPExtensions(strings.Join(lines, "\n")); len(exts) > 0 {
 		return "A package needs PHP's " + strings.Join(exts, ", ") + " extension: set RAILPACK_PHP_EXTENSIONS=" +
 			strings.Join(exts, ",") + " in the app's variables."

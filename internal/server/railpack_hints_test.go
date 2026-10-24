@@ -177,3 +177,15 @@ func TestBuildHintNamesAMissingPHPExtension(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestBuildHintNamesAStaleLockfile(t *testing.T) {
+	for _, line := range []string{
+		"#19 17.29 error Your lockfile needs to be updated, but yarn was run with `--frozen-lockfile`.",
+		" ERR_PNPM_OUTDATED_LOCKFILE  Cannot install with \"frozen-lockfile\" because pnpm-lock.yaml is not up to date",
+		"npm error `npm ci` can only install packages when your package.json and package-lock.json or npm-shrinkwrap.json are in sync.",
+	} {
+		if got := buildHint([]string{line}, false, ""); !strings.Contains(got, "lockfile does not match its package.json") {
+			t.Errorf("%s: got %q", line, got)
+		}
+	}
+}
