@@ -108,6 +108,15 @@ func startHint(exitCode int, lines []string) string {
 	if exitCode == 127 || strings.Contains(text, "command not found") || strings.Contains(text, "executable file not found") {
 		return "The start command runs a program that is not in the image: check the Start command in Settings -> Build & output."
 	}
+	if m := pyModuleMissing.FindStringSubmatch(joined); m != nil {
+		mod, _, _ := strings.Cut(m[1], ".")
+		if mod == "pkg_resources" {
+			return "An old package still needs setuptools, which new Python versions no longer include: add setuptools " +
+				"to requirements.txt, or update that package."
+		}
+		return "The app imports " + mod + ", which is not installed: add it to requirements.txt if it is a package, " +
+			"or check the Start command in Settings -> Build & output."
+	}
 	for _, re := range missingStart {
 		m := re.FindStringSubmatch(joined)
 		switch {
@@ -122,6 +131,8 @@ func startHint(exitCode int, lines []string) string {
 	}
 	return ""
 }
+
+var pyModuleMissing = regexp.MustCompile(`ModuleNotFoundError: No module named '([A-Za-z0-9_.]+)'`)
 
 // What Node, Python, bash and dash print for a start script or program that is not there (Railpack builds into /app).
 var missingStart = []*regexp.Regexp{

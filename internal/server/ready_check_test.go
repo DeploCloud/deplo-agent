@@ -489,3 +489,15 @@ func TestPickPortPrefersThePortThatAnswersHTTP(t *testing.T) {
 		t.Fatal("an SSH banner was taken for HTTP")
 	}
 }
+
+func TestStartHintNamesAPythonModuleThatIsNotInstalled(t *testing.T) {
+	if got := startHint(1, []string{"ModuleNotFoundError: No module named 'gradio'"}); !strings.Contains(got, "imports gradio, which is not installed") {
+		t.Errorf("got %q", got)
+	}
+	if got := startHint(1, []string{"ModuleNotFoundError: No module named 'pkg_resources'"}); !strings.Contains(got, "add setuptools") {
+		t.Errorf("got %q", got)
+	}
+	if got := startHint(1, []string{"ModuleNotFoundError: No module named 'google.protobuf'"}); !strings.Contains(got, "imports google,") {
+		t.Errorf("got %q", got)
+	}
+}
