@@ -229,3 +229,36 @@ func TestE2E_RailpackNamesAMissingStartCommand(t *testing.T) {
 		t.Fatalf("result = %v; log:\n%s", res, rec.joined())
 	}
 }
+
+// End-to-end (real docker): install and build commands written as sh -c '...' run whole. railpack
+// wraps both in its own sh -c '...', and the inner quotes used to cut them down to `sh -c <first word>`.
+func TestE2E_RailpackRunsQuotedInstallAndBuildCommands(t *testing.T) {
+	ctx := context.Background()
+	if !dockercli.Available(ctx) {
+		t.Skip("docker not available")
+	}
+	if !dockercli.ImageExportOptsSupported(ctx) {
+		t.Skip("railpack's frontend needs the containerd image store (mergeop); this daemon uses the classic store")
+	}
+	const image = "deplo-agent-test/railpack-quotes:e2e"
+	t.Cleanup(func() { _, _ = dockercli.Run(context.Background(), 60*time.Second, "rmi", "-f", image) })
+	buildDir := t.TempDir()
+	mustWrite(t, filepath.Join(buildDir, "package.json"), `{"name":"e2e-quotes","version":"1.0.0","scripts":{"start":"node server.js"}}`)
+	mustWrite(t, filepath.Join(buildDir, "server.js"), `require("http").createServer((_,r)=>r.end("ok")).listen(3000);`)
+	req := &pb.DeployRequest{
+		Slug: "deplo-agent-test-railpack-quotes", ProjectId: "prj_quotes", ImageRef: image,
+		BuildKind: pb.BuildKind_BUILD_KIND_RAILPACK,
+		BuildSpec: &pb.BuildSpec{Method: "railpack", Port: 3000,
+			InstallCommand: "sh -c 'mkdir -p node_modules && echo install > node_modules/.install-ran'",
+			BuildCommand:   "sh -c 'echo one > a.txt && echo two > b.txt'"},
+	}
+	rec := &e2eBuildRecorder{}
+	if !New(t.TempDir(), t.TempDir(), "/", e2eToolsBase(t)).buildImage(ctx, req, buildDir, rec.emitter()) {
+		t.Fatalf("build failed; log:\n%s", rec.joined())
+	}
+	got, err := dockercli.Run(ctx, 60*time.Second, "run", "--rm", "--entrypoint", "cat", image,
+		"/app/node_modules/.install-ran", "/app/a.txt", "/app/b.txt")
+	if err != nil || got.Code != 0 || strings.Join(strings.Fields(got.Stdout), " ") != "install one two" {
+		t.Fatalf("what the commands wrote: %q %s %v; build log:\n%s", got.Stdout, got.Stderr, err, rec.joined())
+	}
+}

@@ -289,10 +289,10 @@ func railpackSettings(spec *pb.BuildSpec, buildDir string) map[string]string {
 	}
 	put("RAILPACK_NODE_VERSION", majorVersion(strings.TrimSpace(spec.GetRuntimeVersion()), ""))
 	if !spec.GetSkipInstall() {
-		put("RAILPACK_INSTALL_CMD", spec.GetInstallCommand())
+		put("RAILPACK_INSTALL_CMD", railpackShellEscape(spec.GetInstallCommand()))
 	}
 	if !spec.GetSkipBuild() {
-		put("RAILPACK_BUILD_CMD", spec.GetBuildCommand())
+		put("RAILPACK_BUILD_CMD", railpackShellEscape(spec.GetBuildCommand()))
 	}
 	put("RAILPACK_START_CMD", spec.GetStartCommand())
 	if out := relativeDir(spec.GetOutputDirectory()); out != "" {
@@ -302,6 +302,12 @@ func railpackSettings(spec *pb.BuildSpec, buildDir string) map[string]string {
 		}
 	}
 	return set
+}
+
+// railpackShellEscape keeps a quote inside an install or build command: railpack 0.43 runs those as
+// sh -c '<cmd>' unescaped, so `sh -c 'a && b'` silently ran `sh -c a`. The start command is not wrapped.
+func railpackShellEscape(cmd string) string {
+	return strings.ReplaceAll(cmd, "'", `'\''`)
 }
 
 func railpackBuildArgs(frontend, planPath, contextDir string, secretNames, output []string, noCache bool, cacheNS, secretsHash string) []string {

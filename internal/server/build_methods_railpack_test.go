@@ -242,6 +242,19 @@ func TestRailpackSettings(t *testing.T) {
 	}
 }
 
+// railpack wraps install and build in sh -c '...' without escaping; the start command it runs as is.
+func TestRailpackSettingsKeepsQuotesInCommands(t *testing.T) {
+	const quoted = "sh -c 'node gen.js && next build'"
+	got := railpackSettings(&pb.BuildSpec{InstallCommand: quoted, BuildCommand: quoted, StartCommand: quoted}, t.TempDir())
+	want := `sh -c '\''node gen.js && next build'\''`
+	if got["RAILPACK_INSTALL_CMD"] != want || got["RAILPACK_BUILD_CMD"] != want {
+		t.Errorf("install/build = %q / %q; want %q", got["RAILPACK_INSTALL_CMD"], got["RAILPACK_BUILD_CMD"], want)
+	}
+	if got["RAILPACK_START_CMD"] != quoted {
+		t.Errorf("start = %q; want it as typed", got["RAILPACK_START_CMD"])
+	}
+}
+
 func TestCapabilities_advertisesGithubToken(t *testing.T) {
 	if !containsString(Capabilities, "build.github-token") {
 		t.Error(`Capabilities must advertise "build.github-token"`)
