@@ -218,7 +218,7 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 			return false
 		}
 		if code != 0 {
-			e.result(false, prepareFailure(code, readRailpackInfo(infoPath), req.GetGithubToken() != "", dockerignoreHidesAll(buildDir)), "")
+			e.result(false, prepareFailure(code, readRailpackInfo(infoPath), req.GetGithubToken() != "", buildDir), "")
 			return false
 		}
 		return true

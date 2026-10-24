@@ -47,12 +47,14 @@ func (i railpackInfo) major(pkg string) string {
 const railpackTransientExit = 75
 
 // prepareFailure is the deploy error for a failed `railpack prepare`: what railpack said, then what to change.
-func prepareFailure(code int, info railpackInfo, haveToken, ignoreHidesAll bool) string {
+func prepareFailure(code int, info railpackInfo, haveToken bool, buildDir string) string {
 	errs := info.errors()
 	text := strings.Join(errs, "\n")
 	hint := prepareHint(text, haveToken)
-	if ignoreHidesAll && strings.Contains(strings.ToLower(text), "could not determine how to build the app") {
-		hint = "Its .dockerignore leaves out every file (`*`), so Railpack sees an empty folder: remove that line to let it read the code."
+	if strings.Contains(strings.ToLower(text), "could not determine how to build the app") {
+		if h := undetectedHint(buildDir); h != "" {
+			hint = h
+		}
 	}
 	if hint == "" && code == railpackTransientExit {
 		hint = "Railpack could not download what it needs, usually a passing network problem: deploy again."
@@ -148,6 +150,18 @@ func buildHint(lines []string, haveToken bool, nodeMajor string) string {
 }
 
 var copyNotFound = regexp.MustCompile(`failed to calculate checksum of ref [^ ]+: "([^"]+)": not found`)
+
+// undetectedHint names what hides a project Railpack would otherwise recognise.
+func undetectedHint(buildDir string) string {
+	has := func(name string) bool { _, err := os.Stat(filepath.Join(buildDir, name)); return err == nil }
+	switch {
+	case dockerignoreHidesAll(buildDir):
+		return "Its .dockerignore leaves out every file (`*`), so Railpack sees an empty folder: remove that line to let it read the code."
+	case (has("build.gradle") || has("build.gradle.kts") || has("settings.gradle") || has("settings.gradle.kts")) && !has("gradlew"):
+		return "Railpack builds a Gradle project through its wrapper: commit gradlew and the gradle/wrapper folder (`gradle wrapper` writes them)."
+	}
+	return ""
+}
 
 // dockerignoreHidesAll reports a .dockerignore that leaves out every file, as Quarkus' own does for its prebuilt jars.
 func dockerignoreHidesAll(buildDir string) bool {

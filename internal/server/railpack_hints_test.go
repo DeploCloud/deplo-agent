@@ -46,14 +46,14 @@ func TestPrepareFailure(t *testing.T) {
 		{"no info file", 2, railpackInfo{}, false, []string{"railpack prepare failed (exit 2)"}},
 	}
 	for _, c := range cases {
-		got := prepareFailure(c.code, c.info, c.token, false)
+		got := prepareFailure(c.code, c.info, c.token, t.TempDir())
 		for _, w := range c.want {
 			if !strings.Contains(got, w) {
 				t.Errorf("%s: %q lacks %q", c.name, got, w)
 			}
 		}
 	}
-	if got := prepareFailure(1, infoWithErrors("No start command detected. Specify"), false, false); strings.Contains(got, "https://") {
+	if got := prepareFailure(1, infoWithErrors("No start command detected. Specify"), false, t.TempDir()); strings.Contains(got, "https://") {
 		t.Errorf("railpack's own link must not crowd the hint: %q", got)
 	}
 }
@@ -105,24 +105,34 @@ func TestLineTailKeepsTheLast(t *testing.T) {
 	}
 }
 
-func TestPrepareFailureNamesADockerignoreThatHidesEverything(t *testing.T) {
+func TestPrepareFailureNamesWhatHidesTheProject(t *testing.T) {
 	info := infoWithErrors("Railpack could not determine how to build the app.")
-	if got := prepareFailure(1, info, false, true); !strings.Contains(got, ".dockerignore leaves out every file") {
-		t.Fatalf("got %q", got)
+	write := func(dir, name, body string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if got := prepareFailure(1, info, false, false); !strings.Contains(got, "set the Root directory") {
-		t.Fatalf("got %q", got)
+	if got := prepareFailure(1, info, false, t.TempDir()); !strings.Contains(got, "set the Root directory") {
+		t.Fatalf("plain folder: got %q", got)
 	}
-	dir := t.TempDir()
-	if dockerignoreHidesAll(dir) {
-		t.Fatal("no .dockerignore hides nothing")
+	quarkus := t.TempDir()
+	write(quarkus, ".dockerignore", "*\n!target/*-runner\n")
+	write(quarkus, "pom.xml", "<project/>")
+	if got := prepareFailure(1, info, false, quarkus); !strings.Contains(got, ".dockerignore leaves out every file") {
+		t.Fatalf("hidden by .dockerignore: got %q", got)
 	}
-	_ = os.WriteFile(filepath.Join(dir, ".dockerignore"), []byte("*\n!target/*-runner\n"), 0o644)
-	if !dockerignoreHidesAll(dir) {
-		t.Fatal("a leading * hides every file")
+	gradle := t.TempDir()
+	write(gradle, "settings.gradle", "include 'app'")
+	if got := prepareFailure(1, info, false, gradle); !strings.Contains(got, "commit gradlew") {
+		t.Fatalf("gradle without wrapper: got %q", got)
 	}
-	_ = os.WriteFile(filepath.Join(dir, ".dockerignore"), []byte("node_modules\n*.log\n"), 0o644)
-	if dockerignoreHidesAll(dir) {
+	write(gradle, "gradlew", "#!/bin/sh")
+	if got := prepareFailure(1, info, false, gradle); strings.Contains(got, "commit gradlew") {
+		t.Fatalf("gradle with wrapper: got %q", got)
+	}
+	logs := t.TempDir()
+	write(logs, ".dockerignore", "node_modules\n*.log\n")
+	if dockerignoreHidesAll(logs) {
 		t.Fatal("*.log hides only logs")
 	}
 }
