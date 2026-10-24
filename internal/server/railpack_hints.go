@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -46,10 +47,13 @@ func (i railpackInfo) major(pkg string) string {
 const railpackTransientExit = 75
 
 // prepareFailure is the deploy error for a failed `railpack prepare`: what railpack said, then what to change.
-func prepareFailure(code int, info railpackInfo, haveToken bool) string {
+func prepareFailure(code int, info railpackInfo, haveToken, ignoreHidesAll bool) string {
 	errs := info.errors()
 	text := strings.Join(errs, "\n")
 	hint := prepareHint(text, haveToken)
+	if ignoreHidesAll && strings.Contains(strings.ToLower(text), "could not determine how to build the app") {
+		hint = "Its .dockerignore leaves out every file (`*`), so Railpack sees an empty folder: remove that line to let it read the code."
+	}
 	if hint == "" && code == railpackTransientExit {
 		hint = "Railpack could not download what it needs, usually a passing network problem: deploy again."
 	}
@@ -135,7 +139,28 @@ func buildHint(lines []string, haveToken bool, nodeMajor string) string {
 		return "There is no ready-made build of that Python version: set RAILPACK_PYTHON_VERSION to a " +
 			"released version (for example 3.13) in the app's variables."
 	}
+	if m := copyNotFound.FindStringSubmatch(strings.Join(lines, "\n")); m != nil {
+		return "The Dockerfile copies " + strings.TrimPrefix(m[1], "/") + ", which is not in the repository " +
+			"(another tool makes it before the build, or .dockerignore leaves it out): build it in the Dockerfile, " +
+			"or pick Railpack in Settings -> Build & output to build from the source."
+	}
 	return ""
+}
+
+var copyNotFound = regexp.MustCompile(`failed to calculate checksum of ref [^ ]+: "([^"]+)": not found`)
+
+// dockerignoreHidesAll reports a .dockerignore that leaves out every file, as Quarkus' own does for its prebuilt jars.
+func dockerignoreHidesAll(buildDir string) bool {
+	b, err := os.ReadFile(filepath.Join(buildDir, ".dockerignore"))
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if l := strings.TrimSpace(line); l == "*" || l == "**" || l == "/*" {
+			return true
+		}
+	}
+	return false
 }
 
 // headline is the first sentence of a multi-line tool error, ending in a period.

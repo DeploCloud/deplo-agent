@@ -46,14 +46,14 @@ func TestPrepareFailure(t *testing.T) {
 		{"no info file", 2, railpackInfo{}, false, []string{"railpack prepare failed (exit 2)"}},
 	}
 	for _, c := range cases {
-		got := prepareFailure(c.code, c.info, c.token)
+		got := prepareFailure(c.code, c.info, c.token, false)
 		for _, w := range c.want {
 			if !strings.Contains(got, w) {
 				t.Errorf("%s: %q lacks %q", c.name, got, w)
 			}
 		}
 	}
-	if got := prepareFailure(1, infoWithErrors("No start command detected. Specify"), false); strings.Contains(got, "https://") {
+	if got := prepareFailure(1, infoWithErrors("No start command detected. Specify"), false, false); strings.Contains(got, "https://") {
 		t.Errorf("railpack's own link must not crowd the hint: %q", got)
 	}
 }
@@ -102,5 +102,35 @@ func TestLineTailKeepsTheLast(t *testing.T) {
 	}
 	if strings.Join(tail.lines, "") != "cde" {
 		t.Fatalf("tail = %v", tail.lines)
+	}
+}
+
+func TestPrepareFailureNamesADockerignoreThatHidesEverything(t *testing.T) {
+	info := infoWithErrors("Railpack could not determine how to build the app.")
+	if got := prepareFailure(1, info, false, true); !strings.Contains(got, ".dockerignore leaves out every file") {
+		t.Fatalf("got %q", got)
+	}
+	if got := prepareFailure(1, info, false, false); !strings.Contains(got, "set the Root directory") {
+		t.Fatalf("got %q", got)
+	}
+	dir := t.TempDir()
+	if dockerignoreHidesAll(dir) {
+		t.Fatal("no .dockerignore hides nothing")
+	}
+	_ = os.WriteFile(filepath.Join(dir, ".dockerignore"), []byte("*\n!target/*-runner\n"), 0o644)
+	if !dockerignoreHidesAll(dir) {
+		t.Fatal("a leading * hides every file")
+	}
+	_ = os.WriteFile(filepath.Join(dir, ".dockerignore"), []byte("node_modules\n*.log\n"), 0o644)
+	if dockerignoreHidesAll(dir) {
+		t.Fatal("*.log hides only logs")
+	}
+}
+
+func TestBuildHintNamesACopiedFileTheRepositoryLacks(t *testing.T) {
+	lines := []string{`ERROR: failed to build: failed to solve: failed to compute cache key: failed to calculate checksum of ref smfbcj0::q3v7: "/dist/shiori_linux_amd64/shiori": not found`}
+	got := buildHint(lines, false, "")
+	if !strings.Contains(got, "copies dist/shiori_linux_amd64/shiori, which is not in the repository") {
+		t.Fatalf("got %q", got)
 	}
 }
