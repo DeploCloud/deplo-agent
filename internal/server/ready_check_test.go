@@ -501,3 +501,13 @@ func TestStartHintNamesAPythonModuleThatIsNotInstalled(t *testing.T) {
 		t.Errorf("got %q", got)
 	}
 }
+
+func TestFailureHintNamesAStartThatEndsOnSuccess(t *testing.T) {
+	v := readyVerdict{done: true, err: "The app keeps restarting (exit code 0)"}
+	if got := failureHint(v, nil); !strings.Contains(got, "finishes right after it starts") {
+		t.Fatalf("got %q", got)
+	}
+	if got := failureHint(readyVerdict{err: "The app keeps restarting (exit code 1)", exitCode: 1}, nil); got != "" {
+		t.Fatalf("a crash is not a clean finish: %q", got)
+	}
+}

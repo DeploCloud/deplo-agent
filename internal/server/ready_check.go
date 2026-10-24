@@ -69,7 +69,7 @@ func (s *Service) reportReady(ctx context.Context, rc *readyCheck, v readyVerdic
 			for _, l := range lines {
 				e.log("info", l)
 			}
-			if hint := startHint(v.exitCode, lines); hint != "" {
+			if hint := failureHint(v, lines); hint != "" {
 				res.Error += ". " + hint
 			}
 		}
@@ -99,6 +99,18 @@ func portList(ports []int32) string {
 		return "port " + s[0]
 	}
 	return "ports " + strings.Join(s, ", ")
+}
+
+// failureHint is what to change after a failed start: the cause its output names, or a start that ends on success.
+func failureHint(v readyVerdict, lines []string) string {
+	if hint := startHint(v.exitCode, lines); hint != "" {
+		return hint
+	}
+	if strings.HasSuffix(v.err, "(exit code 0)") {
+		return "It finishes right after it starts instead of running a server: the Start command in " +
+			"Settings -> Build & output must start one that keeps running"
+	}
+	return ""
 }
 
 // startHint names the usual cause of a start that failed at once: a program or a script missing from the image.
