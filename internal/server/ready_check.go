@@ -107,7 +107,14 @@ func startHint(exitCode int, lines []string) string {
 		return "The start command runs a program that is not in the image: check the Start command in Settings -> Build & output."
 	}
 	for _, re := range missingStart {
-		if m := re.FindStringSubmatch(joined); m != nil {
+		m := re.FindStringSubmatch(joined)
+		switch {
+		case m == nil:
+			continue
+		case !strings.Contains(m[1], "/"):
+			return "The app runs " + m[1] + ", a program its image does not have: add the package that provides it " +
+				"(for a Railpack build, list it in RAILPACK_DEPLOY_APT_PACKAGES), or change the Start command in Settings -> Build & output."
+		default:
 			return "The start command runs " + strings.TrimPrefix(m[1], "/app/") + ", which is not in the app: check the Start command in Settings -> Build & output."
 		}
 	}
