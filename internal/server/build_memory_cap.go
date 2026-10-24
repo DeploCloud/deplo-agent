@@ -81,6 +81,10 @@ func buildCapLayout(dir string) string {
 	if err != nil || !slices.Contains(strings.Fields(string(ctl)), "memory") {
 		return "no memory controller under " + dir
 	}
+	// A cap it cannot write must not be named when a build runs out of memory on its own.
+	if syscall.Access(filepath.Join(dir, "cgroup.subtree_control"), 2 /* W_OK */) != nil {
+		return "no write access to " + dir
+	}
 	return ""
 }
 
