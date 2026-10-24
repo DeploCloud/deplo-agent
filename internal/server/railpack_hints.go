@@ -156,7 +156,7 @@ func buildHint(lines []string, haveToken bool, nodeMajor string) string {
 	}
 	if want, got := nodeTooOld(strings.Join(lines, "\n")); want != "" {
 		return "The code needs Node " + want + " and the build used Node " + got +
-			": pick a newer Node.js version in Settings -> Build & output."
+			": pick a Node.js version in that range in Settings -> Build & output."
 	}
 	if m := copyNotFound.FindStringSubmatch(strings.Join(lines, "\n")); m != nil {
 		return "The Dockerfile copies " + strings.TrimPrefix(m[1], "/") + ", which is not in the repository " +

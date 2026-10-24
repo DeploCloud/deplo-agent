@@ -154,7 +154,7 @@ func TestBuildHintNamesANodeTooOldForTheCode(t *testing.T) {
 			"#21 1.685 Expected version: ^20.19.0 || ^22.13.0 || >=24\n#21 1.685 Got: v18.20.8",
 	} {
 		got := buildHint(strings.Split(line, "\n"), false, "")
-		if !strings.Contains(got, "and the build used Node 18.20.8") || !strings.Contains(got, "pick a newer Node.js version") {
+		if !strings.Contains(got, "and the build used Node 18.20.8") || !strings.Contains(got, "pick a Node.js version in that range") {
 			t.Errorf("%s: got %q", line, got)
 		}
 	}
@@ -187,5 +187,14 @@ func TestBuildHintNamesAStaleLockfile(t *testing.T) {
 		if got := buildHint([]string{line}, false, ""); !strings.Contains(got, "lockfile does not match its package.json") {
 			t.Errorf("%s: got %q", line, got)
 		}
+	}
+}
+
+// A dependency can cap Node too: the hint names the range, never assumes "newer".
+func TestBuildHintNamesANodeAboveTheRange(t *testing.T) {
+	line := `33.36 error strapi-plugin-populate-deep@1.1.2: The engine "node" is incompatible with this module. Expected version ">=12.x.x <=16.x.x". Got "18.20.8"`
+	got := buildHint([]string{line}, false, "")
+	if !strings.Contains(got, "needs Node >=12.x.x <=16.x.x and the build used Node 18.20.8") || strings.Contains(got, "newer") {
+		t.Fatalf("got %q", got)
 	}
 }
