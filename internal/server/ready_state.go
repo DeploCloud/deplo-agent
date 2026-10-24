@@ -140,7 +140,12 @@ func (r *readyCheck) observe(now time.Time, samples []readySample) readyVerdict 
 			}
 			return r.fail(c, fmt.Sprintf("%s stopped right after it started (exit code %d)", who, c.exitCode))
 		case c.health == "unhealthy":
-			return r.fail(c, who+"'s health check fails")
+			msg := who + "'s health check fails"
+			if r.port > 0 && slices.ContainsFunc(c.listeners, func(l listener) bool { return l.port == r.port && !l.loopback }) {
+				msg = fmt.Sprintf("%s answers on port %d, but its own health check (HEALTHCHECK in the image) fails, so it gets no traffic: "+
+					"the check may look at another port than %d", who, r.port, r.port)
+			}
+			return r.fail(c, msg)
 		}
 		switch {
 		case c.status != "running":

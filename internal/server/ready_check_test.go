@@ -442,3 +442,13 @@ func TestStartHintNamesAStartScriptThatIsNotThere(t *testing.T) {
 		t.Errorf("a missing dependency is not a missing start script: %q", got)
 	}
 }
+
+// An image's own health check that fails while the app answers on its port names that mismatch.
+func TestReadyCheckNamesAHealthCheckThatMissesTheAppsPort(t *testing.T) {
+	sick := up("app", t0, public(3000))
+	sick.health = "unhealthy"
+	v := runReady(newReadyCheck(3000, true, "", false), step(at(1), up("app", t0, public(3000))), step(at(4), sick))
+	if !v.done || v.ok || !strings.Contains(v.err, "answers on port 3000, but its own health check") {
+		t.Fatalf("verdict = %+v", v)
+	}
+}
