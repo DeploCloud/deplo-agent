@@ -16,7 +16,7 @@ import (
 // health check has no Health key and the whole inspect fails.
 const readyInspectTemplate = `{"id":{{json .ID}},"name":{{json .Name}},` +
 	`"service":{{json (index .Config.Labels "com.docker.compose.service")}},` +
-	`"status":{{json .State.Status}},"restarts":{{json .RestartCount}},` +
+	`"status":{{json .State.Status}},"restarts":{{json .RestartCount}},"created":{{json .Created}},` +
 	`"startedAt":{{json .State.StartedAt}},"pid":{{json .State.Pid}},` +
 	`"exitCode":{{json .State.ExitCode}},"oomKilled":{{json .State.OOMKilled}},` +
 	`"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}""{{end}},` +
@@ -24,9 +24,10 @@ const readyInspectTemplate = `{"id":{{json .ID}},"name":{{json .Name}},` +
 
 // waitReady holds the deploy until every container has stayed up through the settle window and
 // the app listens where it is routed, failing fast on a restart, an exit or a failing health check.
-func (s *Service) waitReady(ctx context.Context, req *pb.DeployRequest, stack bool, commitSha string, e *emitter) {
+func (s *Service) waitReady(ctx context.Context, req *pb.DeployRequest, stack bool, since time.Time, commitSha string, e *emitter) {
 	ready := req.GetReady()
 	rc := newReadyCheck(ready.GetPort(), ready.GetPortRequired(), ready.GetService(), stack)
+	rc.since = since
 	timeout := time.Duration(req.GetReadyTimeoutMs()) * time.Millisecond
 	if timeout <= 0 {
 		timeout = 60 * time.Second
@@ -129,20 +130,21 @@ func parseReadySamples(out string) []readySample {
 	var samples []readySample
 	for _, line := range splitLines(out) {
 		var raw struct {
-			ID, Name, Service, Status, StartedAt, Health, RestartPolicy string
-			Restarts, Pid, ExitCode                                     int
-			OOMKilled                                                   bool
+			ID, Name, Service, Status, Created, StartedAt, Health, RestartPolicy string
+			Restarts, Pid, ExitCode                                              int
+			OOMKilled                                                            bool
 		}
 		if json.Unmarshal([]byte(line), &raw) != nil || raw.ID == "" {
 			continue
 		}
+		created, _ := parseDockerTime(raw.Created)
 		started, _ := parseDockerTime(raw.StartedAt)
 		if started.Year() <= 1 {
 			started = time.Time{}
 		}
 		c := readySample{id: raw.ID, name: strings.TrimPrefix(raw.Name, "/"), service: raw.Service, status: raw.Status,
-			restarts: raw.Restarts, startedAt: started, pid: raw.Pid, exitCode: raw.ExitCode, oomKilled: raw.OOMKilled,
-			health: raw.Health, restartPolicy: raw.RestartPolicy}
+			restarts: raw.Restarts, created: created, startedAt: started, pid: raw.Pid, exitCode: raw.ExitCode,
+			oomKilled: raw.OOMKilled, health: raw.Health, restartPolicy: raw.RestartPolicy}
 		if c.status == "running" {
 			c.listeners = containerListeners(c.pid)
 		}

@@ -80,3 +80,47 @@ func TestE2E_ReadyCheckRefusesALoopbackOnlyApp(t *testing.T) {
 		t.Fatalf("result = %v; log:\n%s", res, log)
 	}
 }
+
+// End-to-end (real docker): in a stack, an app that crashes until its database answers (here: its
+// first three boots) is not a failed deploy; it is up once it stays up.
+func TestE2E_ReadyCheckWaitsOutAStackServiceThatCrashesWhileItsDatabaseBoots(t *testing.T) {
+	ctx := context.Background()
+	if !dockercli.Available(ctx) {
+		t.Skip("docker not available")
+	}
+	const slug = "deplo-agent-test-ready-stack"
+	s := New(t.TempDir(), t.TempDir(), "/", "")
+	t.Cleanup(func() {
+		ctx := context.Background()
+		_, _ = s.DestroyStack(ctx, &pb.StackRef{Slug: slug, RemoveVolumes: true})
+		_, _ = dockercli.Run(ctx, 20*time.Second, "network", "disconnect", "-f", testNetwork, traefikContainer)
+		_, _ = dockercli.Run(ctx, 20*time.Second, "network", "rm", testNetwork)
+	})
+	boot := `n=$$(cat /state/boots 2>/dev/null || echo 0); n=$$((n+1)); echo $$n > /state/boots; ` +
+		`[ $$n -gt 3 ] || { echo "boot $$n: the database is not answering yet"; exit 1; }; exec httpd -f -p 8080`
+	yaml := "services:\n" +
+		"  db:\n    image: busybox:1.37\n    labels: [\"deplo.slug=" + slug + "\"]\n    restart: unless-stopped\n" +
+		"    command: [\"httpd\", \"-f\", \"-p\", \"5432\"]\n" +
+		"  app:\n    image: busybox:1.37\n    labels: [\"deplo.slug=" + slug + "\"]\n    restart: unless-stopped\n" +
+		"    volumes: [\"./state:/state\"]\n    command: [\"sh\", \"-c\", " + strconv.Quote(boot) + "]\n"
+	var res *pb.DeployResult
+	rec := &e2eBuildRecorder{}
+	s.runDeploy(ctx, &pb.DeployRequest{
+		DeployId: "dep_" + slug, Slug: slug, ProjectId: "prj_" + slug, ImageRef: "busybox:1.37",
+		SourceKind: pb.SourceKind_SOURCE_KIND_COMPOSE, BuildKind: pb.BuildKind_BUILD_KIND_NONE,
+		ComposeYaml: yaml, Network: testNetwork, ReadyTimeoutMs: 120_000,
+		Ready: &pb.ReadyCheck{Port: 8080, PortRequired: true, Service: "app"},
+	}, &emitter{send: func(ev *pb.DeployEvent) error {
+		if r := ev.GetResult(); r != nil {
+			res = r
+		}
+		return rec.emitter().send(ev)
+	}})
+	if res == nil || !res.GetReady() || !slices.Equal(res.GetListeningPorts(), []int32{8080}) {
+		t.Fatalf("result = %v; log:\n%s", res, rec.joined())
+	}
+	got, _ := dockercli.Run(ctx, 15*time.Second, "inspect", "-f", "{{.RestartCount}}", "deplo-"+slug+"-app-1")
+	if n := strings.TrimSpace(got.Stdout); n == "0" || n == "" {
+		t.Fatalf("the app never restarted (RestartCount %q): the test proved nothing", n)
+	}
+}

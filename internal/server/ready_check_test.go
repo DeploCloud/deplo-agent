@@ -238,12 +238,13 @@ func TestReadyCheckExpiresWithWhatWasMissing(t *testing.T) {
 }
 
 func TestParseReadySamples(t *testing.T) {
-	out := `{"id":"abc","name":"/deplo-web-web-1","service":"web","status":"running","restarts":2,"startedAt":"2026-10-24T12:00:00.123456789Z","pid":0,"exitCode":0,"oomKilled":false,"health":"healthy","restartPolicy":"unless-stopped"}
+	out := `{"id":"abc","name":"/deplo-web-web-1","service":"web","status":"running","restarts":2,"created":"2026-10-24T11:59:58Z","startedAt":"2026-10-24T12:00:00.123456789Z","pid":0,"exitCode":0,"oomKilled":false,"health":"healthy","restartPolicy":"unless-stopped"}
 {"id":"def","name":"/deplo-web-job-1","service":"job","status":"created","restarts":0,"startedAt":"0001-01-01T00:00:00Z","pid":0,"exitCode":127,"oomKilled":true,"health":"","restartPolicy":"no"}
 not json`
 	got := parseReadySamples(out)
 	if len(got) != 2 || got[0].name != "deplo-web-web-1" || got[0].restarts != 2 || got[0].health != "healthy" ||
-		got[0].startedAt.Nanosecond() != 123456789 || !got[1].startedAt.IsZero() || got[1].exitCode != 127 || !got[1].oomKilled {
+		got[0].startedAt.Nanosecond() != 123456789 || !got[0].created.Equal(t0.Add(-2*time.Second)) ||
+		!got[1].startedAt.IsZero() || got[1].exitCode != 127 || !got[1].oomKilled {
 		t.Fatalf("samples = %+v", got)
 	}
 }
@@ -284,5 +285,90 @@ func TestDeployWithoutReadyKeepsTheRunningCheck(t *testing.T) {
 func TestCapabilities_advertisesReadyCheck(t *testing.T) {
 	if !containsString(Capabilities, "deploy.ready-check") {
 		t.Error(`Capabilities must advertise "deploy.ready-check"`)
+	}
+}
+
+func stackUp(id, service string, created, startedAt time.Time, restarts int, ls ...listener) readySample {
+	c := up(id, startedAt, ls...)
+	c.service, c.created, c.restarts = service, created, restarts
+	return c
+}
+
+func flapping(c readySample, exitCode int) readySample {
+	c.status, c.exitCode, c.pid, c.listeners = "restarting", exitCode, 0, nil
+	return c
+}
+
+// In a stack a service may crash while its database boots: four restarts are tolerated, and it
+// counts once it has stayed up 10 s since its last start.
+func TestReadyCheckStackToleratesRestartsWhileItsSiblingsBoot(t *testing.T) {
+	rc := newReadyCheck(8080, true, "app", true)
+	rc.since = t0
+	db := stackUp("db", "db", at(1), at(1), 0, public(5432))
+	steps := []func() (time.Time, []readySample){step(at(2), db, stackUp("app", "app", at(1), at(1), 0))}
+	for n := 1; n <= 4; n++ {
+		steps = append(steps, step(at(time.Duration(2+n)), db, flapping(stackUp("app", "app", at(1), at(1), n), 1)))
+	}
+	if v := runReady(rc, steps...); v.done || rc.pending != "Service app keeps restarting (exit code 1)" || rc.pendingID != "app" {
+		t.Fatalf("four restarts ended the wait: %+v pending %q", v, rc.pending)
+	}
+	serving := stackUp("app", "app", at(1), at(7), 4, public(8080))
+	if v := rc.observe(at(16), []readySample{db, serving}); v.done {
+		t.Fatalf("counted before 10 s up since its last start: %+v", v)
+	}
+	if v := rc.observe(at(17), []readySample{db, serving}); !v.done || !v.ok || !slices.Equal(v.listening, []int32{8080}) {
+		t.Fatalf("verdict = %+v", v)
+	}
+}
+
+// The fifth restart since the deploy began ends it, restarts made before the first look included.
+func TestReadyCheckStackFailsAtTheFifthRestart(t *testing.T) {
+	rc := newReadyCheck(8080, true, "app", true)
+	rc.since = t0
+	v := runReady(rc,
+		step(at(2), flapping(stackUp("app", "app", at(1), at(1), 3), 2)),
+		step(at(3), stackUp("app", "app", at(1), at(3), 4)),
+		step(at(4), flapping(stackUp("app", "app", at(1), at(3), 5), 2)))
+	if !v.done || v.ok || v.err != "Service app keeps restarting (exit code 2)" || v.culprit != "app" || v.exitCode != 2 {
+		t.Fatalf("verdict = %+v", v)
+	}
+	// A container this deploy did not create brings its old restarts along: they are not counted.
+	old := newReadyCheck(8080, true, "app", true)
+	old.since = t0
+	if v := runReady(old, step(at(2), flapping(stackUp("app", "app", t0.Add(-time.Hour), at(1), 7), 2)),
+		step(at(3), flapping(stackUp("app", "app", t0.Add(-time.Hour), at(1), 9), 2))); v.done {
+		t.Fatalf("restarts from before the deploy were counted: %+v", v)
+	}
+}
+
+// Out of memory and a failing health check end a stack's wait at once, as for a single app.
+func TestReadyCheckStackStillFailsAtOnceOnOOMAndHealth(t *testing.T) {
+	oom := flapping(stackUp("app", "app", at(1), at(1), 1), 137)
+	oom.oomKilled = true
+	sick := stackUp("app", "app", at(1), at(1), 0)
+	sick.health = "unhealthy"
+	for want, next := range map[string]readySample{"Service app was stopped: out of memory": oom, "Service app's health check fails": sick} {
+		rc := newReadyCheck(8080, true, "app", true)
+		rc.since = t0
+		if v := runReady(rc, step(at(2), stackUp("app", "app", at(1), at(1), 0)), step(at(3), next)); !v.done || v.ok || v.err != want {
+			t.Errorf("%s: %+v", want, v)
+		}
+	}
+}
+
+// A stack service still flapping when the timeout ends says so, with its own log.
+func TestReadyCheckStackTimesOutWhileItRestarts(t *testing.T) {
+	rc := newReadyCheck(8080, true, "app", true)
+	rc.since = t0
+	runReady(rc, step(at(2), stackUp("app", "app", at(1), at(1), 0)), step(at(170), flapping(stackUp("app", "app", at(1), at(1), 2), 1)))
+	if v := rc.expire(readyVerdict{}); v.err != "Service app keeps restarting (exit code 1)" || v.culprit != "app" || v.exitCode != 1 {
+		t.Fatalf("expired: %+v", v)
+	}
+	gone := flapping(stackUp("app", "app", at(1), at(1), 2), 1)
+	gone.status = "exited"
+	rc2 := newReadyCheck(8080, true, "app", true)
+	if v := runReady(rc2, step(at(2), stackUp("app", "app", at(1), at(1), 0)), step(at(3), gone)); !v.done ||
+		v.err != "Service app stopped right after it started (exit code 1)" {
+		t.Fatalf("a service that stopped for good waited for the timeout: %+v", v)
 	}
 }

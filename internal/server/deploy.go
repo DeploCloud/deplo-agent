@@ -56,6 +56,7 @@ func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitt
 
 // runDeployFrom deploys, reading an upload's build context from contextFile when set, else from the request.
 func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, contextFile string, e *emitter) {
+	started := time.Now()
 	slug := req.GetSlug()
 	if err := validateSlug(slug); err != nil {
 		e.result(false, err.Error(), "")
@@ -231,7 +232,7 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 
 	e.phase(pb.DeployPhase_DEPLOY_PHASE_WAITING)
 	if req.GetReady() != nil {
-		s.waitReady(ctx, req, isCompose, commitSha, e)
+		s.waitReady(ctx, req, isCompose, started, commitSha, e)
 		return
 	}
 	timeout := time.Duration(req.GetReadyTimeoutMs()) * time.Millisecond

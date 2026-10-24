@@ -10,6 +10,8 @@ const (
 	readySettle    = 10 * time.Second // up this long with no restart before a container counts
 	readyPortGrace = 10 * time.Second // how long the expected port may lag behind another one
 	workerGrace    = 20 * time.Second // after settling, how long a process may take to open a port
+	// A stack's service may crash a few times while a sibling (its database) boots.
+	stackRestartLimit = 5
 )
 
 // readySample is one inspect of a container the ready check watches.
@@ -17,6 +19,7 @@ type readySample struct {
 	id, name, service string
 	status            string
 	restarts          int
+	created           time.Time
 	startedAt         time.Time
 	pid               int
 	exitCode          int
@@ -32,11 +35,14 @@ type readyCheck struct {
 	required bool
 	service  string
 	stack    bool
+	since    time.Time // the deploy's start: a stack container made after it has every restart counted
 
-	first    map[string]readySample
-	opened   map[int32]time.Time
-	loopback time.Time
-	pending  string
+	first     map[string]readySample
+	exits     map[string]int
+	opened    map[int32]time.Time
+	loopback  time.Time
+	pending   string
+	pendingID string
 }
 
 type readyVerdict struct {
@@ -51,7 +57,7 @@ type readyVerdict struct {
 
 func newReadyCheck(port int32, required bool, service string, stack bool) *readyCheck {
 	return &readyCheck{port: port, required: required, service: service, stack: stack,
-		first: map[string]readySample{}, opened: map[int32]time.Time{}}
+		first: map[string]readySample{}, exits: map[string]int{}, opened: map[int32]time.Time{}}
 }
 
 func (r *readyCheck) who(c readySample) string {
@@ -62,11 +68,24 @@ func (r *readyCheck) who(c readySample) string {
 }
 
 func (r *readyCheck) fail(c readySample, msg string) readyVerdict {
-	return readyVerdict{done: true, err: msg, culprit: c.id, exitCode: c.exitCode}
+	return readyVerdict{done: true, err: msg, culprit: c.id, exitCode: r.exitOf(c)}
+}
+
+// exitOf is the container's exit code, or its last failing one while it runs again.
+func (r *readyCheck) exitOf(c readySample) int {
+	if c.exitCode == 0 {
+		return r.exits[c.id]
+	}
+	return c.exitCode
+}
+
+func (r *readyCheck) wait(c readySample, msg string) {
+	r.pending, r.pendingID = msg, c.id
 }
 
 func (r *readyCheck) observe(now time.Time, samples []readySample) readyVerdict {
 	settled := len(samples) > 0
+	r.pendingID = ""
 	switch {
 	case settled:
 		r.pending = "The app did not stay up long enough to count as started"
@@ -79,16 +98,29 @@ func (r *readyCheck) observe(now time.Time, samples []readySample) readyVerdict 
 	var latest time.Time
 	for _, c := range samples {
 		base, seen := r.first[c.id]
-		if !seen || base.startedAt.IsZero() {
-			r.first[c.id], base = c, c
+		switch {
+		case !seen:
+			base = c
+			if r.stack && !r.since.IsZero() && !c.created.IsZero() && !c.created.Before(r.since) {
+				base.restarts = 0
+			}
+		case base.startedAt.IsZero():
+			base.startedAt = c.startedAt
+		}
+		r.first[c.id] = base
+		if c.status != "running" && c.exitCode != 0 {
+			r.exits[c.id] = c.exitCode
 		}
 		who := r.who(c)
+		restarted := c.status == "restarting" || c.restarts > base.restarts || !c.startedAt.Equal(base.startedAt)
 		switch {
-		case c.status == "restarting" || c.restarts > base.restarts || !c.startedAt.Equal(base.startedAt):
-			if c.oomKilled {
-				return r.fail(c, who+" was stopped: out of memory")
-			}
-			return r.fail(c, fmt.Sprintf("%s keeps restarting (exit code %d)", who, c.exitCode))
+		case restarted && c.oomKilled:
+			return r.fail(c, who+" was stopped: out of memory")
+		case restarted && (!r.stack || c.restarts-base.restarts >= stackRestartLimit):
+			return r.fail(c, fmt.Sprintf("%s keeps restarting (exit code %d)", who, r.exitOf(c)))
+		case restarted && (c.status == "restarting" || c.status == "running" && now.Sub(c.startedAt) < readySettle):
+			// It counts once it has stayed up through the settle window since its last start.
+			r.wait(c, fmt.Sprintf("%s keeps restarting (exit code %d)", who, r.exitOf(c)))
 		case c.status == "exited" || c.status == "dead":
 			if r.stack && c.exitCode == 0 && slices.Contains([]string{"", "no", "on-failure"}, c.restartPolicy) {
 				continue // a one-shot that finished
@@ -102,9 +134,13 @@ func (r *readyCheck) observe(now time.Time, samples []readySample) readyVerdict 
 		}
 		switch {
 		case c.status != "running":
-			settled, r.pending = false, who+" did not start (it is "+c.status+")"
+			settled = false
+			if !restarted {
+				r.wait(c, who+" did not start (it is "+c.status+")")
+			}
 		case c.health == "starting":
-			settled, r.pending = false, who+" never passed its health check"
+			settled = false
+			r.wait(c, who+" never passed its health check")
 		case now.Sub(c.startedAt) < readySettle:
 			settled = false
 		}
@@ -165,22 +201,26 @@ func (r *readyCheck) observe(now time.Time, samples []readySample) readyVerdict 
 			v.done, v.ok, v.note = true, true, msg
 		}
 	default:
-		r.pending = fmt.Sprintf("%s is running but never listened on port %d (PORT=%d)", who, r.port, r.port)
+		r.wait(culprit, fmt.Sprintf("%s is running but never listened on port %d (PORT=%d)", who, r.port, r.port))
 		if !r.required && now.Sub(latest) >= readySettle+workerGrace {
 			v.done, v.ok, v.note = true, true, "Not listening on any port - fine for a background worker"
 		}
 	}
 	if v.done {
-		r.pending = ""
+		r.pending, r.pendingID = "", ""
 	}
 	return v
 }
 
-// expire is the verdict when the timeout ends the wait: what was still missing.
+// expire is the verdict when the timeout ends the wait: what was still missing, and whose log says why.
 func (r *readyCheck) expire(last readyVerdict) readyVerdict {
 	msg := r.pending
 	if msg == "" {
 		msg = "The app did not become ready in time"
 	}
-	return readyVerdict{done: true, err: msg, listening: last.listening}
+	v := readyVerdict{done: true, err: msg, listening: last.listening, culprit: r.pendingID}
+	if c, ok := r.first[r.pendingID]; ok {
+		v.exitCode = r.exitOf(c)
+	}
+	return v
 }
