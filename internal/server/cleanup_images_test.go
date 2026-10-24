@@ -368,7 +368,8 @@ func TestDockerCleanup_unusedPulledImages_allowList(t *testing.T) {
 		return "sha256:" + id + "|<no value>|<no value>|" + old + "|300000000|" +
 			strings.Split(tags, ",")[0] + "|" + managed + "|\"" + lastTag + "\"|" + tags + "|" + repoOf(strings.Split(tags, ",")[0]) + "@sha256:" + strings.Repeat("a", 64)
 	}
-	for _, tag := range []string{"kanboard/kanboard:latest", "louislam/uptime-kuma:2", "louislam/uptime-kuma:2.1.0"} {
+	for _, tag := range []string{"kanboard/kanboard:latest", "louislam/uptime-kuma:2", "louislam/uptime-kuma:2.1.0",
+		"ghcr.io/railwayapp/railpack-frontend:v0.43.0"} {
 		h.registryRefs[tag] = true
 		h.registryRefs[repoOf(tag)+"@sha256:"+strings.Repeat("a", 64)] = true
 	}
@@ -377,7 +378,7 @@ func TestDockerCleanup_unusedPulledImages_allowList(t *testing.T) {
 	h.imageRows["p2"] = row("p2", "", old, "louislam/uptime-kuma:2,louislam/uptime-kuma:2.1.0")
 	h.imageRows["p3"] = row("p3", "true", old, "deplo/web:dpl_1")
 	h.imageRows["p4"] = row("p4", "", fresh, "nginx:alpine")
-	h.imageRows["p5"] = row("p5", "", old, "heroku/builder:24")
+	h.imageRows["p5"] = row("p5", "", old, "ghcr.io/railwayapp/railpack-frontend:v0.43.0")
 	h.imageRows["p6"] = row("aaa", "", old, "postgres:16-alpine")
 	h.install(t)
 
