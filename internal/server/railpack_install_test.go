@@ -14,15 +14,20 @@ import (
 
 // The download URL must name the per-arch musl asset railpack actually publishes - a wrong shape 404s and the build method is dead on arrival.
 func TestRailpackDownloadURL(t *testing.T) {
-	url, err := railpackDownloadURL("0.35.0")
-	if err != nil {
-		t.Skipf("unsupported host for railpack auto-install: %v", err)
+	for arch, asset := range map[string]string{"amd64": "x86_64-unknown-linux-musl", "arm64": "arm64-unknown-linux-musl"} {
+		url, err := railpackAssetURL(railpackVersion, "linux", arch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := "https://github.com/railwayapp/railpack/releases/download/v0.43.0/railpack-v0.43.0-" + asset + ".tar.gz"; url != want {
+			t.Fatalf("%s: %s, want %s", arch, url, want)
+		}
 	}
-	if !strings.HasPrefix(url, "https://github.com/railwayapp/railpack/releases/download/v0.35.0/railpack-v0.35.0-") {
-		t.Fatalf("unexpected release URL: %s", url)
+	if _, err := railpackAssetURL(railpackVersion, "linux", "386"); err == nil {
+		t.Fatal("an arch railpack does not publish must be refused")
 	}
-	if !strings.HasSuffix(url, "-unknown-linux-musl.tar.gz") {
-		t.Fatalf("expected a musl linux asset: %s", url)
+	if railpackFrontend != "ghcr.io/railwayapp/railpack-frontend:v0.43.0" {
+		t.Fatalf("frontend %s does not match the CLI", railpackFrontend)
 	}
 }
 

@@ -529,21 +529,10 @@ func (s *Service) buildArgv(req *pb.DeployRequest, rest ...string) []string {
 }
 
 func (s *Service) runBuild(ctx context.Context, req *pb.DeployRequest, args []string, extraEnv []string, e *emitter) bool {
-	extraEnv = append(extraEnv, dockerConfigEnv(req)...)
 	if dockercli.ImageExportOptsSupported(ctx) {
 		extraEnv = append([]string{"DOCKER_BUILDKIT=1"}, extraEnv...)
 	}
-	e.log("command", "docker "+strings.Join(args, " "))
-	code, err := dockercli.StreamEnv(ctx, 15*time.Minute, func(l string) { e.log("info", l) }, extraEnv, args...)
-	if err != nil {
-		e.result(false, "docker build: "+err.Error(), "")
-		return false
-	}
-	if code != 0 {
-		e.result(false, fmt.Sprintf("docker build failed (exit %d)", code), "")
-		return false
-	}
-	return true
+	return s.streamBuild(ctx, req, 15*time.Minute, args, extraEnv, e, "")
 }
 
 func (s *Service) materializeUpload(tarBytes []byte, slug string) (string, func(), error) {

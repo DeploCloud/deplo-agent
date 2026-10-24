@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -132,7 +133,6 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 	e.log("info", "Building with Railpack")
 	e.phase(pb.DeployPhase_DEPLOY_PHASE_BUILDING)
 
-	frontend := "ghcr.io/railwayapp/railpack-frontend:v" + railpackVersion
 	railpack, err := s.ensureRailpack(ctx, railpackVersion, e)
 	if err != nil {
 		e.result(false, "railpack unavailable: "+err.Error(), "")
@@ -150,34 +150,35 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 	}
 	defer func() { _ = os.RemoveAll(planDir) }()
 	planPath := filepath.Join(planDir, "railpack-plan.json")
+	infoPath := filepath.Join(planDir, "railpack-info.json")
 
-	nodeVer := majorVersion(strings.TrimSpace(spec.GetRuntimeVersion()), "")
-	buildCmd := strings.TrimSpace(spec.GetBuildCommand())
-	if spec.GetSkipBuild() {
-		buildCmd = ""
-	}
-	startCmd := strings.TrimSpace(spec.GetStartCommand())
-	envKeys := filterKeys(buildEnvKeys(req.GetEnv()), func(k string) bool {
-		return !slices.Contains(railpackManagedEnv, k)
-	})
-	spaDir := relativeDir(spec.GetOutputDirectory())
-	prepareArgs := []string{"prepare", buildDir,
-		"--env", "RAILPACK_NODE_VERSION", "--env", "RAILPACK_BUILD_CMD",
-		"--env", "RAILPACK_START_CMD", "--env", "RAILPACK_SPA_OUTPUT_DIR"}
-	for _, k := range envKeys {
-		prepareArgs = append(prepareArgs, "--env", k)
-	}
-	prepareArgs = append(prepareArgs,
-		"--plan-out", planPath,
-		"--info-out", filepath.Join(planDir, "railpack-info.json"))
+	known := railpackSettings(spec, buildDir)
+	userEnv := req.GetEnv()
+	envKeys := filterKeys(buildEnvKeys(userEnv), func(k string) bool { _, ours := known[k]; return !ours })
+	prepareArgs := []string{"prepare", buildDir, "--plan-out", planPath, "--info-out", infoPath, "--error-missing-start"}
 
+	if spec.GetStaticSinglePageApp() {
+		wrote, sErr := writeStaticfile(buildDir, relativeDir(spec.GetOutputDirectory()))
+		if sErr != nil {
+			e.result(false, "write the Staticfile: "+sErr.Error(), "")
+			return false
+		}
+		if wrote {
+			e.log("info", "Serving the output as a single-page app: unknown paths get index.html")
+		}
+	}
 	if spec.GetSkipInstall() || spec.GetSkipBuild() {
-		name, cErr := writeRailpackSkipConfig(buildDir, spec.GetSkipInstall(), spec.GetSkipBuild())
+		base := ""
+		if slices.Contains(envKeys, "RAILPACK_CONFIG_FILE") {
+			base = userEnv["RAILPACK_CONFIG_FILE"]
+		}
+		name, cErr := writeRailpackSkipConfig(buildDir, base, spec.GetSkipInstall(), spec.GetSkipBuild())
 		if cErr != nil {
 			e.result(false, "write railpack config: "+cErr.Error(), "")
 			return false
 		}
 		defer func() { _ = os.Remove(filepath.Join(buildDir, name)) }()
+		envKeys = filterKeys(envKeys, func(k string) bool { return k != "RAILPACK_CONFIG_FILE" })
 		prepareArgs = append(prepareArgs, "--config-file", name)
 		if spec.GetSkipInstall() {
 			e.log("info", "Skipping the install step, as asked")
@@ -187,42 +188,52 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 		}
 	}
 
-	prepareEnv := envKV(req.GetEnv(), envKeys)
-	for _, kv := range [][2]string{
-		{"RAILPACK_NODE_VERSION", nodeVer},
-		{"RAILPACK_BUILD_CMD", buildCmd},
-		{"RAILPACK_START_CMD", startCmd},
-		{"RAILPACK_SPA_OUTPUT_DIR", spaDir},
-	} {
-		if kv[1] != "" {
-			prepareEnv = append(prepareEnv, kv[0]+"="+kv[1])
-		}
-	}
-
-	e.log("command", "railpack "+strings.Join(prepareArgs, " "))
-	code, err := dockercli.SpawnEnv(ctx, 5*time.Minute, func(l string) { e.log("info", l) },
-		append(prepareEnv, dockerConfigEnv(req)...), railpack, prepareArgs...)
-	if err != nil {
-		e.result(false, "railpack prepare: "+err.Error(), "")
-		return false
-	}
-	if code != 0 {
-		e.result(false, fmt.Sprintf("railpack prepare failed (exit %d)", code), "")
-		return false
-	}
-
-	known := map[string]string{}
 	for _, k := range envKeys {
-		known[k] = req.GetEnv()[k]
+		known[k] = userEnv[k]
 	}
-	known["RAILPACK_NODE_VERSION"] = nodeVer
-	known["RAILPACK_BUILD_CMD"] = buildCmd
-	known["RAILPACK_START_CMD"] = startCmd
-	known["RAILPACK_SPA_OUTPUT_DIR"] = spaDir
+	names := slices.Sorted(maps.Keys(known))
+	prepareEnv := make([]string, 0, len(names)+1)
+	for _, k := range names {
+		prepareArgs = append(prepareArgs, "--env", k)
+		prepareEnv = append(prepareEnv, k+"="+known[k])
+	}
+	// Only prepare's own version lookups read it: never an --env, so never a build secret.
+	if tok := req.GetGithubToken(); tok != "" && !slices.Contains(envKeys, "GITHUB_TOKEN") {
+		prepareEnv = append(prepareEnv, "GITHUB_TOKEN="+tok)
+	}
+
+	prepare := func(args []string) bool {
+		e.log("command", "railpack "+strings.Join(args, " "))
+		code, err := dockercli.SpawnEnv(ctx, 5*time.Minute, func(l string) { e.log("info", l) },
+			append(prepareEnv, dockerConfigEnv(req)...), railpack, args...)
+		if err != nil {
+			e.result(false, "railpack prepare: "+err.Error(), "")
+			return false
+		}
+		if code != 0 {
+			e.result(false, prepareFailure(code, readRailpackInfo(infoPath), req.GetGithubToken() != ""), "")
+			return false
+		}
+		return true
+	}
+	if !prepare(prepareArgs) {
+		return false
+	}
+	info := readRailpackInfo(infoPath)
+	// A static site's build step is what writes its web server config, so it is never skipped.
+	if spec.GetSkipBuild() && slices.Contains(info.DetectedProviders, "staticfile") {
+		e.log("info", "A static site has no build command to skip: serving its files as they are")
+		if !prepare(slices.DeleteFunc(slices.Clone(prepareArgs), func(a string) bool {
+			return a == "--config-file" || a == railpackSkipConfigName
+		})) {
+			return false
+		}
+		info = readRailpackInfo(infoPath)
+	}
+
 	secretNames, ok := readPlanSecrets(planPath)
 	if !ok {
-		secretNames = append([]string{"RAILPACK_NODE_VERSION", "RAILPACK_BUILD_CMD",
-			"RAILPACK_START_CMD", "RAILPACK_SPA_OUTPUT_DIR"}, envKeys...)
+		secretNames = names
 	}
 	secretNames = sanitizeSecretNames(secretNames)
 	secretEnv := make([]string, 0, len(secretNames))
@@ -230,17 +241,40 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 		secretEnv = append(secretEnv, name+"="+known[name])
 	}
 
-	args := railpackBuildArgs(frontend, planPath, buildDir, secretNames,
+	args := railpackBuildArgs(railpackFrontend, planPath, buildDir, secretNames,
 		imageOutputArgs(ctx, req.GetImageRef()), req.GetNoBuildCache(), s.cacheNamespace(req.GetSlug()),
 		s.secretsHash(secretEnv))
-	if !s.runBuildKit(ctx, req, 20*time.Minute, args, secretEnv, e) {
+	if !s.runBuildKit(ctx, req, 20*time.Minute, args, secretEnv, e, info.major("node")) {
 		return false
 	}
 	return s.relabel(ctx, req, e)
 }
 
-// Deplo sets these from the build spec; a user env var must not override them.
-var railpackManagedEnv = []string{"RAILPACK_NODE_VERSION", "RAILPACK_BUILD_CMD", "RAILPACK_START_CMD", "RAILPACK_SPA_OUTPUT_DIR"}
+// railpackSettings maps the build spec onto railpack's own variables. Only what the app set
+// is declared, so railpack's defaults (and a user's RAILPACK_* variable) apply otherwise.
+func railpackSettings(spec *pb.BuildSpec, buildDir string) map[string]string {
+	set := map[string]string{}
+	put := func(k, v string) {
+		if v = strings.TrimSpace(v); v != "" {
+			set[k] = v
+		}
+	}
+	put("RAILPACK_NODE_VERSION", majorVersion(strings.TrimSpace(spec.GetRuntimeVersion()), ""))
+	if !spec.GetSkipInstall() {
+		put("RAILPACK_INSTALL_CMD", spec.GetInstallCommand())
+	}
+	if !spec.GetSkipBuild() {
+		put("RAILPACK_BUILD_CMD", spec.GetBuildCommand())
+	}
+	put("RAILPACK_START_CMD", spec.GetStartCommand())
+	if out := relativeDir(spec.GetOutputDirectory()); out != "" {
+		put("RAILPACK_SPA_OUTPUT_DIR", out)
+		if _, err := os.Stat(filepath.Join(buildDir, "package.json")); err != nil {
+			put("RAILPACK_STATIC_FILE_ROOT", out)
+		}
+	}
+	return set
+}
 
 func railpackBuildArgs(frontend, planPath, contextDir string, secretNames, output []string, noCache bool, cacheNS, secretsHash string) []string {
 	args := []string{"build"}
@@ -262,17 +296,26 @@ func railpackBuildArgs(frontend, planPath, contextDir string, secretNames, outpu
 	return append(args, contextDir)
 }
 
-func (s *Service) runBuildKit(ctx context.Context, req *pb.DeployRequest, timeout time.Duration, args []string, extraEnv []string, e *emitter) bool {
-	extraEnv = append(extraEnv, dockerConfigEnv(req)...)
+func (s *Service) runBuildKit(ctx context.Context, req *pb.DeployRequest, timeout time.Duration, args []string, extraEnv []string, e *emitter, nodeMajor string) bool {
+	return s.streamBuild(ctx, req, timeout, args, append([]string{"DOCKER_BUILDKIT=1"}, extraEnv...), e, nodeMajor)
+}
+
+// streamBuild runs one `docker build` and, when it fails, names a cause its output shows.
+func (s *Service) streamBuild(ctx context.Context, req *pb.DeployRequest, timeout time.Duration, args []string, env []string, e *emitter, nodeMajor string) bool {
+	env = append(env, dockerConfigEnv(req)...)
 	e.log("command", "docker "+strings.Join(args, " "))
-	code, err := dockercli.StreamEnv(ctx, timeout, func(l string) { e.log("info", l) },
-		append([]string{"DOCKER_BUILDKIT=1"}, extraEnv...), args...)
+	tail := &lineTail{max: 200}
+	code, err := dockercli.StreamEnv(ctx, timeout, func(l string) { tail.add(l); e.log("info", l) }, env, args...)
 	if err != nil {
 		e.result(false, "docker build: "+err.Error(), "")
 		return false
 	}
 	if code != 0 {
-		e.result(false, fmt.Sprintf("docker build failed (exit %d)", code), "")
+		msg := fmt.Sprintf("docker build failed (exit %d)", code)
+		if hint := buildHint(tail.lines, req.GetGithubToken() != "", nodeMajor); hint != "" {
+			msg += ". " + hint
+		}
+		e.result(false, msg, "")
 		return false
 	}
 	return true

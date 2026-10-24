@@ -15,7 +15,10 @@ import (
 	"time"
 )
 
-const railpackVersion = "0.35.0"
+// The railpack CLI and frontend every build uses: the version Deplo tests, never an app's choice.
+const railpackVersion = "0.43.0"
+
+const railpackFrontend = "ghcr.io/railwayapp/railpack-frontend:v" + railpackVersion
 
 func (s *Service) ensureRailpack(ctx context.Context, version string, e *emitter) (string, error) {
 	if p, err := exec.LookPath("railpack"); err == nil && railpackBinaryVersion(ctx, p) == version {
@@ -53,17 +56,21 @@ func railpackBinaryVersion(ctx context.Context, path string) string {
 }
 
 func railpackDownloadURL(version string) (string, error) {
-	if runtime.GOOS != "linux" {
-		return "", fmt.Errorf("railpack auto-install supports linux only (host is %s)", runtime.GOOS)
+	return railpackAssetURL(version, runtime.GOOS, runtime.GOARCH)
+}
+
+func railpackAssetURL(version, goos, goarch string) (string, error) {
+	if goos != "linux" {
+		return "", fmt.Errorf("railpack auto-install supports linux only (host is %s)", goos)
 	}
 	var target string
-	switch runtime.GOARCH {
+	switch goarch {
 	case "amd64":
 		target = "x86_64-unknown-linux-musl"
 	case "arm64":
-		target = "aarch64-unknown-linux-musl"
+		target = "arm64-unknown-linux-musl"
 	default:
-		return "", fmt.Errorf("railpack auto-install: unsupported arch %s", runtime.GOARCH)
+		return "", fmt.Errorf("railpack auto-install: unsupported arch %s", goarch)
 	}
 	return fmt.Sprintf(
 		"https://github.com/railwayapp/railpack/releases/download/v%s/railpack-v%s-%s.tar.gz",
