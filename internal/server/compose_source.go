@@ -2,16 +2,22 @@ package server
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
+	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 	"github.com/DeploCloud/deplo-agent/internal/safepath"
 )
 
@@ -312,4 +318,105 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 func (s *Service) removeWorkingCopy(slug string) {
 	_ = os.RemoveAll(s.srcDir(slug))
 	_ = os.Remove(s.srcListPath(slug))
+}
+
+// composeHostPaths is the part of `docker compose config --format json` that names host paths.
+type composeHostPaths struct {
+	Services map[string]struct {
+		Build *struct {
+			Context            string            `json:"context"`
+			Dockerfile         string            `json:"dockerfile"`
+			AdditionalContexts map[string]string `json:"additional_contexts"`
+		} `json:"build"`
+		Volumes []struct {
+			Type     string `json:"type"`
+			Source   string `json:"source"`
+			ReadOnly bool   `json:"read_only"`
+		} `json:"volumes"`
+	} `json:"services"`
+	Secrets map[string]struct {
+		File string `json:"file"`
+	} `json:"secrets"`
+	Configs map[string]struct {
+		File string `json:"file"`
+	} `json:"configs"`
+}
+
+// swappablePath names a host path compose or Docker opens that lies strictly inside a folder a
+// service mounts writable: that container could swap it for a link to anywhere on the server,
+// and Docker follows it on the next start. "" when there is none.
+func swappablePath(m composeHostPaths, root string) string {
+	type use struct{ what, path string }
+	var reads []use
+	var writable []use
+	for _, name := range slices.Sorted(maps.Keys(m.Services)) {
+		svc := m.Services[name]
+		for _, v := range svc.Volumes {
+			if v.Type == "bind" && filepath.IsAbs(v.Source) {
+				reads = append(reads, use{"service " + name + "'s volume", v.Source})
+				if !v.ReadOnly {
+					writable = append(writable, use{"service " + name, v.Source})
+				}
+			}
+		}
+		if b := svc.Build; b != nil && filepath.IsAbs(b.Context) {
+			reads = append(reads, use{"service " + name + "'s build context", b.Context})
+			df := orDefault(b.Dockerfile, "Dockerfile")
+			if !filepath.IsAbs(df) {
+				df = filepath.Join(b.Context, df)
+			}
+			reads = append(reads, use{"service " + name + "'s Dockerfile folder", filepath.Dir(df)})
+			for _, k := range slices.Sorted(maps.Keys(b.AdditionalContexts)) {
+				if p := b.AdditionalContexts[k]; filepath.IsAbs(p) {
+					reads = append(reads, use{"service " + name + "'s build context " + k, p})
+				}
+			}
+		}
+	}
+	for _, k := range slices.Sorted(maps.Keys(m.Secrets)) {
+		if p := m.Secrets[k].File; p != "" {
+			reads = append(reads, use{"secret " + k, p})
+		}
+	}
+	for _, k := range slices.Sorted(maps.Keys(m.Configs)) {
+		if p := m.Configs[k].File; p != "" {
+			reads = append(reads, use{"config " + k, p})
+		}
+	}
+	rel := func(p string) string {
+		r, err := filepath.Rel(root, p)
+		switch {
+		case err != nil || strings.HasPrefix(r, ".."):
+			return p
+		case r == ".":
+			return "./"
+		}
+		return "./" + filepath.ToSlash(r)
+	}
+	for _, r := range reads {
+		for _, w := range writable {
+			if r.path != w.path && strings.HasPrefix(r.path, strings.TrimSuffix(w.path, "/")+"/") {
+				return fmt.Sprintf("%s (%s) is inside %s, which %s mounts writable: a container could swap it for "+
+					"a link to anywhere on the server. Mount %s read-only (:ro), or keep the two apart",
+					r.what, rel(r.path), rel(w.path), w.what, rel(w.path))
+			}
+		}
+	}
+	return ""
+}
+
+// checkSourceStack refuses a source-built stack whose paths a service could swap (see swappablePath).
+func checkSourceStack(ctx context.Context, req *pb.DeployRequest, base []string, root string) error {
+	res, err := dockercli.RunEnv(ctx, 2*time.Minute, dockerConfigEnv(req), append(append([]string{}, base...), "config", "--format", "json")...)
+	if err != nil || res.Code != 0 {
+		return fmt.Errorf("docker compose config: %s", strings.TrimSpace(res.Stderr))
+	}
+	var m composeHostPaths
+	if err := json.Unmarshal([]byte(res.Stdout), &m); err != nil {
+		return fmt.Errorf("read the stack's compose config: %w", err)
+	}
+	if msg := swappablePath(m, root); msg != "" {
+		return errors.New(msg)
+	}
+	return nil
 }

@@ -73,3 +73,42 @@ func TestE2E_ComposeFromSourceKeepsItsDataUntilDestroyed(t *testing.T) {
 		t.Fatalf("DestroyStack left the working copy: %v", err)
 	}
 }
+
+// End-to-end (real docker): a service mounting the whole working copy writable while another
+// mounts a folder inside it is refused before anything is built or started.
+func TestE2E_ComposeFromSourceRefusesANestedWritableBind(t *testing.T) {
+	ctx := context.Background()
+	if !dockercli.Available(ctx) {
+		t.Skip("docker not available")
+	}
+	const slug = "deplo-agent-test-cs-nested"
+	s := New(t.TempDir(), t.TempDir(), "/", "")
+	wc := s.srcDir(slug)
+	t.Cleanup(func() {
+		ctx := context.Background()
+		_, _ = s.DestroyStack(ctx, &pb.StackRef{Slug: slug, RemoveVolumes: true})
+		_, _ = dockercli.Run(ctx, 20*time.Second, "network", "disconnect", "-f", testNetwork, traefikContainer)
+		_, _ = dockercli.Run(ctx, 20*time.Second, "network", "rm", testNetwork)
+	})
+	yaml := "services:\n  writer:\n    image: busybox:1.37\n    volumes: [\"" + wc + ":/w\"]\n" +
+		"  reader:\n    image: busybox:1.37\n    labels: [\"deplo.slug=" + slug + "\"]\n    volumes: [\"" + wc + "/data:/host\"]\n"
+	var res *pb.DeployResult
+	rec := &e2eBuildRecorder{}
+	s.runDeploy(ctx, &pb.DeployRequest{
+		DeployId: "dep_" + slug, Slug: slug, ProjectId: "prj_" + slug,
+		SourceKind: pb.SourceKind_SOURCE_KIND_UPLOAD, BuildKind: pb.BuildKind_BUILD_KIND_COMPOSE, Network: testNetwork,
+		ContextTar: composeTarball(t, map[string]string{"compose.yaml": "services: {}\n"}), ComposeYaml: yaml,
+		ReadyTimeoutMs: 60_000, Ready: &pb.ReadyCheck{},
+	}, &emitter{send: func(ev *pb.DeployEvent) error {
+		if r := ev.GetResult(); r != nil {
+			res = r
+		}
+		return rec.emitter().send(ev)
+	}})
+	if res == nil || res.GetReady() || !strings.Contains(res.GetError(), "service reader's volume (./data) is inside ./, which service writer mounts writable") {
+		t.Fatalf("result %v; log:\n%s", res, rec.joined())
+	}
+	if strings.Contains(rec.joined(), "up -d") {
+		t.Fatal("the stack came up anyway")
+	}
+}

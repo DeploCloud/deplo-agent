@@ -62,7 +62,9 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 		return
 	}
 	// Both reach the build argv and the relabel Dockerfile, where a "-" or a newline would be read as more.
-	if k := req.GetSourceKind(); k == pb.SourceKind_SOURCE_KIND_UPLOAD || k == pb.SourceKind_SOURCE_KIND_GIT {
+	// A stack built from its source names its images in the compose file instead.
+	if k := req.GetSourceKind(); (k == pb.SourceKind_SOURCE_KIND_UPLOAD || k == pb.SourceKind_SOURCE_KIND_GIT) &&
+		req.GetBuildKind() != pb.BuildKind_BUILD_KIND_COMPOSE {
 		if err := validateImageRef(req.GetImageRef()); err != nil {
 			e.result(false, err.Error(), "")
 			return
@@ -199,10 +201,15 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 		if !ok {
 			return
 		}
+		base := composeBaseArgs(name, stackFile, envFile, projectDir)
 		if req.GetBuildKind() == pb.BuildKind_BUILD_KIND_COMPOSE {
+			if err := checkSourceStack(ctx, req, base, s.srcDir(slug)); err != nil {
+				e.result(false, err.Error(), "")
+				return
+			}
 			e.phase(pb.DeployPhase_DEPLOY_PHASE_BUILDING)
 		}
-		images, ok := s.prepareStackImages(ctx, req, composeBaseArgs(name, stackFile, envFile, projectDir), e)
+		images, ok := s.prepareStackImages(ctx, req, base, e)
 		if !ok {
 			return
 		}

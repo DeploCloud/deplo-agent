@@ -3,6 +3,7 @@ package server
 import (
 	"archive/tar"
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -208,6 +209,7 @@ func composeTarball(t *testing.T, files map[string]string) []byte {
 func TestComposeDeployBuildsFromTheWorkingCopy(t *testing.T) {
 	calls := dockerOnPath(t, `case "$*" in
 *" config --images"*) echo deplo/deplo-agent-test-leg2-web:t ;;
+*" config --format json"*) echo '{"services":{"web":{"build":{"context":"/x"}}}}' ;;
 "image inspect "*) echo null ;;
 "ps "*) echo 0123abcd ;;
 esac
@@ -295,5 +297,43 @@ func TestStripSourceLinksBeforeAStart(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(wc, "data", "alias")); err != nil {
 		t.Fatalf("a link inside the copy was removed: %v", err)
+	}
+}
+
+func hostPathsModel(t *testing.T, raw string) composeHostPaths {
+	t.Helper()
+	var m composeHostPaths
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+// A folder a service mounts writable may hold no path that compose or Docker opens later: the
+// container could swap it for a link, and Docker would mount or read wherever it points.
+func TestSwappablePath(t *testing.T) {
+	const root = "/data/stacks/app.src"
+	ok := []string{
+		`{"services":{"web":{"build":{"context":"/data/stacks/app.src"},"volumes":[{"type":"bind","source":"/data/stacks/app.src","target":"/app"}]}}}`,
+		`{"services":{"db":{"volumes":[{"type":"bind","source":"/data/stacks/app.src/data","target":"/d"}]},"web":{"build":{"context":"/data/stacks/app.src/web"},"volumes":[{"type":"bind","source":"/data/stacks/app.src","target":"/app","read_only":true},{"type":"volume","source":"named","target":"/n"}]}}}`,
+		`{"services":{"a":{"volumes":[{"type":"bind","source":"/data/stacks/app.src/data","target":"/d"}]},"b":{"volumes":[{"type":"bind","source":"/data/stacks/app.src/data","target":"/e"}]}}}`,
+		`{"services":{"web":{"build":{"context":"/data/stacks/app.src/web","additional_contexts":{"img":"docker-image://busybox"}},"volumes":[{"type":"bind","source":"/data/stacks/app.src/data","target":"/d"}]}}}`,
+	}
+	for _, raw := range ok {
+		if msg := swappablePath(hostPathsModel(t, raw), root); msg != "" {
+			t.Errorf("refused %s: %s", raw, msg)
+		}
+	}
+	bad := map[string]string{
+		`{"services":{"a":{"volumes":[{"type":"bind","source":"/data/stacks/app.src","target":"/w"}]},"b":{"volumes":[{"type":"bind","source":"/data/stacks/app.src/data","target":"/host"}]}}}`: "service b's volume (./data) is inside ./, which service a mounts writable",
+		`{"services":{"web":{"build":{"context":"/data/stacks/app.src/web"},"volumes":[{"type":"bind","source":"/data/stacks/app.src","target":"/repo"}]}}}`:                                     "service web's build context (./web) is inside ./",
+		`{"services":{"web":{"build":{"context":"/data/stacks/app.src","dockerfile":"docker/Dockerfile"},"volumes":[{"type":"bind","source":"/data/stacks/app.src","target":"/r"}]}}}`:           "service web's Dockerfile folder (./docker)",
+		`{"services":{"web":{"volumes":[{"type":"bind","source":"/data/stacks/app.src","target":"/r"}]}},"secrets":{"tok":{"file":"/data/stacks/app.src/tok.txt"}}}`:                             "secret tok (./tok.txt)",
+		`{"services":{"web":{"volumes":[{"type":"bind","source":"/data/stacks/app.src","target":"/r"}]}},"configs":{"cfg":{"file":"/data/stacks/app.src/a.ini"}}}`:                               "config cfg (./a.ini)",
+	}
+	for raw, want := range bad {
+		if msg := swappablePath(hostPathsModel(t, raw), root); !strings.Contains(msg, want) || !strings.Contains(msg, "read-only (:ro)") {
+			t.Errorf("%s: %q, want %q", raw, msg, want)
+		}
 	}
 }
