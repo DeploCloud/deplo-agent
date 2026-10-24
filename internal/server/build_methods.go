@@ -258,6 +258,10 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 	} else if fixed {
 		e.log("info", "Looking for the Gradle jar in build/libs too")
 	}
+	if err := tuneRailpackPlan(planPath); err != nil {
+		e.result(false, "read the railpack plan: "+err.Error(), "")
+		return false
+	}
 
 	secretNames, ok := readPlanSecrets(planPath)
 	if !ok {

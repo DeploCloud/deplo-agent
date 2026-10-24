@@ -26,7 +26,7 @@ func TestRailpackDownloadURL(t *testing.T) {
 	if _, err := railpackAssetURL(railpackVersion, "linux", "386"); err == nil {
 		t.Fatal("an arch railpack does not publish must be refused")
 	}
-	if railpackFrontend != "ghcr.io/railwayapp/railpack-frontend:v0.43.0" {
+	if !strings.HasPrefix(railpackFrontend, "ghcr.io/railwayapp/railpack-frontend:v0.43.0@sha256:") {
 		t.Fatalf("frontend %s does not match the CLI", railpackFrontend)
 	}
 }

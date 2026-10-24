@@ -107,6 +107,12 @@ func TestE2E_RailpackBuildsLabelledImageWithoutBuildkitdContainer(t *testing.T) 
 	}
 
 	log := rec.joined()
+	// A railpack bump that moves its base images to new tags must bring their digests (railpackImageDigests).
+	for _, line := range strings.Split(log, "\n") {
+		if strings.Contains(line, "docker-image://ghcr.io/railwayapp/railpack-") && !strings.Contains(line, "@sha256:") {
+			t.Fatalf("railpack's own image is not pinned by digest: %s", line)
+		}
+	}
 	for _, forbidden := range []string{"deplo-buildkitd-", "docker load", "buildctl", "apt-get"} {
 		if strings.Contains(log, forbidden) {
 			t.Fatalf("railpack still uses %q; log:\n%s", forbidden, log)

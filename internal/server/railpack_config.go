@@ -137,14 +137,8 @@ const railpackGradleStart = "ls -1 */build/libs/*jar"
 
 // fixGradleStart widens that lookup to build/libs too; any other start command is left as it is.
 func fixGradleStart(planPath string) (bool, error) {
-	b, err := os.ReadFile(planPath)
-	if err != nil || !bytes.Contains(b, []byte(railpackGradleStart)) {
-		return false, err
-	}
-	dec := json.NewDecoder(bytes.NewReader(b))
-	dec.UseNumber()
-	var plan map[string]any
-	if err := dec.Decode(&plan); err != nil {
+	plan, err := readPlan(planPath)
+	if err != nil {
 		return false, err
 	}
 	deploy, _ := plan["deploy"].(map[string]any)
@@ -153,13 +147,7 @@ func fixGradleStart(planPath string) (bool, error) {
 		return false, nil
 	}
 	deploy["startCommand"] = strings.Replace(start, railpackGradleStart, "ls -1 build/libs/*jar */build/libs/*jar 2>/dev/null", 1)
-	var out bytes.Buffer
-	enc := json.NewEncoder(&out)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(plan); err != nil {
-		return false, err
-	}
-	return true, os.WriteFile(planPath, out.Bytes(), 0o644)
+	return true, writePlan(planPath, plan)
 }
 
 // The repository files that pin each tool; mise reads them over the version Railpack resolved.

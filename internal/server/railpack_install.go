@@ -18,7 +18,15 @@ import (
 // The railpack CLI and frontend every build uses: the version Deplo tests, never an app's choice.
 const railpackVersion = "0.43.0"
 
-const railpackFrontend = "ghcr.io/railwayapp/railpack-frontend:v" + railpackVersion
+// The frontend and the base images its plans name, each pinned to the digest its tag had when Deplo
+// tested it: a warm build then reads them locally instead of asking GHCR, and still builds while GHCR is down.
+const railpackFrontend = "ghcr.io/railwayapp/railpack-frontend:v" + railpackVersion +
+	"@sha256:355ef61fae6f2551103cd8b10c710cb07167dd353d561f15c69b8d7ac1c676cc"
+
+var railpackImageDigests = map[string]string{
+	"ghcr.io/railwayapp/railpack-builder:mise-2026.10.14": "sha256:03df9e9aa1e786c2e0dd12c5409acad3bbd5a0fa8a75c1117c7ddab5c0c3fde4",
+	"ghcr.io/railwayapp/railpack-runtime:mise-2026.10.14": "sha256:02820533713338569ae4d4f0df986c3e7cc6e93457fd06fbb0d2cfa86fba9cdb",
+}
 
 func (s *Service) ensureRailpack(ctx context.Context, version string, e *emitter) (string, error) {
 	if p, err := exec.LookPath("railpack"); err == nil && railpackBinaryVersion(ctx, p) == version {
