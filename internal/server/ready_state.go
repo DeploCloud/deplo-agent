@@ -81,6 +81,14 @@ func (r *readyCheck) exitOf(c readySample) int {
 	return c.exitCode
 }
 
+// exitNote names the exit code only once a sample saw it: Docker resets it to 0 when it restarts the app.
+func (r *readyCheck) exitNote(c readySample) string {
+	if _, seen := r.exits[c.id]; c.exitCode != 0 || seen {
+		return fmt.Sprintf(" (exit code %d)", r.exitOf(c))
+	}
+	return ""
+}
+
 func (r *readyCheck) wait(c readySample, msg string) {
 	r.pending, r.pendingID = msg, c.id
 }
@@ -110,7 +118,7 @@ func (r *readyCheck) observe(now time.Time, samples []readySample) readyVerdict 
 			base.startedAt = c.startedAt
 		}
 		r.first[c.id] = base
-		if c.status != "running" && c.exitCode != 0 {
+		if c.status == "restarting" || c.status == "exited" || c.status == "dead" {
 			r.exits[c.id] = c.exitCode
 		}
 		who := r.who(c)
@@ -119,10 +127,10 @@ func (r *readyCheck) observe(now time.Time, samples []readySample) readyVerdict 
 		case restarted && c.oomKilled:
 			return r.fail(c, who+" was stopped: out of memory")
 		case restarted && (!r.stack || c.restarts-base.restarts >= stackRestartLimit):
-			return r.fail(c, fmt.Sprintf("%s keeps restarting (exit code %d)", who, r.exitOf(c)))
+			return r.fail(c, who+" keeps restarting"+r.exitNote(c))
 		case restarted && (c.status == "restarting" || c.status == "running" && now.Sub(c.startedAt) < readySettle):
 			// It counts once it has stayed up through the settle window since its last start.
-			r.wait(c, fmt.Sprintf("%s keeps restarting (exit code %d)", who, r.exitOf(c)))
+			r.wait(c, who+" keeps restarting"+r.exitNote(c))
 		case c.status == "exited" || c.status == "dead":
 			if r.stack && c.exitCode == 0 && slices.Contains([]string{"", "no", "on-failure"}, c.restartPolicy) {
 				continue // a one-shot that finished

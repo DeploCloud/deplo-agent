@@ -408,3 +408,20 @@ func TestReadyCheckIgnoresAnEphemeralLoopbackPort(t *testing.T) {
 		}
 	}
 }
+
+// Docker restarts a crashing app between two samples and resets its exit code: an unseen code is not named.
+func TestReadyCheckNamesOnlyAnExitCodeItSaw(t *testing.T) {
+	again := up("app", at(3))
+	again.restarts = 1
+	v := runReady(newReadyCheck(3000, true, "", false), step(at(1), up("app", t0)), step(at(4), again))
+	if !v.done || v.err != "The app keeps restarting" {
+		t.Fatalf("unseen exit: %+v", v)
+	}
+	loop := up("app", t0)
+	loop.status, loop.exitCode = "restarting", 1
+	again.exitCode = 0
+	v = runReady(newReadyCheck(3000, true, "", false), step(at(1), loop), step(at(4), again))
+	if !v.done || v.err != "The app keeps restarting (exit code 1)" {
+		t.Fatalf("seen exit: %+v", v)
+	}
+}
