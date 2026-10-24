@@ -85,6 +85,7 @@ var Capabilities = []string{
 	"deploy.build-only",
 	"build.railpack-output-dir",
 	"build.github-token",
+	"build.memory-cap",
 	"image-copy",
 	"deploy.registry-auth",
 	"cleanup.images.by-repository",

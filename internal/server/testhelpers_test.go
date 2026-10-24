@@ -7,6 +7,12 @@ import (
 	"testing"
 )
 
+// Unit tests never cap this host's own build cgroups; a test that wants the watcher points it at a tree.
+func TestMain(m *testing.M) {
+	buildStepCgroupDir = ""
+	os.Exit(m.Run())
+}
+
 func mustWrite(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

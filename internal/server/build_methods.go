@@ -304,6 +304,8 @@ func (s *Service) runBuildKit(ctx context.Context, req *pb.DeployRequest, timeou
 func (s *Service) streamBuild(ctx context.Context, req *pb.DeployRequest, timeout time.Duration, args []string, env []string, e *emitter, nodeMajor string) bool {
 	env = append(env, dockerConfigEnv(req)...)
 	e.log("command", "docker "+strings.Join(args, " "))
+	limit, release := capBuildSteps()
+	defer release()
 	tail := &lineTail{max: 200}
 	code, err := dockercli.StreamEnv(ctx, timeout, func(l string) { tail.add(l); e.log("info", l) }, env, args...)
 	if err != nil {
@@ -311,14 +313,23 @@ func (s *Service) streamBuild(ctx context.Context, req *pb.DeployRequest, timeou
 		return false
 	}
 	if code != 0 {
-		msg := fmt.Sprintf("docker build failed (exit %d)", code)
-		if hint := buildHint(tail.lines, req.GetGithubToken() != "", nodeMajor); hint != "" {
-			msg += ". " + hint
-		}
-		e.result(false, msg, "")
+		e.result(false, buildFailure("docker build", code, tail.lines, limit, req, nodeMajor), "")
 		return false
 	}
 	return true
+}
+
+// buildFailure is a failed build's error: the exit code, then a cause its output shows.
+func buildFailure(what string, code int, lines []string, limit int64, req *pb.DeployRequest, nodeMajor string) string {
+	msg := fmt.Sprintf("%s failed (exit %d)", what, code)
+	hint := memoryKilled(lines, limit)
+	if hint == "" {
+		hint = buildHint(lines, req.GetGithubToken() != "", nodeMajor)
+	}
+	if hint != "" {
+		msg += ". " + hint
+	}
+	return msg
 }
 
 func imageTag(ref string) string {
