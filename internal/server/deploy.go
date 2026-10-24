@@ -38,9 +38,12 @@ func (e *emitter) phase(p pb.DeployPhase) {
 }
 
 func (e *emitter) result(ready bool, errMsg, commitSha string) {
-	_ = e.send(&pb.DeployEvent{Event: &pb.DeployEvent_Result{
-		Result: &pb.DeployResult{Ready: ready, Error: errMsg, CommitSha: commitSha},
-	}})
+	e.finish(&pb.DeployResult{Ready: ready, Error: errMsg, CommitSha: commitSha})
+}
+
+// finish sends the deploy's result.
+func (e *emitter) finish(r *pb.DeployResult) {
+	_ = e.send(&pb.DeployEvent{Event: &pb.DeployEvent_Result{Result: r}})
 }
 
 func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitter) {
@@ -202,6 +205,10 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 	}
 
 	e.phase(pb.DeployPhase_DEPLOY_PHASE_WAITING)
+	if req.GetReady() != nil {
+		s.waitReady(ctx, req, isCompose, commitSha, e)
+		return
+	}
 	timeout := time.Duration(req.GetReadyTimeoutMs()) * time.Millisecond
 	if timeout <= 0 {
 		timeout = 60 * time.Second
@@ -241,14 +248,19 @@ func (s *Service) startStack(ctx context.Context, req *pb.DeployRequest, e *emit
 		upLog += " " + strings.Join(extra, " ")
 	}
 	e.log("command", upLog)
-	code, err := dockercli.StreamEnv(ctx, 15*time.Minute, func(l string) { e.log("info", l) },
+	tail := &lineTail{max: 50}
+	code, err := dockercli.StreamEnv(ctx, 15*time.Minute, func(l string) { tail.add(l); e.log("info", l) },
 		dockerConfigEnv(req), composeArgs...)
 	if err != nil {
 		e.result(false, "compose up: "+err.Error(), "")
 		return false
 	}
 	if code != 0 {
-		e.result(false, fmt.Sprintf("docker compose up failed (exit %d)", code), "")
+		msg := fmt.Sprintf("docker compose up failed (exit %d)", code)
+		if hint := startHint(0, tail.lines); hint != "" {
+			msg += ". " + hint
+		}
+		e.result(false, msg, "")
 		return false
 	}
 	return true
