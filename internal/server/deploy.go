@@ -24,6 +24,8 @@ import (
 
 type emitter struct {
 	send func(*pb.DeployEvent) error
+	// What auto detection chose to build with, reported on every result after it.
+	builtWith string
 }
 
 func (e *emitter) log(level, text string) {
@@ -44,6 +46,7 @@ func (e *emitter) result(ready bool, errMsg, commitSha string) {
 
 // finish sends the deploy's result.
 func (e *emitter) finish(r *pb.DeployResult) {
+	r.BuiltWith = e.builtWith
 	_ = e.send(&pb.DeployEvent{Event: &pb.DeployEvent_Result{Result: r}})
 }
 
@@ -327,6 +330,8 @@ func (s *Service) fromSource(ctx context.Context, req *pb.DeployRequest, dir, co
 		return false
 	case req.GetBuildKind() == pb.BuildKind_BUILD_KIND_COMPOSE:
 		return s.updateWorkingCopy(req, dir, e)
+	case req.GetBuildKind() == pb.BuildKind_BUILD_KIND_RAILPACK && req.GetBuildSpec().GetAutoMethod():
+		return s.buildDetected(ctx, req, dir, commitSha, e)
 	}
 	return s.buildImage(ctx, req, dir, e)
 }
@@ -422,7 +427,7 @@ func shortSha(sha string) string {
 func (s *Service) buildImage(ctx context.Context, req *pb.DeployRequest, buildDir string, e *emitter) bool {
 	switch req.GetBuildKind() {
 	case pb.BuildKind_BUILD_KIND_DOCKERFILE:
-		return s.buildDockerfile(ctx, req, buildDir, e)
+		return s.buildDockerfile(ctx, req, req.GetDockerfile(), buildDir, e)
 	case pb.BuildKind_BUILD_KIND_RAILPACK:
 		return s.buildRailpack(ctx, req, buildDir, e)
 	default:
@@ -431,8 +436,7 @@ func (s *Service) buildImage(ctx context.Context, req *pb.DeployRequest, buildDi
 	}
 }
 
-func (s *Service) buildDockerfile(ctx context.Context, req *pb.DeployRequest, buildDir string, e *emitter) bool {
-	df := req.GetDockerfile()
+func (s *Service) buildDockerfile(ctx context.Context, req *pb.DeployRequest, df *pb.DockerfileBuild, buildDir string, e *emitter) bool {
 	labels := labelArgs(req)
 
 	e.phase(pb.DeployPhase_DEPLOY_PHASE_BUILDING)

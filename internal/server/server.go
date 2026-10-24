@@ -88,6 +88,7 @@ var Capabilities = []string{
 	"build.memory-cap",
 	"deploy.ready-check",
 	"deploy.compose.source",
+	"build.auto-method",
 	"image-copy",
 	"deploy.registry-auth",
 	"cleanup.images.by-repository",
