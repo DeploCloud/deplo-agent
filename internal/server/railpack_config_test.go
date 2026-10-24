@@ -168,3 +168,30 @@ func TestFixGradleStartFindsASingleModuleJar(t *testing.T) {
 		t.Fatal("a start command the user wrote was changed")
 	}
 }
+
+func TestPinVersionFilesLetsTheAppsVersionWin(t *testing.T) {
+	dir, outside := t.TempDir(), t.TempDir()
+	_ = os.WriteFile(filepath.Join(dir, ".python-version"), []byte("3.15\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(outside, "host-file"), []byte("18\n"), 0o644)
+	if err := os.Symlink(filepath.Join(outside, "host-file"), filepath.Join(dir, ".nvmrc")); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(dir, ".ruby-version"), []byte("3.3.5\n"), 0o644)
+	pinned := map[string]string{"RAILPACK_PYTHON_VERSION": "3.13", "RAILPACK_NODE_VERSION": "22", "RAILPACK_RUBY_VERSION": "3.3.5"}
+	changed := pinVersionFiles(dir, func(env string) string { return pinned[env] })
+	if len(changed) != 2 || !strings.Contains(changed[0], "Python 3.13 over the repository's .python-version (3.15)") {
+		t.Fatalf("changed = %q", changed)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, ".python-version")); string(b) != "3.13\n" {
+		t.Fatalf(".python-version = %q", b)
+	}
+	if strings.Contains(strings.Join(changed, " "), "(18)") {
+		t.Fatal("the content behind a link reached the log")
+	}
+	if b, _ := os.ReadFile(filepath.Join(outside, "host-file")); string(b) != "18\n" {
+		t.Fatal("a linked version file was written through to the file it points at")
+	}
+	if fi, _ := os.Lstat(filepath.Join(dir, ".nvmrc")); fi.Mode()&os.ModeSymlink != 0 {
+		t.Fatal(".nvmrc is still a link")
+	}
+}

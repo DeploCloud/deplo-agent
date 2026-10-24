@@ -173,6 +173,9 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 		e.log("info", "Using Java "+v+", the version the Gradle build asks for")
 	}
 	envKeys := filterKeys(buildEnvKeys(userEnv), func(k string) bool { _, ours := known[k]; return !ours })
+	for _, c := range pinVersionFiles(buildDir, func(env string) string { return orDefault(known[env], userEnv[env]) }) {
+		e.log("info", "Using "+c)
+	}
 	prepareArgs := []string{"prepare", buildDir, "--plan-out", planPath, "--info-out", infoPath, "--error-missing-start"}
 
 	if spec.GetStaticSinglePageApp() {

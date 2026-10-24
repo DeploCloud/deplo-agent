@@ -161,3 +161,46 @@ func fixGradleStart(planPath string) (bool, error) {
 	}
 	return true, os.WriteFile(planPath, out.Bytes(), 0o644)
 }
+
+// The repository files that pin each tool; mise reads them over the version Railpack resolved.
+var versionFiles = []struct {
+	env, tool string
+	files     []string
+}{
+	{"RAILPACK_PYTHON_VERSION", "Python", []string{".python-version"}},
+	{"RAILPACK_NODE_VERSION", "Node", []string{".nvmrc", ".node-version"}},
+	{"RAILPACK_RUBY_VERSION", "Ruby", []string{".ruby-version"}},
+	{"RAILPACK_GO_VERSION", "Go", []string{".go-version"}},
+	{"RAILPACK_JDK_VERSION", "Java", []string{".java-version"}},
+}
+
+// pinVersionFiles makes a version set for the app win over the repository's own version file in the build
+// copy: the build's mise reads that file before the version Railpack planned. It returns what it changed.
+func pinVersionFiles(buildDir string, pinned func(env string) string) []string {
+	var changed []string
+	for _, vf := range versionFiles {
+		v := strings.TrimSpace(pinned(vf.env))
+		if v == "" {
+			continue
+		}
+		for _, name := range vf.files {
+			path := filepath.Join(buildDir, name)
+			fi, err := os.Lstat(path)
+			if err != nil {
+				continue
+			}
+			old := []byte("a link")
+			if fi.Mode().IsRegular() {
+				old, _ = os.ReadFile(path)
+			}
+			if strings.TrimSpace(string(old)) == v {
+				continue
+			}
+			if err := writeBuildFile(path, []byte(v+"\n")); err == nil {
+				changed = append(changed, fmt.Sprintf("%s %s over the repository's %s (%s)", vf.tool, v, name,
+					orDefault(strings.TrimSpace(string(old)), "unreadable")))
+			}
+		}
+	}
+	return changed
+}
