@@ -18,6 +18,7 @@ type hostFixture struct {
 	buildCacheJSON  string
 	danglingImages  []string
 	managedImages   []string
+	builtImages     []string
 	imageRows       map[string]string
 	danglingVolumes []string
 	volumeMounts    map[string]string
@@ -60,6 +61,8 @@ func (h *hostFixture) query(args []string) (dockercli.Result, error) {
 		return okResult(strings.Join(h.danglingImages, "\n")), nil
 	case strings.HasPrefix(key, "image ls --filter label=deplo.managed=true"):
 		return okResult(strings.Join(h.managedImages, "\n")), nil
+	case strings.HasPrefix(key, "image ls --filter reference=deplo/*"):
+		return okResult(strings.Join(h.builtImages, "\n")), nil
 	case strings.HasPrefix(key, "image ls --filter dangling=false"):
 		return okResult(strings.Join(h.taggedImages, "\n")), nil
 	case strings.HasPrefix(key, "network ls"):

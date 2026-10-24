@@ -444,3 +444,64 @@ func TestInspectImages_labelsThroughWith(t *testing.T) {
 		t.Fatalf("labels must be reached with index, never dotted, got %q", format)
 	}
 }
+
+// A Railpack image carries no labels (its frontend drops --label): its deplo/<slug>:dpl_ name alone makes it
+// the app's, ranked with the app's labelled images, the newest kept for a rollback.
+func TestDockerCleanup_unusedAppImages_adoptsAnUnlabelledBuild(t *testing.T) {
+	h := newFixture(t)
+	now := time.Now()
+	row := func(id, slug, managed string, hoursAgo int, tag string) string {
+		return "sha256:" + id + "|" + slug + "|<no value>|" + now.Add(-time.Duration(hoursAgo)*time.Hour).Format(time.RFC3339Nano) +
+			"|100000000|" + tag + "|" + managed + "|\"\"|" + tag + "|"
+	}
+	h.managedImages = []string{"old1111"}
+	h.builtImages = []string{"new1111", "mid1111", "old1111"}
+	h.imageRows = map[string]string{
+		"new1111": row("new", "<no value>", "<no value>", 2, "deplo/web:dpl_0a1b2c3d4e5f"),
+		"mid1111": row("mid", "<no value>", "<no value>", 6, "deplo/web:dpl_99887766aabb"),
+		"old1111": row("old", "web", "true", 9, "deplo/web:dpl_123456789abc"),
+	}
+	h.install(t)
+
+	if _, err := newService(t).DockerCleanup(context.Background(), &pb.DockerCleanupRequest{
+		Scopes:           []pb.CleanupScope{pb.CleanupScope_CLEANUP_SCOPE_UNUSED_APP_IMAGES},
+		KeepImagesPerApp: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got := h.argv()
+	if len(got) != 2 || !containsString(got, "rmi sha256:mid") || !containsString(got, "rmi sha256:old") {
+		t.Fatalf("argv = %q, want the two older generations removed and the newest kept", got)
+	}
+}
+
+// The same name keeps it out of "pulled images": it is in no registry, and a name that only looks like
+// Deplo's (another tag, another namespace) stays a pulled image.
+func TestDockerCleanup_unusedPulledImages_neverTakesAnUnlabelledBuild(t *testing.T) {
+	h := newFixture(t)
+	old := time.Now().Add(-72 * time.Hour).Format(time.RFC3339Nano)
+	row := func(id, tag string) string {
+		return "sha256:" + id + "|<no value>|<no value>|" + old + "|300000000|" + tag + "||\"" + old + "\"|" + tag + "|" +
+			repoOf(tag) + "@sha256:" + strings.Repeat("a", 64)
+	}
+	for _, tag := range []string{"deplo/web:dpl_0a1b2c3d4e5f", "deplo/web:latest", "acme/deplo:dpl_0a1b2c3d4e5f"} {
+		h.registryRefs[tag] = true
+		h.registryRefs[repoOf(tag)+"@sha256:"+strings.Repeat("a", 64)] = true
+	}
+	h.taggedImages = []string{"b1", "b2", "b3"}
+	h.imageRows["b1"] = row("b1", "deplo/web:dpl_0a1b2c3d4e5f")
+	h.imageRows["b2"] = row("b2", "deplo/web:latest")
+	h.imageRows["b3"] = row("b3", "acme/deplo:dpl_0a1b2c3d4e5f")
+	h.install(t)
+
+	if _, err := newService(t).DockerCleanup(context.Background(), &pb.DockerCleanupRequest{
+		Scopes:      []pb.CleanupScope{pb.CleanupScope_CLEANUP_SCOPE_UNUSED_PULLED_IMAGES},
+		MinAgeHours: 24,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := "rmi deplo/web:latest;rmi acme/deplo:dpl_0a1b2c3d4e5f"
+	if got := strings.Join(h.argv(), ";"); got != want {
+		t.Fatalf("removals = %s, want %s", got, want)
+	}
+}

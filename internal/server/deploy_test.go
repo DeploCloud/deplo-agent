@@ -89,8 +89,8 @@ func TestMaterializeUpload_rejectsSymlink(t *testing.T) {
 	}
 }
 
-// image_ref reaches the build argv and, with project_id, the relabel Dockerfile: a leading "-" is a
-// flag and a newline is another instruction, so a build refuses both before anything runs.
+// image_ref reaches the build argv and, with project_id, a --label value: a leading "-" is a flag
+// and a newline breaks the value, so a build refuses both before anything runs.
 func TestRunDeployRefusesAnUnsafeImageRefOrProjectID(t *testing.T) {
 	s := newTestService(t)
 	for _, req := range []*pb.DeployRequest{

@@ -27,36 +27,6 @@ func labelArgs(req *pb.DeployRequest) []string {
 	}
 }
 
-// Only metadata, but a big image on a slow disk can take a minute just to be read back.
-const relabelTimeout = 10 * time.Minute
-
-func relabelFailure(err error) string {
-	if strings.Contains(err.Error(), "timed out") {
-		return "Deplo could not finish preparing the app's image in 10 minutes. Deploy again; if it keeps " +
-			"happening, the server's disk is probably full or slow."
-	}
-	return "relabel build: " + err.Error()
-}
-
-func (s *Service) relabel(ctx context.Context, req *pb.DeployRequest, e *emitter) bool {
-	dockerfile := fmt.Sprintf(
-		"FROM %s\nLABEL deplo.managed=true deplo.project=%s deplo.slug=%s\n",
-		req.GetImageRef(), req.GetProjectId(), req.GetSlug(),
-	)
-	e.log("command", "docker build (relabel "+req.GetImageRef()+")")
-	code, err := dockercli.Stream(ctx, relabelTimeout, func(l string) { e.log("info", l) },
-		dockerfile, "build", "-t", req.GetImageRef(), "-")
-	if err != nil {
-		e.result(false, relabelFailure(err), "")
-		return false
-	}
-	if code != 0 {
-		e.result(false, fmt.Sprintf("relabel build failed (exit %d)", code), "")
-		return false
-	}
-	return true
-}
-
 // writeBuildFile writes an agent-owned file into a checkout, replacing a symlink the repo put
 // there instead of writing through it to wherever it points on the host.
 func writeBuildFile(path string, data []byte) error {
@@ -276,10 +246,8 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 	args := railpackBuildArgs(railpackFrontend, planPath, buildDir, secretNames,
 		imageOutputArgs(ctx, req.GetImageRef()), req.GetNoBuildCache(), s.cacheNamespace(req.GetSlug()),
 		s.secretsHash(secretEnv))
-	if !s.runBuildKit(ctx, req, args, secretEnv, e, info.major("node")) {
-		return false
-	}
-	return s.relabel(ctx, req, e)
+	// No relabel pass: the frontend drops --label, and cleanup knows these images by their deplo/<slug>:dpl_ name.
+	return s.runBuildKit(ctx, req, args, secretEnv, e, info.major("node"))
 }
 
 // railpackSettings maps the build spec onto railpack's own variables. Only what the app set

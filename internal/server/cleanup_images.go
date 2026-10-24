@@ -5,6 +5,7 @@ import (
 	"errors"
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"log"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -93,17 +94,20 @@ func cleanDanglingImages(ctx context.Context, p cleanupParams) *pb.CleanupScopeR
 func cleanUnusedAppImages(ctx context.Context, p cleanupParams, idx *containerIndex) *pb.CleanupScopeResult {
 	r := &pb.CleanupScopeResult{Scope: pb.CleanupScope_CLEANUP_SCOPE_UNUSED_APP_IMAGES}
 
-	res, err := dockerQuery(ctx, cleanupQueryTimeout,
-		"image", "ls", "--filter", "label=deplo.managed=true", "--quiet")
-	if err != nil {
-		r.Error = err.Error()
-		return r
+	var ids strings.Builder
+	for _, filter := range []string{"label=deplo.managed=true", "reference=deplo/*"} {
+		res, err := dockerQuery(ctx, cleanupQueryTimeout, "image", "ls", "--filter", filter, "--quiet")
+		if err != nil {
+			r.Error = err.Error()
+			return r
+		}
+		if res.Code != 0 {
+			r.Error = dockerErr("image ls", res)
+			return r
+		}
+		ids.WriteString(res.Stdout + "\n")
 	}
-	if res.Code != 0 {
-		r.Error = dockerErr("image ls", res)
-		return r
-	}
-	images, err := inspectImages(ctx, uniqueLines(res.Stdout))
+	images, err := inspectImages(ctx, uniqueLines(ids.String()))
 	if err != nil {
 		r.Error = err.Error()
 		return r
@@ -345,6 +349,9 @@ func inspectImages(ctx context.Context, ids []string) ([]imageInfo, error) {
 		if len(parts) > 9 {
 			im.digests = strings.FieldsFunc(parts[9], func(r rune) bool { return r == ',' })
 		}
+		if !im.managed {
+			im.adoptBuiltName()
+		}
 		out = append(out, im)
 	}
 	if res.Code != 0 && len(out) == 0 {
@@ -352,6 +359,21 @@ func inspectImages(ctx context.Context, ids []string) ([]imageInfo, error) {
 	}
 	return out, nil
 }
+
+// builtImageName is the name every Deplo build tags its image with (deployImageRef): deplo/<slug>:dpl_<id>.
+var builtImageName = regexp.MustCompile(`^(?:docker\.io/)?deplo/([a-z0-9][a-z0-9_.-]*):dpl_[0-9a-f]+$`)
+
+// adoptBuiltName marks an image Deplo built without labels as the app's own: a Railpack build has none,
+// since its frontend drops --label.
+func (im *imageInfo) adoptBuiltName() {
+	for _, tag := range im.tags {
+		if m := builtImageName.FindStringSubmatch(tag); m != nil && (im.slug == "" || im.slug == m[1]) {
+			im.managed, im.slug = true, m[1]
+			return
+		}
+	}
+}
+
 func repoOf(ref string) string {
 	if i := strings.Index(ref, "@"); i >= 0 {
 		ref = ref[:i]

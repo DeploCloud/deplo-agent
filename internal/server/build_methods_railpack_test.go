@@ -308,10 +308,3 @@ func TestBuildRunErrorSaysATimeoutInWords(t *testing.T) {
 		t.Fatalf("result = %v", res)
 	}
 }
-
-func TestRelabelTimeoutReadsAsAnImageThatTookTooLong(t *testing.T) {
-	got := relabelFailure(errors.New("docker build -t deplo/web:dpl_1 - timed out after 10m0s"))
-	if strings.Contains(got, "docker build") || !strings.Contains(got, "in 10 minutes") {
-		t.Fatalf("got %q", got)
-	}
-}
