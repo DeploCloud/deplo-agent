@@ -161,3 +161,71 @@ func TestE2E_BuildAsksForFastExportWhenSupported(t *testing.T) {
 		t.Fatalf("built image is not in the image store: %v %s", err, res.Stderr)
 	}
 }
+
+// End-to-end (real docker): a static folder with an output directory and the single-page flag
+// is served by Railpack with every unknown path answered by index.html.
+func TestE2E_RailpackServesASinglePageApp(t *testing.T) {
+	ctx := context.Background()
+	if !dockercli.Available(ctx) {
+		t.Skip("docker not available")
+	}
+	if !dockercli.ImageExportOptsSupported(ctx) {
+		t.Skip("railpack's frontend needs the containerd image store (mergeop); this daemon uses the classic store")
+	}
+	const image, name = "deplo-agent-test/railpack-spa:e2e", "deplo-agent-test-railpack-spa"
+	t.Cleanup(func() {
+		_, _ = dockercli.Run(context.Background(), 30*time.Second, "rm", "-f", name)
+		_, _ = dockercli.Run(context.Background(), 60*time.Second, "rmi", "-f", image)
+	})
+	buildDir := t.TempDir()
+	mustWrite(t, filepath.Join(buildDir, "dist", "index.html"), "<h1>spa-shell</h1>\n")
+	req := &pb.DeployRequest{
+		Slug: "deplo-agent-test-railpack-spa", ProjectId: "prj_spa", ImageRef: image,
+		BuildKind: pb.BuildKind_BUILD_KIND_RAILPACK,
+		BuildSpec: &pb.BuildSpec{Method: "railpack", OutputDirectory: "dist", StaticSinglePageApp: true},
+	}
+	rec := &e2eBuildRecorder{}
+	if !New(t.TempDir(), t.TempDir(), "/", e2eToolsBase(t)).buildImage(ctx, req, buildDir, rec.emitter()) {
+		t.Fatalf("build failed; log:\n%s", rec.joined())
+	}
+	if run, err := dockercli.Run(ctx, 60*time.Second, "run", "-d", "--name", name, "-e", "PORT=8080", image); err != nil || run.Code != 0 {
+		t.Fatalf("run: %v %s", err, run.Stderr)
+	}
+	var body string
+	for i := 0; i < 30 && !strings.Contains(body, "spa-shell"); i++ {
+		time.Sleep(time.Second)
+		got, _ := dockercli.Run(ctx, 30*time.Second, "run", "--rm", "--network", "container:"+name, "busybox:1.37",
+			"wget", "-qO-", "http://127.0.0.1:8080/some/client/route")
+		body = got.Stdout
+	}
+	if !strings.Contains(body, "spa-shell") {
+		t.Fatalf("an unknown path did not get index.html: %q; build log:\n%s", body, rec.joined())
+	}
+}
+
+// End-to-end (real docker): with --error-missing-start a project railpack cannot start fails at
+// prepare, and the result says where to set the start command.
+func TestE2E_RailpackNamesAMissingStartCommand(t *testing.T) {
+	ctx := context.Background()
+	if !dockercli.Available(ctx) {
+		t.Skip("docker not available")
+	}
+	buildDir := t.TempDir()
+	mustWrite(t, filepath.Join(buildDir, "package.json"), `{"name":"lib","version":"1.0.0"}`)
+	var res *pb.DeployResult
+	rec := &e2eBuildRecorder{}
+	e := &emitter{send: func(ev *pb.DeployEvent) error {
+		if r := ev.GetResult(); r != nil {
+			res = r
+		}
+		return rec.emitter().send(ev)
+	}}
+	req := &pb.DeployRequest{Slug: "deplo-agent-test-nostart", ProjectId: "prj_nostart", ImageRef: "deplo-agent-test/nostart:e2e",
+		BuildKind: pb.BuildKind_BUILD_KIND_RAILPACK, BuildSpec: &pb.BuildSpec{Method: "railpack"}}
+	if New(t.TempDir(), t.TempDir(), "/", e2eToolsBase(t)).buildImage(ctx, req, buildDir, e) {
+		t.Fatal("a project with no start command built")
+	}
+	if res == nil || res.GetError() != "No start command detected. Set a Start command in Settings -> Build & output." {
+		t.Fatalf("result = %v; log:\n%s", res, rec.joined())
+	}
+}
