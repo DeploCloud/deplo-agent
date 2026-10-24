@@ -106,14 +106,20 @@ func startHint(exitCode int, lines []string) string {
 	if exitCode == 127 || strings.Contains(text, "command not found") || strings.Contains(text, "executable file not found") {
 		return "The start command runs a program that is not in the image: check the Start command in Settings -> Build & output."
 	}
-	if m := missingEntry.FindStringSubmatch(joined); m != nil {
-		return "The start command runs " + m[1] + ", which is not in the app: check the Start command in Settings -> Build & output."
+	for _, re := range missingStart {
+		if m := re.FindStringSubmatch(joined); m != nil {
+			return "The start command runs " + strings.TrimPrefix(m[1], "/app/") + ", which is not in the app: check the Start command in Settings -> Build & output."
+		}
 	}
 	return ""
 }
 
-// Node's and Python's words for a start script that is not there (Railpack builds into /app).
-var missingEntry = regexp.MustCompile(`(?:Cannot find module|can't open file) '/app/([^']+)'`)
+// What Node, Python, bash and dash print for a start script or program that is not there (Railpack builds into /app).
+var missingStart = []*regexp.Regexp{
+	regexp.MustCompile(`(?:Cannot find module|can't open file) '(/app/[^']+)'`),
+	regexp.MustCompile(`/bin/(?:ba)?sh: (?:line \d+: )?(\S+): No such file or directory`),
+	regexp.MustCompile(`\bsh: \d+: (\S+): not found`),
+}
 
 // sampleReady inspects the app's container, or every container of its stack.
 func sampleReady(ctx context.Context, slug string, stack bool) []readySample {

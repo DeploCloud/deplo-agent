@@ -430,6 +430,8 @@ func TestStartHintNamesAStartScriptThatIsNotThere(t *testing.T) {
 	for line, want := range map[string]string{
 		"Error: Cannot find module '/app/index.js'":                                   "runs index.js, which is not in the app",
 		"python: can't open file '/app/main.py': [Errno 2] No such file or directory": "runs main.py, which is not in the app",
+		"/bin/bash: line 1: ./zig-out/bin/httpz: No such file or directory":           "runs ./zig-out/bin/httpz, which is not in the app",
+		"sh: 1: gunicorn: not found":                                                  "runs gunicorn, which is not in the app",
 	} {
 		if got := startHint(1, []string{line}); !strings.Contains(got, want) {
 			t.Errorf("%s: got %q", line, got)
