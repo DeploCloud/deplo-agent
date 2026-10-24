@@ -87,6 +87,7 @@ var Capabilities = []string{
 	"build.github-token",
 	"build.memory-cap",
 	"deploy.ready-check",
+	"deploy.compose.source",
 	"image-copy",
 	"deploy.registry-auth",
 	"cleanup.images.by-repository",
@@ -406,6 +407,9 @@ func (s *Service) StartStack(ctx context.Context, ref *pb.StackRef) (*pb.StackRe
 		return nil, err
 	}
 	defer s.lockStack(slug)()
+	if err := s.stripSourceLinks(slug); err != nil {
+		return &pb.StackResult{Ok: false, Error: err.Error()}, nil
+	}
 	res, err := dockercli.Run(ctx, time.Minute, s.composeCtl(slug, "start")...)
 	if err == nil && res.Code == 0 {
 		return &pb.StackResult{Ok: true}, nil
@@ -433,6 +437,7 @@ func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.Stack
 		reclaimed := s.reclaimVolumes(ctx, ref.GetReclaimVolumes())
 		if r2.Code == 0 {
 			removePreviewNetworks(ctx, previewNets)
+			s.removeWorkingCopy(slug)
 			return &pb.StackResult{Ok: true, Error: reclaimed}, nil
 		}
 		return &pb.StackResult{Ok: false, Error: strings.TrimSpace(r2.Stderr)}, nil
@@ -486,6 +491,7 @@ func (s *Service) removeStackFiles(slug string) {
 	_ = os.Remove(s.legacyEnvPath(slug))
 	_ = os.Remove(filepath.Join(s.stackDir, "files", slug, ".env"))
 	_ = os.RemoveAll(s.filesRoot(slug))
+	s.removeWorkingCopy(slug)
 }
 
 func (s *Service) reclaimVolumes(ctx context.Context, names []string) string {
@@ -558,6 +564,9 @@ func (s *Service) Reroute(ctx context.Context, req *pb.RerouteRequest) (*pb.Stac
 		}
 	}
 	if err := admitStackImages(ctx, composeBaseArgs(name, stackFile, envFile, projectDir)); err != nil {
+		return &pb.StackResult{Ok: false, Error: err.Error()}, nil
+	}
+	if err := s.stripSourceLinks(slug); err != nil {
 		return &pb.StackResult{Ok: false, Error: err.Error()}, nil
 	}
 	composeArgs := composeUpArgs(name, stackFile, envFile, projectDir, false, req.GetComposeUpArgs())

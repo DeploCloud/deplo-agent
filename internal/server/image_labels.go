@@ -30,13 +30,25 @@ func (s *Service) prepareStackImages(ctx context.Context, req *pb.DeployRequest,
 			"--build-arg", "BUILDKIT_CACHE_MOUNT_NS="+s.cacheNamespace(req.GetSlug())),
 	}
 	for _, args := range steps {
-		code, err := dockercli.StreamEnv(ctx, 15*time.Minute, func(l string) { e.log("info", l) }, env, args...)
+		verb := args[len(base)]
+		var limit int64
+		if verb == "build" {
+			l, release := capBuildSteps()
+			defer release()
+			limit = l
+		}
+		tail := &lineTail{max: 200}
+		code, err := dockercli.StreamEnv(ctx, 15*time.Minute, func(l string) { tail.add(l); e.log("info", l) }, env, args...)
 		if err != nil {
-			e.result(false, "docker "+args[len(base)]+": "+err.Error(), "")
+			e.result(false, "docker "+verb+": "+err.Error(), "")
 			return nil, false
 		}
 		if code != 0 {
-			e.result(false, fmt.Sprintf("docker compose %s failed (exit %d)", args[len(base)], code), "")
+			msg := fmt.Sprintf("docker compose %s failed (exit %d)", verb, code)
+			if verb == "build" {
+				msg = buildFailure("docker compose build", code, tail.lines, limit, req, "")
+			}
+			e.result(false, msg, "")
 			return nil, false
 		}
 	}

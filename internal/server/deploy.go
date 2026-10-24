@@ -15,6 +15,7 @@ import (
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
@@ -70,9 +71,14 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 	}
 	name := "deplo-" + slug
 	stackFile := s.stackPath(slug)
+	if k := req.GetSourceKind(); req.GetBuildKind() == pb.BuildKind_BUILD_KIND_COMPOSE &&
+		k != pb.SourceKind_SOURCE_KIND_GIT && k != pb.SourceKind_SOURCE_KIND_UPLOAD {
+		e.result(false, "a stack built from its source needs a git or upload source", "")
+		return
+	}
 
 	if req.GetBuildOnly() {
-		if req.GetSourceKind() == pb.SourceKind_SOURCE_KIND_COMPOSE {
+		if isStack(req) {
 			e.result(false, "build-only is not supported for a compose stack (no single image to move)", "")
 			return
 		}
@@ -87,7 +93,7 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 		e.result(false, "create stack dir: "+err.Error(), "")
 		return
 	}
-	if !req.GetBuildOnly() {
+	if !req.GetBuildOnly() && !readsCompose(req) {
 		warning, err := ensureTenantNetworkWarned(ctx, req.GetNetwork())
 		if err != nil {
 			e.result(false, "ensure network: "+err.Error(), "")
@@ -133,11 +139,17 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 			return
 		}
 		defer cleanup()
-		if !s.buildImage(ctx, req, buildDir, e) {
+		if !s.fromSource(ctx, req, buildDir, "", e) {
 			return
 		}
 	case pb.SourceKind_SOURCE_KIND_GIT:
-		buildDir, sha, cleanup, err := s.materializeGit(ctx, req.GetGit(), slug, e)
+		g := req.GetGit()
+		if req.GetBuildKind() == pb.BuildKind_BUILD_KIND_COMPOSE && !readsCompose(req) {
+			// The working copy holds the whole repository; the subdir is its project directory.
+			g = proto.Clone(g).(*pb.GitSource)
+			g.Subdir = ""
+		}
+		buildDir, sha, cleanup, err := s.materializeGit(ctx, g, slug, e)
 		if err != nil {
 			e.result(false, "git clone: "+err.Error(), "")
 			return
@@ -147,7 +159,7 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 		if sha != "" {
 			e.log("info", "Checked out "+shortSha(sha))
 		}
-		if !s.buildImage(ctx, req, buildDir, e) {
+		if !s.fromSource(ctx, req, buildDir, commitSha, e) {
 			return
 		}
 	case pb.SourceKind_SOURCE_KIND_COMPOSE:
@@ -166,7 +178,7 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 		return
 	}
 
-	isCompose := req.GetSourceKind() == pb.SourceKind_SOURCE_KIND_COMPOSE
+	isCompose := isStack(req)
 
 	e.phase(pb.DeployPhase_DEPLOY_PHASE_STARTING)
 	if req.GetComposeYaml() == "" {
@@ -183,6 +195,9 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 		envFile, projectDir, ok := s.writeStackFiles(req, e)
 		if !ok {
 			return
+		}
+		if req.GetBuildKind() == pb.BuildKind_BUILD_KIND_COMPOSE {
+			e.phase(pb.DeployPhase_DEPLOY_PHASE_BUILDING)
 		}
 		images, ok := s.prepareStackImages(ctx, req, composeBaseArgs(name, stackFile, envFile, projectDir), e)
 		if !ok {
@@ -238,6 +253,9 @@ func (s *Service) startStack(ctx context.Context, req *pb.DeployRequest, e *emit
 	if !ok {
 		return false
 	}
+	if req.GetBuildKind() == pb.BuildKind_BUILD_KIND_COMPOSE && !s.stripWorkingCopyLinks(req.GetSlug(), e) {
+		return false
+	}
 	composeArgs := composeUpArgs("deplo-"+req.GetSlug(), s.stackPath(req.GetSlug()), envFile, projectDir,
 		req.GetForceRecreate(), req.GetComposeUpArgs())
 	upLog := "docker compose up -d"
@@ -276,7 +294,7 @@ func (s *Service) writeStackFiles(req *pb.DeployRequest, e *emitter) (envFile, p
 		e.result(false, "secure stack file: "+err.Error(), "")
 		return "", "", false
 	}
-	if req.GetSourceKind() != pb.SourceKind_SOURCE_KIND_COMPOSE {
+	if !isStack(req) {
 		return "", "", true
 	}
 	envFile, projectDir, err := s.writeComposeEnv(req.GetSlug(), req.GetEnv())
@@ -284,7 +302,33 @@ func (s *Service) writeStackFiles(req *pb.DeployRequest, e *emitter) (envFile, p
 		e.result(false, "write env file: "+err.Error(), "")
 		return "", "", false
 	}
+	if req.GetBuildKind() == pb.BuildKind_BUILD_KIND_COMPOSE {
+		projectDir, _ = s.sourceProjectDir(req)
+	}
 	return envFile, projectDir, true
+}
+
+// isStack: the deploy runs a compose stack, not one container.
+func isStack(req *pb.DeployRequest) bool {
+	return req.GetSourceKind() == pb.SourceKind_SOURCE_KIND_COMPOSE || req.GetBuildKind() == pb.BuildKind_BUILD_KIND_COMPOSE
+}
+
+// readsCompose: a compose deploy the control plane has not rendered yet only reads the source's file.
+func readsCompose(req *pb.DeployRequest) bool {
+	return req.GetBuildKind() == pb.BuildKind_BUILD_KIND_COMPOSE && req.GetComposeYaml() == ""
+}
+
+// fromSource takes the materialised source on: it answers with the compose file the control plane
+// asked for, moves a stack's working copy to it, or builds the image. false: the result is sent.
+func (s *Service) fromSource(ctx context.Context, req *pb.DeployRequest, dir, commitSha string, e *emitter) bool {
+	switch {
+	case readsCompose(req):
+		redirectToCompose(req, dir, commitSha, e)
+		return false
+	case req.GetBuildKind() == pb.BuildKind_BUILD_KIND_COMPOSE:
+		return s.updateWorkingCopy(req, dir, e)
+	}
+	return s.buildImage(ctx, req, dir, e)
 }
 
 func pullImage(ctx context.Context, req *pb.DeployRequest, e *emitter) error {

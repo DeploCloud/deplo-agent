@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"maps"
@@ -76,38 +77,40 @@ func stripHostLinks(buildDir string, e *emitter) bool {
 	return true
 }
 
-// stripEscapingSymlinks removes the links under root that resolve outside it, so railpack
-// reading the repo as root cannot read a host file through one. Returns what it removed.
-func stripEscapingSymlinks(root string) ([]string, error) {
-	realRoot, err := filepath.EvalSymlinks(root)
+// stripEscapingSymlinks removes the links under dir that resolve outside it, so a host tool
+// reading the tree as root, or a bind mount into it, cannot reach a host file through one. The
+// walk goes through an os.Root, so a container rewriting the tree meanwhile cannot steer it out.
+func stripEscapingSymlinks(dir string) ([]string, error) {
+	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return nil, err
 	}
+	defer root.Close()
 	var removed []string
-	err = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || p == root || d.Type()&fs.ModeSymlink == 0 {
-			return err
-		}
-		target, err := os.Readlink(p)
+	err = fs.WalkDir(root.FS(), ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return err
-		}
-		escapes := filepath.IsAbs(target) || !within(root, filepath.Join(filepath.Dir(p), target))
-		if real, rerr := filepath.EvalSymlinks(p); rerr == nil && !within(realRoot, real) {
-			escapes = true
-		}
-		if !escapes {
+			if p == "." {
+				return err
+			}
 			return nil
 		}
-		rel, _ := filepath.Rel(root, p)
-		removed = append(removed, rel)
-		return os.Remove(p)
+		if d.Type()&fs.ModeSymlink == 0 || resolvesInside(root, p) {
+			return nil
+		}
+		removed = append(removed, p)
+		return root.Remove(p)
 	})
 	return removed, err
 }
 
-func within(base, p string) bool {
-	return p == base || strings.HasPrefix(p, base+string(os.PathSeparator))
+// resolvesInside: the link leads inside the root, or dangles with a target that would.
+func resolvesInside(root *os.Root, p string) bool {
+	_, err := root.Stat(p)
+	if err == nil || !errors.Is(err, fs.ErrNotExist) {
+		return err == nil
+	}
+	target, err := root.Readlink(p)
+	return err == nil && linkStaysInside(p, target, false)
 }
 
 func majorVersion(v, def string) string {
