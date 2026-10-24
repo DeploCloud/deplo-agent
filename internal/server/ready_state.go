@@ -12,6 +12,8 @@ const (
 	workerGrace    = 20 * time.Second // after settling, how long a process may take to open a port
 	// A stack's service may crash a few times while a sibling (its database) boots.
 	stackRestartLimit = 5
+	// Linux hands out ports from here up when a process asks for any port (ip_local_port_range).
+	ephemeralPortFloor = 32768
 )
 
 // readySample is one inspect of a container the ready check watches.
@@ -156,6 +158,9 @@ func (r *readyCheck) observe(now time.Time, samples []readySample) readyVerdict 
 		all = append(all, c.listeners...)
 	}
 	public, loop := splitListeners(all)
+	// An ephemeral loopback port is a client socket or a setup step (a database's first-run init),
+	// not the app picking the wrong address: only the expected port or a fixed one says that.
+	loop = slices.DeleteFunc(loop, func(p int32) bool { return p != r.port && p >= ephemeralPortFloor })
 	for _, p := range public {
 		if _, ok := r.opened[p]; !ok {
 			r.opened[p] = now

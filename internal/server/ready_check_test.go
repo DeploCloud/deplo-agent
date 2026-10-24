@@ -372,3 +372,39 @@ func TestReadyCheckStackTimesOutWhileItRestarts(t *testing.T) {
 		t.Fatalf("a service that stopped for good waited for the timeout: %+v", v)
 	}
 }
+
+// A loopback port from the ephemeral range is a client socket or a database's first-run init, not
+// an app bound to the wrong address: the check keeps waiting for the real port instead.
+func TestReadyCheckIgnoresAnEphemeralLoopbackPort(t *testing.T) {
+	rc := newReadyCheck(8000, true, "", false)
+	if v := runReady(rc, step(at(11), up("app", t0, loopback(35953))), step(at(40), up("app", t0, loopback(35953)))); v.done {
+		t.Fatalf("an ephemeral loopback port decided the deploy: %+v", v)
+	}
+	if v := rc.expire(readyVerdict{}); v.err != "The app is running but never listened on port 8000 (PORT=8000)" {
+		t.Fatalf("expired: %+v", v)
+	}
+	if v := rc.observe(at(41), []readySample{up("app", t0, loopback(35953), public(8000))}); !v.ok || !slices.Equal(v.listening, []int32{8000}) {
+		t.Fatalf("the real port opened: %+v", v)
+	}
+
+	db := stackUp("db", "db", t0, t0, 0, loopback(36613))
+	web := stackUp("web", "web", t0, t0, 0, public(3000))
+	if v := runReady(newReadyCheck(3306, true, "db", true), step(at(11), db, web), step(at(25), db, web)); v.done {
+		t.Fatalf("mysql's init listener failed the stack: %+v", v)
+	}
+
+	// The expected port, or a fixed one, on loopback is still the wrong-address mistake.
+	for _, c := range []struct {
+		port int32
+		ls   listener
+		want string
+	}{
+		{40000, loopback(40000), "listens only on 127.0.0.1:40000"},
+		{8000, loopback(5000), "listens only on 127.0.0.1:5000"},
+	} {
+		v := runReady(newReadyCheck(c.port, true, "", false), step(at(11), up("app", t0, c.ls)), step(at(22), up("app", t0, c.ls)))
+		if v.ok || !strings.Contains(v.err, c.want) {
+			t.Errorf("port %d: %+v", c.port, v)
+		}
+	}
+}
