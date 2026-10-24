@@ -123,3 +123,22 @@ func TestWriteStaticfile(t *testing.T) {
 		t.Fatalf("no output folder must leave railpack to find the root: %q", b)
 	}
 }
+
+func TestJavaFromGradle(t *testing.T) {
+	for _, tc := range []struct{ file, body, want string }{
+		{"build.gradle", "java {\n\ttoolchain {\n\t\tlanguageVersion = JavaLanguageVersion.of(17)\n\t}\n}\n", "17"},
+		{"build.gradle.kts", "java { toolchain { languageVersion.set(JavaLanguageVersion.of( 21 )) } }", "21"},
+		{"build.gradle", "sourceCompatibility = '17'\n", ""},
+	} {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, tc.file), []byte(tc.body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := javaFromGradle(dir); got != tc.want {
+			t.Errorf("%s %q: got %q, want %q", tc.file, tc.body, got, tc.want)
+		}
+	}
+	if got := javaFromGradle(t.TempDir()); got != "" {
+		t.Errorf("no Gradle build: got %q", got)
+	}
+}

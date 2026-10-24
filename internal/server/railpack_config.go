@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 
 	"github.com/DeploCloud/deplo-agent/internal/safepath"
@@ -107,4 +109,23 @@ func writeStaticfile(buildDir, root string) (bool, error) {
 		body = "root: " + strconv.Quote(root) + "\n" + body
 	}
 	return true, writeBuildFile(path, []byte(body))
+}
+
+var gradleToolchain = regexp.MustCompile(`JavaLanguageVersion\.of\(\s*(\d{1,2})\s*\)`)
+
+// javaFromGradle is the Java version a Gradle toolchain pins. Railpack does not read it and installs
+// its default JDK, which such a build refuses (Spring's own project template pins one).
+func javaFromGradle(buildDir string) string {
+	for _, name := range []string{"build.gradle", "build.gradle.kts"} {
+		f, err := os.Open(filepath.Join(buildDir, name))
+		if err != nil {
+			continue
+		}
+		b, _ := io.ReadAll(io.LimitReader(f, 1<<20))
+		_ = f.Close()
+		if m := gradleToolchain.FindSubmatch(b); m != nil {
+			return string(m[1])
+		}
+	}
+	return ""
 }

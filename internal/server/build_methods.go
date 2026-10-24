@@ -157,6 +157,10 @@ func (s *Service) buildRailpack(ctx context.Context, req *pb.DeployRequest, buil
 
 	known := railpackSettings(spec, buildDir)
 	userEnv := req.GetEnv()
+	if v := javaFromGradle(buildDir); v != "" && userEnv["RAILPACK_JDK_VERSION"] == "" {
+		known["RAILPACK_JDK_VERSION"] = v
+		e.log("info", "Using Java "+v+", the version the Gradle build asks for")
+	}
 	envKeys := filterKeys(buildEnvKeys(userEnv), func(k string) bool { _, ours := known[k]; return !ours })
 	prepareArgs := []string{"prepare", buildDir, "--plan-out", planPath, "--info-out", infoPath, "--error-missing-start"}
 
