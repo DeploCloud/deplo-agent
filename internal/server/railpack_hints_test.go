@@ -157,3 +157,10 @@ func TestBuildHintNamesANodeTooOldForTheCode(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildHintNamesAPrismaClientNeverGenerated(t *testing.T) {
+	line := `#21 10.71 src/structures/ConfigCache.ts(2,15): error TS2305: Module '"@prisma/client"' has no exported member 'Config'.`
+	if got := buildHint([]string{line}, false, ""); !strings.Contains(got, "npx prisma generate") {
+		t.Fatalf("got %q", got)
+	}
+}

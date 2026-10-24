@@ -141,6 +141,9 @@ func buildHint(lines []string, haveToken bool, nodeMajor string) string {
 		return "There is no ready-made build of that Python version: set RAILPACK_PYTHON_VERSION to a " +
 			"released version (for example 3.13) in the app's variables."
 	}
+	if strings.Contains(low, `module '"@prisma/client"' has no exported member`) || strings.Contains(low, "@prisma/client did not initialize yet") {
+		return "Prisma's client was not generated before the build: put `npx prisma generate && ` in front of the Build command in Settings -> Build & output."
+	}
 	if want, got := nodeTooOld(strings.Join(lines, "\n")); want != "" {
 		return "The code needs Node " + want + " and the build used Node " + got +
 			": pick a newer Node.js version in Settings -> Build & output."
