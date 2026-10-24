@@ -60,6 +60,13 @@ func (s *Service) materializeGit(
 	sha, _ := gitOutput(ctx, dir, "rev-parse", "HEAD")
 	commitSha = strings.TrimSpace(sha)
 
+	if g.GetSubmodules() {
+		if err := cloneSubmodules(ctx, e, dir, cloneURL, authHeader, 0); err != nil {
+			cleanup()
+			return "", "", func() {}, err
+		}
+	}
+
 	stripVolatileGitMetadata(dir)
 
 	buildDir = dir
@@ -107,6 +114,97 @@ func fetchCommit(ctx context.Context, e *emitter, dir, cloneURL, display, authHe
 	return nil
 }
 
+const maxSubmoduleDepth = 3
+
+// cloneSubmodules checks out the submodules .gitmodules names, recursively, and only from the
+// repository's own host: those URLs are whoever-can-push's, and the credential must reach no other server.
+func cloneSubmodules(ctx context.Context, e *emitter, dir, parentURL, authHeader string, depth int) error {
+	urls := gitmodules(ctx, dir, "url")
+	if len(urls) == 0 {
+		return nil
+	}
+	parent, err := url.Parse(parentURL)
+	if err != nil {
+		return fmt.Errorf("submodules need the repository's address to be a URL")
+	}
+	resolved := map[string]string{}
+	for name, raw := range urls {
+		u, ok := submoduleURL(parent, raw)
+		if !ok {
+			return fmt.Errorf("submodule %s is not on %s: Deplo clones submodules only from the repository's own server", name, parent.Host)
+		}
+		resolved[name] = u
+		if err := runGit(ctx, e, dir, "", "config", "submodule."+name+".url", u); err != nil {
+			return err
+		}
+	}
+	scope := parent.Scheme + "://" + parent.Host + "/"
+	e.log("command", "git submodule update --init")
+	if err := runGitScoped(ctx, e, dir, scope, authHeader, "submodule", "update", "--init", "--depth", "1"); err != nil {
+		e.log("info", "A submodule's commit is not at the tip of its branch, fetching full history instead")
+		if err := runGitScoped(ctx, e, dir, scope, authHeader, "submodule", "update", "--init"); err != nil {
+			return err
+		}
+	}
+	if depth+1 >= maxSubmoduleDepth {
+		return nil
+	}
+	for name, path := range gitmodules(ctx, dir, "path") {
+		sub, ok := safepath.Join(dir, path)
+		if _, err := os.Stat(filepath.Join(sub, ".gitmodules")); !ok || err != nil || resolved[name] == "" {
+			continue
+		}
+		if err := cloneSubmodules(ctx, e, sub, resolved[name], authHeader, depth+1); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// gitmodules maps each submodule's name to one of its .gitmodules keys ("url", "path").
+func gitmodules(ctx context.Context, dir, key string) map[string]string {
+	out, err := gitOutput(ctx, dir, "config", "-f", ".gitmodules", "--get-regexp", `^submodule\..*\.`+key+`$`)
+	if err != nil {
+		return nil
+	}
+	m := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		k, v, ok := strings.Cut(line, " ")
+		if ok {
+			m[strings.TrimSuffix(strings.TrimPrefix(k, "submodule."), "."+key)] = strings.TrimSpace(v)
+		}
+	}
+	return m
+}
+
+var scpLikeURL = regexp.MustCompile(`^[\w.-]+@([\w.-]+):(.+)$`)
+
+// submoduleURL is a submodule's address as https on the parent's own host, or false when it points anywhere else.
+func submoduleURL(parent *url.URL, raw string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	if strings.HasPrefix(raw, "./") || strings.HasPrefix(raw, "../") {
+		base := *parent
+		base.Path = strings.TrimSuffix(parent.Path, "/") + "/"
+		ref, err := url.Parse(raw)
+		if err != nil {
+			return "", false
+		}
+		return base.ResolveReference(ref).String(), true
+	}
+	host, path := "", ""
+	if m := scpLikeURL.FindStringSubmatch(raw); m != nil && !strings.Contains(raw, "://") {
+		host, path = m[1], m[2]
+	} else if u, err := url.Parse(raw); err == nil && (u.Scheme == "https" || u.Scheme == parent.Scheme || u.Scheme == "ssh") {
+		host, path = u.Hostname(), u.Path
+	} else {
+		return "", false
+	}
+	if !strings.EqualFold(host, parent.Hostname()) || path == "" {
+		return "", false
+	}
+	return parent.Scheme + "://" + parent.Host + "/" + strings.TrimPrefix(path, "/"), true
+}
+
 var volatileGitPaths = []string{"index", "logs"}
 
 func stripVolatileGitMetadata(root string) {
@@ -147,6 +245,11 @@ func basicAuthHeader(user, pass string) string {
 var gitAllowProtocol = "https:http:ssh:git"
 
 func runGit(ctx context.Context, e *emitter, dir, authHeader string, args ...string) error {
+	return runGitScoped(ctx, e, dir, "", authHeader, args...)
+}
+
+// runGitScoped sends authHeader only to URLs under scope ("" sends it everywhere, for the repository's own clone).
+func runGitScoped(ctx context.Context, e *emitter, dir, scope, authHeader string, args ...string) error {
 	cctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	cmd := dockercli.Command(cctx, "git", args...)
@@ -155,9 +258,13 @@ func runGit(ctx context.Context, e *emitter, dir, authHeader string, args ...str
 	}
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ALLOW_PROTOCOL="+gitAllowProtocol)
 	if strings.TrimSpace(authHeader) != "" {
+		key := "http.extraHeader"
+		if scope != "" {
+			key = "http." + scope + ".extraHeader"
+		}
 		cmd.Env = append(cmd.Env,
 			"GIT_CONFIG_COUNT=1",
-			"GIT_CONFIG_KEY_0=http.extraHeader",
+			"GIT_CONFIG_KEY_0="+key,
 			"GIT_CONFIG_VALUE_0="+authHeader,
 		)
 	}

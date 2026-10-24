@@ -496,6 +496,9 @@ message GitSource {
   // A full commit SHA to build instead of the branch tip (a rollback whose image
   // was pruned). Advertised as `git.commit` in Hello; an older agent ignores it.
   string commit = 5;
+  // Also check out the repository's git submodules, recursively, only from the
+  // repository's own host. Advertised as `git.submodules`; an older agent ignores it.
+  bool submodules = 6;
 }
 
 message DockerfileBuild {

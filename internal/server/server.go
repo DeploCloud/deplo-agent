@@ -104,6 +104,7 @@ var Capabilities = []string{
 	"deploy.context_stream",
 	"host.addresses",
 	"git.commit",
+	"git.submodules",
 	"deploy.files-bind-check",
 	"backup.db-owner-check",
 }

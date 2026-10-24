@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/base64"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -282,5 +283,103 @@ func TestRunGitEnv(t *testing.T) {
 		if !strings.Contains(string(b), "GIT_ALLOW_PROTOCOL=https:http:ssh:git\n") {
 			t.Fatalf("git ran without the protocol allowlist (auth %q):\n%s", auth, b)
 		}
+	}
+}
+
+func TestSubmoduleURLStaysOnTheRepositoryHost(t *testing.T) {
+	parent, _ := url.Parse("https://github.com/rustdesk/rustdesk-server")
+	for raw, want := range map[string]string{
+		"https://github.com/rustdesk/hbb_common":   "https://github.com/rustdesk/hbb_common",
+		"../hbb_common.git":                        "https://github.com/rustdesk/hbb_common.git",
+		"./libs/x":                                 "https://github.com/rustdesk/rustdesk-server/libs/x",
+		"git@github.com:rustdesk/hbb_common.git":   "https://github.com/rustdesk/hbb_common.git",
+		"ssh://git@github.com/rustdesk/hbb_common": "https://github.com/rustdesk/hbb_common",
+		"https://user:secret@GitHub.com/acme/lib":  "https://github.com/acme/lib",
+		"https://evil.example/acme/lib":            "",
+		"git@evil.example:acme/lib.git":            "",
+		"file:///etc":                              "",
+		"/srv/git/lib":                             "",
+		"ext::sh -c touch% /tmp/x":                 "",
+		"http://github.com/acme/lib":               "",
+		"https://github.com.evil.example/acme/lib": "",
+	} {
+		got, ok := submoduleURL(parent, raw)
+		if (want == "") != !ok || got != want {
+			t.Errorf("%q: got %q (%v), want %q", raw, got, ok, want)
+		}
+	}
+}
+
+// A submodule is checked out, nested ones too, and one that points to another server stops the clone.
+func TestMaterializeGitChecksOutSubmodules(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	root := t.TempDir()
+	git := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-c", "protocol.file.allow=always"}, args...)...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	repo := func(name, file string) string {
+		dir := filepath.Join(root, name)
+		_ = os.MkdirAll(dir, 0o755)
+		git(dir, "init", "-q", "-b", "main", ".")
+		_ = os.WriteFile(filepath.Join(dir, file), []byte(name+"\n"), 0o644)
+		git(dir, "add", "-A")
+		git(dir, "commit", "-qm", name)
+		return dir
+	}
+	repo("nested", "nested.txt")
+	lib := repo("lib", "lib.txt")
+	git(lib, "submodule", "add", "-q", "../nested", "deps/nested")
+	git(lib, "commit", "-qm", "nested")
+	app := repo("app", "app.txt")
+	git(app, "submodule", "add", "-q", "../lib", "libs/lib")
+	git(app, "commit", "-qm", "lib")
+
+	allowFileGit(t)
+	s := &Service{buildTmpDir: t.TempDir()}
+	e := &emitter{send: func(*pb.DeployEvent) error { return nil }}
+	g := &pb.GitSource{Url: "file://" + app, Branch: "main", Submodules: true}
+	dir, _, cleanup, err := s.materializeGit(context.Background(), g, "app", e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	for _, f := range []string{"libs/lib/lib.txt", "libs/lib/deps/nested/nested.txt"} {
+		if _, err := os.Stat(filepath.Join(dir, f)); err != nil {
+			t.Errorf("%s was not checked out: %v", f, err)
+		}
+	}
+
+	git(app, "config", "-f", ".gitmodules", "submodule.libs/lib.url", "https://evil.example/lib")
+	git(app, "commit", "-qam", "elsewhere")
+	if _, _, _, err := s.materializeGit(context.Background(), g, "app", e); err == nil || !strings.Contains(err.Error(), "only from the repository's own server") {
+		t.Fatalf("a submodule on another server was cloned: %v", err)
+	}
+}
+
+func TestRunGitScopedSendsTheCredentialOnlyToItsHost(t *testing.T) {
+	out, bin := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\nenv > "+out+"/env\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	e := &emitter{send: func(*pb.DeployEvent) error { return nil }}
+	if err := runGitScoped(context.Background(), e, "", "https://github.com/", "Authorization: Basic eDp5", "submodule", "update"); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(filepath.Join(out, "env"))
+	if !strings.Contains(string(b), "GIT_CONFIG_KEY_0=http.https://github.com/.extraHeader\n") {
+		t.Fatalf("the credential is not scoped to the repository's host:\n%s", b)
+	}
+	if !containsString(Capabilities, "git.submodules") {
+		t.Error(`Capabilities must advertise "git.submodules"`)
 	}
 }
