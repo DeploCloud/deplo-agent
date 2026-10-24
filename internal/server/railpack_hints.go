@@ -141,12 +141,32 @@ func buildHint(lines []string, haveToken bool, nodeMajor string) string {
 		return "There is no ready-made build of that Python version: set RAILPACK_PYTHON_VERSION to a " +
 			"released version (for example 3.13) in the app's variables."
 	}
+	if want, got := nodeTooOld(strings.Join(lines, "\n")); want != "" {
+		return "The code needs Node " + want + " and the build used Node " + got +
+			": pick a newer Node.js version in Settings -> Build & output."
+	}
 	if m := copyNotFound.FindStringSubmatch(strings.Join(lines, "\n")); m != nil {
 		return "The Dockerfile copies " + strings.TrimPrefix(m[1], "/") + ", which is not in the repository " +
 			"(another tool makes it before the build, or .dockerignore leaves it out): build it in the Dockerfile, " +
 			"or pick Railpack in Settings -> Build & output to build from the source."
 	}
 	return ""
+}
+
+// What a framework or package manager prints when the build's Node is older than the code needs.
+var nodeTooOldErrors = []*regexp.Regexp{
+	regexp.MustCompile(`You are using Node\.js (?P<got>[\d.]+)\. For Next\.js, Node\.js version "(?P<want>[^"]+)" is required`),
+	regexp.MustCompile(`You are using Node\.js (?P<got>[\d.]+)\. Vite requires Node\.js version (?P<want>[\d.+ or]+[\d+])`),
+	regexp.MustCompile(`The engine "node" is incompatible with this module\. Expected version "(?P<want>[^"]+)"\. Got "(?P<got>[^"]+)"`),
+}
+
+func nodeTooOld(text string) (want, got string) {
+	for _, re := range nodeTooOldErrors {
+		if m := re.FindStringSubmatch(text); m != nil {
+			return m[re.SubexpIndex("want")], m[re.SubexpIndex("got")]
+		}
+	}
+	return "", ""
 }
 
 var copyNotFound = regexp.MustCompile(`failed to calculate checksum of ref [^ ]+: "([^"]+)": not found`)
