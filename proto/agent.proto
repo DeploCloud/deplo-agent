@@ -424,50 +424,42 @@ enum BuildKind {
   BUILD_KIND_UNSPECIFIED = 0;
   BUILD_KIND_NONE = 1;        // SOURCE_KIND_IMAGE: run as-is, no build
   BUILD_KIND_DOCKERFILE = 2;  // build from a Dockerfile in the context
-  // The heavy builders. Each reads DeployRequest.build_spec for its method
-  // settings (port, commands, runtime version, per-method knobs). The agent ports
-  // builders.ts byte-for-byte so an image built here matches the old local path.
-  BUILD_KIND_STATIC = 3;      // nginx serves a build output (buildStatic)
-  BUILD_KIND_NIXPACKS = 4;    // nixpacks generates a Dockerfile, then docker build
-  BUILD_KIND_BUILDPACKS = 5;  // Cloud Native Buildpacks via `pack` (heroku|paketo)
-  BUILD_KIND_RAILPACK = 6;    // railpack plan + buildkitd/buildctl
+  // The static, nixpacks and buildpacks builders are gone: Railpack serves static sites.
+  reserved 3, 4, 5;
+  reserved "BUILD_KIND_STATIC", "BUILD_KIND_NIXPACKS", "BUILD_KIND_BUILDPACKS";
+  BUILD_KIND_RAILPACK = 6;    // railpack plan, built by the daemon's BuildKit (build_spec)
+  // The compose file the source carries (GIT or UPLOAD). With compose_yaml empty the agent
+  // only reads that file and returns it as DeployResult.source_compose; with compose_yaml
+  // (the control plane's render of it) it builds the services from the checkout and brings
+  // the stack up there. Advertised as `deploy.compose.source`.
+  BUILD_KIND_COMPOSE = 7;
 }
 
-// The build method's settings for a heavy BuildKind (STATIC/NIXPACKS/BUILDPACKS/
-// RAILPACK).
+// The build method's settings for BUILD_KIND_RAILPACK and BUILD_KIND_COMPOSE.
 message BuildSpec {
-  // The build method name, for logs + the buildpacks flavor select
-  // ("nixpacks"|"heroku"|"paketo"|"railpack"|"static"). The agent dispatches on
-  // build_kind, not this string; it is the human label + the heroku/paketo split.
+  // The build method name, for logs ("railpack"|"dockerfile"|"compose"). The agent
+  // dispatches on build_kind, not this string.
   string method = 1;
-  // The container port the app listens on (drives PORT/--build-arg PORT and the
-  // nginx `listen`). 0 => the method's default (nginx 80).
+  // The container port the app listens on. 0 => none set.
   int32 port = 2;
   // Build commands (empty => the method's own default / detection). Mirror
   // BuildConfig.installCommand / buildCommand / startCommand.
   string install_command = 3;
   string build_command = 4;
   string start_command = 5;
-  // The static method's output dir to serve (BuildConfig.outputDirectory). Empty
-  // => ".".
+  // The folder the build outputs, served as a static site (BuildConfig.outputDirectory).
+  // Empty => the builder decides.
   string output_directory = 6;
   // The runtime version the user pinned (BuildConfig.runtimeVersion), e.g. "20".
   // Empty => the method's default.
   string runtime_version = 7;
-  // The framework's runtime language, resolved control-plane-side via
-  // runtimeFor(framework).language ("node"|"python"|…|"none").
+  // The runtime language runtime_version is for ("node"|...). Empty with no version.
   string runtime_language = 8;
-  // nixpacks: the dir the build publishes/serves; non-empty switches nixpacks to
-  // the nginx-wrap static path (methodSettings.nixpacksPublishDirectory).
-  string nixpacks_publish_directory = 9;
-  // heroku: builder image version ("22"|"24"|"26"); maps to heroku/builder:<v>.
-  // Empty => "24". Ignored for paketo (methodSettings.herokuVersion).
-  string heroku_version = 10;
-  // railpack: CLI/frontend version pin ("latest" or "0.27.2"); empty => latest
-  // (methodSettings.railpackVersion).
-  string railpack_version = 11;
-  // static / nixpacks-static: serve as an SPA (history-API fallback to
-  // index.html) (methodSettings.staticSinglePageApp).
+  // nixpacks_publish_directory, heroku_version, railpack_version: Railpack is the one
+  // builder now, at the version this agent ships.
+  reserved 9, 10, 11;
+  reserved "nixpacks_publish_directory", "heroku_version", "railpack_version";
+  // Serve the output folder as a single-page app (unknown paths get index.html).
   bool static_single_page_app = 12;
   // Run NO install / build step, as opposed to letting the method detect one.
   // The command strings above cannot carry this: "" already means "detect", so
@@ -476,6 +468,13 @@ message BuildSpec {
   // it detects, which is the safe direction.
   bool skip_install = 13;
   bool skip_build = 14;
+  // Detect automatically (BUILD_KIND_RAILPACK only): a Dockerfile in the build dir is
+  // built instead, else a compose file is returned as source_compose, else Railpack.
+  // DeployResult.built_with says which. Advertised as `build.auto-method`.
+  bool auto_method = 15;
+  // The compose file, relative to the build dir. Empty => the first of compose.yaml,
+  // compose.yml, docker-compose.yaml, docker-compose.yml.
+  string compose_file = 16;
 }
 
 // A git source the agent clones itself (SOURCE_KIND_GIT, D3). The token is the only
@@ -588,13 +587,11 @@ message DeployRequest {
   // workspace root (SOURCE_KIND_DEV_WORKSPACE, Part D).
   string dev_workspace_subdir = 15;
 
-  // The heavy build method's settings - present iff build_kind is STATIC / NIXPACKS /
-  // BUILDPACKS / RAILPACK.
+  // The build method's settings - present iff build_kind is RAILPACK or COMPOSE.
   BuildSpec build_spec = 16;
 
   // Build this deploy WITHOUT the host's layer cache: every `docker build` runs with
-  // --no-cache, and nixpacks is left on its default (per-build-dir) cache key so its
-  // BuildKit cache mounts start empty too.
+  // --no-cache.
   bool no_build_cache = 17;
 
   // Replace the running containers even when the rendered stack is unchanged (`docker
@@ -625,6 +622,27 @@ message DeployRequest {
   // Every mount source under <stack_dir>/files/<slug>/, relative to it. The agent refuses
   // to bring the stack up when one resolves (through links) outside that directory.
   repeated string files_bind_sources = 23;
+
+  // When the stack counts as up. Unset => the old rule (the container reports running).
+  // Advertised as `deploy.ready-check`.
+  ReadyCheck ready = 24;
+
+  // A GitHub token limited to public metadata, for the builder's own version lookups
+  // (railpack prepare reads GITHUB_TOKEN). Empty => none. It reaches the host-side
+  // prepare only: never the build, the image or a log. Advertised as `build.github-token`.
+  string github_token = 25;
+}
+
+// When a deploy counts as up: every container stays running (no restart, no exit) for a
+// settle window, and the app listens on `port` from outside its container.
+message ReadyCheck {
+  // The port the app should listen on (the routed one). 0 => no port is checked.
+  int32 port = 1;
+  // True when the app has a domain, so a process that never listens is a failed deploy.
+  // False: a stable process is enough (a background worker), the port is only observed.
+  bool port_required = 2;
+  // Compose stacks: the service `port` belongs to. Empty => the app's single container.
+  string service = 3;
 }
 
 // One event in the deploy stream. Exactly one of the oneof arms is set.
@@ -683,6 +701,25 @@ message DeployResult {
   // The git commit sha the agent resolved when it materialised a GIT source (Part B):
   // the control plane writes it back to the Deployment row.
   string commit_sha = 3;
+  // The port the app listened on when it was not ReadyCheck.port, so the control plane
+  // routes to it instead. 0 => it was (or no check ran).
+  int32 observed_port = 4;
+  // What built the image when build_spec.auto_method was set: "dockerfile" | "railpack".
+  string built_with = 5;
+  // Set INSTEAD of a build when the method is (or resolved to) compose and compose_yaml
+  // was empty: the compose file found at commit_sha. ready is false and error empty; the
+  // control plane renders it and deploys BUILD_KIND_COMPOSE pinned to that commit.
+  SourceCompose source_compose = 6;
+  // The ports the checked container listened on from outside it, for the log.
+  repeated int32 listening_ports = 7;
+}
+
+// A compose file read from the app's source.
+message SourceCompose {
+  // Relative to the build dir.
+  string path = 1;
+  // The file's text (at most 512 KiB).
+  string content = 2;
 }
 
 // ---------------------------------------------------------------------------

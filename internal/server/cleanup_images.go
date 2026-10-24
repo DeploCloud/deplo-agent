@@ -169,10 +169,7 @@ func cleanUnusedAppImages(ctx context.Context, p cleanupParams, idx *containerIn
 	return r
 }
 
-var buildToolingImages = []string{
-	"buildpacksio/", "heroku/builder", "paketobuildpacks/", "moby/buildkit",
-	"ghcr.io/railwayapp/nixpacks", "ghcr.io/railwayapp/railpack", "docker/dockerfile",
-}
+var buildToolingImages = []string{"moby/buildkit", "ghcr.io/railwayapp/railpack", "docker/dockerfile"}
 
 func isBuildTooling(repo string) bool {
 	for _, prefix := range buildToolingImages {

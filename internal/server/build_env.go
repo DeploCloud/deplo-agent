@@ -7,7 +7,7 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
-// A tenant variable reaches root host processes (the docker client, nixpacks, railpack), so it
+// A tenant variable reaches root host processes (the docker client, railpack), so it
 // never takes a name that configures one: the loader, docker, BuildKit, or glibc's setuid list.
 var reservedEnvPrefixes = []string{"LD_", "DOCKER_", "BUILDKIT_", "BUILDX_", "COMPOSE_", "XDG_"}
 
@@ -91,18 +91,6 @@ func dockerfileEnvKeys(dockerfile string, env map[string]string) []string {
 		_, ok := declared[k]
 		return ok
 	})
-}
-
-func appendBuildArgValues(args []string, vars map[string]string) []string {
-	keys := make([]string, 0, len(vars))
-	for k := range vars {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		args = append(args, "--build-arg", k+"="+vars[k])
-	}
-	return args
 }
 
 func appendBuildArgKeys(args []string, keys []string) []string {

@@ -1,14 +1,9 @@
 package server
 
 import (
-	"context"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
-
-	pb "github.com/DeploCloud/deplo-agent/gen"
 )
 
 // buildEnvKeys must sort deterministically and drop non-identifier names (keys arrive off the wire - same threat model as railpack plan secrets).
@@ -95,42 +90,6 @@ func TestAppendBuildArgKeysBareNames(t *testing.T) {
 	}
 	if strings.Contains(strings.Join(args, " "), "=") {
 		t.Fatalf("a value leaked onto argv: %v", args)
-	}
-}
-
-// The static builder's generated Dockerfile must declare each env var as an ARG in the BUILDER stage (so the build command sees it) and leave the nginx stage untouched.
-func TestBuildStatic_declaresBuildEnvInBuilderStage(t *testing.T) {
-	s := New(t.TempDir(), t.TempDir(), "/", "")
-	buildDir := t.TempDir()
-
-	req := &pb.DeployRequest{
-		Slug:      "stat",
-		ProjectId: "prj_stat",
-		ImageRef:  "deplo/stat:test",
-		BuildKind: pb.BuildKind_BUILD_KIND_STATIC,
-		BuildSpec: &pb.BuildSpec{BuildCommand: "npm run build", OutputDirectory: "dist"},
-		Env:       map[string]string{"NEXT_PUBLIC_API": "https://api.example.com", "bad-key": "dropped"},
-	}
-	e := &emitter{send: func(*pb.DeployEvent) error { return nil }}
-	_ = s.buildStatic(context.Background(), req, buildDir, e)
-
-	body, err := os.ReadFile(filepath.Join(buildDir, "Dockerfile"))
-	if err != nil {
-		t.Fatalf("static Dockerfile not written: %v", err)
-	}
-	df := string(body)
-	builderStage := strings.Split(df, "FROM nginx:alpine")[0]
-	if !strings.Contains(builderStage, "ARG NEXT_PUBLIC_API\n") {
-		t.Errorf("builder stage missing the ARG:\n%s", df)
-	}
-	if strings.Contains(df, "ENV NEXT_PUBLIC_API") {
-		t.Errorf("the build var must not be declared as ENV:\n%s", df)
-	}
-	if strings.Contains(df, "https://api.example.com") {
-		t.Errorf("env VALUE must not be baked into the Dockerfile text:\n%s", df)
-	}
-	if strings.Contains(df, "bad-key") {
-		t.Errorf("non-identifier key must be dropped:\n%s", df)
 	}
 }
 

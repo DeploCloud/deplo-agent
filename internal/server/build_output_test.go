@@ -46,7 +46,6 @@ func TestImageOutputArgsAcceptsMintedRefs(t *testing.T) {
 	for _, ref := range []string{
 		"deplo/hub:dpl_1de86a50",
 		"deplo/my-app-2:dpl_c47ef96e",
-		"deplo-nixpacks-staging:dpl_abc123",
 	} {
 		got := imageOutputArgsFor(ref, true)
 		if len(got) != 2 || got[0] != "--output" || !strings.Contains(got[1], "name="+ref+",") {

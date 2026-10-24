@@ -54,7 +54,7 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 		e.result(false, err.Error(), "")
 		return
 	}
-	// Both reach pack's argv and the relabel Dockerfile, where a "-" or a newline would be read as more.
+	// Both reach the build argv and the relabel Dockerfile, where a "-" or a newline would be read as more.
 	if k := req.GetSourceKind(); k == pb.SourceKind_SOURCE_KIND_UPLOAD || k == pb.SourceKind_SOURCE_KIND_GIT {
 		if err := validateImageRef(req.GetImageRef()); err != nil {
 			e.result(false, err.Error(), "")
@@ -367,12 +367,6 @@ func (s *Service) buildImage(ctx context.Context, req *pb.DeployRequest, buildDi
 	switch req.GetBuildKind() {
 	case pb.BuildKind_BUILD_KIND_DOCKERFILE:
 		return s.buildDockerfile(ctx, req, buildDir, e)
-	case pb.BuildKind_BUILD_KIND_STATIC:
-		return s.buildStatic(ctx, req, buildDir, e)
-	case pb.BuildKind_BUILD_KIND_NIXPACKS:
-		return s.buildNixpacks(ctx, req, buildDir, e)
-	case pb.BuildKind_BUILD_KIND_BUILDPACKS:
-		return s.buildBuildpacks(ctx, req, buildDir, e)
 	case pb.BuildKind_BUILD_KIND_RAILPACK:
 		return s.buildRailpack(ctx, req, buildDir, e)
 	default:

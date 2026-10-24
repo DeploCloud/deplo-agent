@@ -56,7 +56,7 @@ func TestValidateHostPath_refusesTheSystem(t *testing.T) {
 		"/var/lib/docker/volumes/someone-elses", "/proc/1", "/sys/kernel",
 		"/data/../etc",
 		"/data/stacks", "/data/stacks/api.env", "/data/stacks/files",
-		"/data/backups/app", "/data/tools/nixpacks",
+		"/data/backups/app", "/data/tools/railpack-0.43.0",
 		"/etc/profile.d", "/etc/cron.hourly", "/etc/letsencrypt/live", "/etc/deplo-agent",
 		"/usr/local/bin", "/usr/lib/systemd/system", "/opt/deplo", "/opt/deplo/.env",
 		"/var/spool/cron", "/boot/grub", "/lib64/security", "/run/secrets",
