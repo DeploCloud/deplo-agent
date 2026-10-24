@@ -23,44 +23,49 @@ func cleanLeftoverAppFiles(p cleanupParams) *pb.CleanupScopeResult {
 		return skippedScope(r.Scope, errors.New("this agent has no stack directory configured"))
 	}
 
-	root := filepath.Join(p.stackDir, "files")
-	entries, err := os.ReadDir(root)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return r
+	sweep := func(path, slug, item string, e os.DirEntry) {
+		if p.liveSlugs[slug] || validateSlug(slug) != nil {
+			return
 		}
-		r.Error = err.Error()
-		return r
-	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		slug := e.Name()
-		if p.liveSlugs[slug] {
-			continue
-		}
-		if validateSlug(slug) != nil {
-			continue
-		}
-		dir := filepath.Join(root, slug)
 		info, err := e.Info()
 		if err != nil || info.ModTime().After(p.filesCutoff) {
-			continue
+			return
 		}
-		size := dirSize(dir)
+		size := dirSize(path)
 		if !p.dryRun {
-			if err := os.RemoveAll(dir); err != nil {
+			if err := os.RemoveAll(path); err != nil {
 				if r.Error == "" {
-					r.Error = fmt.Sprintf("remove %s: %v", slug, err)
+					r.Error = fmt.Sprintf("remove %s: %v", item, err)
 				}
-				continue
+				return
 			}
 		}
 		r.ItemsRemoved++
 		r.ReclaimedBytes += size
 		if len(r.Items) < cleanupMaxItems {
-			r.Items = append(r.Items, slug)
+			r.Items = append(r.Items, item)
+		}
+	}
+	root := filepath.Join(p.stackDir, "files")
+	entries, err := os.ReadDir(root)
+	if err != nil && !os.IsNotExist(err) {
+		r.Error = err.Error()
+		return r
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			sweep(filepath.Join(root, e.Name()), e.Name(), e.Name(), e)
+		}
+	}
+	// A stack built from its source also leaves its working copy and that copy's file list.
+	entries, _ = os.ReadDir(p.stackDir)
+	for _, e := range entries {
+		slug, ok := strings.CutSuffix(e.Name(), ".src")
+		if !ok {
+			slug, ok = strings.CutSuffix(e.Name(), ".src.list")
+		}
+		if ok {
+			sweep(filepath.Join(p.stackDir, e.Name()), slug, e.Name(), e)
 		}
 	}
 	return r

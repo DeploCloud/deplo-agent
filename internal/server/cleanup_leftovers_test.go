@@ -197,3 +197,57 @@ func TestDockerCleanup_leftoverNetworks_projectNetworksOfDeadSlugs(t *testing.T)
 		t.Fatalf("slugs only: %v", got)
 	}
 }
+
+// A stack built from its source leaves its working copy and that copy's file list beside the stack
+// files: the sweep reclaims both for a deleted app, by the rules it applies to an app's files.
+func TestDockerCleanup_leftoverAppFiles_reclaimsWorkingCopies(t *testing.T) {
+	h := newFixture(t)
+	h.install(t)
+	stackDir := t.TempDir()
+	s := New(stackDir, t.TempDir(), "/", "")
+	old := time.Now().Add(-48 * time.Hour)
+	seed := func(name string, dir bool) string {
+		path := filepath.Join(stackDir, name)
+		if dir {
+			mustWrite(t, filepath.Join(path, "data", "PG_VERSION"), "16\n")
+		} else {
+			mustWrite(t, path, "compose.yaml\n")
+		}
+		if err := os.Chtimes(path, old, old); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	keep := []string{seed("shop.src", true), seed("shop.src.list", false), seed("notes.txt", false), seed("a_b.src", true)}
+	gone := []string{seed("garage.src", true), seed("garage.src.list", false)}
+	fresh := filepath.Join(stackDir, "brand-new.src")
+	if err := os.MkdirAll(fresh, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	keep = append(keep, fresh)
+
+	resp, err := s.DockerCleanup(context.Background(), &pb.DockerCleanupRequest{
+		Scopes:    []pb.CleanupScope{pb.CleanupScope_CLEANUP_SCOPE_LEFTOVER_APP_FILES},
+		LiveSlugs: []string{"shop"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range keep {
+		if _, err := os.Lstat(p); err != nil {
+			t.Errorf("%s must survive: %v", filepath.Base(p), err)
+		}
+	}
+	for _, p := range gone {
+		if _, err := os.Lstat(p); !os.IsNotExist(err) {
+			t.Errorf("%s of a deleted app must be gone: %v", filepath.Base(p), err)
+		}
+	}
+	r := resultFor(t, resp, pb.CleanupScope_CLEANUP_SCOPE_LEFTOVER_APP_FILES)
+	if r.GetItemsRemoved() != 2 || strings.Join(r.GetItems(), ",") != "garage.src,garage.src.list" || r.GetReclaimedBytes() <= 0 {
+		t.Errorf("result = %+v", r)
+	}
+	if got := h.argv(); len(got) != 0 {
+		t.Errorf("this scope must run no docker command, got %q", got)
+	}
+}
