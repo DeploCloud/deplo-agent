@@ -114,7 +114,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("deplo-agent: listen %s: %v", *addr, err)
 	}
-	svc.SetListener(lis)
+	svc.SetPort(lis)
 	if lis != nil {
 		log.Printf("deplo-agent %s listening on %s (mtls=%v)", server.AgentVersion, *addr, !*insecure)
 	} else if *addr != "" {
@@ -166,7 +166,7 @@ func newGRPCServer(certMgr *server.CertManager) *grpc.Server {
 }
 
 // listen opens the listener for --addr; none when it is empty or the agent closed it once linked (ADR-0040).
-func listen(addr, agentDir string) (*link.Direct, error) {
+func listen(addr, agentDir string) (*link.Port, error) {
 	if addr == "" || agentDir != "" && link.ListenerStopped(agentDir) {
 		return nil, nil
 	}
@@ -174,7 +174,7 @@ func listen(addr, agentDir string) (*link.Direct, error) {
 	if err != nil {
 		return nil, err
 	}
-	return link.NewDirect(lis, agentDir), nil
+	return link.NewPort(lis, agentDir), nil
 }
 
 // printCapabilities answers an installer asking what this binary can do, e.g. whether it links.
@@ -185,7 +185,7 @@ func printCapabilities(w io.Writer) {
 }
 
 // serveAgent serves srv on lis (when there is one) and, given lc, over an agent link, until ctx ends or lis fails.
-func serveAgent(ctx context.Context, srv *grpc.Server, lis *link.Direct, lc *link.Config) error {
+func serveAgent(ctx context.Context, srv *grpc.Server, lis *link.Port, lc *link.Config) error {
 	serveErr := make(chan error, 2)
 	if lis != nil {
 		go func() { serveErr <- srv.Serve(lis) }()

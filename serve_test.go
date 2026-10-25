@@ -236,16 +236,16 @@ func startAgentWith(t *testing.T, lis net.Listener, saved bool) *agentUnderTest 
 	srv := newGRPCServer(cm)
 	svc := server.New(t.TempDir(), t.TempDir(), "/", "")
 	svc.EnableAgentLink(lc.Addresses)
-	var direct *link.Direct
+	var port *link.Port
 	if lis != nil {
-		direct = link.NewDirect(lis, dir)
+		port = link.NewPort(lis, dir)
 	}
-	svc.SetListener(direct)
+	svc.SetPort(port)
 	pb.RegisterAgentServer(srv, svc)
 	ctx, cancel := context.WithCancel(context.Background())
 	a := &agentUnderTest{pki: pki, dir: dir, url: url, lis: lis, links: links, stop: cancel, served: make(chan error, 1)}
 	go func() {
-		a.served <- serveAgent(ctx, srv, direct, lc)
+		a.served <- serveAgent(ctx, srv, port, lc)
 	}()
 	t.Cleanup(func() {
 		cancel()
