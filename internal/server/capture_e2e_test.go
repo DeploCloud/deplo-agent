@@ -49,6 +49,14 @@ func TestE2E_CaptureScreenshot(t *testing.T) {
 		case "/":
 			fmt.Fprint(w, `<!doctype html><style>body{background:#fff;color:#111;font:48px sans-serif}
 @media (prefers-color-scheme: dark){body{background:#111;color:#eee}}</style><h1>Deplo screenshot test</h1>`)
+		case "/alert":
+			fmt.Fprint(w, `<!doctype html><h1 style="font:48px sans-serif">Alert</h1><script>alert("hi")</script>`)
+		case "/hang":
+			fmt.Fprint(w, `<!doctype html><h1 style="font:48px sans-serif">Slow pixel</h1><img src="/never">`)
+		case "/never":
+			<-r.Context().Done()
+		case "/refresh":
+			fmt.Fprint(w, `<!doctype html><meta http-equiv="refresh" content="0;url=/refresh"><h1 style="font:48px sans-serif">Again</h1>`)
 		case "/blank":
 			fmt.Fprint(w, `<!doctype html><body style="background:#fff"></body>`)
 		case "/auth":
@@ -105,6 +113,11 @@ func TestE2E_CaptureScreenshot(t *testing.T) {
 	}
 	if r := shoot("/auth", "", ""); r.Outcome != pb.CaptureOutcome_CAPTURE_OUTCOME_HTTP_ERROR || r.HttpStatus != 401 {
 		t.Errorf("/auth without it: want HTTP_ERROR 401, got %v %d", r.Outcome, r.HttpStatus)
+	}
+	for _, path := range []string{"/alert", "/hang", "/refresh"} {
+		if r := shoot(path, "", ""); r.Outcome != pb.CaptureOutcome_CAPTURE_OUTCOME_OK {
+			t.Errorf("%s: a dialog, a hanging pixel or a refresh loop must not cost the picture, got %v (%s)", path, r.Outcome, r.Detail)
+		}
 	}
 	shoot("/ssrf", "", "")
 	mu.Lock()

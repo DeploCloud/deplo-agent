@@ -17,6 +17,7 @@ import (
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/emulation"
 	"github.com/chromedp/cdproto/fetch"
+	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
 )
@@ -25,15 +26,18 @@ const (
 	maxSpec         = 64 << 10
 	browserDeadline = 75 * time.Second
 	navTimeout      = 30 * time.Second
-	idleTimeout     = 15 * time.Second
-	settleDelay     = time.Second
-	consentGrace    = 3 * time.Second
-	viewportWidth   = 1280
-	viewportHeight  = 800
-	shotScale       = 0.75
-	shotQuality     = 80
-	headlessShell   = "/headless-shell/headless-shell"
-	userAgentSuffix = " Deplo-Screenshot/1"
+	idleTimeout     = 10 * time.Second
+	callTimeout     = 10 * time.Second
+	// Main-frame documents a page may still load after its first one: a JS redirect, not a refresh loop.
+	navigationsAfterLoad = 2
+	settleDelay          = time.Second
+	consentGrace         = 3 * time.Second
+	viewportWidth        = 1280
+	viewportHeight       = 800
+	shotScale            = 0.75
+	shotQuality          = 80
+	headlessShell        = "/headless-shell/headless-shell"
+	userAgentSuffix      = " Deplo-Screenshot/1"
 )
 
 // Main runs inside the browser's container: the spec on stdin, one Result on stdout.
@@ -78,7 +82,7 @@ func capturePage(ctx context.Context, spec Spec, sock, exe string) Result {
 	defer cancel()
 	bctx, cancel := chromedp.NewContext(actx)
 	defer cancel()
-	p := &pageRun{ctx: bctx, spec: spec, host: strings.ToLower(target.Hostname()), idle: map[cdp.FrameID]bool{}}
+	p := &pageRun{ctx: bctx, spec: spec, host: strings.ToLower(target.Hostname())}
 	if err := p.prepare(); err != nil {
 		return failure(ctx, err)
 	}
@@ -91,8 +95,14 @@ type pageRun struct {
 	host    string
 	consent *consentBridge
 
-	mu   sync.Mutex
-	idle map[cdp.FrameID]bool
+	mu          sync.Mutex
+	main        cdp.FrameID
+	blankLoader cdp.LoaderID
+	domReady    bool
+	netIdle     bool
+	docStatus   int64
+	loaded      bool
+	laterDocs   int
 }
 
 func (p *pageRun) prepare() error {
@@ -115,18 +125,24 @@ func (p *pageRun) prepare() error {
 	if _, err := chromedp.Call(p.ctx, page.SetLifecycleEventsEnabled, page.SetLifecycleEventsEnabledParams{Enabled: true}); err != nil {
 		return err
 	}
+	tree, err := chromedp.Call(p.ctx, page.GetFrameTree, cdp.Empty{})
+	if err != nil || tree.FrameTree == nil {
+		return fmt.Errorf("frame tree: %v", err)
+	}
+	p.main, p.blankLoader = tree.FrameTree.Frame.ID, tree.FrameTree.Frame.LoaderID
 	go p.watchLifecycle(chromedp.Events(p.ctx, page.LifecycleEvent))
+	go p.watchDocuments(chromedp.Events(p.ctx, network.ResponseReceived))
+	go p.dismissDialogs(chromedp.Events(p.ctx, page.JavascriptDialogOpening))
 	if p.consent, err = startConsent(p.ctx); err != nil {
 		return err
 	}
-	if p.spec.Username != "" {
-		return p.answerBasicAuth()
-	}
-	return nil
+	return p.interceptRequests()
 }
 
 func (p *pageRun) setScheme(scheme string) error {
-	_, err := chromedp.Call(p.ctx, emulation.SetEmulatedMedia, emulation.SetEmulatedMediaParams{
+	ctx, cancel := context.WithTimeout(p.ctx, callTimeout)
+	defer cancel()
+	_, err := chromedp.Call(ctx, emulation.SetEmulatedMedia, emulation.SetEmulatedMediaParams{
 		Features: []*emulation.MediaFeature{{Name: "prefers-color-scheme", Value: scheme}},
 	})
 	return err
@@ -137,24 +153,56 @@ func (p *pageRun) watchLifecycle(events iter.Seq2[page.EventLifecycleEvent, erro
 		if err != nil {
 			return
 		}
+		if ev.FrameID != p.main || ev.LoaderID == p.blankLoader {
+			continue
+		}
 		p.mu.Lock()
 		switch ev.Name {
 		case "init":
-			p.idle[ev.FrameID] = false
+			p.netIdle = false
+		case "DOMContentLoaded":
+			p.domReady = true
 		case "networkIdle":
-			p.idle[ev.FrameID] = true
+			p.netIdle = true
 		}
 		p.mu.Unlock()
 	}
 }
 
-// answerBasicAuth hands the credentials only to a challenge from the deployment's own host, once.
-func (p *pageRun) answerBasicAuth() error {
-	handle := true
-	patterns := []*fetch.RequestPattern{{URLPattern: "http://" + p.host + "/*"}, {URLPattern: "https://" + p.host + "/*"}}
+func (p *pageRun) watchDocuments(events iter.Seq2[network.EventResponseReceived, error]) {
+	for ev, err := range events {
+		if err != nil {
+			return
+		}
+		if ev.Type == network.ResourceTypeDocument && ev.FrameID == p.main && ev.Response != nil {
+			p.mu.Lock()
+			p.docStatus = ev.Response.Status
+			p.mu.Unlock()
+		}
+	}
+}
+
+// dismissDialogs answers alert, confirm and beforeunload with Cancel, so none can hold the page.
+func (p *pageRun) dismissDialogs(events iter.Seq2[page.EventJavascriptDialogOpening, error]) {
+	for _, err := range events {
+		if err != nil {
+			return
+		}
+		_, _ = chromedp.Call(p.ctx, page.HandleJavaScriptDialog, page.HandleJavaScriptDialogParams{Accept: false})
+	}
+}
+
+// interceptRequests stops a page that keeps navigating once it has loaded, and hands the
+// credentials only to a challenge from the deployment's own host, once.
+func (p *pageRun) interceptRequests() error {
+	auth := p.spec.Username != ""
+	patterns := []*fetch.RequestPattern{{URLPattern: "*", ResourceType: network.ResourceTypeDocument}}
+	if auth {
+		patterns = append(patterns, &fetch.RequestPattern{URLPattern: "http://" + p.host + "/*"}, &fetch.RequestPattern{URLPattern: "https://" + p.host + "/*"})
+	}
 	paused := chromedp.Events(p.ctx, fetch.RequestPaused)
 	challenged := chromedp.Events(p.ctx, fetch.AuthRequired)
-	if _, err := chromedp.Call(p.ctx, fetch.Enable, fetch.EnableParams{Patterns: patterns, HandleAuthRequests: &handle}); err != nil {
+	if _, err := chromedp.Call(p.ctx, fetch.Enable, fetch.EnableParams{Patterns: patterns, HandleAuthRequests: &auth}); err != nil {
 		return err
 	}
 	go func() {
@@ -162,9 +210,16 @@ func (p *pageRun) answerBasicAuth() error {
 			if err != nil {
 				return
 			}
+			if ev.ResourceType == network.ResourceTypeDocument && ev.FrameID == p.main && p.navigationRefused() {
+				_, _ = chromedp.Call(p.ctx, fetch.FailRequest, fetch.FailRequestParams{RequestID: ev.RequestID, ErrorReason: network.ErrorReasonAborted})
+				continue
+			}
 			_, _ = chromedp.Call(p.ctx, fetch.ContinueRequest, fetch.ContinueRequestParams{RequestID: ev.RequestID})
 		}
 	}()
+	if !auth {
+		return nil
+	}
 	go func() {
 		answered := map[fetch.RequestID]bool{}
 		for ev, err := range challenged {
@@ -187,6 +242,16 @@ func (p *pageRun) answerBasicAuth() error {
 	return nil
 }
 
+func (p *pageRun) navigationRefused() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.loaded {
+		return false
+	}
+	p.laterDocs++
+	return p.laterDocs > navigationsAfterLoad
+}
+
 func originHost(origin string) string {
 	u, err := url.Parse(origin)
 	if err != nil {
@@ -198,17 +263,27 @@ func originHost(origin string) string {
 func (p *pageRun) capture() Result {
 	navCtx, cancel := context.WithTimeout(p.ctx, navTimeout)
 	defer cancel()
-	resp, err := chromedp.RunResponse(navCtx, chromedp.Navigate(p.spec.URL))
+	nav, err := chromedp.Call(navCtx, page.Navigate, page.NavigateParams{URL: p.spec.URL})
 	if err != nil {
 		return failure(navCtx, err)
 	}
-	if resp == nil {
-		return Result{Outcome: OutcomeUnreachable, Detail: "no response"}
+	if nav.ErrorText != "" {
+		return Result{Outcome: OutcomeUnreachable, Detail: nav.ErrorText}
 	}
-	if resp.Status < 200 || resp.Status >= 300 {
-		return Result{Outcome: OutcomeHTTPError, Status: int(resp.Status)}
+	// The DOM, not the load event: one hanging pixel must not cost the whole picture.
+	if !p.waitFor(navCtx, func() bool { return p.domReady }) {
+		return Result{Outcome: OutcomeTimeout, Detail: "the page never finished parsing"}
 	}
-	status := int(resp.Status)
+	p.mu.Lock()
+	status := int(p.docStatus)
+	p.loaded = true
+	p.mu.Unlock()
+	if status == 0 {
+		status = 200
+	}
+	if status < 200 || status >= 300 {
+		return Result{Outcome: OutcomeHTTPError, Status: status}
+	}
 	p.waitIdle()
 	sleep(p.ctx, settleDelay)
 	p.consent.wait(p.ctx, consentGrace)
@@ -230,28 +305,31 @@ func (p *pageRun) capture() Result {
 	}
 	sleep(p.ctx, settleDelay)
 	dark, err := p.shot(page.CaptureScreenshotFormatWebp, shotScale)
-	if err != nil || string(dark) == string(light) {
+	if err != nil {
+		dark = nil
+	} else if darkThumb, err := p.shot(page.CaptureScreenshotFormatPng, 0.1); err != nil || looksSame(thumb, darkThumb) {
 		dark = nil
 	}
 	return Result{Outcome: OutcomeOK, Status: status, Light: light, Dark: dark}
 }
 
-func (p *pageRun) waitIdle() {
-	tree, err := chromedp.Call(p.ctx, page.GetFrameTree, cdp.Empty{})
-	if err != nil || tree.FrameTree == nil {
-		return
-	}
-	main := tree.FrameTree.Frame.ID
-	deadline := time.Now().Add(idleTimeout)
-	for time.Now().Before(deadline) && p.ctx.Err() == nil {
+func (p *pageRun) waitFor(ctx context.Context, cond func() bool) bool {
+	for ctx.Err() == nil {
 		p.mu.Lock()
-		idle := p.idle[main]
+		ok := cond()
 		p.mu.Unlock()
-		if idle {
-			return
+		if ok {
+			return true
 		}
-		sleep(p.ctx, 100*time.Millisecond)
+		sleep(ctx, 100*time.Millisecond)
 	}
+	return false
+}
+
+func (p *pageRun) waitIdle() {
+	ctx, cancel := context.WithTimeout(p.ctx, idleTimeout)
+	defer cancel()
+	p.waitFor(ctx, func() bool { return p.netIdle })
 }
 
 func (p *pageRun) shot(format page.CaptureScreenshotFormat, scale float64) ([]byte, error) {
@@ -263,7 +341,9 @@ func (p *pageRun) shot(format page.CaptureScreenshotFormat, scale float64) ([]by
 		q := int64(shotQuality)
 		params.Quality = &q
 	}
-	res, err := chromedp.Call(p.ctx, page.CaptureScreenshot, params)
+	ctx, cancel := context.WithTimeout(p.ctx, callTimeout)
+	defer cancel()
+	res, err := chromedp.Call(ctx, page.CaptureScreenshot, params)
 	return res.Data, err
 }
 
