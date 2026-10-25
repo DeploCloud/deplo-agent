@@ -81,48 +81,81 @@ func (linkAddr) String() string  { return "agent-link" }
 
 // Config is where to link and how the agent names itself there.
 type Config struct {
-	// URL is the panel address to link to (the saved primary).
-	URL string
+	// Addresses is the saved pair: each attempt dials its primary, then its fallback.
+	Addresses *Store
 	// CertFile is the agent's leaf; its sha256 names the server at the door, read per dial so a renewal counts.
 	CertFile string
 	Logf     func(format string, args ...any)
 }
 
-// Run keeps one link open to cfg.URL until ctx ends or l is closed.
+// Run keeps one link open to the saved pair until ctx ends or l is closed; with no primary it waits for one.
 func Run(ctx context.Context, cfg Config, l *Listener) {
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
 	}
 	backoff, lastErr := minBackoff, ""
 	for {
-		up, err := cfg.link(ctx, l)
-		if ctx.Err() != nil || l.isClosed() {
-			return
+		a, replaced := cfg.Addresses.watch()
+		wait := time.Duration(-1)
+		if a.Primary != "" {
+			up, retryAfter, err := cfg.attempt(ctx, l, a)
+			if ctx.Err() != nil || l.isClosed() {
+				return
+			}
+			// A refusal repeats every 30 s for as long as it lasts: log it when it changes.
+			if up > 0 {
+				cfg.Logf("deplo-agent: agent link ended after %s: %v", up.Round(time.Second), err)
+			} else if err.Error() != lastErr {
+				cfg.Logf("deplo-agent: agent link: %v (retrying)", err)
+			}
+			lastErr = err.Error()
+			if up >= healthyAfter {
+				backoff = minBackoff
+			}
+			wait = max(jitter(backoff), retryAfter)
 		}
-		// A refusal repeats every 30 s for as long as it lasts: log it when it changes.
-		if up > 0 {
-			cfg.Logf("deplo-agent: agent link to %s ended after %s: %v", cfg.URL, up.Round(time.Second), err)
-		} else if err.Error() != lastErr {
-			cfg.Logf("deplo-agent: agent link to %s: %v (retrying)", cfg.URL, err)
-		}
-		lastErr = err.Error()
-		if up >= healthyAfter {
-			backoff = minBackoff
-		}
-		wait := jitter(backoff)
-		var r *refusedError
-		if errors.As(err, &r) {
-			wait = max(wait, r.retryAfter)
+		var waited <-chan time.Time
+		if wait >= 0 {
+			waited = after(wait)
 		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-l.closed:
 			return
-		case <-after(wait):
+		case <-replaced:
+			// A new pair is dialed at once, from a fresh backoff.
+			backoff, lastErr = minBackoff, ""
+			continue
+		case <-waited:
 		}
 		backoff = min(backoff*2, maxBackoff)
 	}
+}
+
+// attempt dials the primary, then the fallback, and serves the first that links until that link ends.
+func (cfg Config) attempt(ctx context.Context, l *Listener, a Addresses) (up, retryAfter time.Duration, err error) {
+	addresses := []string{a.Primary}
+	if a.Fallback != "" && a.Fallback != a.Primary {
+		addresses = append(addresses, a.Fallback)
+	}
+	var failed []error
+	for _, address := range addresses {
+		ws, err := cfg.dial(ctx, l, address)
+		if err == nil {
+			up, err := cfg.serve(ctx, l, ws, address)
+			return up, 0, err
+		}
+		var r *refusedError
+		if errors.As(err, &r) {
+			retryAfter = max(retryAfter, r.retryAfter)
+		}
+		failed = append(failed, fmt.Errorf("%s: %w", address, err))
+		if ctx.Err() != nil || l.isClosed() {
+			break
+		}
+	}
+	return 0, retryAfter, errors.Join(failed...)
 }
 
 // jitter spreads a wait over its upper half, so servers that dropped together do not return together.
@@ -139,12 +172,8 @@ func (l *Listener) isClosed() bool {
 	}
 }
 
-// link dials once, hands the link to l and returns how long it was up once it has ended.
-func (cfg Config) link(ctx context.Context, l *Listener) (time.Duration, error) {
-	ws, err := cfg.dial(ctx, l)
-	if err != nil {
-		return 0, err
-	}
+// serve hands the link to l and returns how long it was up once it has ended.
+func (cfg Config) serve(ctx context.Context, l *Listener, ws *websocket.Conn, address string) (time.Duration, error) {
 	linkCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	c := &conn{Conn: websocket.NetConn(linkCtx, ws, websocket.MessageBinary), closed: make(chan struct{})}
@@ -157,7 +186,7 @@ func (cfg Config) link(ctx context.Context, l *Listener) (time.Duration, error) 
 		ws.Close(websocket.StatusGoingAway, "agent stopping")
 		return 0, ctx.Err()
 	}
-	cfg.Logf("deplo-agent: agent link to %s is up", cfg.URL)
+	cfg.Logf("deplo-agent: agent link to %s is up", address)
 	started := time.Now()
 	unanswered := make(chan error, 1)
 	go ping(linkCtx, ws, unanswered)
@@ -193,12 +222,12 @@ func ping(linkCtx context.Context, ws *websocket.Conn, unanswered chan<- error) 
 	}
 }
 
-func (cfg Config) dial(ctx context.Context, l *Listener) (*websocket.Conn, error) {
+func (cfg Config) dial(ctx context.Context, l *Listener, address string) (*websocket.Conn, error) {
 	fp, err := fingerprint(cfg.CertFile)
 	if err != nil {
 		return nil, err
 	}
-	u, err := linkURL(cfg.URL)
+	u, err := linkURL(address)
 	if err != nil {
 		return nil, err
 	}

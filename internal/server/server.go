@@ -22,6 +22,7 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 	"github.com/DeploCloud/deplo-agent/internal/hostinfo"
 	"github.com/DeploCloud/deplo-agent/internal/hostmetrics"
+	"github.com/DeploCloud/deplo-agent/internal/link"
 )
 
 // Capabilities this agent advertises in Hello.
@@ -130,6 +131,7 @@ type Service struct {
 	cacheSalt     []byte
 	agentDir      string
 	traefikApply  func(ctx context.Context, path string, restartOnly bool) error
+	linkAddresses *link.Store
 
 	mu      sync.Mutex
 	deploys map[string]*inflight
@@ -204,6 +206,7 @@ func (s *Service) Hello(ctx context.Context, req *pb.HelloRequest) (*pb.HelloRes
 		TraefikRunning:  available && dockercli.TraefikRunning(ctx),
 		HostArch:        runtime.GOARCH,
 		PublicAddresses: hostinfo.PublicAddresses(),
+		LinkAddresses:   s.savedLinkAddresses(),
 	}, nil
 }
 

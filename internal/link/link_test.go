@@ -185,7 +185,7 @@ func nextLink(t *testing.T, links <-chan *doorLink) *doorLink {
 func TestRun_linksToThePrimaryAndNamesItsServer(t *testing.T) {
 	certPath, der := agentCert(t)
 	srv, links := door(t, doorOpts{})
-	l, _ := run(t, Config{URL: srv.URL, CertFile: certPath, Logf: t.Logf})
+	l, _ := run(t, Config{Addresses: pair(t, srv.URL, ""), CertFile: certPath, Logf: t.Logf})
 
 	conn := accept(t, l)
 	dl := nextLink(t, links)
@@ -216,7 +216,7 @@ func TestRun_linksToThePrimaryAndNamesItsServer(t *testing.T) {
 func TestRun_linksWhateverThePanelsOuterCertificate(t *testing.T) {
 	certPath, _ := agentCert(t)
 	srv, links := door(t, doorOpts{tls: true}) // self-signed: trust is the mTLS inside the link
-	l, _ := run(t, Config{URL: srv.URL, CertFile: certPath, Logf: t.Logf})
+	l, _ := run(t, Config{Addresses: pair(t, srv.URL, ""), CertFile: certPath, Logf: t.Logf})
 	accept(t, l)
 	nextLink(t, links)
 }
@@ -224,7 +224,7 @@ func TestRun_linksWhateverThePanelsOuterCertificate(t *testing.T) {
 func TestRun_stoppingClosesTheLinkAsGoingAway(t *testing.T) {
 	certPath, _ := agentCert(t)
 	srv, links := door(t, doorOpts{})
-	l, stop := run(t, Config{URL: srv.URL, CertFile: certPath, Logf: t.Logf})
+	l, stop := run(t, Config{Addresses: pair(t, srv.URL, ""), CertFile: certPath, Logf: t.Logf})
 	accept(t, l)
 	dl := nextLink(t, links)
 	stop()
@@ -277,7 +277,7 @@ func TestRun_backsOffWithJitterFromAboutOneSecondToThirty(t *testing.T) {
 	waits := fakeWaits(t)
 	certPath, _ := agentCert(t)
 	srv, _ := door(t, doorOpts{refuse: refuseWith(http.StatusServiceUnavailable)})
-	_, stop := run(t, Config{URL: srv.URL, CertFile: certPath, Logf: t.Logf})
+	_, stop := run(t, Config{Addresses: pair(t, srv.URL, ""), CertFile: certPath, Logf: t.Logf})
 	waitFor(t, "a dozen reconnect waits", func() bool { return len(waits()) >= 12 })
 	stop()
 
@@ -323,7 +323,7 @@ func TestRun_aLinkThatLastedStartsTheBackoffOver(t *testing.T) {
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return true
 	}})
-	l, stop := run(t, Config{URL: srv.URL, CertFile: certPath, Logf: t.Logf})
+	l, stop := run(t, Config{Addresses: pair(t, srv.URL, ""), CertFile: certPath, Logf: t.Logf})
 	standIn(accept(t, l))
 	dl := nextLink(t, links)
 	time.Sleep(4 * healthyAfter)
@@ -344,7 +344,7 @@ func TestRun_aLinkThePanelDropsAtOnceKeepsBackingOff(t *testing.T) {
 	waits := fakeWaits(t)
 	certPath, _ := agentCert(t)
 	srv, links := door(t, doorOpts{})
-	l, stop := run(t, Config{URL: srv.URL, CertFile: certPath, Logf: t.Logf})
+	l, stop := run(t, Config{Addresses: pair(t, srv.URL, ""), CertFile: certPath, Logf: t.Logf})
 	go func() {
 		for {
 			c, err := l.Accept()
@@ -380,7 +380,7 @@ func TestRun_waitsAsLongAsThePanelAsks(t *testing.T) {
 		w.WriteHeader(http.StatusTooManyRequests)
 		return true
 	}})
-	_, stop := run(t, Config{URL: srv.URL, CertFile: certPath, Logf: t.Logf})
+	_, stop := run(t, Config{Addresses: pair(t, srv.URL, ""), CertFile: certPath, Logf: t.Logf})
 	waitFor(t, "two reconnect waits", func() bool { return len(waits()) >= 2 })
 	stop()
 
@@ -405,7 +405,7 @@ func TestRun_pingsTheLinkWhileItIsQuiet(t *testing.T) {
 	shortPings(t)
 	certPath, _ := agentCert(t)
 	srv, links := door(t, doorOpts{})
-	l, _ := run(t, Config{URL: srv.URL, CertFile: certPath, Logf: t.Logf})
+	l, _ := run(t, Config{Addresses: pair(t, srv.URL, ""), CertFile: certPath, Logf: t.Logf})
 	standIn(accept(t, l))
 	dl := nextLink(t, links)
 	waitFor(t, "three pings", func() bool { return dl.pings.Load() >= 3 })
@@ -420,7 +420,7 @@ func TestRun_dropsALinkWhosePingsGoUnanswered(t *testing.T) {
 	shortPings(t)
 	certPath, _ := agentCert(t)
 	srv, links := door(t, doorOpts{mute: true})
-	l, _ := run(t, Config{URL: srv.URL, CertFile: certPath, Logf: t.Logf})
+	l, _ := run(t, Config{Addresses: pair(t, srv.URL, ""), CertFile: certPath, Logf: t.Logf})
 	go func() {
 		for {
 			c, err := l.Accept()
@@ -433,4 +433,130 @@ func TestRun_dropsALinkWhosePingsGoUnanswered(t *testing.T) {
 	first := nextLink(t, links)
 	first.waitEnded(t)
 	nextLink(t, links) // and it links again
+}
+
+// pair is a saved pair in a fresh agent dir.
+func pair(t *testing.T, primary, fallback string) *Store {
+	t.Helper()
+	a := Addresses{Primary: primary, Fallback: fallback}
+	dir := t.TempDir()
+	if primary != "" {
+		if err := SaveAddresses(dir, a); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return NewStore(dir, a)
+}
+
+// knocks records which door each attempt reached, in order.
+type knocks struct {
+	mu  sync.Mutex
+	got []string
+}
+
+func (k *knocks) door(name string, refuse bool) func(int, http.ResponseWriter) bool {
+	return func(_ int, w http.ResponseWriter) bool {
+		k.mu.Lock()
+		k.got = append(k.got, name)
+		k.mu.Unlock()
+		if refuse {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+		return refuse
+	}
+}
+
+func (k *knocks) list() []string {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return append([]string(nil), k.got...)
+}
+
+func TestRun_dialsThePrimaryThenTheFallback(t *testing.T) {
+	certPath, _ := agentCert(t)
+	var k knocks
+	primary, _ := door(t, doorOpts{refuse: k.door("primary", true)})
+	fallback, links := door(t, doorOpts{refuse: k.door("fallback", false)})
+	l, _ := run(t, Config{Addresses: pair(t, primary.URL, fallback.URL), CertFile: certPath, Logf: t.Logf})
+
+	accept(t, l)
+	nextLink(t, links)
+	if got := k.list(); len(got) < 2 || got[0] != "primary" || got[1] != "fallback" {
+		t.Fatalf("doors reached %v, want the primary and then the fallback", got)
+	}
+}
+
+func TestRun_leavesTheFallbackAloneWhileThePrimaryAnswers(t *testing.T) {
+	certPath, _ := agentCert(t)
+	var k knocks
+	primary, links := door(t, doorOpts{refuse: k.door("primary", false)})
+	fallback, _ := door(t, doorOpts{refuse: k.door("fallback", false)})
+	l, _ := run(t, Config{Addresses: pair(t, primary.URL, fallback.URL), CertFile: certPath, Logf: t.Logf})
+
+	accept(t, l)
+	nextLink(t, links)
+	if got := k.list(); len(got) != 1 || got[0] != "primary" {
+		t.Fatalf("doors reached %v, want the primary alone", got)
+	}
+}
+
+// A working link is proof enough the panel is there: a new pair waits for the next dial.
+func TestRun_aReplacedPairKeepsTheOpenLinkAndIsDialedNext(t *testing.T) {
+	certPath, _ := agentCert(t)
+	oldDoor, oldLinks := door(t, doorOpts{})
+	newDoor, newLinks := door(t, doorOpts{})
+	st := pair(t, oldDoor.URL, "")
+	l, _ := run(t, Config{Addresses: st, CertFile: certPath, Logf: t.Logf})
+	standIn(accept(t, l))
+	open := nextLink(t, oldLinks)
+
+	if _, err := st.Replace(Addresses{Primary: newDoor.URL}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-open.ended:
+		t.Fatalf("replacing the pair ended the open link: %v", open.err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	_ = open.ws.Close(4000, "replaced by a newer link")
+	go standIn(accept(t, l))
+	nextLink(t, newLinks)
+}
+
+func TestRun_waitsForAPrimaryAndDialsTheFirstOneItIsGiven(t *testing.T) {
+	certPath, _ := agentCert(t)
+	srv, links := door(t, doorOpts{})
+	st := pair(t, "", "")
+	l, _ := run(t, Config{Addresses: st, CertFile: certPath, Logf: t.Logf})
+	select {
+	case dl := <-links:
+		t.Fatalf("an agent with no address linked to %s", dl.req.Host)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	if _, err := st.Replace(Addresses{Primary: srv.URL}); err != nil {
+		t.Fatal(err)
+	}
+	accept(t, l)
+	nextLink(t, links)
+}
+
+func TestRun_aNewPairIsDialedWithoutWaitingOutTheBackoff(t *testing.T) {
+	certPath, _ := agentCert(t)
+	away, _ := door(t, doorOpts{refuse: func(_ int, w http.ResponseWriter) bool {
+		w.Header().Set("Retry-After", "300")
+		w.WriteHeader(http.StatusTooManyRequests)
+		return true
+	}})
+	srv, links := door(t, doorOpts{})
+	st := pair(t, away.URL, "")
+	l, _ := run(t, Config{Addresses: st, CertFile: certPath, Logf: t.Logf})
+	time.Sleep(200 * time.Millisecond) // refused, and told to stay away for five minutes
+
+	if _, err := st.Replace(Addresses{Primary: srv.URL}); err != nil {
+		t.Fatal(err)
+	}
+	accept(t, l)
+	nextLink(t, links)
 }

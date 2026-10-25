@@ -22,7 +22,9 @@ import (
 
 	"github.com/coder/websocket"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/status"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/bootstrap"
@@ -184,6 +186,8 @@ func hello(t *testing.T, c pb.AgentClient) *pb.HelloResponse {
 
 type agentUnderTest struct {
 	pki    *testPKI
+	dir    string
+	url    string // the panel door
 	lis    net.Listener
 	links  <-chan linked
 	stop   context.CancelFunc
@@ -203,6 +207,12 @@ func startAgent(t *testing.T) *agentUnderTest {
 // startAgentOn is startAgent with lis as its listener; nil is an agent that only links.
 func startAgentOn(t *testing.T, lis net.Listener) *agentUnderTest {
 	t.Helper()
+	return startAgentWith(t, lis, true)
+}
+
+// startAgentWith is startAgentOn with the door's address saved, or with none: an agent from before the link.
+func startAgentWith(t *testing.T, lis net.Listener, saved bool) *agentUnderTest {
+	t.Helper()
 	noDocker(t)
 	pki := newTestPKI(t)
 	dir := t.TempDir()
@@ -212,13 +222,25 @@ func startAgentOn(t *testing.T, lis net.Listener) *agentUnderTest {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := newGRPCServer(cm)
-	pb.RegisterAgentServer(srv, server.New(t.TempDir(), t.TempDir(), "/", ""))
 	url, links := panelDoor(t)
+	if saved {
+		if err := link.SaveAddresses(dir, link.Addresses{Primary: url}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lc, err := linkConfig(false, dir, m.CertPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lc.Logf = t.Logf
+	srv := newGRPCServer(cm)
+	svc := server.New(t.TempDir(), t.TempDir(), "/", "")
+	svc.EnableAgentLink(lc.Addresses)
+	pb.RegisterAgentServer(srv, svc)
 	ctx, cancel := context.WithCancel(context.Background())
-	a := &agentUnderTest{pki: pki, lis: lis, links: links, stop: cancel, served: make(chan error, 1)}
+	a := &agentUnderTest{pki: pki, dir: dir, url: url, lis: lis, links: links, stop: cancel, served: make(chan error, 1)}
 	go func() {
-		a.served <- serveAgent(ctx, srv, lis, &link.Config{URL: url, CertFile: m.CertPath, Logf: t.Logf})
+		a.served <- serveAgent(ctx, srv, lis, lc)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -318,4 +340,79 @@ func TestServeAgent_stopsWithoutWaitingOnStreamsOverTheLink(t *testing.T) {
 		t.Errorf("stopping took %v: the open stream on the link held the drain", took)
 	}
 	a.served <- nil // for the cleanup
+}
+
+func setPair(t *testing.T, c pb.AgentClient, primary, fallback string) (*pb.LinkAddresses, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return c.SetLinkAddresses(ctx, &pb.LinkAddresses{Primary: primary, Fallback: fallback})
+}
+
+func TestServeAgent_takesANewPairOverItsLinkAndLinksThereNext(t *testing.T) {
+	a := startAgentOn(t, nil)
+	first := nextLinked(t, a.links)
+	c := overLink(t, first.conn, a.pki.panelTLS(t, nil))
+	if got := hello(t, c).GetLinkAddresses(); got.GetPrimary() == "" || got.GetFallback() != "" {
+		t.Fatalf("Hello reports %v, want the saved primary alone", got)
+	}
+
+	moved, moves := panelDoor(t)
+	kept, err := setPair(t, c, moved, "https://deplo-cb00710a.deplo.site")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := &pb.LinkAddresses{Primary: moved, Fallback: "https://deplo-cb00710a.deplo.site"}
+	if kept.GetPrimary() != want.Primary || kept.GetFallback() != want.Fallback {
+		t.Fatalf("kept %v, want %v", kept, want)
+	}
+	// Still on the link that carried it, which now reports the new pair.
+	if got := hello(t, c).GetLinkAddresses(); got.GetPrimary() != want.Primary || got.GetFallback() != want.Fallback {
+		t.Fatalf("Hello after the change reports %v, want %v", got, want)
+	}
+	if saved, err := linkAddresses(a.dir); err != nil || saved != (link.Addresses{Primary: want.Primary, Fallback: want.Fallback}) {
+		t.Fatalf("what a restart reads: %+v, %v", saved, err)
+	}
+
+	_ = first.ws.CloseNow()
+	again := nextLinked(t, moves)
+	hello(t, overLink(t, again.conn, a.pki.panelTLS(t, nil)))
+}
+
+// The way an agent from before the link moves over: the panel sends the pair over its listener.
+func TestServeAgent_withNoAddressLinksOnceThePanelSendsOne(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := startAgentWith(t, lis, false)
+	cc, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(credentials.NewTLS(a.pki.panelTLS(t, nil))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cc.Close()
+	direct := pb.NewAgentClient(cc)
+	if got := hello(t, direct).GetLinkAddresses(); got == nil || got.GetPrimary() != "" {
+		t.Fatalf("Hello reports %v, want an empty pair: the panel should send one", got)
+	}
+
+	if _, err := setPair(t, direct, a.url, ""); err != nil {
+		t.Fatal(err)
+	}
+	l := nextLinked(t, a.links)
+	hello(t, overLink(t, l.conn, a.pki.panelTLS(t, nil)))
+}
+
+func TestServeAgent_keepsItsPairWhenGivenOneItCouldNotDial(t *testing.T) {
+	a := startAgentOn(t, nil)
+	l := nextLinked(t, a.links)
+	c := overLink(t, l.conn, a.pki.panelTLS(t, nil))
+	was := hello(t, c).GetLinkAddresses().GetPrimary()
+
+	if _, err := setPair(t, c, "", "https://deplo-cb00710a.deplo.site"); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("a pair with no primary: %v, want InvalidArgument", err)
+	}
+	if got := hello(t, c).GetLinkAddresses(); got.GetPrimary() != was || got.GetFallback() != "" {
+		t.Fatalf("Hello reports %v after a refused pair, want the old one", got)
+	}
 }

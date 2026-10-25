@@ -118,10 +118,14 @@ func main() {
 	lc, err := linkConfig(*insecure, *agentDir, cert)
 	if err != nil {
 		log.Printf("deplo-agent: agent link: %v", err)
-	} else if lc != nil {
-		log.Printf("deplo-agent: linking to %s", lc.URL)
 	}
-	if lis == nil && lc == nil {
+	if lc != nil {
+		svc.EnableAgentLink(lc.Addresses)
+		if a := lc.Addresses.Current(); a.Primary != "" {
+			log.Printf("deplo-agent: linking to %s", a.Primary)
+		}
+	}
+	if lis == nil && (lc == nil || lc.Addresses.Current().Primary == "") {
 		log.Fatalf("deplo-agent: no --addr and no panel address to link to, so nothing could reach this agent")
 	}
 
@@ -206,15 +210,13 @@ func serveAgent(ctx context.Context, srv *grpc.Server, lis net.Listener, lc *lin
 }
 
 // linkConfig is where the agent links, or nil: never without mTLS, since the link crosses the internet.
+// With no saved address (or an unreadable one) it waits for the panel to send a pair over the listener.
 func linkConfig(insecure bool, agentDir, certFile string) (*link.Config, error) {
 	if insecure || agentDir == "" {
 		return nil, nil
 	}
 	a, err := linkAddresses(agentDir)
-	if err != nil || a.Primary == "" {
-		return nil, err
-	}
-	return &link.Config{URL: a.Primary, CertFile: certFile, Logf: log.Printf}, nil
+	return &link.Config{Addresses: link.NewStore(agentDir, a), CertFile: certFile, Logf: log.Printf}, err
 }
 
 // linkAddresses is the saved pair; an agent enrolled before the agent link saves its install URL once.

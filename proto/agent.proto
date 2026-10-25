@@ -306,6 +306,10 @@ service Agent {
   // The package list inside one of those images, read under a memory cap, one image at a
   // time and never during a deploy. Advertised as `image-inventory`.
   rpc InventoryImage(InventoryImageRequest) returns (InventoryImageResponse);
+
+  // Replace the panel addresses this agent links to (ADR-0038): it keeps exactly this pair,
+  // an empty fallback dropped, and dials it from its next link on. Advertised as `agent-link`.
+  rpc SetLinkAddresses(LinkAddresses) returns (LinkAddresses);
 }
 
 // ---------------------------------------------------------------------------
@@ -363,6 +367,15 @@ message HelloResponse {
   // The host's public IPv4 and IPv6 addresses, read from its own interfaces. Trusted only
   // with the "host.addresses" capability: an older agent leaves it empty.
   repeated string public_addresses = 8;
+  // The panel addresses this agent links to, as it keeps them. Trusted only with the
+  // "agent-link" capability, and unset on an agent that cannot link.
+  LinkAddresses link_addresses = 9;
+}
+
+// The panel addresses an agent links to: a primary and, while the panel keeps one, its fallback.
+message LinkAddresses {
+  string primary = 1;
+  string fallback = 2;
 }
 
 // ---------------------------------------------------------------------------

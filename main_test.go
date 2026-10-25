@@ -116,7 +116,7 @@ func TestLinkConfig_neverLinksWithoutMTLS(t *testing.T) {
 		t.Fatalf("--insecure linked to %+v (err %v): gRPC would cross the internet in the clear", lc, err)
 	}
 	lc, err := linkConfig(false, dir, "agent.crt")
-	if err != nil || lc == nil || lc.URL != "https://panel.example.com" || lc.CertFile != "agent.crt" {
+	if err != nil || lc == nil || lc.Addresses.Current().Primary != "https://panel.example.com" || lc.CertFile != "agent.crt" {
 		t.Fatalf("with mTLS: %+v, %v", lc, err)
 	}
 }

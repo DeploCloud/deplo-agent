@@ -5,8 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 )
 
 // Addresses are the panel addresses this agent links to: at most a primary and the panel's fallback.
@@ -64,4 +67,55 @@ func SaveAddresses(agentDir string, a Addresses) error {
 		return err
 	}
 	return os.Rename(tmp.Name(), path)
+}
+
+// Store is the saved pair, shared by the dialer and the RPC that replaces it.
+type Store struct {
+	dir     string
+	mu      sync.Mutex
+	a       Addresses
+	changed chan struct{}
+}
+
+// NewStore holds saved, the pair already on disk under agentDir.
+func NewStore(agentDir string, saved Addresses) *Store {
+	return &Store{dir: agentDir, a: saved, changed: make(chan struct{})}
+}
+
+// Current is the pair the next dial uses.
+func (s *Store) Current() Addresses {
+	a, _ := s.watch()
+	return a
+}
+
+// watch is the pair and a channel closed once it is replaced, read together so no replacement is missed.
+func (s *Store) watch() (Addresses, <-chan struct{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.a, s.changed
+}
+
+// ErrInvalidAddresses is a pair the agent could not dial; it keeps the one it has.
+var ErrInvalidAddresses = errors.New("not a pair of panel addresses")
+
+// Replace saves a as the whole pair, the old one forgotten, and returns what it kept.
+func (s *Store) Replace(a Addresses) (Addresses, error) {
+	a = Addresses{Primary: strings.TrimSpace(a.Primary), Fallback: strings.TrimSpace(a.Fallback)}
+	if !dialable(a.Primary) || a.Fallback != "" && !dialable(a.Fallback) {
+		return s.Current(), fmt.Errorf("%w: %+v", ErrInvalidAddresses, a)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := SaveAddresses(s.dir, a); err != nil {
+		return s.a, err
+	}
+	s.a = a
+	close(s.changed)
+	s.changed = make(chan struct{})
+	return a, nil
+}
+
+func dialable(address string) bool {
+	u, err := url.Parse(address)
+	return err == nil && (u.Scheme == "https" || u.Scheme == "http") && u.Host != ""
 }
