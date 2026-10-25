@@ -193,6 +193,16 @@ type agentUnderTest struct {
 // startAgent serves the real Agent service with main's gRPC server, on a listener and over a link.
 func startAgent(t *testing.T) *agentUnderTest {
 	t.Helper()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return startAgentOn(t, lis)
+}
+
+// startAgentOn is startAgent with lis as its listener; nil is an agent that only links.
+func startAgentOn(t *testing.T, lis net.Listener) *agentUnderTest {
+	t.Helper()
 	noDocker(t)
 	pki := newTestPKI(t)
 	dir := t.TempDir()
@@ -204,10 +214,6 @@ func startAgent(t *testing.T) *agentUnderTest {
 	}
 	srv := newGRPCServer(cm)
 	pb.RegisterAgentServer(srv, server.New(t.TempDir(), t.TempDir(), "/", ""))
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
 	url, links := panelDoor(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	a := &agentUnderTest{pki: pki, lis: lis, links: links, stop: cancel, served: make(chan error, 1)}
@@ -240,6 +246,21 @@ func TestServeAgent_answersOverTheLinkWithItsMTLSIdentity(t *testing.T) {
 	sum := sha256.Sum256(peer.Raw)
 	if l.claim != hex.EncodeToString(sum[:]) {
 		t.Errorf("the door claim %q is not the certificate the agent proved inside the link", l.claim)
+	}
+}
+
+func TestServeAgent_withNoListenerAnswersOverTheLinkAlone(t *testing.T) {
+	a := startAgentOn(t, nil)
+	l := nextLinked(t, a.links)
+	hello(t, overLink(t, l.conn, a.pki.panelTLS(t, nil)))
+
+	_ = l.ws.CloseNow()
+	again := nextLinked(t, a.links)
+	hello(t, overLink(t, again.conn, a.pki.panelTLS(t, nil)))
+	select {
+	case err := <-a.served:
+		t.Fatalf("an agent with nothing but its link stopped serving: %v", err)
+	default:
 	}
 }
 

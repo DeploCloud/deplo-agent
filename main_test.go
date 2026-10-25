@@ -3,9 +3,12 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/DeploCloud/deplo-agent/internal/link"
+	"github.com/DeploCloud/deplo-agent/internal/server"
 )
 
 func TestLoopbackAddr(t *testing.T) {
@@ -77,6 +80,30 @@ func TestLinkAddresses_noAddressAnywhereMeansNoLink(t *testing.T) {
 	}
 	if _, err := os.Stat(link.AddressesPath(dir)); !os.IsNotExist(err) {
 		t.Fatalf("nothing may be saved when there is no address (stat err = %v)", err)
+	}
+}
+
+func TestListen_noAddressMeansNoListener(t *testing.T) {
+	lis, err := listen("")
+	if lis != nil || err != nil {
+		t.Fatalf("listen(\"\") = %v, %v; a linking agent opens no port at all", lis, err)
+	}
+	lis, err = listen("127.0.0.1:0")
+	if err != nil || lis == nil {
+		t.Fatalf("an explicit --addr still listens: %v, %v", lis, err)
+	}
+	lis.Close()
+}
+
+func TestPrintCapabilities_tellsAnInstallerThisAgentLinks(t *testing.T) {
+	var out strings.Builder
+	printCapabilities(&out)
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if !slices.Contains(lines, "agent-link") {
+		t.Fatalf("--capabilities printed %q, want an agent-link line", out.String())
+	}
+	if len(lines) != len(server.Capabilities) {
+		t.Fatalf("--capabilities printed %d lines, Hello advertises %d", len(lines), len(server.Capabilities))
 	}
 }
 

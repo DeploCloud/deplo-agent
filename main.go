@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -23,7 +25,8 @@ import (
 
 func main() {
 	var (
-		addr        = flag.String("addr", "127.0.0.1:9443", "listen address (host:port)")
+		addr        = flag.String("addr", "", "listen address (host:port); none by default, the agent links out to its panel")
+		showCaps    = flag.Bool("capabilities", false, "print the capabilities Hello advertises, one per line, and exit")
 		certFile    = flag.String("cert", envOr("DEPLO_AGENT_CERT", ""), "agent server certificate (PEM)")
 		keyFile     = flag.String("key", envOr("DEPLO_AGENT_KEY", ""), "agent server private key (PEM)")
 		caFile      = flag.String("ca", envOr("DEPLO_AGENT_CA", ""), "CA certificate to verify the control plane (PEM)")
@@ -43,9 +46,13 @@ func main() {
 	for _, k := range []string{"DEPLO_BOOTSTRAP_URL", "DEPLO_BOOTSTRAP_TOKEN", "DEPLO_BOOTSTRAP_FINGERPRINT"} {
 		_ = os.Unsetenv(k)
 	}
+	if *showCaps {
+		printCapabilities(os.Stdout)
+		return
+	}
 
 	if *insecure && !loopbackAddr(*addr) {
-		log.Fatalf("deplo-agent: --insecure serves without mTLS, so it only listens on loopback (got --addr %s)", *addr)
+		log.Fatalf("deplo-agent: --insecure serves without mTLS, so it needs a loopback --addr (got %q)", *addr)
 	}
 
 	if err := os.MkdirAll(*buildTmpDir, 0o755); err != nil {
@@ -59,7 +66,10 @@ func main() {
 			if *bootstrapTok == "" || *bootstrapURL == "" {
 				log.Fatalf("deplo-agent: not provisioned and no bootstrap token/url given (run via the dashboard's install command)")
 			}
-			port := portFromAddr(*addr)
+			port := 0 // a linking agent has no port to report
+			if *addr != "" {
+				port = portFromAddr(*addr)
+			}
 			log.Printf("deplo-agent: bootstrapping against %s", *bootstrapURL)
 			if _, err := bootstrap.Run(bootstrap.Config{
 				ControlPlaneURL: *bootstrapURL,
@@ -95,17 +105,24 @@ func main() {
 	}
 	pb.RegisterAgentServer(srv, svc)
 
-	lis, err := net.Listen("tcp", *addr)
+	lis, err := listen(*addr)
 	if err != nil {
 		log.Fatalf("deplo-agent: listen %s: %v", *addr, err)
 	}
-	log.Printf("deplo-agent %s listening on %s (mtls=%v)", server.AgentVersion, *addr, !*insecure)
+	if lis != nil {
+		log.Printf("deplo-agent %s listening on %s (mtls=%v)", server.AgentVersion, *addr, !*insecure)
+	} else {
+		log.Printf("deplo-agent %s: no listener, it links out to its panel", server.AgentVersion)
+	}
 
 	lc, err := linkConfig(*insecure, *agentDir, cert)
 	if err != nil {
 		log.Printf("deplo-agent: agent link: %v", err)
 	} else if lc != nil {
 		log.Printf("deplo-agent: linking to %s", lc.URL)
+	}
+	if lis == nil && lc == nil {
+		log.Fatalf("deplo-agent: no --addr and no panel address to link to, so nothing could reach this agent")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
@@ -136,10 +153,27 @@ func newGRPCServer(certMgr *server.CertManager) *grpc.Server {
 	return grpc.NewServer(opts...)
 }
 
-// serveAgent serves srv on lis and, given lc, over an agent link too, until ctx ends or lis fails.
+// listen opens the listener for --addr; none at all when it is empty (ADR-0038).
+func listen(addr string) (net.Listener, error) {
+	if addr == "" {
+		return nil, nil
+	}
+	return net.Listen("tcp", addr)
+}
+
+// printCapabilities answers an installer asking what this binary can do, e.g. whether it links.
+func printCapabilities(w io.Writer) {
+	for _, c := range server.Capabilities {
+		fmt.Fprintln(w, c)
+	}
+}
+
+// serveAgent serves srv on lis (when there is one) and, given lc, over an agent link, until ctx ends or lis fails.
 func serveAgent(ctx context.Context, srv *grpc.Server, lis net.Listener, lc *link.Config) error {
 	serveErr := make(chan error, 2)
-	go func() { serveErr <- srv.Serve(lis) }()
+	if lis != nil {
+		go func() { serveErr <- srv.Serve(lis) }()
+	}
 	linkCtx, closeLink := context.WithCancel(context.Background())
 	defer closeLink()
 	unlinked := make(chan struct{})

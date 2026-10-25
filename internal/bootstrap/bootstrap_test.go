@@ -21,12 +21,12 @@ import (
 )
 
 func fakeControlPlane(t *testing.T, token string, tamperMAC bool) *httptest.Server {
-	return fakeControlPlaneIssuing(t, token, tamperMAC, "")
+	return fakeControlPlaneIssuing(t, token, tamperMAC, "", "")
 }
 
-// fakeControlPlaneIssuing answers like the control plane; forge "key" signs a stranger's key,
-// forge "ca" signs the CSR with a CA other than the one it returns.
-func fakeControlPlaneIssuing(t *testing.T, token string, tamperMAC bool, forge string) *httptest.Server {
+// fakeControlPlaneIssuing answers like the control plane, naming linkURL as the link address when set;
+// forge "key" signs a stranger's key, forge "ca" signs the CSR with a CA other than the one it returns.
+func fakeControlPlaneIssuing(t *testing.T, token string, tamperMAC bool, forge, linkURL string) *httptest.Server {
 	t.Helper()
 	caPub, caPriv, _ := ed25519.GenerateKey(rand.Reader)
 	caTmpl := &x509.Certificate{
@@ -76,7 +76,7 @@ func fakeControlPlaneIssuing(t *testing.T, token string, tamperMAC bool, forge s
 		leafDER, _ := x509.CreateCertificate(rand.Reader, leafTmpl, signer, leafPub, signerKey)
 		leafPem := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER})
 
-		payload, _ := json.Marshal(callHomeResponse{CertPem: string(leafPem), CAPem: string(caPem)})
+		payload, _ := json.Marshal(callHomeResponse{CertPem: string(leafPem), CAPem: string(caPem), LinkURL: linkURL})
 		h := hmac.New(sha256.New, []byte(token))
 		h.Write(payload)
 		mac := hex.EncodeToString(h.Sum(nil))
@@ -143,6 +143,38 @@ func TestBootstrap_savesTheCallHomeURLAsThePrimaryAddress(t *testing.T) {
 	}
 }
 
+func TestBootstrap_savesTheLinkAddressThePanelNames(t *testing.T) {
+	// The panel's own server calls home on the dashboard's port and links on another (ADR-0038).
+	srv := fakeControlPlaneIssuing(t, "tok-123", false, "", "http://127.0.0.1:3102/")
+	defer srv.Close()
+	dir := t.TempDir()
+	if _, err := Run(Config{ControlPlaneURL: srv.URL, Token: "tok-123", AgentDir: dir}); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	got, err := link.LoadAddresses(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != (link.Addresses{Primary: "http://127.0.0.1:3102"}) {
+		t.Fatalf("saved addresses = %+v, want the one the panel named", got)
+	}
+}
+
+func TestBootstrap_anAddressThatIsNotTheWebKeepsTheCallHomeURL(t *testing.T) {
+	for _, named := range []string{"ftp://127.0.0.1:3102", "127.0.0.1:3102", " "} {
+		srv := fakeControlPlaneIssuing(t, "tok-123", false, "", named)
+		dir := t.TempDir()
+		_, err := Run(Config{ControlPlaneURL: srv.URL, Token: "tok-123", AgentDir: dir})
+		srv.Close()
+		if err != nil {
+			t.Fatalf("%q: bootstrap: %v", named, err)
+		}
+		if got, _ := link.LoadAddresses(dir); got.Primary != srv.URL {
+			t.Errorf("%q: primary = %q, want the call-home URL %q", named, got.Primary, srv.URL)
+		}
+	}
+}
+
 func TestBootstrap_rejectsTamperedMACOverHTTP(t *testing.T) {
 	srv := fakeControlPlane(t, "tok-123", true)
 	defer srv.Close()
@@ -189,7 +221,7 @@ func TestBootstrap_httpWithAFingerprintStillNeedsTheMAC(t *testing.T) {
 
 func TestBootstrap_refusesACertThatIsNotOurs(t *testing.T) {
 	for _, forge := range []string{"key", "ca"} {
-		srv := fakeControlPlaneIssuing(t, "tok-123", false, forge)
+		srv := fakeControlPlaneIssuing(t, "tok-123", false, forge, "")
 		dir := t.TempDir()
 		_, err := Run(Config{ControlPlaneURL: srv.URL, Token: "tok-123", AgentDir: dir})
 		srv.Close()

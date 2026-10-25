@@ -92,6 +92,8 @@ type callHomeRequest struct {
 type callHomeResponse struct {
 	CertPem string `json:"certPem"`
 	CAPem   string `json:"caPem"`
+	// LinkURL is where the panel wants this agent to link (ADR-0038); an older panel names none.
+	LinkURL string `json:"linkUrl,omitempty"`
 	Error   string `json:"error,omitempty"`
 }
 
@@ -167,7 +169,7 @@ func Run(cfg Config) (Materials, error) {
 		}
 	}
 	// Saved before the PEMs commit: an agent is provisioned only once its link address is on disk too.
-	if err := link.SaveAddresses(cfg.AgentDir, link.Addresses{Primary: strings.TrimRight(cfg.ControlPlaneURL, "/")}); err != nil {
+	if err := link.SaveAddresses(cfg.AgentDir, link.Addresses{Primary: primaryAddress(cfg.ControlPlaneURL, resp.LinkURL)}); err != nil {
 		cleanupTmps()
 		return mats, fmt.Errorf("save link address: %w", err)
 	}
@@ -218,6 +220,16 @@ func callHome(cfg Config, csrPem string) (callHomeResponse, []byte, string, erro
 		parsed.Error = fmt.Sprintf("HTTP %d", res.StatusCode)
 	}
 	return parsed, raw, res.Header.Get("x-deplo-bootstrap-mac"), nil
+}
+
+// primaryAddress is the link address the panel named, signed with the certificate, or else the call-home URL.
+func primaryAddress(callHome, named string) string {
+	named = strings.TrimSpace(named)
+	lower := strings.ToLower(named)
+	if !strings.HasPrefix(lower, "https://") && !strings.HasPrefix(lower, "http://") {
+		named = callHome
+	}
+	return strings.TrimRight(named, "/")
 }
 
 func isHTTPS(url string) bool {
