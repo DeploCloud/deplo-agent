@@ -27,7 +27,7 @@ const (
 	browserDeadline = 75 * time.Second
 	navTimeout      = 30 * time.Second
 	idleTimeout     = 10 * time.Second
-	callTimeout     = 10 * time.Second
+	callTimeout     = 25 * time.Second
 	// Main-frame documents a page may still load after its first one: a JS redirect, not a refresh loop.
 	navigationsAfterLoad = 2
 	settleDelay          = time.Second
