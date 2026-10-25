@@ -236,11 +236,16 @@ func startAgentWith(t *testing.T, lis net.Listener, saved bool) *agentUnderTest 
 	srv := newGRPCServer(cm)
 	svc := server.New(t.TempDir(), t.TempDir(), "/", "")
 	svc.EnableAgentLink(lc.Addresses)
+	var direct *link.Direct
+	if lis != nil {
+		direct = link.NewDirect(lis, dir)
+	}
+	svc.SetListener(direct)
 	pb.RegisterAgentServer(srv, svc)
 	ctx, cancel := context.WithCancel(context.Background())
 	a := &agentUnderTest{pki: pki, dir: dir, url: url, lis: lis, links: links, stop: cancel, served: make(chan error, 1)}
 	go func() {
-		a.served <- serveAgent(ctx, srv, lis, lc)
+		a.served <- serveAgent(ctx, srv, direct, lc)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -414,5 +419,99 @@ func TestServeAgent_keepsItsPairWhenGivenOneItCouldNotDial(t *testing.T) {
 	}
 	if got := hello(t, c).GetLinkAddresses(); got.GetPrimary() != was || got.GetFallback() != "" {
 		t.Fatalf("Hello reports %v after a refused pair, want the old one", got)
+	}
+}
+
+func stopListening(c pb.AgentClient) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := c.StopListening(ctx, &pb.StopListeningRequest{})
+	return err
+}
+
+// direct is the control plane's client on the agent's own port, as it dials today.
+func (a *agentUnderTest) direct(t *testing.T) pb.AgentClient {
+	t.Helper()
+	cc, err := grpc.NewClient(a.lis.Addr().String(), grpc.WithTransportCredentials(credentials.NewTLS(a.pki.panelTLS(t, nil))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cc.Close() })
+	return pb.NewAgentClient(cc)
+}
+
+func (a *agentUnderTest) accepts() bool {
+	c, err := net.DialTimeout("tcp", a.lis.Addr().String(), time.Second)
+	if err == nil {
+		c.Close()
+	}
+	return err == nil
+}
+
+func TestServeAgent_helloSaysWhetherItStillListens(t *testing.T) {
+	a := startAgent(t)
+	if !hello(t, overLink(t, nextLinked(t, a.links).conn, a.pki.panelTLS(t, nil))).GetListening() {
+		t.Error("an agent with a listener reports none")
+	}
+	b := startAgentOn(t, nil)
+	if hello(t, overLink(t, nextLinked(t, b.links).conn, b.pki.panelTLS(t, nil))).GetListening() {
+		t.Error("an agent with no listener reports one")
+	}
+}
+
+func TestServeAgent_stopsListeningWhenAskedOverItsLinkAndServesThereAlone(t *testing.T) {
+	a := startAgent(t)
+	before := a.direct(t)
+	hello(t, before)
+	l := nextLinked(t, a.links)
+	c := overLink(t, l.conn, a.pki.panelTLS(t, nil))
+
+	if err := stopListening(c); err != nil {
+		t.Fatalf("StopListening: %v", err)
+	}
+	if hello(t, c).GetListening() {
+		t.Error("Hello still reports a listener")
+	}
+	if a.accepts() {
+		t.Fatal("its port still takes connections")
+	}
+	hello(t, before) // a connection made before carries on
+
+	_ = l.ws.CloseNow()
+	again := nextLinked(t, a.links)
+	hello(t, overLink(t, again.conn, a.pki.panelTLS(t, nil)))
+	select {
+	case err := <-a.served:
+		t.Fatalf("closing its port ended serving: %v", err)
+	default:
+	}
+}
+
+func TestServeAgent_staysClosedAcrossARestartWhateverAddrSays(t *testing.T) {
+	a := startAgent(t)
+	if err := stopListening(overLink(t, nextLinked(t, a.links).conn, a.pki.panelTLS(t, nil))); err != nil {
+		t.Fatal(err)
+	}
+	// The unit and a self-update re-exec start it again with the same --addr.
+	lis, err := listen("127.0.0.1:0", a.dir)
+	if lis != nil || err != nil {
+		t.Fatalf("the restart listens: %v, %v", lis, err)
+	}
+}
+
+func TestServeAgent_keepsItsPortWhenAskedToCloseItOverThatPort(t *testing.T) {
+	a := startAgent(t)
+	hello(t, overLink(t, nextLinked(t, a.links).conn, a.pki.panelTLS(t, nil)))
+	direct := a.direct(t)
+	if err := stopListening(direct); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("StopListening over its own port: %v, want FailedPrecondition", err)
+	}
+	if !hello(t, direct).GetListening() || !a.accepts() {
+		t.Fatal("it closed the only way in it was sure of")
+	}
+	if lis, err := listen("127.0.0.1:0", a.dir); lis == nil || err != nil {
+		t.Fatalf("a restart no longer listens: %v, %v", lis, err)
+	} else {
+		lis.Close()
 	}
 }

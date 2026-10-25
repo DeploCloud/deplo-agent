@@ -132,6 +132,7 @@ type Service struct {
 	agentDir      string
 	traefikApply  func(ctx context.Context, path string, restartOnly bool) error
 	linkAddresses *link.Store
+	listener      *link.Direct
 
 	mu      sync.Mutex
 	deploys map[string]*inflight
@@ -207,6 +208,7 @@ func (s *Service) Hello(ctx context.Context, req *pb.HelloRequest) (*pb.HelloRes
 		HostArch:        runtime.GOARCH,
 		PublicAddresses: hostinfo.PublicAddresses(),
 		LinkAddresses:   s.savedLinkAddresses(),
+		Listening:       s.listener.Listening(),
 	}, nil
 }
 

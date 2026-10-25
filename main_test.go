@@ -84,15 +84,36 @@ func TestLinkAddresses_noAddressAnywhereMeansNoLink(t *testing.T) {
 }
 
 func TestListen_noAddressMeansNoListener(t *testing.T) {
-	lis, err := listen("")
+	dir := t.TempDir()
+	lis, err := listen("", dir)
 	if lis != nil || err != nil {
 		t.Fatalf("listen(\"\") = %v, %v; a linking agent opens no port at all", lis, err)
 	}
-	lis, err = listen("127.0.0.1:0")
+	lis, err = listen("127.0.0.1:0", dir)
 	if err != nil || lis == nil {
 		t.Fatalf("an explicit --addr still listens: %v, %v", lis, err)
 	}
 	lis.Close()
+}
+
+func TestListen_anAgentThatStoppedListeningOpensNoPortOnItsNextStart(t *testing.T) {
+	dir := t.TempDir()
+	lis, err := listen("127.0.0.1:0", dir)
+	if err != nil || lis == nil {
+		t.Fatalf("listen: %v, %v", lis, err)
+	}
+	if err := lis.Stop(); err != nil {
+		t.Fatal(err)
+	}
+	if again, err := listen("127.0.0.1:0", dir); again != nil || err != nil {
+		t.Fatalf("after stopping, --addr still opened %v (%v)", again, err)
+	}
+	// Without an agent dir there is nowhere to remember it, so nothing overrides --addr.
+	if lis, err := listen("127.0.0.1:0", ""); lis == nil || err != nil {
+		t.Fatalf("listen with no agent dir: %v, %v", lis, err)
+	} else {
+		lis.Close()
+	}
 }
 
 func TestPrintCapabilities_tellsAnInstallerThisAgentLinks(t *testing.T) {

@@ -79,6 +79,11 @@ type linkAddr struct{}
 func (linkAddr) Network() string { return "agent-link" }
 func (linkAddr) String() string  { return "agent-link" }
 
+// Over reports whether addr, a call's peer address, is an agent link rather than the agent's own port.
+func Over(addr net.Addr) bool {
+	return addr != nil && addr.Network() == linkAddr{}.Network()
+}
+
 // Config is where to link and how the agent names itself there.
 type Config struct {
 	// Addresses is the saved pair: each attempt dials its primary, then its fallback.
@@ -321,3 +326,7 @@ func (c *conn) Close() error {
 	c.once.Do(func() { close(c.closed) })
 	return err
 }
+
+// A call that came over the link says so, wherever the WebSocket under it came from.
+func (c *conn) RemoteAddr() net.Addr { return linkAddr{} }
+func (c *conn) LocalAddr() net.Addr  { return linkAddr{} }
