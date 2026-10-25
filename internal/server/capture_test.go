@@ -23,7 +23,7 @@ func TestCaptureRunArgs_hardened(t *testing.T) {
 	args := strings.Join(captureRunArgs("/usr/local/bin/deplo-agent", "/var/lib/deplo-agent/capture-1/egress.sock"), " ")
 	for _, want := range []string{
 		"--rm", "--network none", "--user 65534:65534", "--cap-drop ALL", "--security-opt no-new-privileges",
-		"--read-only", "--memory 1g", "--pids-limit 1024", "--log-driver none",
+		"--read-only", "--memory 1g", "--cpu-shares 256", "--oom-score-adj 1000", "--pids-limit 1024", "--log-driver none",
 		"/usr/local/bin/deplo-agent:/deplo-agent:ro", "egress.sock:/egress/egress.sock:ro",
 		"--entrypoint /deplo-agent " + captureImage + " capture",
 	} {

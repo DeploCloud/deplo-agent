@@ -36,7 +36,10 @@ type Egress struct {
 	localErr  error
 }
 
-var errRefused = errors.New("refused")
+var (
+	errRefused = errors.New("refused")
+	errTracker = errors.New("not loaded: an ad or analytics host")
+)
 
 // Refused counts the connections the policy turned down.
 func (e *Egress) Refused() int64 { return e.refused.Load() }
@@ -50,6 +53,9 @@ func (e *Egress) dial(ctx context.Context, hostport string) (net.Conn, error) {
 	proxy, viaProxy := e.Proxy[port]
 	if viaProxy && host == strings.ToLower(e.OwnHost) {
 		return e.base(ctx, proxy)
+	}
+	if isTracker(host) {
+		return nil, errTracker
 	}
 	ips := []net.IP{net.ParseIP(host)}
 	if ips[0] == nil {

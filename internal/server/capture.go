@@ -102,7 +102,7 @@ func captureRunArgs(exe, sock string) []string {
 		"run", "--rm", "-i", "--network", "none", "--user", "65534:65534",
 		"--cap-drop", "ALL", "--security-opt", "no-new-privileges",
 		"--read-only", "--tmpfs", "/tmp:rw,nosuid,nodev,size=256m",
-		"--memory", "1g", "--memory-swap", "1g", "--cpus", "1", "--pids-limit", "1024", "--oom-score-adj", "1000",
+		"--memory", "1g", "--memory-swap", "1g", "--cpus", "1", "--cpu-shares", "256", "--pids-limit", "1024", "--oom-score-adj", "1000",
 		"--log-driver", "none", "--label", "deplo.helper=screenshot",
 		"-e", "HOME=/tmp", "-e", "XDG_CACHE_HOME=/tmp", "-e", "XDG_CONFIG_HOME=/tmp",
 		"-v", exe + ":/deplo-agent:ro", "-v", sock + ":" + capture.SocketPath + ":ro",

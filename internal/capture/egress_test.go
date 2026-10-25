@@ -183,3 +183,24 @@ func mustURL(t *testing.T, s string) *url.URL {
 	}
 	return u
 }
+
+func TestEgressDial_skipsTrackersButNeverTheApp(t *testing.T) {
+	var dialed []string
+	e := recordingEgress(&dialed)
+	e.OwnHost = "www.google-analytics.com"
+	for _, h := range []string{"securepubads.g.doubleclick.net:443", "www.googletagmanager.com:443", "cdn.taboola.com:443"} {
+		if _, err := e.dial(context.Background(), h); !errors.Is(err, errTracker) {
+			t.Errorf("%s: want skipped as a tracker, got %v", h, err)
+		}
+	}
+	if e.Refused() != 0 {
+		t.Error("a tracker is not an SSRF refusal")
+	}
+	_, _ = e.dial(context.Background(), "www.google-analytics.com:443")
+	if len(dialed) != 1 {
+		t.Fatalf("the deployment's own host is never skipped, dialed %v", dialed)
+	}
+	if isTracker("notdoubleclick.net") || !isTracker("doubleclick.net") {
+		t.Error("suffix match must be on a label boundary")
+	}
+}
