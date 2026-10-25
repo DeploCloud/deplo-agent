@@ -34,6 +34,8 @@ const (
 	maxBackoff  = 30 * time.Second
 	// maxRetryAfter bounds a Retry-After, so a misconfigured proxy cannot park a server for days.
 	maxRetryAfter = 5 * time.Minute
+	// maxRedirects bounds how far a proxy may move the link, such as from http to https.
+	maxRedirects = 5
 )
 
 // Package vars so tests can stand in for time.
@@ -246,7 +248,7 @@ func (cfg Config) dial(ctx context.Context, l *Listener, address string) (*webso
 		}
 	}()
 	ws, resp, err := websocket.Dial(dctx, u, &websocket.DialOptions{
-		HTTPClient:   &http.Client{Transport: transport()},
+		HTTPClient:   &http.Client{Transport: transport(), CheckRedirect: boundedRedirects},
 		HTTPHeader:   http.Header{CertHeader: []string{fp}},
 		Subprotocols: []string{Subprotocol},
 	})
@@ -279,6 +281,14 @@ func refused(resp *http.Response) *refusedError {
 		e.retryAfter = time.Duration(min(secs, int(maxRetryAfter/time.Second))) * time.Second
 	}
 	return e
+}
+
+// boundedRedirects follows the panel to where its proxy moved it, a few hops at most; the mTLS inside still decides.
+func boundedRedirects(_ *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return fmt.Errorf("the panel redirected the link more than %d times", maxRedirects)
+	}
+	return nil
 }
 
 func transport() *http.Transport {

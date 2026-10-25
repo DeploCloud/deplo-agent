@@ -560,3 +560,46 @@ func TestRun_aNewPairIsDialedWithoutWaitingOutTheBackoff(t *testing.T) {
 	accept(t, l)
 	nextLink(t, links)
 }
+
+// redirector answers every request by sending it to target with status, the way a proxy moves http to https.
+func redirector(t *testing.T, status int, target func() string) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		http.Redirect(w, r, target()+r.URL.Path, status)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &hits
+}
+
+func TestRun_followsThePanelFromHTTPToHTTPS(t *testing.T) {
+	for _, status := range []int{http.StatusMovedPermanently, http.StatusPermanentRedirect} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			certPath, der := agentCert(t)
+			secure, links := door(t, doorOpts{tls: true})
+			plain, _ := redirector(t, status, func() string { return secure.URL })
+			l, _ := run(t, Config{Addresses: pair(t, plain.URL, ""), CertFile: certPath, Logf: t.Logf})
+
+			accept(t, l)
+			dl := nextLink(t, links)
+			sum := sha256.Sum256(der)
+			if got := dl.req.Header.Get(CertHeader); got != hex.EncodeToString(sum[:]) {
+				t.Errorf("claim after the redirect = %q, want the agent's certificate", got)
+			}
+		})
+	}
+}
+
+func TestRun_givesUpOnARedirectThatNeverEnds(t *testing.T) {
+	waits := fakeWaits(t)
+	certPath, _ := agentCert(t)
+	var loop *httptest.Server
+	loop, hits := redirector(t, http.StatusPermanentRedirect, func() string { return loop.URL })
+	_, stop := run(t, Config{Addresses: pair(t, loop.URL, ""), CertFile: certPath, Logf: t.Logf})
+	waitFor(t, "a reconnect wait", func() bool { return len(waits()) >= 1 })
+	stop()
+	if got := hits.Load(); got > int32(len(waits())+1)*maxRedirects {
+		t.Fatalf("%d requests over %d attempts: the redirects were not bounded", got, len(waits()))
+	}
+}
