@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/DeploCloud/deplo-agent/internal/netguard"
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 )
@@ -113,7 +114,7 @@ func New(cfg Config) (*minio.Client, error) {
 			tr.TLSClientConfig.InsecureSkipVerify = true
 		}
 		if !cfg.AllowPrivateEndpoint {
-			tr.DialContext = guardedDial(tr.DialContext)
+			tr.DialContext = netguard.Dial(tr.DialContext)
 		}
 		return tr, nil
 	})
@@ -160,11 +161,6 @@ func bucketLookup(pathStyle bool) minio.BucketLookupType {
 	return minio.BucketLookupDNS
 }
 
-// lookupIP is swapped by tests that need a resolver they control.
-var lookupIP = func(ctx context.Context, host string) ([]net.IP, error) {
-	return net.DefaultResolver.LookupIP(ctx, "ip", host)
-}
-
 func validateEndpointHost(endpoint string, allowPrivate bool) error {
 	if allowPrivate {
 		return nil
@@ -180,72 +176,10 @@ func validateEndpointHost(endpoint string, allowPrivate bool) error {
 	if host == "" {
 		return fmt.Errorf("s3: empty endpoint host")
 	}
-	_, err := allowedIPs(context.Background(), host)
-	return err
-}
-
-func allowedIPs(ctx context.Context, host string) ([]net.IP, error) {
-	ips := []net.IP{net.ParseIP(host)}
-	if ips[0] == nil {
-		resolved, err := lookupIP(ctx, host)
-		if err != nil {
-			return nil, fmt.Errorf("s3: cannot resolve endpoint host %q: %w", host, err)
-		}
-		ips = resolved
+	if _, err := netguard.AllowedIPs(context.Background(), host); err != nil {
+		return fmt.Errorf("s3: endpoint %w", err)
 	}
-	if len(ips) == 0 {
-		return nil, fmt.Errorf("s3: endpoint host %q has no address", host)
-	}
-	for _, ip := range ips {
-		if reason := blockedIPReason(ip); reason != "" {
-			return nil, fmt.Errorf("s3: endpoint host %q resolves to a disallowed %s address %s; refusing to connect (SSRF guard)", host, reason, ip)
-		}
-	}
-	return ips, nil
-}
-
-// guardedDial vets EVERY host the client dials (a virtual-host bucket is <bucket>.<endpoint>) and
-// dials the address it vetted, so a rebinding resolver cannot swap it after the check.
-func guardedDial(base func(ctx context.Context, network, addr string) (net.Conn, error)) func(ctx context.Context, network, addr string) (net.Conn, error) {
-	return func(ctx context.Context, network, addr string) (net.Conn, error) {
-		host, port, err := net.SplitHostPort(addr)
-		if err != nil {
-			return nil, err
-		}
-		ips, err := allowedIPs(ctx, host)
-		if err != nil {
-			return nil, err
-		}
-		return base(ctx, network, net.JoinHostPort(ips[0].String(), port))
-	}
-}
-
-var blockedNets = func() []*net.IPNet {
-	var out []*net.IPNet
-	for _, c := range []string{"0.0.0.0/8", "100.64.0.0/10", "198.18.0.0/15", "240.0.0.0/4", "64:ff9b::/96"} {
-		_, n, _ := net.ParseCIDR(c)
-		out = append(out, n)
-	}
-	return out
-}()
-
-func blockedIPReason(ip net.IP) string {
-	switch {
-	case ip.IsLoopback():
-		return "loopback"
-	case ip.IsUnspecified():
-		return "unspecified"
-	case ip.IsLinkLocalUnicast(), ip.IsLinkLocalMulticast():
-		return "link-local"
-	case ip.IsPrivate():
-		return "private"
-	}
-	for _, n := range blockedNets {
-		if n.Contains(ip) {
-			return "reserved"
-		}
-	}
-	return ""
+	return nil
 }
 
 // Upload streams `r` to bucket/key via a multipart PUT, no temp file.

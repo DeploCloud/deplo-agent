@@ -94,6 +94,7 @@ const (
 	Agent_InventoryImage_FullMethodName      = "/deplo.agent.v1.Agent/InventoryImage"
 	Agent_SetLinkAddresses_FullMethodName    = "/deplo.agent.v1.Agent/SetLinkAddresses"
 	Agent_StopListening_FullMethodName       = "/deplo.agent.v1.Agent/StopListening"
+	Agent_CaptureScreenshot_FullMethodName   = "/deplo.agent.v1.Agent/CaptureScreenshot"
 )
 
 // AgentClient is the client API for Agent service.
@@ -311,6 +312,9 @@ type AgentClient interface {
 	// Close this agent's own port for good, once its agent link works (ADR-0038). Taken over
 	// the link only, and kept across restarts. Advertised as `agent-link`.
 	StopListening(ctx context.Context, in *StopListeningRequest, opts ...grpc.CallOption) (*StopListeningResponse, error)
+	// Opens a deployment in a throwaway browser that has no network of its own and returns
+	// a light and a dark picture of it. Advertised as `screenshot`.
+	CaptureScreenshot(ctx context.Context, in *CaptureScreenshotRequest, opts ...grpc.CallOption) (*CaptureScreenshotResponse, error)
 }
 
 type agentClient struct {
@@ -1172,6 +1176,16 @@ func (c *agentClient) StopListening(ctx context.Context, in *StopListeningReques
 	return out, nil
 }
 
+func (c *agentClient) CaptureScreenshot(ctx context.Context, in *CaptureScreenshotRequest, opts ...grpc.CallOption) (*CaptureScreenshotResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CaptureScreenshotResponse)
+	err := c.cc.Invoke(ctx, Agent_CaptureScreenshot_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AgentServer is the server API for Agent service.
 // All implementations must embed UnimplementedAgentServer
 // for forward compatibility.
@@ -1387,6 +1401,9 @@ type AgentServer interface {
 	// Close this agent's own port for good, once its agent link works (ADR-0038). Taken over
 	// the link only, and kept across restarts. Advertised as `agent-link`.
 	StopListening(context.Context, *StopListeningRequest) (*StopListeningResponse, error)
+	// Opens a deployment in a throwaway browser that has no network of its own and returns
+	// a light and a dark picture of it. Advertised as `screenshot`.
+	CaptureScreenshot(context.Context, *CaptureScreenshotRequest) (*CaptureScreenshotResponse, error)
 	mustEmbedUnimplementedAgentServer()
 }
 
@@ -1609,6 +1626,9 @@ func (UnimplementedAgentServer) SetLinkAddresses(context.Context, *LinkAddresses
 }
 func (UnimplementedAgentServer) StopListening(context.Context, *StopListeningRequest) (*StopListeningResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method StopListening not implemented")
+}
+func (UnimplementedAgentServer) CaptureScreenshot(context.Context, *CaptureScreenshotRequest) (*CaptureScreenshotResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CaptureScreenshot not implemented")
 }
 func (UnimplementedAgentServer) mustEmbedUnimplementedAgentServer() {}
 func (UnimplementedAgentServer) testEmbeddedByValue()               {}
@@ -2730,6 +2750,24 @@ func _Agent_StopListening_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Agent_CaptureScreenshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CaptureScreenshotRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).CaptureScreenshot(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_CaptureScreenshot_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).CaptureScreenshot(ctx, req.(*CaptureScreenshotRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Agent_ServiceDesc is the grpc.ServiceDesc for Agent service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -2936,6 +2974,10 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "StopListening",
 			Handler:    _Agent_StopListening_Handler,
+		},
+		{
+			MethodName: "CaptureScreenshot",
+			Handler:    _Agent_CaptureScreenshot_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

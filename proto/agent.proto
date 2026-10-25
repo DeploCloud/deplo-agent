@@ -314,6 +314,9 @@ service Agent {
   // Close this agent's own port for good, once its agent link works (ADR-0038). Taken over
   // the link only, and kept across restarts. Advertised as `agent-link`.
   rpc StopListening(StopListeningRequest) returns (StopListeningResponse);
+  // Opens a deployment in a throwaway browser that has no network of its own and returns
+  // a light and a dark picture of it. Advertised as `screenshot`.
+  rpc CaptureScreenshot(CaptureScreenshotRequest) returns (CaptureScreenshotResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -2149,4 +2152,40 @@ message InventoryImageResponse {
   repeated ImagePackage packages = 6;
   string scanner_version = 7;
   int64 duration_ms = 8;
+}
+
+// ---------------------------------------------------------------------------
+// Deployment screenshots
+// ---------------------------------------------------------------------------
+
+message CaptureScreenshotRequest {
+  // http(s)://host[/path] of the deployment. Its host is always dialed at this server's own
+  // proxy, never through DNS.
+  string url = 1;
+  // Answered only to a challenge from the url's own host. Empty = never authenticate.
+  string basic_auth_username = 2;
+  string basic_auth_password = 3;
+}
+
+enum CaptureOutcome {
+  CAPTURE_OUTCOME_UNSPECIFIED = 0;
+  CAPTURE_OUTCOME_OK = 1;
+  // The page answered with a status outside 2xx (http_status says which).
+  CAPTURE_OUTCOME_HTTP_ERROR = 2;
+  // The page rendered as one flat colour.
+  CAPTURE_OUTCOME_BLANK = 3;
+  CAPTURE_OUTCOME_UNREACHABLE = 4;
+  CAPTURE_OUTCOME_TIMEOUT = 5;
+}
+
+message CaptureScreenshotResponse {
+  CaptureOutcome outcome = 1;
+  // The status of the page itself, after redirects. 0 when it never answered.
+  int32 http_status = 2;
+  // WebP, 960x600. Set only on OK.
+  bytes light_webp = 3;
+  // Empty when the page looks the same in the dark.
+  bytes dark_webp = 4;
+  // Why it was not OK, for logs.
+  string detail = 5;
 }

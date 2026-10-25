@@ -15,8 +15,9 @@ control plane never touches a Docker socket; everything host-coupled arrives her
 - `main.go` - flags, mTLS config or first-run call-home bootstrap, gRPC wiring.
 - `internal/server/` - the Agent service implementation. The bulk of the code.
 - `internal/dockercli/`, `internal/hostmetrics/`, `internal/hostinfo/`, `internal/s3client/`,
-  `internal/safepath/`, `internal/bootstrap/` - leaf helpers.
+  `internal/safepath/`, `internal/bootstrap/`, `internal/netguard/` - leaf helpers.
 - `internal/link/` - the agent link: the WebSocket the agent opens to its panel and serves gRPC on.
+- `internal/capture/` - the deployment screenshot browser (see below).
 - `proto/agent.proto` - the wire contract, owned here.
 - `gen/` - generated. Never hand-edit; `make proto` owns it.
 
@@ -91,6 +92,25 @@ for a in amd64 arm64; do CGO_ENABLED=0 GOOS=linux GOARCH=$a go build -o /dev/nul
 
 A pre-commit hook (`.githooks/pre-commit` -> lint-staged) runs `gofmt -w` on staged Go and Prettier
 on staged Markdown and YAML. CI additionally runs `govulncheck` and the full test suite.
+
+## Deployment screenshots
+
+`CaptureScreenshot` runs THIS binary as `deplo-agent capture` inside a `--network none` container of
+`captureImage` (`internal/server/capture.go`). Its only way out is the egress proxy the host serves on a
+unix socket (`internal/capture/egress.go`); `../deplo/docs/adr/0039-the-screenshot-browser-has-no-network.md`
+says why.
+
+- **Bump `captureImage`'s digest with every agent release**, or the browser goes stale.
+- **autoconsent is vendored** in `internal/capture/autoconsent/` (MPL-2.0, its `LICENSE` sits next to it).
+  To update it, from a scratch directory:
+
+  ```sh
+  npm pack @duckduckgo/autoconsent && tar xzf duckduckgo-autoconsent-*.tgz
+  D=<repo>/internal/capture/autoconsent
+  gzip -9 -n -c package/dist/autoconsent.playwright.js > $D/autoconsent.playwright.js.gz
+  gzip -9 -n -c package/rules/rules.json > $D/rules.json.gz
+  cp package/LICENSE $D/ && node -p 'require("./package/package.json").version' > $D/VERSION
+  ```
 
 ## Releases
 

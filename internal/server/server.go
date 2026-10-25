@@ -112,6 +112,7 @@ var Capabilities = []string{
 	"deploy.pull-base",
 	"reroute.pull",
 	"agent-link",
+	"screenshot",
 }
 
 // AgentVersion is the version this agent reports over Hello.
