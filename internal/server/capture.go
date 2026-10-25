@@ -53,6 +53,9 @@ func (s *Service) CaptureScreenshot(ctx context.Context, req *pb.CaptureScreensh
 	case <-ctx.Done():
 		return nil, status.FromContextError(ctx.Err()).Err()
 	}
+	if err := captureHeadroom(ctx); err != nil {
+		return nil, err
+	}
 	if err := ensureCaptureImage(ctx); err != nil {
 		return nil, err
 	}
@@ -85,7 +88,8 @@ func (s *Service) CaptureScreenshot(ctx context.Context, req *pb.CaptureScreensh
 		log.Printf("deplo-agent: screenshot of %s: refused %d connections", target.Hostname(), n)
 	}
 	if runErr != nil {
-		return nil, status.Errorf(codes.Unavailable, "browser: %v", runErr)
+		log.Printf("deplo-agent: screenshot of %s: %v", target.Hostname(), runErr)
+		return nil, status.Error(codes.Internal, "The screenshot browser stopped before it finished.")
 	}
 	return captureResponse(out)
 }
@@ -115,14 +119,15 @@ func ensureCaptureImage(ctx context.Context) error {
 		return nil
 	}
 	if root := dockerRootDir(ctx); root != "" && filesystemFree(root) < captureMinFree {
-		return status.Error(codes.FailedPrecondition, "not enough free disk to download the screenshot browser")
+		return status.Error(codes.FailedPrecondition, "This server is short of disk space for the screenshot browser.")
 	}
 	res, err := dockercli.Run(ctx, capturePullTimeout, "pull", captureImage)
-	if err != nil {
-		return status.Errorf(codes.Unavailable, "download the screenshot browser: %v", err)
+	if err == nil && res.Code != 0 {
+		err = errors.New(strings.TrimSpace(res.Stderr))
 	}
-	if res.Code != 0 {
-		return status.Errorf(codes.Unavailable, "download the screenshot browser: %s", strings.TrimSpace(res.Stderr))
+	if err != nil {
+		log.Printf("deplo-agent: downloading the screenshot browser: %v", err)
+		return status.Error(codes.FailedPrecondition, "This server could not download the screenshot browser.")
 	}
 	return nil
 }
