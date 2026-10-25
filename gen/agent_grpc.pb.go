@@ -306,10 +306,10 @@ type AgentClient interface {
 	// The package list inside one of those images, read under a memory cap, one image at a
 	// time and never during a deploy. Advertised as `image-inventory`.
 	InventoryImage(ctx context.Context, in *InventoryImageRequest, opts ...grpc.CallOption) (*InventoryImageResponse, error)
-	// Replace the panel addresses this agent links to (ADR-0038): it keeps exactly this pair,
+	// Replace the panel addresses this agent links to (ADR-0040): it keeps exactly this pair,
 	// an empty fallback dropped, and dials it from its next link on. Advertised as `agent-link`.
 	SetLinkAddresses(ctx context.Context, in *LinkAddresses, opts ...grpc.CallOption) (*LinkAddresses, error)
-	// Close this agent's own port for good, once its agent link works (ADR-0038). Taken over
+	// Close this agent's own port for good, once its agent link works (ADR-0040). Taken over
 	// the link only, and kept across restarts. Advertised as `agent-link`.
 	StopListening(ctx context.Context, in *StopListeningRequest, opts ...grpc.CallOption) (*StopListeningResponse, error)
 	// Opens a deployment in a throwaway browser that has no network of its own and returns
@@ -1395,10 +1395,10 @@ type AgentServer interface {
 	// The package list inside one of those images, read under a memory cap, one image at a
 	// time and never during a deploy. Advertised as `image-inventory`.
 	InventoryImage(context.Context, *InventoryImageRequest) (*InventoryImageResponse, error)
-	// Replace the panel addresses this agent links to (ADR-0038): it keeps exactly this pair,
+	// Replace the panel addresses this agent links to (ADR-0040): it keeps exactly this pair,
 	// an empty fallback dropped, and dials it from its next link on. Advertised as `agent-link`.
 	SetLinkAddresses(context.Context, *LinkAddresses) (*LinkAddresses, error)
-	// Close this agent's own port for good, once its agent link works (ADR-0038). Taken over
+	// Close this agent's own port for good, once its agent link works (ADR-0040). Taken over
 	// the link only, and kept across restarts. Advertised as `agent-link`.
 	StopListening(context.Context, *StopListeningRequest) (*StopListeningResponse, error)
 	// Opens a deployment in a throwaway browser that has no network of its own and returns

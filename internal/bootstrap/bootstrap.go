@@ -92,7 +92,7 @@ type callHomeRequest struct {
 type callHomeResponse struct {
 	CertPem string `json:"certPem"`
 	CAPem   string `json:"caPem"`
-	// LinkURL is where the panel wants this agent to link (ADR-0038); an older panel names none.
+	// LinkURL is where the panel wants this agent to link (ADR-0040); an older panel names none.
 	LinkURL string `json:"linkUrl,omitempty"`
 	Error   string `json:"error,omitempty"`
 }

@@ -19,7 +19,7 @@ func ListenerStopped(agentDir string) bool {
 	return err == nil
 }
 
-// Direct is the agent's own port, which the panel dials until the agent link replaces it (ADR-0038).
+// Direct is the agent's own port, which the panel dials until the agent link replaces it (ADR-0040).
 type Direct struct {
 	net.Listener
 	agentDir string

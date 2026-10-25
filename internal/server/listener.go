@@ -14,7 +14,7 @@ import (
 // SetListener names the agent's own port, so Hello reports it and StopListening can close it.
 func (s *Service) SetListener(d *link.Direct) { s.listener = d }
 
-// StopListening closes the agent's own port for good once its link works (ADR-0038).
+// StopListening closes the agent's own port for good once its link works (ADR-0040).
 // Asked over that port instead, the agent cannot tell its link works, so it keeps the port.
 func (s *Service) StopListening(ctx context.Context, _ *pb.StopListeningRequest) (*pb.StopListeningResponse, error) {
 	if p, ok := peer.FromContext(ctx); !ok || !link.Over(p.Addr) {

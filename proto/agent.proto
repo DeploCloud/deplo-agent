@@ -307,11 +307,11 @@ service Agent {
   // time and never during a deploy. Advertised as `image-inventory`.
   rpc InventoryImage(InventoryImageRequest) returns (InventoryImageResponse);
 
-  // Replace the panel addresses this agent links to (ADR-0038): it keeps exactly this pair,
+  // Replace the panel addresses this agent links to (ADR-0040): it keeps exactly this pair,
   // an empty fallback dropped, and dials it from its next link on. Advertised as `agent-link`.
   rpc SetLinkAddresses(LinkAddresses) returns (LinkAddresses);
 
-  // Close this agent's own port for good, once its agent link works (ADR-0038). Taken over
+  // Close this agent's own port for good, once its agent link works (ADR-0040). Taken over
   // the link only, and kept across restarts. Advertised as `agent-link`.
   rpc StopListening(StopListeningRequest) returns (StopListeningResponse);
   // Opens a deployment in a throwaway browser that has no network of its own and returns

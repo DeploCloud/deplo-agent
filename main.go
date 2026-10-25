@@ -165,7 +165,7 @@ func newGRPCServer(certMgr *server.CertManager) *grpc.Server {
 	return grpc.NewServer(opts...)
 }
 
-// listen opens the listener for --addr; none when it is empty or the agent closed it once linked (ADR-0038).
+// listen opens the listener for --addr; none when it is empty or the agent closed it once linked (ADR-0040).
 func listen(addr, agentDir string) (*link.Direct, error) {
 	if addr == "" || agentDir != "" && link.ListenerStopped(agentDir) {
 		return nil, nil

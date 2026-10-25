@@ -14,7 +14,7 @@ import (
 // EnableAgentLink lets Hello report the saved panel addresses and SetLinkAddresses replace them.
 func (s *Service) EnableAgentLink(st *link.Store) { s.linkAddresses = st }
 
-// SetLinkAddresses replaces the pair the agent links to; the control plane names both (ADR-0038).
+// SetLinkAddresses replaces the pair the agent links to; the control plane names both (ADR-0040).
 func (s *Service) SetLinkAddresses(_ context.Context, req *pb.LinkAddresses) (*pb.LinkAddresses, error) {
 	if s.linkAddresses == nil {
 		return nil, status.Error(codes.FailedPrecondition, "this agent does not link to its panel")

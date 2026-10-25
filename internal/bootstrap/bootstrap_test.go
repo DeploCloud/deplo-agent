@@ -144,7 +144,7 @@ func TestBootstrap_savesTheCallHomeURLAsThePrimaryAddress(t *testing.T) {
 }
 
 func TestBootstrap_savesTheLinkAddressThePanelNames(t *testing.T) {
-	// The panel's own server calls home on the dashboard's port and links on another (ADR-0038).
+	// The panel's own server calls home on the dashboard's port and links on another (ADR-0040).
 	srv := fakeControlPlaneIssuing(t, "tok-123", false, "", "http://127.0.0.1:3102/")
 	defer srv.Close()
 	dir := t.TempDir()

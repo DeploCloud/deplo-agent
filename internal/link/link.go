@@ -21,7 +21,7 @@ import (
 	"github.com/coder/websocket"
 )
 
-// The door's wire protocol (ADR-0038).
+// The door's wire protocol (ADR-0040).
 const (
 	Path        = "/api/agent/link"
 	Subprotocol = "deplo-agent-link.v1"
@@ -284,7 +284,7 @@ func refused(resp *http.Response) *refusedError {
 func transport() *http.Transport {
 	return &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
-		// ADR-0038: trust is the mTLS inside the link, never the panel's outer certificate.
+		// ADR-0040: trust is the mTLS inside the link, never the panel's outer certificate.
 		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12},
 		TLSHandshakeTimeout: 10 * time.Second,
 		DisableKeepAlives:   true,
