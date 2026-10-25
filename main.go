@@ -17,6 +17,7 @@ import (
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/bootstrap"
+	"github.com/DeploCloud/deplo-agent/internal/link"
 	"github.com/DeploCloud/deplo-agent/internal/server"
 )
 
@@ -75,7 +76,6 @@ func main() {
 		cert, key, ca = m.CertPath, m.KeyPath, m.CAPath
 	}
 
-	var opts []grpc.ServerOption
 	var certMgr *server.CertManager
 	if !*insecure {
 		cm, err := server.NewCertManager(cert, key, ca)
@@ -83,24 +83,11 @@ func main() {
 			log.Fatalf("deplo-agent: mTLS setup: %v", err)
 		}
 		certMgr = cm
-		opts = append(opts, grpc.Creds(credentials.NewTLS(cm.ServerTLSConfig())))
 	} else {
 		log.Printf("deplo-agent: WARNING serving WITHOUT mTLS (--insecure)")
 	}
-	opts = append(opts, grpc.MaxRecvMsgSize(256*1024*1024))
 
-	opts = append(opts,
-		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
-			MinTime:             15 * time.Second,
-			PermitWithoutStream: false,
-		}),
-		grpc.KeepaliveParams(keepalive.ServerParameters{
-			Time:    30 * time.Second,
-			Timeout: 10 * time.Second,
-		}),
-	)
-
-	srv := grpc.NewServer(opts...)
+	srv := newGRPCServer(certMgr)
 	svc := server.New(*stackDir, *buildTmpDir, *dataDir, *dataBase)
 	svc.SetAgentDir(*agentDir)
 	if certMgr != nil {
@@ -114,28 +101,98 @@ func main() {
 	}
 	log.Printf("deplo-agent %s listening on %s (mtls=%v)", server.AgentVersion, *addr, !*insecure)
 
+	lc, err := linkConfig(*insecure, *agentDir, cert)
+	if err != nil {
+		log.Printf("deplo-agent: agent link: %v", err)
+	} else if lc != nil {
+		log.Printf("deplo-agent: linking to %s", lc.URL)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	go svc.WarmRailpack(ctx)
-	serveErr := make(chan error, 1)
+	if err := serveAgent(ctx, srv, lis, lc); err != nil {
+		log.Fatalf("deplo-agent: serve: %v", err)
+	}
+}
+
+// newGRPCServer is the agent's one gRPC server; every listener and link it serves shares these credentials.
+func newGRPCServer(certMgr *server.CertManager) *grpc.Server {
+	var opts []grpc.ServerOption
+	if certMgr != nil {
+		opts = append(opts, grpc.Creds(credentials.NewTLS(certMgr.ServerTLSConfig())))
+	}
+	opts = append(opts,
+		grpc.MaxRecvMsgSize(256*1024*1024),
+		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
+			MinTime:             15 * time.Second,
+			PermitWithoutStream: false,
+		}),
+		grpc.KeepaliveParams(keepalive.ServerParameters{
+			Time:    30 * time.Second,
+			Timeout: 10 * time.Second,
+		}),
+	)
+	return grpc.NewServer(opts...)
+}
+
+// serveAgent serves srv on lis and, given lc, over an agent link too, until ctx ends or lis fails.
+func serveAgent(ctx context.Context, srv *grpc.Server, lis net.Listener, lc *link.Config) error {
+	serveErr := make(chan error, 2)
 	go func() { serveErr <- srv.Serve(lis) }()
+	linkCtx, closeLink := context.WithCancel(context.Background())
+	defer closeLink()
+	unlinked := make(chan struct{})
+	if lc != nil {
+		ll := link.NewListener()
+		go func() { serveErr <- srv.Serve(ll) }()
+		go func() { link.Run(linkCtx, *lc, ll); close(unlinked) }()
+	} else {
+		close(unlinked)
+	}
 	select {
 	case err := <-serveErr:
-		if err != nil {
-			log.Fatalf("deplo-agent: serve: %v", err)
-		}
+		return err
 	case <-ctx.Done():
-		log.Printf("deplo-agent: signal received - draining in-flight RPCs…")
-		drained := make(chan struct{})
-		go func() { srv.GracefulStop(); close(drained) }()
-		select {
-		case <-drained:
-			log.Printf("deplo-agent: drained cleanly, exiting")
-		case <-time.After(25 * time.Second):
-			log.Printf("deplo-agent: drain timed out, forcing stop")
-			srv.Stop()
-		}
 	}
+	log.Printf("deplo-agent: signal received - draining in-flight RPCs…")
+	// The link closes first: a stream riding it would otherwise hold the drain to its cap.
+	closeLink()
+	<-unlinked
+	drained := make(chan struct{})
+	go func() { srv.GracefulStop(); close(drained) }()
+	select {
+	case <-drained:
+		log.Printf("deplo-agent: drained cleanly, exiting")
+	case <-time.After(25 * time.Second):
+		log.Printf("deplo-agent: drain timed out, forcing stop")
+		srv.Stop()
+	}
+	return nil
+}
+
+// linkConfig is where the agent links, or nil: never without mTLS, since the link crosses the internet.
+func linkConfig(insecure bool, agentDir, certFile string) (*link.Config, error) {
+	if insecure || agentDir == "" {
+		return nil, nil
+	}
+	a, err := linkAddresses(agentDir)
+	if err != nil || a.Primary == "" {
+		return nil, err
+	}
+	return &link.Config{URL: a.Primary, CertFile: certFile, Logf: log.Printf}, nil
+}
+
+// linkAddresses is the saved pair; an agent enrolled before the agent link saves its install URL once.
+func linkAddresses(agentDir string) (link.Addresses, error) {
+	a, err := link.LoadAddresses(agentDir)
+	if err != nil || a.Primary != "" {
+		return a, err
+	}
+	if a.Primary = bootstrap.InstallURL(agentDir); a.Primary == "" {
+		return a, nil
+	}
+	return a, link.SaveAddresses(agentDir, a)
 }
 
 func envOr(key, def string) string {

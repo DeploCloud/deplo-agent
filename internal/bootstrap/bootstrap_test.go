@@ -16,6 +16,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/DeploCloud/deplo-agent/internal/link"
 )
 
 func fakeControlPlane(t *testing.T, token string, tamperMAC bool) *httptest.Server {
@@ -113,6 +115,31 @@ func TestBootstrap_happyPathOverHTTP(t *testing.T) {
 	kb, _ := pem.Decode(keyPem)
 	if _, err := x509.ParsePKCS8PrivateKey(kb.Bytes); err != nil {
 		t.Fatalf("bad key: %v", err)
+	}
+}
+
+func TestBootstrap_savesTheCallHomeURLAsThePrimaryAddress(t *testing.T) {
+	srv := fakeControlPlane(t, "tok-123", false)
+	defer srv.Close()
+	dir := t.TempDir()
+	if _, err := Run(Config{ControlPlaneURL: srv.URL + "/", Token: "tok-123", AgentDir: dir}); err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+
+	// A restart reads the saved pair back from disk, with nothing held in memory.
+	got, err := link.LoadAddresses(dir)
+	if err != nil {
+		t.Fatalf("load addresses: %v", err)
+	}
+	if got != (link.Addresses{Primary: srv.URL}) {
+		t.Fatalf("saved addresses = %+v, want primary %q and no fallback", got, srv.URL)
+	}
+	info, err := os.Stat(link.AddressesPath(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("addresses file mode = %o, want 600", perm)
 	}
 }
 

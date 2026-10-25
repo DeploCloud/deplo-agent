@@ -4,6 +4,7 @@ go 1.26.10
 
 require (
 	filippo.io/age v1.3.2
+	github.com/coder/websocket v1.8.15
 	github.com/creack/pty v1.1.24
 	github.com/minio/minio-go/v7 v7.4.1
 	google.golang.org/grpc v1.83.2

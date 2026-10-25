@@ -19,6 +19,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/DeploCloud/deplo-agent/internal/link"
 )
 
 // Materials are the persisted mTLS files the agent serves with after bootstrap.
@@ -46,6 +48,22 @@ func Provisioned(agentDir string) bool {
 		}
 	}
 	return true
+}
+
+// InstallURL is the call-home URL the install script left in agentDir/bootstrap.env, or "".
+// The file, not the environment: a self-update re-exec starts with no DEPLO_BOOTSTRAP_* set.
+func InstallURL(agentDir string) string {
+	raw, err := os.ReadFile(filepath.Join(agentDir, "bootstrap.env"))
+	if err != nil {
+		return ""
+	}
+	url := ""
+	for _, line := range strings.Split(string(raw), "\n") {
+		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "DEPLO_BOOTSTRAP_URL="); ok {
+			url = strings.Trim(strings.TrimSpace(v), `"'`)
+		}
+	}
+	return strings.TrimRight(url, "/")
 }
 
 // Config carries the one-time inputs from the install command.
@@ -147,6 +165,11 @@ func Run(cfg Config) (Materials, error) {
 			cleanupTmps()
 			return mats, fmt.Errorf("stage %s: %w", filepath.Base(m.final), err)
 		}
+	}
+	// Saved before the PEMs commit: an agent is provisioned only once its link address is on disk too.
+	if err := link.SaveAddresses(cfg.AgentDir, link.Addresses{Primary: strings.TrimRight(cfg.ControlPlaneURL, "/")}); err != nil {
+		cleanupTmps()
+		return mats, fmt.Errorf("save link address: %w", err)
 	}
 	for _, m := range staged {
 		if err := os.Rename(m.tmp, m.final); err != nil {
