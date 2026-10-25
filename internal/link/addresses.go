@@ -101,7 +101,7 @@ var ErrInvalidAddresses = errors.New("not a pair of panel addresses")
 // Replace saves a as the whole pair, the old one forgotten, and returns what it kept.
 func (s *Store) Replace(a Addresses) (Addresses, error) {
 	a = Addresses{Primary: strings.TrimSpace(a.Primary), Fallback: strings.TrimSpace(a.Fallback)}
-	if !dialable(a.Primary) || a.Fallback != "" && !dialable(a.Fallback) {
+	if !Dialable(a.Primary) || a.Fallback != "" && !Dialable(a.Fallback) {
 		return s.Current(), fmt.Errorf("%w: %+v", ErrInvalidAddresses, a)
 	}
 	s.mu.Lock()
@@ -115,7 +115,8 @@ func (s *Store) Replace(a Addresses) (Addresses, error) {
 	return a, nil
 }
 
-func dialable(address string) bool {
-	u, err := url.Parse(address)
+// Dialable reports whether address is one the agent can link to: an http(s) URL with a host.
+func Dialable(address string) bool {
+	u, err := url.Parse(strings.TrimSpace(address))
 	return err == nil && (u.Scheme == "https" || u.Scheme == "http") && u.Host != ""
 }

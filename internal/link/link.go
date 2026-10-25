@@ -302,12 +302,10 @@ func transport() *http.Transport {
 }
 
 func linkURL(base string) (string, error) {
-	b := strings.TrimRight(strings.TrimSpace(base), "/")
-	lower := strings.ToLower(b)
-	if !strings.HasPrefix(lower, "https://") && !strings.HasPrefix(lower, "http://") {
+	if !Dialable(base) {
 		return "", fmt.Errorf("not an http(s) address: %q", base)
 	}
-	return b + Path, nil
+	return strings.TrimRight(strings.TrimSpace(base), "/") + Path, nil
 }
 
 // fingerprint is the sha256 of the agent's leaf certificate, the value the panel pins.

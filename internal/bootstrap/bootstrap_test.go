@@ -161,7 +161,7 @@ func TestBootstrap_savesTheLinkAddressThePanelNames(t *testing.T) {
 }
 
 func TestBootstrap_anAddressThatIsNotTheWebKeepsTheCallHomeURL(t *testing.T) {
-	for _, named := range []string{"ftp://127.0.0.1:3102", "127.0.0.1:3102", " "} {
+	for _, named := range []string{"ftp://127.0.0.1:3102", "127.0.0.1:3102", " ", "https://"} {
 		srv := fakeControlPlaneIssuing(t, "tok-123", false, "", named)
 		dir := t.TempDir()
 		_, err := Run(Config{ControlPlaneURL: srv.URL, Token: "tok-123", AgentDir: dir})

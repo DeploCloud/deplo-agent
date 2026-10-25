@@ -225,8 +225,7 @@ func callHome(cfg Config, csrPem string) (callHomeResponse, []byte, string, erro
 // primaryAddress is the link address the panel named, signed with the certificate, or else the call-home URL.
 func primaryAddress(callHome, named string) string {
 	named = strings.TrimSpace(named)
-	lower := strings.ToLower(named)
-	if !strings.HasPrefix(lower, "https://") && !strings.HasPrefix(lower, "http://") {
+	if !link.Dialable(named) {
 		named = callHome
 	}
 	return strings.TrimRight(named, "/")
