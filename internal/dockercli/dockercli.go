@@ -181,31 +181,20 @@ func exitStatus(cctx context.Context, err error, timeout time.Duration, label st
 
 // PipeOut runs `docker <args>` and copies the child's RAW stdout into `dst` (bytes, not lines) while collecting stderr for diagnostics - for piping a dump tool's output (`docker exec <c> pg_dump …`) straight into the gzip→S3 pipeline with no temp file.
 func PipeOut(ctx context.Context, timeout time.Duration, dst io.Writer, extraEnv []string, args ...string) (int, error) {
-	cctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	args, cleanup := ephemeral(args)
-	defer cleanupIfCancelled(cctx, cleanup)
-	cmd := Command(cctx, "docker", args...)
-	cmd.Env = scopedEnv(extraEnv)
-	var errb strings.Builder
-	cmd.Stdout = dst
-	cmd.Stderr = &errb
-	err := cmd.Run()
-	if err != nil {
-		label := redactArgs(args)
-		if cctx.Err() == context.DeadlineExceeded {
-			return -1, timedOut("docker "+label, timeout)
-		}
-		if ee, ok := err.(*exec.ExitError); ok && ee.ProcessState.Exited() {
-			return ee.ExitCode(), fmt.Errorf("docker %s exited %d: %s", label, ee.ExitCode(), strings.TrimSpace(errb.String()))
-		}
-		return -1, fmt.Errorf("docker %s failed: %w (%s)", label, err, strings.TrimSpace(errb.String()))
-	}
-	return 0, nil
+	return pipe(ctx, timeout, nil, dst, extraEnv, args)
 }
 
 // PipeIn runs `docker <args>` feeding `src` to the child's stdin (the restore direction: a decompressed dump streamed into `docker exec -i <c> psql …`), collecting stderr.
 func PipeIn(ctx context.Context, timeout time.Duration, src io.Reader, extraEnv []string, args ...string) (int, error) {
+	return pipe(ctx, timeout, src, nil, extraEnv, args)
+}
+
+// PipeThrough runs `docker <args>` with `src` on the child's stdin and its RAW stdout copied into `dst`.
+func PipeThrough(ctx context.Context, timeout time.Duration, src io.Reader, dst io.Writer, extraEnv []string, args ...string) (int, error) {
+	return pipe(ctx, timeout, src, dst, extraEnv, args)
+}
+
+func pipe(ctx context.Context, timeout time.Duration, src io.Reader, dst io.Writer, extraEnv []string, args []string) (int, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	args, cleanup := ephemeral(args)
@@ -213,7 +202,12 @@ func PipeIn(ctx context.Context, timeout time.Duration, src io.Reader, extraEnv 
 	cmd := Command(cctx, "docker", args...)
 	cmd.Env = scopedEnv(extraEnv)
 	var errb strings.Builder
-	cmd.Stdin = src
+	if src != nil {
+		cmd.Stdin = src
+	}
+	if dst != nil {
+		cmd.Stdout = dst
+	}
 	cmd.Stderr = &errb
 	err := cmd.Run()
 	if err != nil {

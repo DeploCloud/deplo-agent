@@ -17,10 +17,15 @@ import (
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/bootstrap"
+	"github.com/DeploCloud/deplo-agent/internal/capture"
 	"github.com/DeploCloud/deplo-agent/internal/server"
 )
 
 func main() {
+	// The same binary, mounted into the screenshot browser's container.
+	if len(os.Args) > 1 && os.Args[1] == "capture" {
+		os.Exit(capture.Main(os.Stdin, os.Stdout))
+	}
 	var (
 		addr        = flag.String("addr", "127.0.0.1:9443", "listen address (host:port)")
 		certFile    = flag.String("cert", envOr("DEPLO_AGENT_CERT", ""), "agent server certificate (PEM)")
