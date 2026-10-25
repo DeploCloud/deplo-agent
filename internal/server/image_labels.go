@@ -29,6 +29,9 @@ func (s *Service) prepareStackImages(ctx context.Context, req *pb.DeployRequest,
 		append(append([]string{}, base...), "build",
 			"--build-arg", "BUILDKIT_CACHE_MOUNT_NS="+s.cacheNamespace(req.GetSlug())),
 	}
+	if req.GetPullBaseImages() {
+		steps[1] = append(steps[1], "--pull")
+	}
 	for _, args := range steps {
 		verb := args[len(base)]
 		var limit int64
@@ -74,11 +77,20 @@ func composeImages(ctx context.Context, env, base []string) ([]string, error) {
 }
 
 // admitStackImages is Deploy's image admission for a stack already on disk: present images cost
-// one inspect each, and only a missing one is pulled, as `up` itself would have.
-func admitStackImages(ctx context.Context, base []string) error {
+// one inspect each, and only a missing one is pulled, as `up` itself would have. pull fetches every one first.
+func admitStackImages(ctx context.Context, base []string, pull bool) error {
 	images, err := composeImages(ctx, nil, base)
 	if err != nil {
 		return err
+	}
+	if pull {
+		res, err := dockercli.Run(ctx, 10*time.Minute, append(append([]string{}, base...), "pull", "--ignore-buildable", "--quiet")...)
+		if err == nil && res.Code != 0 {
+			err = fmt.Errorf("docker compose pull: %s", strings.TrimSpace(res.Stderr))
+		}
+		if err != nil {
+			return err
+		}
 	}
 	return admitImages(ctx, images, func() error {
 		res, err := dockercli.Run(ctx, 2*time.Minute,

@@ -283,3 +283,9 @@ func numCPU() int {
 
 func round1(f float64) float64 { return float64(int64(f*10+0.5)) / 10 }
 func round2(f float64) float64 { return float64(int64(f*100+0.5)) / 100 }
+
+// Memory reports the host's total and available memory in bytes.
+func Memory() (total, available int64) {
+	m := readMem()
+	return m.total, m.available
+}

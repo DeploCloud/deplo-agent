@@ -107,6 +107,9 @@ var Capabilities = []string{
 	"git.submodules",
 	"deploy.files-bind-check",
 	"backup.db-owner-check",
+	"image-inventory",
+	"deploy.pull-base",
+	"reroute.pull",
 }
 
 // AgentVersion is the version this agent reports over Hello.
@@ -137,6 +140,8 @@ type Service struct {
 
 	stackLocksMu sync.Mutex
 	stackLocks   map[string]*stackLock
+
+	inventoryMu sync.Mutex
 }
 
 type stackLock struct {
@@ -175,6 +180,7 @@ func New(stackDir, buildTmpDir, dataDir, dataBase string) *Service {
 		dataBase = filepath.Dir(stackDir)
 	}
 	sweepTempSecrets()
+	sweepInventoryDirs(buildTmpDir)
 	return &Service{
 		stackDir:    stackDir,
 		buildTmpDir: buildTmpDir,
@@ -565,7 +571,7 @@ func (s *Service) Reroute(ctx context.Context, req *pb.RerouteRequest) (*pb.Stac
 			return &pb.StackResult{Ok: false, Error: "write env file: " + err.Error()}, nil
 		}
 	}
-	if err := admitStackImages(ctx, composeBaseArgs(name, stackFile, envFile, projectDir)); err != nil {
+	if err := admitStackImages(ctx, composeBaseArgs(name, stackFile, envFile, projectDir), req.GetPullImages()); err != nil {
 		return &pb.StackResult{Ok: false, Error: err.Error()}, nil
 	}
 	if err := s.stripSourceLinks(slug); err != nil {

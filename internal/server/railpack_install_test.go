@@ -73,7 +73,7 @@ func TestInstallTarBinary(t *testing.T) {
 	defer srv.Close()
 
 	dest := filepath.Join(t.TempDir(), "tools", "railpack-0.35.0")
-	if err := installTarBinary(context.Background(), srv.URL, "railpack", dest); err != nil {
+	if err := installTarBinary(context.Background(), srv.URL, "railpack", dest, ""); err != nil {
 		t.Fatalf("installTarBinary: %v", err)
 	}
 	if !usableBinary(dest) {
@@ -105,7 +105,7 @@ func TestInstallTarBinaryMissingEntry(t *testing.T) {
 	defer srv.Close()
 
 	dest := filepath.Join(t.TempDir(), "tools", "railpack-0.35.0")
-	if err := installTarBinary(context.Background(), srv.URL, "railpack", dest); err == nil {
+	if err := installTarBinary(context.Background(), srv.URL, "railpack", dest, ""); err == nil {
 		t.Fatal("want an error when the archive holds no railpack binary")
 	}
 	if _, err := os.Stat(dest); err == nil {

@@ -90,6 +90,8 @@ const (
 	Agent_TraefikConfig_FullMethodName       = "/deplo.agent.v1.Agent/TraefikConfig"
 	Agent_RestartControlPlane_FullMethodName = "/deplo.agent.v1.Agent/RestartControlPlane"
 	Agent_UpdateControlPlane_FullMethodName  = "/deplo.agent.v1.Agent/UpdateControlPlane"
+	Agent_ListWorkloadImages_FullMethodName  = "/deplo.agent.v1.Agent/ListWorkloadImages"
+	Agent_InventoryImage_FullMethodName      = "/deplo.agent.v1.Agent/InventoryImage"
 )
 
 // AgentClient is the client API for Agent service.
@@ -295,6 +297,12 @@ type AgentClient interface {
 	// which is exactly what the manual tells an operator to run by hand. The agent
 	// fetches the script itself: nothing about WHAT runs comes from the caller.
 	UpdateControlPlane(ctx context.Context, in *UpdateControlPlaneRequest, opts ...grpc.CallOption) (*UpdateControlPlaneResponse, error)
+	// The image behind every container Deplo manages on this host, running or stopped:
+	// what the control plane checks for security updates. Advertised as `image-inventory`.
+	ListWorkloadImages(ctx context.Context, in *ListWorkloadImagesRequest, opts ...grpc.CallOption) (*ListWorkloadImagesResponse, error)
+	// The package list inside one of those images, read under a memory cap, one image at a
+	// time and never during a deploy. Advertised as `image-inventory`.
+	InventoryImage(ctx context.Context, in *InventoryImageRequest, opts ...grpc.CallOption) (*InventoryImageResponse, error)
 }
 
 type agentClient struct {
@@ -1116,6 +1124,26 @@ func (c *agentClient) UpdateControlPlane(ctx context.Context, in *UpdateControlP
 	return out, nil
 }
 
+func (c *agentClient) ListWorkloadImages(ctx context.Context, in *ListWorkloadImagesRequest, opts ...grpc.CallOption) (*ListWorkloadImagesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListWorkloadImagesResponse)
+	err := c.cc.Invoke(ctx, Agent_ListWorkloadImages_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) InventoryImage(ctx context.Context, in *InventoryImageRequest, opts ...grpc.CallOption) (*InventoryImageResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(InventoryImageResponse)
+	err := c.cc.Invoke(ctx, Agent_InventoryImage_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AgentServer is the server API for Agent service.
 // All implementations must embed UnimplementedAgentServer
 // for forward compatibility.
@@ -1319,6 +1347,12 @@ type AgentServer interface {
 	// which is exactly what the manual tells an operator to run by hand. The agent
 	// fetches the script itself: nothing about WHAT runs comes from the caller.
 	UpdateControlPlane(context.Context, *UpdateControlPlaneRequest) (*UpdateControlPlaneResponse, error)
+	// The image behind every container Deplo manages on this host, running or stopped:
+	// what the control plane checks for security updates. Advertised as `image-inventory`.
+	ListWorkloadImages(context.Context, *ListWorkloadImagesRequest) (*ListWorkloadImagesResponse, error)
+	// The package list inside one of those images, read under a memory cap, one image at a
+	// time and never during a deploy. Advertised as `image-inventory`.
+	InventoryImage(context.Context, *InventoryImageRequest) (*InventoryImageResponse, error)
 	mustEmbedUnimplementedAgentServer()
 }
 
@@ -1529,6 +1563,12 @@ func (UnimplementedAgentServer) RestartControlPlane(context.Context, *RestartCon
 }
 func (UnimplementedAgentServer) UpdateControlPlane(context.Context, *UpdateControlPlaneRequest) (*UpdateControlPlaneResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method UpdateControlPlane not implemented")
+}
+func (UnimplementedAgentServer) ListWorkloadImages(context.Context, *ListWorkloadImagesRequest) (*ListWorkloadImagesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListWorkloadImages not implemented")
+}
+func (UnimplementedAgentServer) InventoryImage(context.Context, *InventoryImageRequest) (*InventoryImageResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method InventoryImage not implemented")
 }
 func (UnimplementedAgentServer) mustEmbedUnimplementedAgentServer() {}
 func (UnimplementedAgentServer) testEmbeddedByValue()               {}
@@ -2578,6 +2618,42 @@ func _Agent_UpdateControlPlane_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Agent_ListWorkloadImages_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListWorkloadImagesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).ListWorkloadImages(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_ListWorkloadImages_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).ListWorkloadImages(ctx, req.(*ListWorkloadImagesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_InventoryImage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(InventoryImageRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).InventoryImage(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_InventoryImage_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).InventoryImage(ctx, req.(*InventoryImageRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Agent_ServiceDesc is the grpc.ServiceDesc for Agent service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -2768,6 +2844,14 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "UpdateControlPlane",
 			Handler:    _Agent_UpdateControlPlane_Handler,
+		},
+		{
+			MethodName: "ListWorkloadImages",
+			Handler:    _Agent_ListWorkloadImages_Handler,
+		},
+		{
+			MethodName: "InventoryImage",
+			Handler:    _Agent_InventoryImage_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

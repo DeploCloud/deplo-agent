@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -44,7 +46,7 @@ func (s *Service) ensureRailpack(ctx context.Context, version string, e *emitter
 	if err != nil {
 		return "", err
 	}
-	if err := installTarBinary(ctx, url, "railpack", dest); err != nil {
+	if err := installTarBinary(ctx, url, "railpack", dest, ""); err != nil {
 		return "", err
 	}
 	e.log("info", "railpack installed")
@@ -90,26 +92,24 @@ func usableBinary(path string) bool {
 	return err == nil && !fi.IsDir() && fi.Mode()&0o111 != 0
 }
 
-func installTarBinary(ctx context.Context, url, binary, dest string) error {
+// installTarBinary downloads a release archive, refuses it when wantSHA256 is set and does not
+// match, and installs the named binary from it at dest.
+func installTarBinary(ctx context.Context, url, binary, dest, wantSHA256 string) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 		return fmt.Errorf("create tools dir: %w", err)
 	}
-	cctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	defer cancel()
-	req, err := http.NewRequestWithContext(cctx, http.MethodGet, url, nil)
+	archive, err := downloadArchive(ctx, url, binary, filepath.Dir(dest), wantSHA256)
 	if err != nil {
 		return err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	defer os.Remove(archive)
+	src, err := os.Open(archive)
 	if err != nil {
-		return fmt.Errorf("download %s: %w", binary, err)
+		return err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download %s: HTTP %d from %s", binary, resp.StatusCode, url)
-	}
+	defer src.Close()
 
-	gz, err := gzip.NewReader(resp.Body)
+	gz, err := gzip.NewReader(src)
 	if err != nil {
 		return fmt.Errorf("gunzip %s: %w", binary, err)
 	}
@@ -148,4 +148,36 @@ func installTarBinary(ctx context.Context, url, binary, dest string) error {
 		}
 		return nil
 	}
+}
+
+func downloadArchive(ctx context.Context, url, binary, dir, wantSHA256 string) (string, error) {
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	req, err := http.NewRequestWithContext(cctx, http.MethodGet, url, nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("download %s: %w", binary, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("download %s: HTTP %d from %s", binary, resp.StatusCode, url)
+	}
+	f, err := os.CreateTemp(dir, "."+binary+"-*.tgz")
+	if err != nil {
+		return "", err
+	}
+	h := sha256.New()
+	_, err = io.Copy(io.MultiWriter(f, h), io.LimitReader(resp.Body, 512<<20))
+	f.Close()
+	if err == nil && wantSHA256 != "" && hex.EncodeToString(h.Sum(nil)) != wantSHA256 {
+		err = fmt.Errorf("download %s: checksum mismatch", binary)
+	}
+	if err != nil {
+		_ = os.Remove(f.Name())
+		return "", err
+	}
+	return f.Name(), nil
 }

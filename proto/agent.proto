@@ -298,6 +298,14 @@ service Agent {
   // which is exactly what the manual tells an operator to run by hand. The agent
   // fetches the script itself: nothing about WHAT runs comes from the caller.
   rpc UpdateControlPlane(UpdateControlPlaneRequest) returns (UpdateControlPlaneResponse);
+
+  // The image behind every container Deplo manages on this host, running or stopped:
+  // what the control plane checks for security updates. Advertised as `image-inventory`.
+  rpc ListWorkloadImages(ListWorkloadImagesRequest) returns (ListWorkloadImagesResponse);
+
+  // The package list inside one of those images, read under a memory cap, one image at a
+  // time and never during a deploy. Advertised as `image-inventory`.
+  rpc InventoryImage(InventoryImageRequest) returns (InventoryImageResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -634,6 +642,10 @@ message DeployRequest {
   // (railpack prepare reads GITHUB_TOKEN). Empty => none. It reaches the host-side
   // prepare only: never the build, the image or a log. Advertised as `build.github-token`.
   string github_token = 25;
+
+  // Fetch a Dockerfile's base images again instead of reusing the copies on this host, for
+  // a rebuild that has to pick up a fixed base. Advertised as `deploy.pull-base`.
+  bool pull_base_images = 26;
 }
 
 // When a deploy counts as up: every container stays running (no restart, no exit) for a
@@ -915,6 +927,9 @@ message RerouteRequest {
   string network = 6;
   // Same contract as DeployRequest.files_bind_sources.
   repeated string files_bind_sources = 7;
+  // Pull every image again before `up`, so a moved tag (a patch release) is picked up.
+  // Unset keeps pulling only the missing ones. Advertised as `reroute.pull`.
+  bool pull_images = 8;
 }
 
 message ReadStackResponse {
@@ -2045,4 +2060,69 @@ message UpdateControlPlaneResponse {
   string error = 2;
   // Where the run is transcribed on the host, for an update that did not take.
   string log_path = 3;
+}
+
+message ListWorkloadImagesRequest {}
+
+message WorkloadImage {
+  // The container's deplo.project label: an app, preview or database id.
+  string project_id = 1;
+  // The deplo.app label, set on a preview's containers only.
+  string app_id = 2;
+  // The compose service, empty for a container outside compose.
+  string service = 3;
+  // The image the container was created from, as written (Config.Image).
+  string image_ref = 4;
+  // The image's local id, the key InventoryImage takes.
+  string image_id = 5;
+  // The repo@digest entries the image is known by in its registries.
+  repeated string repo_digests = 6;
+  bool running = 7;
+}
+
+message ListWorkloadImagesResponse {
+  repeated WorkloadImage images = 1;
+}
+
+enum InventoryStatus {
+  INVENTORY_STATUS_UNSPECIFIED = 0;
+  INVENTORY_STATUS_OK = 1;
+  // Another inventory or a deploy is running on this host: ask again later.
+  INVENTORY_STATUS_BUSY = 2;
+  INVENTORY_STATUS_SKIPPED_LOW_DISK = 3;
+  INVENTORY_STATUS_SKIPPED_LOW_MEMORY = 4;
+  // The reader hit its memory cap.
+  INVENTORY_STATUS_TOO_LARGE = 5;
+  INVENTORY_STATUS_TIMED_OUT = 6;
+  // This host cannot cap the reader's memory (no systemd), so it never runs here.
+  INVENTORY_STATUS_UNSUPPORTED = 7;
+  INVENTORY_STATUS_FAILED = 8;
+}
+
+message InventoryImageRequest {
+  string image_id = 1;
+}
+
+message ImagePackage {
+  // Package URL as the reader wrote it, qualifiers included (distro, upstream).
+  string purl = 1;
+  string name = 2;
+  string version = 3;
+  // The reader's package type (deb, apk, npm, python, go-module, ...).
+  string type = 4;
+  // Where the package was found inside the image.
+  string location = 5;
+}
+
+message InventoryImageResponse {
+  InventoryStatus status = 1;
+  string error = 2;
+  // The image's os-release ID and VERSION_ID ("debian", "12.13").
+  string distro_id = 3;
+  string distro_version = 4;
+  // The image's Config.WorkingDir, which tells an app's own code from its base image.
+  string working_dir = 5;
+  repeated ImagePackage packages = 6;
+  string scanner_version = 7;
+  int64 duration_ms = 8;
 }

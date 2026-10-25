@@ -592,6 +592,9 @@ func (s *Service) buildArgv(req *pb.DeployRequest, rest ...string) []string {
 	if req.GetNoBuildCache() {
 		args = append(args, "--no-cache")
 	}
+	if req.GetPullBaseImages() {
+		args = append(args, "--pull")
+	}
 	args = append(args, "--build-arg", "BUILDKIT_CACHE_MOUNT_NS="+s.cacheNamespace(req.GetSlug()))
 	return append(args, rest...)
 }
