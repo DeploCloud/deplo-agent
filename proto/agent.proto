@@ -312,6 +312,11 @@ service Agent {
   // Advertised as `image-inventory.candidate`.
   rpc InventoryCandidate(InventoryCandidateRequest) returns (InventoryCandidateResponse);
 
+  // An app's package.json and lockfile with one dependency moved, rewritten by its own package
+  // manager in a container whose only way out is the npm registries; no install script runs.
+  // Advertised as `packages.update`.
+  rpc PreparePackageUpdate(PreparePackageUpdateRequest) returns (PreparePackageUpdateResponse);
+
   // Replace the panel addresses this agent links to (ADR-0040): it keeps exactly this pair,
   // an empty fallback dropped, and dials it from its next link on. Advertised as `agent-link`.
   rpc SetLinkAddresses(LinkAddresses) returns (LinkAddresses);
@@ -2168,6 +2173,32 @@ message InventoryCandidateRequest {
   string image_ref = 1;
   // The image that workload runs now: its size bounds the disk the pull may take.
   string current_image_id = 2;
+}
+
+message PreparePackageUpdateRequest {
+  // The commit to start from; subdir is the app's root directory.
+  GitSource git = 1;
+  string package = 2;
+  string version = 3;
+  // Pin a dependency the app does not list itself: overrides, pnpm.overrides or resolutions.
+  bool override = 4;
+}
+
+message ChangedFile {
+  // Relative to the repository root.
+  string path = 1;
+  // The file's new content, gzip-compressed: a lockfile can run to megabytes.
+  bytes gzip = 2;
+}
+
+message PreparePackageUpdateResponse {
+  // Plain words when it could not be done; empty on success.
+  string error = 1;
+  // npm | pnpm | yarn | yarn-berry
+  string manager = 2;
+  repeated ChangedFile files = 3;
+  // The commit the change applies to.
+  string base_commit = 4;
 }
 
 message InventoryCandidateResponse {

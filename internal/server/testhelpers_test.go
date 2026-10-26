@@ -1,6 +1,7 @@
 package server
 
 import (
+	"github.com/DeploCloud/deplo-agent/internal/pkgupdate"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,10 @@ import (
 
 // Unit tests never cap this host's own build cgroups; a test that wants the watcher points it at a tree.
 func TestMain(m *testing.M) {
+	// Mounted into the package manager's container in place of the agent binary.
+	if len(os.Args) > 1 && os.Args[1] == "pkgupdate" {
+		os.Exit(pkgupdate.Main(os.Stdin, os.Stdout))
+	}
 	buildStepCgroupDir = ""
 	os.Exit(m.Run())
 }

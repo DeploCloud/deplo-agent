@@ -204,3 +204,10 @@ func TestEgressDial_skipsTrackersButNeverTheApp(t *testing.T) {
 		t.Error("suffix match must be on a label boundary")
 	}
 }
+
+func TestEgress_allowListRefusesEverythingElse(t *testing.T) {
+	e := &Egress{Allow: func(h string) bool { return h == "registry.npmjs.org" }}
+	if _, err := e.dial(context.Background(), "example.com:443"); err == nil || e.Refused() != 1 {
+		t.Fatalf("a host off the list must be refused, got %v (refused %d)", err, e.Refused())
+	}
+}

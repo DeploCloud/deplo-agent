@@ -23,79 +23,80 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Agent_Hello_FullMethodName               = "/deplo.agent.v1.Agent/Hello"
-	Agent_Metrics_FullMethodName             = "/deplo.agent.v1.Agent/Metrics"
-	Agent_ContainerStats_FullMethodName      = "/deplo.agent.v1.Agent/ContainerStats"
-	Agent_StreamMetrics_FullMethodName       = "/deplo.agent.v1.Agent/StreamMetrics"
-	Agent_Deploy_FullMethodName              = "/deplo.agent.v1.Agent/Deploy"
-	Agent_ReattachDeploy_FullMethodName      = "/deplo.agent.v1.Agent/ReattachDeploy"
-	Agent_DeployStream_FullMethodName        = "/deplo.agent.v1.Agent/DeployStream"
-	Agent_StopStack_FullMethodName           = "/deplo.agent.v1.Agent/StopStack"
-	Agent_StartStack_FullMethodName          = "/deplo.agent.v1.Agent/StartStack"
-	Agent_DestroyStack_FullMethodName        = "/deplo.agent.v1.Agent/DestroyStack"
-	Agent_Reroute_FullMethodName             = "/deplo.agent.v1.Agent/Reroute"
-	Agent_ExportVolume_FullMethodName        = "/deplo.agent.v1.Agent/ExportVolume"
-	Agent_ImportVolume_FullMethodName        = "/deplo.agent.v1.Agent/ImportVolume"
-	Agent_VolumeUsage_FullMethodName         = "/deplo.agent.v1.Agent/VolumeUsage"
-	Agent_ExportFiles_FullMethodName         = "/deplo.agent.v1.Agent/ExportFiles"
-	Agent_ImportFiles_FullMethodName         = "/deplo.agent.v1.Agent/ImportFiles"
-	Agent_ExportHostPath_FullMethodName      = "/deplo.agent.v1.Agent/ExportHostPath"
-	Agent_ImportHostPath_FullMethodName      = "/deplo.agent.v1.Agent/ImportHostPath"
-	Agent_ExportImage_FullMethodName         = "/deplo.agent.v1.Agent/ExportImage"
-	Agent_ImportImage_FullMethodName         = "/deplo.agent.v1.Agent/ImportImage"
-	Agent_ReadStack_FullMethodName           = "/deplo.agent.v1.Agent/ReadStack"
-	Agent_Inspect_FullMethodName             = "/deplo.agent.v1.Agent/Inspect"
-	Agent_CheckPort_FullMethodName           = "/deplo.agent.v1.Agent/CheckPort"
-	Agent_ProbeHttp_FullMethodName           = "/deplo.agent.v1.Agent/ProbeHttp"
-	Agent_DockerCleanup_FullMethodName       = "/deplo.agent.v1.Agent/DockerCleanup"
-	Agent_SelfUpdate_FullMethodName          = "/deplo.agent.v1.Agent/SelfUpdate"
-	Agent_SelfUninstall_FullMethodName       = "/deplo.agent.v1.Agent/SelfUninstall"
-	Agent_Backup_FullMethodName              = "/deplo.agent.v1.Agent/Backup"
-	Agent_Restore_FullMethodName             = "/deplo.agent.v1.Agent/Restore"
-	Agent_S3Check_FullMethodName             = "/deplo.agent.v1.Agent/S3Check"
-	Agent_S3Delete_FullMethodName            = "/deplo.agent.v1.Agent/S3Delete"
-	Agent_ReadStoreFile_FullMethodName       = "/deplo.agent.v1.Agent/ReadStoreFile"
-	Agent_WriteStoreFile_FullMethodName      = "/deplo.agent.v1.Agent/WriteStoreFile"
-	Agent_RestoreFrom_FullMethodName         = "/deplo.agent.v1.Agent/RestoreFrom"
-	Agent_FollowLogs_FullMethodName          = "/deplo.agent.v1.Agent/FollowLogs"
-	Agent_Attach_FullMethodName              = "/deplo.agent.v1.Agent/Attach"
-	Agent_ListInstances_FullMethodName       = "/deplo.agent.v1.Agent/ListInstances"
-	Agent_Exec_FullMethodName                = "/deplo.agent.v1.Agent/Exec"
-	Agent_ShellLabel_FullMethodName          = "/deplo.agent.v1.Agent/ShellLabel"
-	Agent_StartJob_FullMethodName            = "/deplo.agent.v1.Agent/StartJob"
-	Agent_PollJob_FullMethodName             = "/deplo.agent.v1.Agent/PollJob"
-	Agent_KillJob_FullMethodName             = "/deplo.agent.v1.Agent/KillJob"
-	Agent_ListFiles_FullMethodName           = "/deplo.agent.v1.Agent/ListFiles"
-	Agent_ReadFile_FullMethodName            = "/deplo.agent.v1.Agent/ReadFile"
-	Agent_WriteFile_FullMethodName           = "/deplo.agent.v1.Agent/WriteFile"
-	Agent_UploadFile_FullMethodName          = "/deplo.agent.v1.Agent/UploadFile"
-	Agent_CreateDir_FullMethodName           = "/deplo.agent.v1.Agent/CreateDir"
-	Agent_DeleteFile_FullMethodName          = "/deplo.agent.v1.Agent/DeleteFile"
-	Agent_RenameFile_FullMethodName          = "/deplo.agent.v1.Agent/RenameFile"
-	Agent_FilesExist_FullMethodName          = "/deplo.agent.v1.Agent/FilesExist"
-	Agent_StartDev_FullMethodName            = "/deplo.agent.v1.Agent/StartDev"
-	Agent_StopDev_FullMethodName             = "/deplo.agent.v1.Agent/StopDev"
-	Agent_ResetDevWorkspace_FullMethodName   = "/deplo.agent.v1.Agent/ResetDevWorkspace"
-	Agent_TeardownDev_FullMethodName         = "/deplo.agent.v1.Agent/TeardownDev"
-	Agent_EnsureGateway_FullMethodName       = "/deplo.agent.v1.Agent/EnsureGateway"
-	Agent_ProvisionSshUser_FullMethodName    = "/deplo.agent.v1.Agent/ProvisionSshUser"
-	Agent_DeprovisionSshUser_FullMethodName  = "/deplo.agent.v1.Agent/DeprovisionSshUser"
-	Agent_StartTunnel_FullMethodName         = "/deplo.agent.v1.Agent/StartTunnel"
-	Agent_GetTunnel_FullMethodName           = "/deplo.agent.v1.Agent/GetTunnel"
-	Agent_StopTunnel_FullMethodName          = "/deplo.agent.v1.Agent/StopTunnel"
-	Agent_RenewalCSR_FullMethodName          = "/deplo.agent.v1.Agent/RenewalCSR"
-	Agent_InstallRenewedCert_FullMethodName  = "/deplo.agent.v1.Agent/InstallRenewedCert"
-	Agent_HostInfo_FullMethodName            = "/deplo.agent.v1.Agent/HostInfo"
-	Agent_SetTimezone_FullMethodName         = "/deplo.agent.v1.Agent/SetTimezone"
-	Agent_TraefikConfig_FullMethodName       = "/deplo.agent.v1.Agent/TraefikConfig"
-	Agent_RestartControlPlane_FullMethodName = "/deplo.agent.v1.Agent/RestartControlPlane"
-	Agent_UpdateControlPlane_FullMethodName  = "/deplo.agent.v1.Agent/UpdateControlPlane"
-	Agent_ListWorkloadImages_FullMethodName  = "/deplo.agent.v1.Agent/ListWorkloadImages"
-	Agent_InventoryImage_FullMethodName      = "/deplo.agent.v1.Agent/InventoryImage"
-	Agent_InventoryCandidate_FullMethodName  = "/deplo.agent.v1.Agent/InventoryCandidate"
-	Agent_SetLinkAddresses_FullMethodName    = "/deplo.agent.v1.Agent/SetLinkAddresses"
-	Agent_StopListening_FullMethodName       = "/deplo.agent.v1.Agent/StopListening"
-	Agent_CaptureScreenshot_FullMethodName   = "/deplo.agent.v1.Agent/CaptureScreenshot"
+	Agent_Hello_FullMethodName                = "/deplo.agent.v1.Agent/Hello"
+	Agent_Metrics_FullMethodName              = "/deplo.agent.v1.Agent/Metrics"
+	Agent_ContainerStats_FullMethodName       = "/deplo.agent.v1.Agent/ContainerStats"
+	Agent_StreamMetrics_FullMethodName        = "/deplo.agent.v1.Agent/StreamMetrics"
+	Agent_Deploy_FullMethodName               = "/deplo.agent.v1.Agent/Deploy"
+	Agent_ReattachDeploy_FullMethodName       = "/deplo.agent.v1.Agent/ReattachDeploy"
+	Agent_DeployStream_FullMethodName         = "/deplo.agent.v1.Agent/DeployStream"
+	Agent_StopStack_FullMethodName            = "/deplo.agent.v1.Agent/StopStack"
+	Agent_StartStack_FullMethodName           = "/deplo.agent.v1.Agent/StartStack"
+	Agent_DestroyStack_FullMethodName         = "/deplo.agent.v1.Agent/DestroyStack"
+	Agent_Reroute_FullMethodName              = "/deplo.agent.v1.Agent/Reroute"
+	Agent_ExportVolume_FullMethodName         = "/deplo.agent.v1.Agent/ExportVolume"
+	Agent_ImportVolume_FullMethodName         = "/deplo.agent.v1.Agent/ImportVolume"
+	Agent_VolumeUsage_FullMethodName          = "/deplo.agent.v1.Agent/VolumeUsage"
+	Agent_ExportFiles_FullMethodName          = "/deplo.agent.v1.Agent/ExportFiles"
+	Agent_ImportFiles_FullMethodName          = "/deplo.agent.v1.Agent/ImportFiles"
+	Agent_ExportHostPath_FullMethodName       = "/deplo.agent.v1.Agent/ExportHostPath"
+	Agent_ImportHostPath_FullMethodName       = "/deplo.agent.v1.Agent/ImportHostPath"
+	Agent_ExportImage_FullMethodName          = "/deplo.agent.v1.Agent/ExportImage"
+	Agent_ImportImage_FullMethodName          = "/deplo.agent.v1.Agent/ImportImage"
+	Agent_ReadStack_FullMethodName            = "/deplo.agent.v1.Agent/ReadStack"
+	Agent_Inspect_FullMethodName              = "/deplo.agent.v1.Agent/Inspect"
+	Agent_CheckPort_FullMethodName            = "/deplo.agent.v1.Agent/CheckPort"
+	Agent_ProbeHttp_FullMethodName            = "/deplo.agent.v1.Agent/ProbeHttp"
+	Agent_DockerCleanup_FullMethodName        = "/deplo.agent.v1.Agent/DockerCleanup"
+	Agent_SelfUpdate_FullMethodName           = "/deplo.agent.v1.Agent/SelfUpdate"
+	Agent_SelfUninstall_FullMethodName        = "/deplo.agent.v1.Agent/SelfUninstall"
+	Agent_Backup_FullMethodName               = "/deplo.agent.v1.Agent/Backup"
+	Agent_Restore_FullMethodName              = "/deplo.agent.v1.Agent/Restore"
+	Agent_S3Check_FullMethodName              = "/deplo.agent.v1.Agent/S3Check"
+	Agent_S3Delete_FullMethodName             = "/deplo.agent.v1.Agent/S3Delete"
+	Agent_ReadStoreFile_FullMethodName        = "/deplo.agent.v1.Agent/ReadStoreFile"
+	Agent_WriteStoreFile_FullMethodName       = "/deplo.agent.v1.Agent/WriteStoreFile"
+	Agent_RestoreFrom_FullMethodName          = "/deplo.agent.v1.Agent/RestoreFrom"
+	Agent_FollowLogs_FullMethodName           = "/deplo.agent.v1.Agent/FollowLogs"
+	Agent_Attach_FullMethodName               = "/deplo.agent.v1.Agent/Attach"
+	Agent_ListInstances_FullMethodName        = "/deplo.agent.v1.Agent/ListInstances"
+	Agent_Exec_FullMethodName                 = "/deplo.agent.v1.Agent/Exec"
+	Agent_ShellLabel_FullMethodName           = "/deplo.agent.v1.Agent/ShellLabel"
+	Agent_StartJob_FullMethodName             = "/deplo.agent.v1.Agent/StartJob"
+	Agent_PollJob_FullMethodName              = "/deplo.agent.v1.Agent/PollJob"
+	Agent_KillJob_FullMethodName              = "/deplo.agent.v1.Agent/KillJob"
+	Agent_ListFiles_FullMethodName            = "/deplo.agent.v1.Agent/ListFiles"
+	Agent_ReadFile_FullMethodName             = "/deplo.agent.v1.Agent/ReadFile"
+	Agent_WriteFile_FullMethodName            = "/deplo.agent.v1.Agent/WriteFile"
+	Agent_UploadFile_FullMethodName           = "/deplo.agent.v1.Agent/UploadFile"
+	Agent_CreateDir_FullMethodName            = "/deplo.agent.v1.Agent/CreateDir"
+	Agent_DeleteFile_FullMethodName           = "/deplo.agent.v1.Agent/DeleteFile"
+	Agent_RenameFile_FullMethodName           = "/deplo.agent.v1.Agent/RenameFile"
+	Agent_FilesExist_FullMethodName           = "/deplo.agent.v1.Agent/FilesExist"
+	Agent_StartDev_FullMethodName             = "/deplo.agent.v1.Agent/StartDev"
+	Agent_StopDev_FullMethodName              = "/deplo.agent.v1.Agent/StopDev"
+	Agent_ResetDevWorkspace_FullMethodName    = "/deplo.agent.v1.Agent/ResetDevWorkspace"
+	Agent_TeardownDev_FullMethodName          = "/deplo.agent.v1.Agent/TeardownDev"
+	Agent_EnsureGateway_FullMethodName        = "/deplo.agent.v1.Agent/EnsureGateway"
+	Agent_ProvisionSshUser_FullMethodName     = "/deplo.agent.v1.Agent/ProvisionSshUser"
+	Agent_DeprovisionSshUser_FullMethodName   = "/deplo.agent.v1.Agent/DeprovisionSshUser"
+	Agent_StartTunnel_FullMethodName          = "/deplo.agent.v1.Agent/StartTunnel"
+	Agent_GetTunnel_FullMethodName            = "/deplo.agent.v1.Agent/GetTunnel"
+	Agent_StopTunnel_FullMethodName           = "/deplo.agent.v1.Agent/StopTunnel"
+	Agent_RenewalCSR_FullMethodName           = "/deplo.agent.v1.Agent/RenewalCSR"
+	Agent_InstallRenewedCert_FullMethodName   = "/deplo.agent.v1.Agent/InstallRenewedCert"
+	Agent_HostInfo_FullMethodName             = "/deplo.agent.v1.Agent/HostInfo"
+	Agent_SetTimezone_FullMethodName          = "/deplo.agent.v1.Agent/SetTimezone"
+	Agent_TraefikConfig_FullMethodName        = "/deplo.agent.v1.Agent/TraefikConfig"
+	Agent_RestartControlPlane_FullMethodName  = "/deplo.agent.v1.Agent/RestartControlPlane"
+	Agent_UpdateControlPlane_FullMethodName   = "/deplo.agent.v1.Agent/UpdateControlPlane"
+	Agent_ListWorkloadImages_FullMethodName   = "/deplo.agent.v1.Agent/ListWorkloadImages"
+	Agent_InventoryImage_FullMethodName       = "/deplo.agent.v1.Agent/InventoryImage"
+	Agent_InventoryCandidate_FullMethodName   = "/deplo.agent.v1.Agent/InventoryCandidate"
+	Agent_PreparePackageUpdate_FullMethodName = "/deplo.agent.v1.Agent/PreparePackageUpdate"
+	Agent_SetLinkAddresses_FullMethodName     = "/deplo.agent.v1.Agent/SetLinkAddresses"
+	Agent_StopListening_FullMethodName        = "/deplo.agent.v1.Agent/StopListening"
+	Agent_CaptureScreenshot_FullMethodName    = "/deplo.agent.v1.Agent/CaptureScreenshot"
 )
 
 // AgentClient is the client API for Agent service.
@@ -311,6 +312,10 @@ type AgentClient interface {
 	// removed again unless something uses it: Update is offered only when it has the fix.
 	// Advertised as `image-inventory.candidate`.
 	InventoryCandidate(ctx context.Context, in *InventoryCandidateRequest, opts ...grpc.CallOption) (*InventoryCandidateResponse, error)
+	// An app's package.json and lockfile with one dependency moved, rewritten by its own package
+	// manager in a container whose only way out is the npm registries; no install script runs.
+	// Advertised as `packages.update`.
+	PreparePackageUpdate(ctx context.Context, in *PreparePackageUpdateRequest, opts ...grpc.CallOption) (*PreparePackageUpdateResponse, error)
 	// Replace the panel addresses this agent links to (ADR-0040): it keeps exactly this pair,
 	// an empty fallback dropped, and dials it from its next link on. Advertised as `agent-link`.
 	SetLinkAddresses(ctx context.Context, in *LinkAddresses, opts ...grpc.CallOption) (*LinkAddresses, error)
@@ -1171,6 +1176,16 @@ func (c *agentClient) InventoryCandidate(ctx context.Context, in *InventoryCandi
 	return out, nil
 }
 
+func (c *agentClient) PreparePackageUpdate(ctx context.Context, in *PreparePackageUpdateRequest, opts ...grpc.CallOption) (*PreparePackageUpdateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PreparePackageUpdateResponse)
+	err := c.cc.Invoke(ctx, Agent_PreparePackageUpdate_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *agentClient) SetLinkAddresses(ctx context.Context, in *LinkAddresses, opts ...grpc.CallOption) (*LinkAddresses, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(LinkAddresses)
@@ -1414,6 +1429,10 @@ type AgentServer interface {
 	// removed again unless something uses it: Update is offered only when it has the fix.
 	// Advertised as `image-inventory.candidate`.
 	InventoryCandidate(context.Context, *InventoryCandidateRequest) (*InventoryCandidateResponse, error)
+	// An app's package.json and lockfile with one dependency moved, rewritten by its own package
+	// manager in a container whose only way out is the npm registries; no install script runs.
+	// Advertised as `packages.update`.
+	PreparePackageUpdate(context.Context, *PreparePackageUpdateRequest) (*PreparePackageUpdateResponse, error)
 	// Replace the panel addresses this agent links to (ADR-0040): it keeps exactly this pair,
 	// an empty fallback dropped, and dials it from its next link on. Advertised as `agent-link`.
 	SetLinkAddresses(context.Context, *LinkAddresses) (*LinkAddresses, error)
@@ -1642,6 +1661,9 @@ func (UnimplementedAgentServer) InventoryImage(context.Context, *InventoryImageR
 }
 func (UnimplementedAgentServer) InventoryCandidate(context.Context, *InventoryCandidateRequest) (*InventoryCandidateResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method InventoryCandidate not implemented")
+}
+func (UnimplementedAgentServer) PreparePackageUpdate(context.Context, *PreparePackageUpdateRequest) (*PreparePackageUpdateResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PreparePackageUpdate not implemented")
 }
 func (UnimplementedAgentServer) SetLinkAddresses(context.Context, *LinkAddresses) (*LinkAddresses, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetLinkAddresses not implemented")
@@ -2754,6 +2776,24 @@ func _Agent_InventoryCandidate_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Agent_PreparePackageUpdate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PreparePackageUpdateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).PreparePackageUpdate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_PreparePackageUpdate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).PreparePackageUpdate(ctx, req.(*PreparePackageUpdateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Agent_SetLinkAddresses_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(LinkAddresses)
 	if err := dec(in); err != nil {
@@ -3010,6 +3050,10 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "InventoryCandidate",
 			Handler:    _Agent_InventoryCandidate_Handler,
+		},
+		{
+			MethodName: "PreparePackageUpdate",
+			Handler:    _Agent_PreparePackageUpdate_Handler,
 		},
 		{
 			MethodName: "SetLinkAddresses",

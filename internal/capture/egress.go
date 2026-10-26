@@ -29,6 +29,8 @@ type Egress struct {
 	Local func() ([]net.IP, error)
 	// DialContext is the dialer the vetted addresses go through; nil means a net.Dialer.
 	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
+	// Allow, when set, is the only hosts it dials at all (a package manager's registries).
+	Allow func(host string) bool
 
 	refused   atomic.Int64
 	localOnce sync.Once
@@ -50,6 +52,10 @@ func (e *Egress) dial(ctx context.Context, hostport string) (net.Conn, error) {
 		return nil, err
 	}
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if e.Allow != nil && !e.Allow(host) {
+		e.refused.Add(1)
+		return nil, fmt.Errorf("%w: %s is not on this container's list", errRefused, host)
+	}
 	proxy, viaProxy := e.Proxy[port]
 	if viaProxy && host == strings.ToLower(e.OwnHost) {
 		return e.base(ctx, proxy)
