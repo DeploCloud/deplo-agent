@@ -50,7 +50,10 @@ jobs:
       # binary still reports today's CVEs.
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+      # Static like the shipped binary: the package-update e2e runs it inside node:alpine.
       - run: go test ./...
+        env:
+          CGO_ENABLED: "0"
       - name: Verify it builds static for both target arches
         run: |
           set -euo pipefail

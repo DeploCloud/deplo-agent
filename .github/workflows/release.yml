@@ -38,8 +38,11 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # Static like the shipped binary: the package-update e2e runs it inside node:alpine.
       - name: Run tests
         run: go test ./...
+        env:
+          CGO_ENABLED: "0"
 
       - name: Build static binaries (amd64, arm64)
         run: |
