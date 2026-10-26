@@ -4,7 +4,7 @@ go 1.26.10
 
 require (
 	filippo.io/age v1.3.2
-	github.com/chromedp/cdproto v0.157.8
+	github.com/chromedp/cdproto v0.158.4
 	github.com/chromedp/chromedp v0.21.0
 	github.com/coder/websocket v1.8.15
 	github.com/creack/pty v1.1.24
