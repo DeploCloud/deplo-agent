@@ -29,6 +29,7 @@ func TestPublicOf_keepsOnlyAddressesTheInternetCanReach(t *testing.T) {
 		cidr(t, "fe80::1/64"),
 		cidr(t, "fd00::1/64"),
 		cidr(t, "203.0.113.10/32"),
+		cidr(t, "192.0.0.1/32"),
 	}
 	got := publicOf(in)
 	want := []string{"203.0.113.10", "2001:db8:1::10"}

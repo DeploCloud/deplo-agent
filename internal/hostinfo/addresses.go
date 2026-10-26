@@ -5,7 +5,11 @@ import (
 	"strings"
 )
 
-var cgnat = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
+var (
+	cgnat = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
+	// An IPv6-only server's deplo-clat sits in 192.0.0.0/24: an IPv4 for its own way out, never a way in.
+	ietf = &net.IPNet{IP: net.IPv4(192, 0, 0, 0), Mask: net.CIDRMask(24, 32)}
+)
 
 // PublicAddresses lists the addresses this host answers on from the internet, read from its own interfaces.
 func PublicAddresses() []string {
@@ -25,7 +29,7 @@ func PublicAddresses() []string {
 	return publicOf(addrs)
 }
 
-// publicOf keeps global unicast only: never private, carrier-grade NAT, loopback or link-local.
+// publicOf keeps global unicast only: never private, carrier-grade NAT, IETF-reserved, loopback or link-local.
 func publicOf(addrs []net.Addr) []string {
 	seen := map[string]bool{}
 	var out []string
@@ -35,7 +39,7 @@ func publicOf(addrs []net.Addr) []string {
 			continue
 		}
 		ip := ipnet.IP
-		if !ip.IsGlobalUnicast() || ip.IsPrivate() || cgnat.Contains(ip) {
+		if !ip.IsGlobalUnicast() || ip.IsPrivate() || cgnat.Contains(ip) || ietf.Contains(ip) {
 			continue
 		}
 		s := ip.String()
