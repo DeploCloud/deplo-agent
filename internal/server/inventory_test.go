@@ -67,7 +67,7 @@ func TestListWorkloadImages_skipsUnlabelledContainers(t *testing.T) {
 func TestParseSyftJSON(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "sbom.json")
 	mustWrite(t, p, syftFixture)
-	resp, err := parseSyftJSON(p)
+	resp, _, err := parseSyftJSON(p)
 	if err != nil {
 		t.Fatal(err)
 	}

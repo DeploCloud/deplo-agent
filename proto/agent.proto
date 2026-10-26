@@ -2144,6 +2144,10 @@ message ImagePackage {
   string type = 4;
   // Where the package was found inside the image.
   string location = 5;
+  // Reachable only from the app's devDependencies per its lockfile: built with, never run.
+  bool build_only = 6;
+  // Who pulls it in, from its parent up to the app's own dependency; empty for a direct one.
+  repeated string via = 7;
 }
 
 message InventoryImageResponse {

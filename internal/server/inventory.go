@@ -221,7 +221,8 @@ func (s *Service) inventory(ctx context.Context, id string) (*pb.InventoryImageR
 	code, err := dockercli.SpawnEnv(cctx, inventoryTimeout, tail.add, env, "systemd-run",
 		"--quiet", "--scope", "--collect", "--nice=19",
 		"-p", "MemoryMax="+strconv.FormatInt(memCap, 10), "-p", "MemorySwapMax=0", "-p", "IOWeight=10",
-		"--", syft, "scan", "docker-archive:"+tarPath, "-o", "syft-json="+outPath, "-q")
+		"--", syft, "scan", "docker-archive:"+tarPath, "--select-catalogers", "+"+lockCataloger,
+		"-o", "syft-json="+outPath, "-q")
 	if err != nil || code != 0 {
 		if killedBySignal(err) && cctx.Err() == nil {
 			return inventoryStatus(pb.InventoryStatus_INVENTORY_STATUS_TOO_LARGE, "the image is too large to check on this server"), nil
@@ -229,11 +230,12 @@ func (s *Service) inventory(ctx context.Context, id string) (*pb.InventoryImageR
 		return inventoryRunFailed(cctx, "read the packages", err, code, tail), nil
 	}
 
-	resp, err := parseSyftJSON(outPath)
+	resp, doc, err := parseSyftJSON(outPath)
 	if err != nil {
 		return inventoryStatus(pb.InventoryStatus_INVENTORY_STATUS_FAILED, "read the package list: "+err.Error()), nil
 	}
 	resp.WorkingDir = img.WD
+	applyDepMarks(resp, doc, markDeps(doc, img.WD, readAppManifest(ctx, id, img.WD)))
 	return resp, nil
 }
 
@@ -310,29 +312,15 @@ func inventoryStatus(st pb.InventoryStatus, msg string) *pb.InventoryImageRespon
 	return &pb.InventoryImageResponse{Status: st, Error: msg}
 }
 
-func parseSyftJSON(path string) (*pb.InventoryImageResponse, error) {
+func parseSyftJSON(path string) (*pb.InventoryImageResponse, *syftDoc, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer f.Close()
-	var doc struct {
-		Artifacts []struct {
-			Name, Version, Type, Purl string
-			Locations                 []struct {
-				Path string `json:"path"`
-			} `json:"locations"`
-		} `json:"artifacts"`
-		Distro struct {
-			ID        string `json:"id"`
-			VersionID string `json:"versionID"`
-		} `json:"distro"`
-		Descriptor struct {
-			Version string `json:"version"`
-		} `json:"descriptor"`
-	}
+	var doc syftDoc
 	if err := json.NewDecoder(f).Decode(&doc); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	resp := &pb.InventoryImageResponse{
 		Status:         pb.InventoryStatus_INVENTORY_STATUS_OK,
@@ -341,7 +329,8 @@ func parseSyftJSON(path string) (*pb.InventoryImageResponse, error) {
 		ScannerVersion: doc.Descriptor.Version,
 	}
 	for _, a := range doc.Artifacts {
-		if a.Purl == "" {
+		// Lockfile entries only feed the dependency graph; the installed copy is what runs.
+		if a.Purl == "" || a.FoundBy == lockCataloger {
 			continue
 		}
 		p := &pb.ImagePackage{Purl: a.Purl, Name: a.Name, Version: a.Version, Type: a.Type}
@@ -350,7 +339,25 @@ func parseSyftJSON(path string) (*pb.InventoryImageResponse, error) {
 		}
 		resp.Packages = append(resp.Packages, p)
 	}
-	return resp, nil
+	return resp, &doc, nil
+}
+
+// applyDepMarks copies build_only and via onto the packages they belong to.
+func applyDepMarks(resp *pb.InventoryImageResponse, doc *syftDoc, marks map[string]depMark) {
+	if len(marks) == 0 {
+		return
+	}
+	byPkg := map[string]depMark{}
+	for _, a := range doc.Artifacts {
+		if m, ok := marks[a.ID]; ok && len(a.Locations) > 0 {
+			byPkg[a.Purl+"\x00"+a.Locations[0].Path] = m
+		}
+	}
+	for _, p := range resp.Packages {
+		if m, ok := byPkg[p.Purl+"\x00"+p.Location]; ok {
+			p.BuildOnly, p.Via = m.buildOnly, m.via
+		}
+	}
 }
 
 func (s *Service) ensureSyft(ctx context.Context) (string, error) {

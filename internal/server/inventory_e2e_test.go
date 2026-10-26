@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -114,5 +115,57 @@ func TestE2E_InventoryCandidate(t *testing.T) {
 	}
 	if left, _ := dockercli.Run(ctx, 30*time.Second, "image", "inspect", ref); left.Code == 0 {
 		t.Fatalf("%s pulled only to be read is still on the host", ref)
+	}
+}
+
+// End-to-end: a real npm app image; the lockfile tells the build-only package from the one that runs.
+func TestE2E_InventoryMarksBuildOnly(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	if !dockercli.Available(ctx) {
+		t.Skip("docker not available")
+	}
+	if os.Geteuid() != 0 || !inventoryCanCap() {
+		t.Skip("capping the reader's memory needs root and systemd")
+	}
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "package.json"),
+		`{"name":"e2e","version":"1.0.0","dependencies":{"express":"4.17.1"},"devDependencies":{"left-pad":"1.3.0"}}`)
+	mustWrite(t, filepath.Join(dir, "Dockerfile"),
+		"FROM node:22-alpine\nWORKDIR /app\nCOPY package.json .\nRUN npm install --no-audit --no-fund --loglevel=error\n")
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 36)
+	tag := "deplo-e2e-deps:" + suffix
+	if res, err := dockercli.Run(ctx, 10*time.Minute, "build", "-q", "-t", tag, dir); err != nil || res.Code != 0 {
+		t.Skipf("cannot build the npm image: %v %s", err, res.Stderr)
+	}
+	t.Cleanup(func() { _, _ = dockercli.Run(context.Background(), time.Minute, "image", "rm", "-f", tag) })
+	name := "deplo-e2e-deps-" + suffix
+	res, err := dockercli.Run(ctx, time.Minute, "run", "-d", "--name", name,
+		"--label", "deplo.managed=true", "--label", "deplo.project=prj_e2e_"+suffix, tag, "sleep", "300")
+	if err != nil || res.Code != 0 {
+		t.Fatalf("start container: %v %s", err, res.Stderr)
+	}
+	t.Cleanup(func() { _, _ = dockercli.Run(context.Background(), time.Minute, "rm", "-f", name) })
+	id, _ := dockercli.Run(ctx, 30*time.Second, "image", "inspect", "-f", "{{.Id}}", tag)
+
+	s := New(t.TempDir(), t.TempDir(), "/", e2eToolsBase(t))
+	resp, err := s.InventoryImage(ctx, &pb.InventoryImageRequest{ImageId: strings.TrimSpace(id.Stdout)})
+	if err != nil || resp.Status != pb.InventoryStatus_INVENTORY_STATUS_OK {
+		t.Fatalf("inventory: %v %v %s", err, resp.GetStatus(), resp.GetError())
+	}
+	marks := map[string]*pb.ImagePackage{}
+	for _, p := range resp.Packages {
+		if p.Type == "npm" && strings.HasPrefix(p.Location, "/app/") {
+			marks[p.Name] = p
+		}
+	}
+	if p := marks["left-pad"]; p == nil || !p.BuildOnly {
+		t.Fatalf("left-pad must be build-only: %v", p)
+	}
+	if p := marks["express"]; p == nil || p.BuildOnly || len(p.Via) != 0 {
+		t.Fatalf("express is a direct dependency that runs: %v", p)
+	}
+	if p := marks["body-parser"]; p == nil || p.BuildOnly || len(p.Via) == 0 || p.Via[len(p.Via)-1] != "express" {
+		t.Fatalf("body-parser runs, pulled in by express: %v", p)
 	}
 }
