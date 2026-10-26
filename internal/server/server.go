@@ -109,6 +109,7 @@ var Capabilities = []string{
 	"deploy.files-bind-check",
 	"backup.db-owner-check",
 	"image-inventory",
+	"image-inventory.candidate",
 	"deploy.pull-base",
 	"reroute.pull",
 	"agent-link",

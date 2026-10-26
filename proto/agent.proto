@@ -307,6 +307,11 @@ service Agent {
   // time and never during a deploy. Advertised as `image-inventory`.
   rpc InventoryImage(InventoryImageRequest) returns (InventoryImageResponse);
 
+  // A newer build of an image a workload runs, pulled by digest, read like InventoryImage and
+  // removed again unless something uses it: Update is offered only when it has the fix.
+  // Advertised as `image-inventory.candidate`.
+  rpc InventoryCandidate(InventoryCandidateRequest) returns (InventoryCandidateResponse);
+
   // Replace the panel addresses this agent links to (ADR-0040): it keeps exactly this pair,
   // an empty fallback dropped, and dials it from its next link on. Advertised as `agent-link`.
   rpc SetLinkAddresses(LinkAddresses) returns (LinkAddresses);
@@ -2152,6 +2157,19 @@ message InventoryImageResponse {
   repeated ImagePackage packages = 6;
   string scanner_version = 7;
   int64 duration_ms = 8;
+}
+
+message InventoryCandidateRequest {
+  // repository@sha256:<64 hex>, the same repository a workload's image comes from.
+  string image_ref = 1;
+  // The image that workload runs now: its size bounds the disk the pull may take.
+  string current_image_id = 2;
+}
+
+message InventoryCandidateResponse {
+  InventoryImageResponse result = 1;
+  // The pulled build's image id, which keys its package list.
+  string image_id = 2;
 }
 
 // ---------------------------------------------------------------------------

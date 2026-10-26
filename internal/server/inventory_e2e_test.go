@@ -60,3 +60,59 @@ func TestE2E_InventoryImage(t *testing.T) {
 		t.Fatalf("busybox missing from %d packages", len(resp.Packages))
 	}
 }
+
+// End-to-end: a newer build of a running workload's repository is pulled by digest, read, and gone again.
+func TestE2E_InventoryCandidate(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	if !dockercli.Available(ctx) {
+		t.Skip("docker not available")
+	}
+	if os.Geteuid() != 0 || !inventoryCanCap() {
+		t.Skip("capping the reader's memory needs root and systemd")
+	}
+	const cur, next = "alpine:3.20", "alpine:3.21"
+	for _, img := range []string{cur, next} {
+		if res, err := dockercli.Run(ctx, 5*time.Minute, "pull", "-q", img); err != nil || res.Code != 0 {
+			t.Skipf("cannot pull %s: %v %s", img, err, res.Stderr)
+		}
+	}
+	digests, err := dockercli.Run(ctx, 30*time.Second, "image", "inspect", "-f", "{{index .RepoDigests 0}}", next)
+	if err != nil || digests.Code != 0 {
+		t.Fatalf("read %s's digest: %v %s", next, err, digests.Stderr)
+	}
+	ref := strings.TrimSpace(digests.Stdout)
+	_, _ = dockercli.Run(ctx, time.Minute, "image", "rm", next)
+	_, _ = dockercli.Run(ctx, time.Minute, "image", "rm", ref)
+	if still, _ := dockercli.Run(ctx, 30*time.Second, "image", "inspect", ref); still.Code == 0 {
+		t.Skipf("%s is in use on this host", next)
+	}
+
+	suffix := strconv.FormatInt(time.Now().UnixNano(), 36)
+	name := "deplo-e2e-candidate-" + suffix
+	res, err := dockercli.Run(ctx, time.Minute, "run", "-d", "--name", name,
+		"--label", "deplo.managed=true", "--label", "deplo.project=prj_e2e_"+suffix, cur, "sleep", "300")
+	if err != nil || res.Code != 0 {
+		t.Fatalf("start container: %v %s", err, res.Stderr)
+	}
+	t.Cleanup(func() { _, _ = dockercli.Run(context.Background(), time.Minute, "rm", "-f", name) })
+	id, err := dockercli.Run(ctx, 30*time.Second, "image", "inspect", "-f", "{{.Id}}", cur)
+	if err != nil || id.Code != 0 {
+		t.Fatalf("inspect image: %v %s", err, id.Stderr)
+	}
+
+	s := New(t.TempDir(), t.TempDir(), "/", e2eToolsBase(t))
+	resp, err := s.InventoryCandidate(ctx, &pb.InventoryCandidateRequest{ImageRef: ref, CurrentImageId: strings.TrimSpace(id.Stdout)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.GetResult().GetStatus() != pb.InventoryStatus_INVENTORY_STATUS_OK || resp.GetImageId() == "" {
+		t.Fatalf("want OK with an id, got %v %q: %s", resp.GetResult().GetStatus(), resp.GetImageId(), resp.GetResult().GetError())
+	}
+	if !strings.HasPrefix(resp.GetResult().GetDistroVersion(), "3.21") {
+		t.Fatalf("read the wrong build: alpine %s", resp.GetResult().GetDistroVersion())
+	}
+	if left, _ := dockercli.Run(ctx, 30*time.Second, "image", "inspect", ref); left.Code == 0 {
+		t.Fatalf("%s pulled only to be read is still on the host", ref)
+	}
+}

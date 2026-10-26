@@ -92,6 +92,7 @@ const (
 	Agent_UpdateControlPlane_FullMethodName  = "/deplo.agent.v1.Agent/UpdateControlPlane"
 	Agent_ListWorkloadImages_FullMethodName  = "/deplo.agent.v1.Agent/ListWorkloadImages"
 	Agent_InventoryImage_FullMethodName      = "/deplo.agent.v1.Agent/InventoryImage"
+	Agent_InventoryCandidate_FullMethodName  = "/deplo.agent.v1.Agent/InventoryCandidate"
 	Agent_SetLinkAddresses_FullMethodName    = "/deplo.agent.v1.Agent/SetLinkAddresses"
 	Agent_StopListening_FullMethodName       = "/deplo.agent.v1.Agent/StopListening"
 	Agent_CaptureScreenshot_FullMethodName   = "/deplo.agent.v1.Agent/CaptureScreenshot"
@@ -306,6 +307,10 @@ type AgentClient interface {
 	// The package list inside one of those images, read under a memory cap, one image at a
 	// time and never during a deploy. Advertised as `image-inventory`.
 	InventoryImage(ctx context.Context, in *InventoryImageRequest, opts ...grpc.CallOption) (*InventoryImageResponse, error)
+	// A newer build of an image a workload runs, pulled by digest, read like InventoryImage and
+	// removed again unless something uses it: Update is offered only when it has the fix.
+	// Advertised as `image-inventory.candidate`.
+	InventoryCandidate(ctx context.Context, in *InventoryCandidateRequest, opts ...grpc.CallOption) (*InventoryCandidateResponse, error)
 	// Replace the panel addresses this agent links to (ADR-0040): it keeps exactly this pair,
 	// an empty fallback dropped, and dials it from its next link on. Advertised as `agent-link`.
 	SetLinkAddresses(ctx context.Context, in *LinkAddresses, opts ...grpc.CallOption) (*LinkAddresses, error)
@@ -1156,6 +1161,16 @@ func (c *agentClient) InventoryImage(ctx context.Context, in *InventoryImageRequ
 	return out, nil
 }
 
+func (c *agentClient) InventoryCandidate(ctx context.Context, in *InventoryCandidateRequest, opts ...grpc.CallOption) (*InventoryCandidateResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(InventoryCandidateResponse)
+	err := c.cc.Invoke(ctx, Agent_InventoryCandidate_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *agentClient) SetLinkAddresses(ctx context.Context, in *LinkAddresses, opts ...grpc.CallOption) (*LinkAddresses, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(LinkAddresses)
@@ -1395,6 +1410,10 @@ type AgentServer interface {
 	// The package list inside one of those images, read under a memory cap, one image at a
 	// time and never during a deploy. Advertised as `image-inventory`.
 	InventoryImage(context.Context, *InventoryImageRequest) (*InventoryImageResponse, error)
+	// A newer build of an image a workload runs, pulled by digest, read like InventoryImage and
+	// removed again unless something uses it: Update is offered only when it has the fix.
+	// Advertised as `image-inventory.candidate`.
+	InventoryCandidate(context.Context, *InventoryCandidateRequest) (*InventoryCandidateResponse, error)
 	// Replace the panel addresses this agent links to (ADR-0040): it keeps exactly this pair,
 	// an empty fallback dropped, and dials it from its next link on. Advertised as `agent-link`.
 	SetLinkAddresses(context.Context, *LinkAddresses) (*LinkAddresses, error)
@@ -1620,6 +1639,9 @@ func (UnimplementedAgentServer) ListWorkloadImages(context.Context, *ListWorkloa
 }
 func (UnimplementedAgentServer) InventoryImage(context.Context, *InventoryImageRequest) (*InventoryImageResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method InventoryImage not implemented")
+}
+func (UnimplementedAgentServer) InventoryCandidate(context.Context, *InventoryCandidateRequest) (*InventoryCandidateResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method InventoryCandidate not implemented")
 }
 func (UnimplementedAgentServer) SetLinkAddresses(context.Context, *LinkAddresses) (*LinkAddresses, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetLinkAddresses not implemented")
@@ -2714,6 +2736,24 @@ func _Agent_InventoryImage_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Agent_InventoryCandidate_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(InventoryCandidateRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).InventoryCandidate(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_InventoryCandidate_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).InventoryCandidate(ctx, req.(*InventoryCandidateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Agent_SetLinkAddresses_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(LinkAddresses)
 	if err := dec(in); err != nil {
@@ -2966,6 +3006,10 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "InventoryImage",
 			Handler:    _Agent_InventoryImage_Handler,
+		},
+		{
+			MethodName: "InventoryCandidate",
+			Handler:    _Agent_InventoryCandidate_Handler,
 		},
 		{
 			MethodName: "SetLinkAddresses",
