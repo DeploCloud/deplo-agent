@@ -39,7 +39,7 @@ const workloadDocker = `case "$*" in
 esac`
 
 func TestCapabilities_advertisesInventory(t *testing.T) {
-	for _, c := range []string{"image-inventory", "image-inventory.candidate", "deploy.pull-base", "reroute.pull"} {
+	for _, c := range []string{"image-inventory", "image-inventory.candidate", "image-inventory.deps", "deploy.pull-base", "reroute.pull"} {
 		if !containsString(Capabilities, c) {
 			t.Errorf("Capabilities must advertise %q", c)
 		}
