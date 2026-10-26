@@ -3,27 +3,11 @@ package server
 import (
 	"context"
 
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/peer"
-	"google.golang.org/grpc/status"
-
 	pb "github.com/DeploCloud/deplo-agent/gen"
-	"github.com/DeploCloud/deplo-agent/internal/link"
 )
 
-// SetPort names the agent's own port, so Hello reports it and StopListening can close it.
-func (s *Service) SetPort(p *link.Port) { s.port = p }
-
-// StopListening closes the agent's own port for good once its link works (ADR-0040).
-// Asked over that port instead, the agent cannot tell its link works, so it keeps the port.
-func (s *Service) StopListening(ctx context.Context, _ *pb.StopListeningRequest) (*pb.StopListeningResponse, error) {
-	if p, ok := peer.FromContext(ctx); !ok || !link.Over(p.Addr) {
-		return nil, status.Error(codes.FailedPrecondition, "ask over the agent link: closing this port would leave the agent no way in")
-	}
-	if s.port.Listening() {
-		if err := s.port.Stop(); err != nil {
-			return nil, status.Errorf(codes.Internal, "stop listening: %v", err)
-		}
-	}
+// StopListening succeeds and changes nothing: this agent has no port of its own (ADR-0040).
+// The RPC stays in the contract for panels that still ask.
+func (s *Service) StopListening(context.Context, *pb.StopListeningRequest) (*pb.StopListeningResponse, error) {
 	return &pb.StopListeningResponse{}, nil
 }

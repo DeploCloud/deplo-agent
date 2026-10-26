@@ -74,8 +74,6 @@ type Config struct {
 	Token string
 	// Fingerprint is the expected control-plane cert sha256 (HTTPS only); "" => HTTP.
 	Fingerprint string
-	// AgentPort is the port the agent will serve gRPC on (reported to the control plane so it knows where to dial back).
-	AgentPort int
 	// AdvertisedHost is what the agent believes its address is (informational).
 	AdvertisedHost string
 	// AgentDir is where to write the resulting materials.
@@ -85,7 +83,6 @@ type Config struct {
 type callHomeRequest struct {
 	Token          string `json:"token"`
 	CSRPem         string `json:"csrPem"`
-	AgentPort      int    `json:"agentPort,omitempty"`
 	AdvertisedHost string `json:"advertisedHost,omitempty"`
 }
 
@@ -186,7 +183,6 @@ func callHome(cfg Config, csrPem string) (callHomeResponse, []byte, string, erro
 	body, _ := json.Marshal(callHomeRequest{
 		Token:          cfg.Token,
 		CSRPem:         csrPem,
-		AgentPort:      cfg.AgentPort,
 		AdvertisedHost: cfg.AdvertisedHost,
 	})
 	url := strings.TrimRight(cfg.ControlPlaneURL, "/") + "/api/agent/bootstrap"
