@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -85,6 +86,9 @@ func TestPreparePackageUpdate_refusesBadInput(t *testing.T) {
 	}
 }
 
+// testUser keeps a fixture's files deletable by the test that made them.
+func testUser() string { return fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()) }
+
 func gunzip(t *testing.T, b []byte) string {
 	t.Helper()
 	r, err := gzip.NewReader(bytes.NewReader(b))
@@ -115,7 +119,7 @@ func TestE2E_PreparePackageUpdate_npm(t *testing.T) {
 	}
 	mustWrite(t, filepath.Join(app, "package.json"),
 		`{"name":"e2e","version":"1.0.0","dependencies":{"minimist":"^1.2.5","mkdirp":"0.5.5"}}`+"\n")
-	if res, err := dockercli.Run(ctx, 5*time.Minute, "run", "--rm", "-v", app+":/w", "-w", "/w", pkgUpdateImage,
+	if res, err := dockercli.Run(ctx, 5*time.Minute, "run", "--rm", "--user", testUser(), "-e", "HOME=/tmp", "-v", app+":/w", "-w", "/w", pkgUpdateImage,
 		"npm", "install", "--package-lock-only", "--ignore-scripts", "--no-audit", "--no-fund"); err != nil || res.Code != 0 {
 		t.Skipf("cannot make the lockfile: %v %s", err, res.Stderr)
 	}
@@ -173,7 +177,7 @@ func TestE2E_PreparePackageUpdate_pnpm(t *testing.T) {
 	t.Cleanup(func() { gitAllowProtocol = prev })
 	repo := t.TempDir()
 	mustWrite(t, filepath.Join(repo, "package.json"), `{"name":"e2e","version":"1.0.0","dependencies":{"mkdirp":"0.5.5"}}`+"\n")
-	if res, err := dockercli.Run(ctx, 5*time.Minute, "run", "--rm", "-v", repo+":/w", "-w", "/w", pkgUpdateImage,
+	if res, err := dockercli.Run(ctx, 5*time.Minute, "run", "--rm", "--user", testUser(), "-e", "HOME=/tmp", "-v", repo+":/w", "-w", "/w", pkgUpdateImage,
 		"sh", "-c", "COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack pnpm install --lockfile-only --ignore-scripts"); err != nil || res.Code != 0 {
 		t.Skipf("cannot make the pnpm lockfile: %v %s", err, res.Stderr)
 	}
@@ -210,7 +214,7 @@ func TestE2E_PreparePackageUpdate_yarn(t *testing.T) {
 	repo := t.TempDir()
 	// The lockfile starts on minimist 1.2.5, which mkdirp's ^1.2.5 keeps until something moves it.
 	mustWrite(t, filepath.Join(repo, "package.json"), `{"name":"e2e","version":"1.0.0","dependencies":{"mkdirp":"0.5.5"},"resolutions":{"minimist":"1.2.5"}}`+"\n")
-	if res, err := dockercli.Run(ctx, 5*time.Minute, "run", "--rm", "-v", repo+":/w", "-w", "/w", pkgUpdateImage,
+	if res, err := dockercli.Run(ctx, 5*time.Minute, "run", "--rm", "--user", testUser(), "-e", "HOME=/tmp", "-v", repo+":/w", "-w", "/w", pkgUpdateImage,
 		"yarn", "install", "--ignore-scripts", "--non-interactive"); err != nil || res.Code != 0 {
 		t.Skipf("cannot make the yarn lockfile: %v %s", err, res.Stderr)
 	}

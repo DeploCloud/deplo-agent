@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
@@ -206,10 +207,17 @@ func (s *Service) runPackageManager(ctx context.Context, dir string, spec pkgupd
 	egress := &capture.Egress{Allow: registryHost}
 	go egress.Serve(ectx, l)
 
+	// The checkout's owner: with every capability dropped, even root writes only what it owns.
+	st, err := os.Stat(dir)
+	if err != nil {
+		return "", err
+	}
+	owner := st.Sys().(*syscall.Stat_t)
+
 	in, _ := json.Marshal(spec)
 	var stdout bytes.Buffer
 	code, err := dockercli.PipeThrough(ctx, 10*time.Minute, bytes.NewReader(in), &stdout, nil,
-		"run", "--rm", "-i", "--network", "none",
+		"run", "--rm", "-i", "--network", "none", "--user", fmt.Sprintf("%d:%d", owner.Uid, owner.Gid),
 		"--cap-drop", "ALL", "--security-opt", "no-new-privileges",
 		"--tmpfs", "/tmp:rw,nosuid,nodev,size=1g",
 		"--memory", "2g", "--memory-swap", "2g", "--cpus", "2", "--pids-limit", "1024",
