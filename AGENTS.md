@@ -16,6 +16,7 @@ control plane never touches a Docker socket; everything host-coupled arrives her
 - `internal/server/` - the Agent service implementation. The bulk of the code.
 - `internal/dockercli/`, `internal/hostmetrics/`, `internal/hostinfo/`, `internal/s3client/`,
   `internal/safepath/`, `internal/bootstrap/`, `internal/netguard/` - leaf helpers.
+- `internal/link/` - the agent link: the WebSocket the agent opens to its panel and serves gRPC on.
 - `internal/capture/` - the deployment screenshot browser (see below).
 - `proto/agent.proto` - the wire contract, owned here.
 - `gen/` - generated. Never hand-edit; `make proto` owns it.

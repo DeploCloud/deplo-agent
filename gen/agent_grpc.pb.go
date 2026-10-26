@@ -92,6 +92,8 @@ const (
 	Agent_UpdateControlPlane_FullMethodName  = "/deplo.agent.v1.Agent/UpdateControlPlane"
 	Agent_ListWorkloadImages_FullMethodName  = "/deplo.agent.v1.Agent/ListWorkloadImages"
 	Agent_InventoryImage_FullMethodName      = "/deplo.agent.v1.Agent/InventoryImage"
+	Agent_SetLinkAddresses_FullMethodName    = "/deplo.agent.v1.Agent/SetLinkAddresses"
+	Agent_StopListening_FullMethodName       = "/deplo.agent.v1.Agent/StopListening"
 	Agent_CaptureScreenshot_FullMethodName   = "/deplo.agent.v1.Agent/CaptureScreenshot"
 )
 
@@ -304,6 +306,12 @@ type AgentClient interface {
 	// The package list inside one of those images, read under a memory cap, one image at a
 	// time and never during a deploy. Advertised as `image-inventory`.
 	InventoryImage(ctx context.Context, in *InventoryImageRequest, opts ...grpc.CallOption) (*InventoryImageResponse, error)
+	// Replace the panel addresses this agent links to (ADR-0040): it keeps exactly this pair,
+	// an empty fallback dropped, and dials it from its next link on. Advertised as `agent-link`.
+	SetLinkAddresses(ctx context.Context, in *LinkAddresses, opts ...grpc.CallOption) (*LinkAddresses, error)
+	// Close this agent's own port for good, once its agent link works (ADR-0040). Taken over
+	// the link only, and kept across restarts. Advertised as `agent-link`.
+	StopListening(ctx context.Context, in *StopListeningRequest, opts ...grpc.CallOption) (*StopListeningResponse, error)
 	// Opens a deployment in a throwaway browser that has no network of its own and returns
 	// a light and a dark picture of it. Advertised as `screenshot`.
 	CaptureScreenshot(ctx context.Context, in *CaptureScreenshotRequest, opts ...grpc.CallOption) (*CaptureScreenshotResponse, error)
@@ -1148,6 +1156,26 @@ func (c *agentClient) InventoryImage(ctx context.Context, in *InventoryImageRequ
 	return out, nil
 }
 
+func (c *agentClient) SetLinkAddresses(ctx context.Context, in *LinkAddresses, opts ...grpc.CallOption) (*LinkAddresses, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(LinkAddresses)
+	err := c.cc.Invoke(ctx, Agent_SetLinkAddresses_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) StopListening(ctx context.Context, in *StopListeningRequest, opts ...grpc.CallOption) (*StopListeningResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StopListeningResponse)
+	err := c.cc.Invoke(ctx, Agent_StopListening_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *agentClient) CaptureScreenshot(ctx context.Context, in *CaptureScreenshotRequest, opts ...grpc.CallOption) (*CaptureScreenshotResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CaptureScreenshotResponse)
@@ -1367,6 +1395,12 @@ type AgentServer interface {
 	// The package list inside one of those images, read under a memory cap, one image at a
 	// time and never during a deploy. Advertised as `image-inventory`.
 	InventoryImage(context.Context, *InventoryImageRequest) (*InventoryImageResponse, error)
+	// Replace the panel addresses this agent links to (ADR-0040): it keeps exactly this pair,
+	// an empty fallback dropped, and dials it from its next link on. Advertised as `agent-link`.
+	SetLinkAddresses(context.Context, *LinkAddresses) (*LinkAddresses, error)
+	// Close this agent's own port for good, once its agent link works (ADR-0040). Taken over
+	// the link only, and kept across restarts. Advertised as `agent-link`.
+	StopListening(context.Context, *StopListeningRequest) (*StopListeningResponse, error)
 	// Opens a deployment in a throwaway browser that has no network of its own and returns
 	// a light and a dark picture of it. Advertised as `screenshot`.
 	CaptureScreenshot(context.Context, *CaptureScreenshotRequest) (*CaptureScreenshotResponse, error)
@@ -1586,6 +1620,12 @@ func (UnimplementedAgentServer) ListWorkloadImages(context.Context, *ListWorkloa
 }
 func (UnimplementedAgentServer) InventoryImage(context.Context, *InventoryImageRequest) (*InventoryImageResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method InventoryImage not implemented")
+}
+func (UnimplementedAgentServer) SetLinkAddresses(context.Context, *LinkAddresses) (*LinkAddresses, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetLinkAddresses not implemented")
+}
+func (UnimplementedAgentServer) StopListening(context.Context, *StopListeningRequest) (*StopListeningResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method StopListening not implemented")
 }
 func (UnimplementedAgentServer) CaptureScreenshot(context.Context, *CaptureScreenshotRequest) (*CaptureScreenshotResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CaptureScreenshot not implemented")
@@ -2674,6 +2714,42 @@ func _Agent_InventoryImage_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Agent_SetLinkAddresses_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(LinkAddresses)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).SetLinkAddresses(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_SetLinkAddresses_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).SetLinkAddresses(ctx, req.(*LinkAddresses))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_StopListening_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StopListeningRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).StopListening(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_StopListening_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).StopListening(ctx, req.(*StopListeningRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Agent_CaptureScreenshot_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(CaptureScreenshotRequest)
 	if err := dec(in); err != nil {
@@ -2890,6 +2966,14 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "InventoryImage",
 			Handler:    _Agent_InventoryImage_Handler,
+		},
+		{
+			MethodName: "SetLinkAddresses",
+			Handler:    _Agent_SetLinkAddresses_Handler,
+		},
+		{
+			MethodName: "StopListening",
+			Handler:    _Agent_StopListening_Handler,
 		},
 		{
 			MethodName: "CaptureScreenshot",
