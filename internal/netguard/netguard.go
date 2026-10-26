@@ -50,14 +50,48 @@ func Dial(base func(ctx context.Context, network, addr string) (net.Conn, error)
 	}
 }
 
-var blockedNets = func() []*net.IPNet {
+func cidrs(cs ...string) []*net.IPNet {
 	var out []*net.IPNet
-	for _, c := range []string{"0.0.0.0/8", "100.64.0.0/10", "198.18.0.0/15", "240.0.0.0/4", "64:ff9b::/96"} {
+	for _, c := range cs {
 		_, n, _ := net.ParseCIDR(c)
 		out = append(out, n)
 	}
 	return out
-}()
+}
+
+var (
+	blockedNets = cidrs("0.0.0.0/8", "100.64.0.0/10", "198.18.0.0/15", "240.0.0.0/4", "fec0::/10")
+	nat64       = cidrs("64:ff9b::/96", "64:ff9b:1::/48")
+	sixToFour   = cidrs("2002::/16")[0]
+	teredo      = cidrs("2001::/32")[0]
+)
+
+// embeddedIPv4 is the IPv4 a translated or tunnelled IPv6 delivers to, where it carries one.
+func embeddedIPv4(ip net.IP) net.IP {
+	b := ip.To16()
+	if b == nil || ip.To4() != nil {
+		return nil
+	}
+	zero := func(bs []byte) bool {
+		for _, x := range bs {
+			if x != 0 {
+				return false
+			}
+		}
+		return true
+	}
+	switch {
+	case nat64[0].Contains(ip), nat64[1].Contains(ip):
+		return net.IP(b[12:16])
+	case sixToFour.Contains(ip):
+		return net.IP(b[2:6])
+	case teredo.Contains(ip):
+		return net.IPv4(^b[12], ^b[13], ^b[14], ^b[15])
+	case zero(b[:12]), zero(b[:8]) && b[8] == 0xff && b[9] == 0xff && zero(b[10:12]):
+		return net.IP(b[12:16])
+	}
+	return nil
+}
 
 // BlockedReason names the range ip falls in, or returns "" when it may be dialed.
 func BlockedReason(ip net.IP) string {
@@ -70,6 +104,12 @@ func BlockedReason(ip net.IP) string {
 		return "link-local"
 	case ip.IsPrivate():
 		return "private"
+	case ip.IsMulticast():
+		return "multicast"
+	}
+	// NAT64 included: the gateway delivers to the IPv4 inside, so that is what is judged.
+	if v4 := embeddedIPv4(ip); v4 != nil {
+		return BlockedReason(v4)
 	}
 	for _, n := range blockedNets {
 		if n.Contains(ip) {

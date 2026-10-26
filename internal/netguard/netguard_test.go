@@ -62,3 +62,18 @@ func TestBlockedReason_reservedRanges(t *testing.T) {
 		}
 	}
 }
+
+func TestBlockedReason_judgesTheIPv4InsideATranslatedAddress(t *testing.T) {
+	for _, ip := range []string{"64:ff9b::a00:1", "64:ff9b:1::7f00:1", "2002:7f00:1::1", "2001:0:0:0:0:0:80ff:fffe",
+		"::127.0.0.1", "::ffff:0:a00:1", "fec0::1", "ff02::1"} {
+		if BlockedReason(net.ParseIP(ip)) == "" {
+			t.Errorf("%s should be refused", ip)
+		}
+	}
+	// A provider's own NAT64 is how an IPv6-only server reaches an IPv4-only S3 or asset host.
+	for _, ip := range []string{"64:ff9b::808:808", "64:ff9b::34d9:3b4a", "2002:808:808::1"} {
+		if r := BlockedReason(net.ParseIP(ip)); r != "" {
+			t.Errorf("%s refused as %s", ip, r)
+		}
+	}
+}
