@@ -9,7 +9,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -36,7 +35,7 @@ func main() {
 	}
 	var (
 		// Units written before the agent link pass --addr, and self-update keeps their argv: taken, hidden, ignored.
-		addr        = flag.String(legacyAddr, "", "")
+		addr        = flag.String(legacyAddrFlag, "", "")
 		showCaps    = flag.Bool("capabilities", false, "print the capabilities Hello advertises, one per line, and exit")
 		certFile    = flag.String("cert", envOr("DEPLO_AGENT_CERT", ""), "agent server certificate (PEM)")
 		keyFile     = flag.String("key", envOr("DEPLO_AGENT_KEY", ""), "agent server private key (PEM)")
@@ -103,33 +102,34 @@ func main() {
 	svc.EnableCertRenewal(certMgr)
 	pb.RegisterAgentServer(srv, svc)
 
-	lc, err := linkConfig(*agentDir, cert, *bootstrapURL)
+	addrs, err := linkAddresses(*agentDir, *bootstrapURL)
 	if err != nil {
 		log.Printf("deplo-agent: agent link: %v", err)
 	}
-	if lc == nil || lc.Addresses.Current().Primary == "" {
+	if addrs.Primary == "" {
 		log.Fatalf("deplo-agent: no panel address to link to, so nothing could reach this agent")
 	}
+	lc := link.Config{Addresses: link.NewStore(*agentDir, addrs), CertFile: cert, Logf: log.Printf}
 	svc.EnableAgentLink(lc.Addresses)
-	log.Printf("deplo-agent %s: linking to %s", server.AgentVersion, lc.Addresses.Current().Primary)
+	log.Printf("deplo-agent %s: linking to %s", server.AgentVersion, addrs.Primary)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	go svc.WarmRailpack(ctx)
-	if err := serveAgent(ctx, srv, *lc); err != nil {
+	if err := serveAgent(ctx, srv, lc); err != nil {
 		log.Fatalf("deplo-agent: serve: %v", err)
 	}
 }
 
-// legacyAddr is the listen-address flag of agents from before the link, hidden from the usage text.
-const legacyAddr = "addr"
+// legacyAddrFlag is the listen-address flag of agents from before the link, hidden from the usage text.
+const legacyAddrFlag = "addr"
 
 // usage is flag's own, without the flags kept only so that old units still start.
 func usage() {
 	shown := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
 	shown.SetOutput(flag.CommandLine.Output())
 	flag.VisitAll(func(f *flag.Flag) {
-		if f.Name != legacyAddr {
+		if f.Name != legacyAddrFlag {
 			shown.Var(f.Value, f.Name, f.Usage)
 		}
 	})
@@ -190,26 +190,17 @@ func serveAgent(ctx context.Context, srv *grpc.Server, lc link.Config) error {
 	return nil
 }
 
-// linkConfig is where the agent links, or nil with no agent dir to keep its addresses in.
-func linkConfig(agentDir, certFile, bootstrapURL string) (*link.Config, error) {
-	if agentDir == "" {
-		return nil, nil
-	}
-	a, err := linkAddresses(agentDir, bootstrapURL)
-	return &link.Config{Addresses: link.NewStore(agentDir, a), CertFile: certFile, Logf: log.Printf}, err
-}
-
-// linkAddresses is the saved pair. Without one, or with an unreadable one, the agent saves its install URL:
-// from bootstrap.env or, under the first units, from --bootstrap-url. Nothing else could reach it.
+// linkAddresses is the saved pair. Without one, or with an unreadable one, the agent saves its install
+// URL: nothing else could reach it. None at all without an agent dir to keep a pair in.
 func linkAddresses(agentDir, bootstrapURL string) (link.Addresses, error) {
+	if agentDir == "" {
+		return link.Addresses{}, nil
+	}
 	a, err := link.LoadAddresses(agentDir)
 	if a.Primary != "" {
 		return a, nil
 	}
-	if a.Primary = bootstrap.InstallURL(agentDir); a.Primary == "" {
-		a.Primary = strings.TrimRight(strings.TrimSpace(bootstrapURL), "/")
-	}
-	if a.Primary == "" {
+	if a.Primary = bootstrap.InstallURL(agentDir, bootstrapURL); a.Primary == "" {
 		return a, err
 	}
 	return a, errors.Join(err, link.SaveAddresses(agentDir, a))

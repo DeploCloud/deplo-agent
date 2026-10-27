@@ -205,14 +205,11 @@ func startAgent(t *testing.T) *agentUnderTest {
 		t.Fatal(err)
 	}
 	url, links := panelDoor(t)
-	if err := link.SaveAddresses(dir, link.Addresses{Primary: url}); err != nil {
+	pair := link.Addresses{Primary: url}
+	if err := link.SaveAddresses(dir, pair); err != nil {
 		t.Fatal(err)
 	}
-	lc, err := linkConfig(dir, m.CertPath, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	lc.Logf = t.Logf
+	lc := link.Config{Addresses: link.NewStore(dir, pair), CertFile: m.CertPath, Logf: t.Logf}
 	srv := newGRPCServer(cm)
 	svc := server.New(t.TempDir(), t.TempDir(), "/", "")
 	svc.EnableAgentLink(lc.Addresses)
@@ -220,7 +217,7 @@ func startAgent(t *testing.T) *agentUnderTest {
 	ctx, cancel := context.WithCancel(context.Background())
 	a := &agentUnderTest{pki: pki, dir: dir, links: links, stop: cancel, served: make(chan error, 1)}
 	go func() {
-		a.served <- serveAgent(ctx, srv, *lc)
+		a.served <- serveAgent(ctx, srv, lc)
 	}()
 	t.Cleanup(func() {
 		cancel()
