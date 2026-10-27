@@ -319,8 +319,8 @@ type AgentClient interface {
 	// Replace the panel addresses this agent links to (ADR-0040): it keeps exactly this pair,
 	// an empty fallback dropped, and dials it from its next link on. Advertised as `agent-link`.
 	SetLinkAddresses(ctx context.Context, in *LinkAddresses, opts ...grpc.CallOption) (*LinkAddresses, error)
-	// Close this agent's own port for good, once its agent link works (ADR-0040). Taken over
-	// the link only, and kept across restarts. Advertised as `agent-link`.
+	// Kept in V1 for agents that had a port of their own (ADR-0040). An agent since the link-only
+	// release never listens, so this is a no-op that succeeds. Advertised as `agent-link`.
 	StopListening(ctx context.Context, in *StopListeningRequest, opts ...grpc.CallOption) (*StopListeningResponse, error)
 	// Opens a deployment in a throwaway browser that has no network of its own and returns
 	// a light and a dark picture of it. Advertised as `screenshot`.
@@ -1436,8 +1436,8 @@ type AgentServer interface {
 	// Replace the panel addresses this agent links to (ADR-0040): it keeps exactly this pair,
 	// an empty fallback dropped, and dials it from its next link on. Advertised as `agent-link`.
 	SetLinkAddresses(context.Context, *LinkAddresses) (*LinkAddresses, error)
-	// Close this agent's own port for good, once its agent link works (ADR-0040). Taken over
-	// the link only, and kept across restarts. Advertised as `agent-link`.
+	// Kept in V1 for agents that had a port of their own (ADR-0040). An agent since the link-only
+	// release never listens, so this is a no-op that succeeds. Advertised as `agent-link`.
 	StopListening(context.Context, *StopListeningRequest) (*StopListeningResponse, error)
 	// Opens a deployment in a throwaway browser that has no network of its own and returns
 	// a light and a dark picture of it. Advertised as `screenshot`.
