@@ -55,8 +55,8 @@ type agentProc struct {
 	log    *syncBuffer
 }
 
-// runUnit starts the agent as a process with a unit's arguments and environment, stopped like systemd stops it.
-func runUnit(t *testing.T, args, env []string) *agentProc {
+// startUnderUnit starts the agent as a process with a systemd unit's arguments and environment, stopped like systemd stops it.
+func startUnderUnit(t *testing.T, args, env []string) *agentProc {
 	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
@@ -115,57 +115,68 @@ func linkedOrExited(t *testing.T, links <-chan linked, p *agentProc) linked {
 	return linked{}
 }
 
-// Self-update replaces only the binary: a unit written before the agent link still passes --addr.
-func TestUnit_anAgentUnderAnOldUnitLinksAndListensNowhere(t *testing.T) {
+// enrolledHost is a host provisioned before the agent link: its agent dir, the panel door it was
+// installed from, and a port for --addr that must stay closed.
+type enrolledHost struct {
+	pki   *testPKI
+	dir   string
+	door  string
+	links <-chan linked
+	port  int
+}
+
+func newEnrolledHost(t *testing.T) *enrolledHost {
+	t.Helper()
 	noDocker(t)
-	pki := newTestPKI(t)
-	dir := t.TempDir()
-	pki.provisionAgent(t, dir)
-	door, links := panelDoor(t)
-	writeInstallEnv(t, dir, door)
-	if err := link.SaveAddresses(dir, link.Addresses{Primary: door}); err != nil {
+	h := &enrolledHost{pki: newTestPKI(t), dir: t.TempDir(), port: freePort(t)}
+	h.pki.provisionAgent(t, h.dir)
+	h.door, h.links = panelDoor(t)
+	return h
+}
+
+// oldUnitArgs is install-agent.sh's ExecStart from before the agent link, then any extra flags.
+func (h *enrolledHost) oldUnitArgs(extra ...string) []string {
+	return append([]string{"--addr", "0.0.0.0:" + strconv.Itoa(h.port), "--data-dir", "/", "--agent-dir", h.dir}, extra...)
+}
+
+// Self-update replaces only the binary: a unit written before the agent link still passes --addr.
+func TestOldUnit_theAgentLinksAndListensNowhere(t *testing.T) {
+	h := newEnrolledHost(t)
+	writeInstallEnv(t, h.dir, h.door)
+	if err := link.SaveAddresses(h.dir, link.Addresses{Primary: h.door}); err != nil {
 		t.Fatal(err)
 	}
-	port := freePort(t)
 
-	// install-agent.sh's ExecStart, and the EnvironmentFile it reads.
-	p := runUnit(t,
-		[]string{"--addr", "0.0.0.0:" + strconv.Itoa(port), "--data-dir", "/", "--agent-dir", dir},
-		[]string{"DEPLO_BOOTSTRAP_URL=" + door, "DEPLO_BOOTSTRAP_TOKEN=spent", "DEPLO_BOOTSTRAP_FINGERPRINT=aa:bb"})
+	// With the EnvironmentFile install-agent.sh points it at.
+	p := startUnderUnit(t, h.oldUnitArgs(),
+		[]string{"DEPLO_BOOTSTRAP_URL=" + h.door, "DEPLO_BOOTSTRAP_TOKEN=spent", "DEPLO_BOOTSTRAP_FINGERPRINT=aa:bb"})
 
-	l := linkedOrExited(t, links, p)
-	if hello(t, overLink(t, l.conn, pki.panelTLS(t, nil))).GetListening() {
+	l := linkedOrExited(t, h.links, p)
+	if hello(t, overLink(t, l.conn, h.pki.panelTLS(t, nil))).GetListening() {
 		t.Error("Hello reports a listener")
 	}
-	if c, err := net.DialTimeout("tcp", "127.0.0.1:"+strconv.Itoa(port), time.Second); err == nil {
+	if c, err := net.DialTimeout("tcp", "127.0.0.1:"+strconv.Itoa(h.port), time.Second); err == nil {
 		c.Close()
-		t.Errorf("the agent listens on --addr's port %d", port)
+		t.Errorf("the agent listens on --addr's port %d", h.port)
 	}
 }
 
 // The first units (2026-06) named the panel on the command line, before bootstrap.env existed.
 // An agent that never received a pair has no other way back to its panel.
-func TestUnit_anAgentUnderTheFirstUnitsLinksToTheURLItsUnitNames(t *testing.T) {
-	noDocker(t)
-	pki := newTestPKI(t)
-	dir := t.TempDir()
-	pki.provisionAgent(t, dir)
-	door, links := panelDoor(t)
+func TestOldUnit_theFirstUnitsLinkToTheURLTheyName(t *testing.T) {
+	h := newEnrolledHost(t)
 
-	p := runUnit(t, []string{
-		"--addr", "0.0.0.0:" + strconv.Itoa(freePort(t)), "--data-dir", "/", "--agent-dir", dir,
-		"--bootstrap-url", door, "--bootstrap-token", "spent", "--bootstrap-fingerprint", "aa:bb",
-	}, nil)
+	p := startUnderUnit(t, h.oldUnitArgs("--bootstrap-url", h.door, "--bootstrap-token", "spent", "--bootstrap-fingerprint", "aa:bb"), nil)
 
-	l := linkedOrExited(t, links, p)
-	hello(t, overLink(t, l.conn, pki.panelTLS(t, nil)))
-	if saved, err := link.LoadAddresses(dir); err != nil || saved.Primary != door {
-		t.Errorf("saved pair %+v (%v), want %s for the next start", saved, err, door)
+	l := linkedOrExited(t, h.links, p)
+	hello(t, overLink(t, l.conn, h.pki.panelTLS(t, nil)))
+	if saved, err := link.LoadAddresses(h.dir); err != nil || saved.Primary != h.door {
+		t.Errorf("saved pair %+v (%v), want %s for the next start", saved, err, h.door)
 	}
 }
 
-func TestUnit_theUsageTextLeavesOutTheListenAddress(t *testing.T) {
-	p := runUnit(t, []string{"-h"}, nil)
+func TestUsage_leavesOutTheListenAddress(t *testing.T) {
+	p := startUnderUnit(t, []string{"-h"}, nil)
 	select {
 	case <-p.exited:
 	case <-time.After(15 * time.Second):
