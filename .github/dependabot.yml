@@ -9,8 +9,8 @@ updates:
       prefix: "build(deps)"
     labels: ["dependencies"]
 
-  # A stdlib, gRPC, x/crypto or WebSocket advisory here is pre-auth surface on the
-  # agent link, so the module tree is watched too - not only the workflows.
+  # A stdlib, gRPC or x/crypto advisory here is pre-auth surface on the agent's
+  # gRPC port, so the module tree is watched too - not only the workflows.
   - package-ecosystem: gomod
     directory: "/"
     schedule:
