@@ -50,18 +50,20 @@ func Provisioned(agentDir string) bool {
 	return true
 }
 
-// InstallURL is the call-home URL the install script left in agentDir/bootstrap.env, or "".
-// The file, not the environment: a self-update re-exec starts with no DEPLO_BOOTSTRAP_* set.
-func InstallURL(agentDir string) string {
-	raw, err := os.ReadFile(filepath.Join(agentDir, "bootstrap.env"))
-	if err != nil {
-		return ""
-	}
+// InstallURL is the call-home URL the agent was installed with: bootstrap.env's, else the first units'
+// --bootstrap-url (flagURL); "" with neither. The file comes first: a self-update re-exec starts with
+// no DEPLO_BOOTSTRAP_* set.
+func InstallURL(agentDir, flagURL string) string {
 	url := ""
-	for _, line := range strings.Split(string(raw), "\n") {
-		if v, ok := strings.CutPrefix(strings.TrimSpace(line), "DEPLO_BOOTSTRAP_URL="); ok {
-			url = strings.Trim(strings.TrimSpace(v), `"'`)
+	if raw, err := os.ReadFile(filepath.Join(agentDir, "bootstrap.env")); err == nil {
+		for _, line := range strings.Split(string(raw), "\n") {
+			if v, ok := strings.CutPrefix(strings.TrimSpace(line), "DEPLO_BOOTSTRAP_URL="); ok {
+				url = strings.Trim(strings.TrimSpace(v), `"'`)
+			}
 		}
+	}
+	if url == "" {
+		url = strings.TrimSpace(flagURL)
 	}
 	return strings.TrimRight(url, "/")
 }
@@ -74,8 +76,6 @@ type Config struct {
 	Token string
 	// Fingerprint is the expected control-plane cert sha256 (HTTPS only); "" => HTTP.
 	Fingerprint string
-	// AgentPort is the port the agent will serve gRPC on (reported to the control plane so it knows where to dial back).
-	AgentPort int
 	// AdvertisedHost is what the agent believes its address is (informational).
 	AdvertisedHost string
 	// AgentDir is where to write the resulting materials.
@@ -85,7 +85,6 @@ type Config struct {
 type callHomeRequest struct {
 	Token          string `json:"token"`
 	CSRPem         string `json:"csrPem"`
-	AgentPort      int    `json:"agentPort,omitempty"`
 	AdvertisedHost string `json:"advertisedHost,omitempty"`
 }
 
@@ -186,7 +185,6 @@ func callHome(cfg Config, csrPem string) (callHomeResponse, []byte, string, erro
 	body, _ := json.Marshal(callHomeRequest{
 		Token:          cfg.Token,
 		CSRPem:         csrPem,
-		AgentPort:      cfg.AgentPort,
 		AdvertisedHost: cfg.AdvertisedHost,
 	})
 	url := strings.TrimRight(cfg.ControlPlaneURL, "/") + "/api/agent/bootstrap"

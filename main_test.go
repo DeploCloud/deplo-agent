@@ -11,23 +11,6 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/server"
 )
 
-func TestLoopbackAddr(t *testing.T) {
-	for addr, want := range map[string]bool{
-		"127.0.0.1:9443": true,
-		"[::1]:9443":     true,
-		"localhost:9443": true,
-		":9443":          false,
-		"0.0.0.0:9443":   false,
-		"10.0.0.5:9443":  false,
-		"[::]:9443":      false,
-		"127.0.0.1":      false,
-	} {
-		if got := loopbackAddr(addr); got != want {
-			t.Errorf("loopbackAddr(%q) = %v, want %v", addr, got, want)
-		}
-	}
-}
-
 // writeInstallEnv writes bootstrap.env the way the install script does.
 func writeInstallEnv(t *testing.T, dir, url string) {
 	t.Helper()
@@ -41,7 +24,7 @@ func TestLinkAddresses_anAgentEnrolledBeforeTheLinkKeepsItsInstallURL(t *testing
 	dir := t.TempDir()
 	writeInstallEnv(t, dir, "https://panel.example.com")
 
-	got, err := linkAddresses(dir)
+	got, err := linkAddresses(dir, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,18 +35,18 @@ func TestLinkAddresses_anAgentEnrolledBeforeTheLinkKeepsItsInstallURL(t *testing
 	if err := os.Remove(filepath.Join(dir, "bootstrap.env")); err != nil {
 		t.Fatal(err)
 	}
-	if again, _ := linkAddresses(dir); again != got {
+	if again, _ := linkAddresses(dir, ""); again != got {
 		t.Fatalf("after a restart without bootstrap.env: %+v, want %+v", again, got)
 	}
 }
 
-func TestLinkAddresses_theSavedPairWinsOverTheInstallFile(t *testing.T) {
+func TestLinkAddresses_theSavedPairWinsOverWhatTheInstallNamed(t *testing.T) {
 	dir := t.TempDir()
 	writeInstallEnv(t, dir, "https://old.example.com")
 	if err := link.SaveAddresses(dir, link.Addresses{Primary: "https://new.example.com"}); err != nil {
 		t.Fatal(err)
 	}
-	got, err := linkAddresses(dir)
+	got, err := linkAddresses(dir, "https://old.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,45 +57,12 @@ func TestLinkAddresses_theSavedPairWinsOverTheInstallFile(t *testing.T) {
 
 func TestLinkAddresses_noAddressAnywhereMeansNoLink(t *testing.T) {
 	dir := t.TempDir()
-	got, err := linkAddresses(dir)
+	got, err := linkAddresses(dir, "")
 	if err != nil || got.Primary != "" {
 		t.Fatalf("addresses = %+v, %v; want none", got, err)
 	}
 	if _, err := os.Stat(link.AddressesPath(dir)); !os.IsNotExist(err) {
 		t.Fatalf("nothing may be saved when there is no address (stat err = %v)", err)
-	}
-}
-
-func TestListen_noAddressMeansNoListener(t *testing.T) {
-	dir := t.TempDir()
-	lis, err := listen("", dir)
-	if lis != nil || err != nil {
-		t.Fatalf("listen(\"\") = %v, %v; a linking agent opens no port at all", lis, err)
-	}
-	lis, err = listen("127.0.0.1:0", dir)
-	if err != nil || lis == nil {
-		t.Fatalf("an explicit --addr still listens: %v, %v", lis, err)
-	}
-	lis.Close()
-}
-
-func TestListen_anAgentThatStoppedListeningOpensNoPortOnItsNextStart(t *testing.T) {
-	dir := t.TempDir()
-	lis, err := listen("127.0.0.1:0", dir)
-	if err != nil || lis == nil {
-		t.Fatalf("listen: %v, %v", lis, err)
-	}
-	if err := lis.Stop(); err != nil {
-		t.Fatal(err)
-	}
-	if again, err := listen("127.0.0.1:0", dir); again != nil || err != nil {
-		t.Fatalf("after stopping, --addr still opened %v (%v)", again, err)
-	}
-	// Without an agent dir there is nowhere to remember it, so nothing overrides --addr.
-	if lis, err := listen("127.0.0.1:0", ""); lis == nil || err != nil {
-		t.Fatalf("listen with no agent dir: %v, %v", lis, err)
-	} else {
-		lis.Close()
 	}
 }
 
@@ -128,16 +78,19 @@ func TestPrintCapabilities_tellsAnInstallerThisAgentLinks(t *testing.T) {
 	}
 }
 
-func TestLinkConfig_neverLinksWithoutMTLS(t *testing.T) {
+// With no port of its own, an agent whose saved pair cannot be read has only its install URL left.
+func TestLinkAddresses_anUnreadablePairFallsBackToTheInstallURL(t *testing.T) {
 	dir := t.TempDir()
-	if err := link.SaveAddresses(dir, link.Addresses{Primary: "https://panel.example.com"}); err != nil {
+	writeInstallEnv(t, dir, "https://panel.example.com")
+	if err := os.WriteFile(link.AddressesPath(dir), []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if lc, err := linkConfig(true, dir, "agent.crt"); lc != nil || err != nil {
-		t.Fatalf("--insecure linked to %+v (err %v): gRPC would cross the internet in the clear", lc, err)
+
+	got, err := linkAddresses(dir, "")
+	if got.Primary != "https://panel.example.com" {
+		t.Fatalf("addresses = %+v (%v), want the install URL", got, err)
 	}
-	lc, err := linkConfig(false, dir, "agent.crt")
-	if err != nil || lc == nil || lc.Addresses.Current().Primary != "https://panel.example.com" || lc.CertFile != "agent.crt" {
-		t.Fatalf("with mTLS: %+v, %v", lc, err)
+	if again, err := linkAddresses(dir, ""); again != got || err != nil {
+		t.Fatalf("after a restart: %+v, %v; want %+v saved", again, err, got)
 	}
 }

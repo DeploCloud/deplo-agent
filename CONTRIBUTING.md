@@ -12,8 +12,8 @@ Deplo that runs `docker`, a shell or `fs` on a server. The control plane lives i
 - **Bugs and feature requests about the agent** go to
   [Issues](https://github.com/DeploCloud/deplo-agent/issues) here.
 - **Security vulnerabilities** go to [SECURITY.md](SECURITY.md), never to a public issue.
-  The gRPC port is reachable by anyone who can open a socket, so treat a finding here as
-  pre-auth until proven otherwise.
+  Anyone on the agent link's path reaches the agent's TLS handshake, so treat a finding here
+  as pre-auth until proven otherwise.
 
 ## Running it locally
 

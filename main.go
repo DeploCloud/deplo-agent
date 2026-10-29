@@ -2,14 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -35,7 +34,8 @@ func main() {
 		os.Exit(pkgupdate.Main(os.Stdin, os.Stdout))
 	}
 	var (
-		addr        = flag.String("addr", "", "listen address (host:port); none by default, the agent links out to its panel")
+		// Units written before the agent link pass --addr, and self-update keeps their argv: taken, hidden, ignored.
+		addr        = flag.String(legacyAddrFlag, "", "")
 		showCaps    = flag.Bool("capabilities", false, "print the capabilities Hello advertises, one per line, and exit")
 		certFile    = flag.String("cert", envOr("DEPLO_AGENT_CERT", ""), "agent server certificate (PEM)")
 		keyFile     = flag.String("key", envOr("DEPLO_AGENT_KEY", ""), "agent server private key (PEM)")
@@ -45,13 +45,13 @@ func main() {
 		buildTmpDir = flag.String("build-tmp", envOr("DEPLO_AGENT_BUILD_TMP", os.TempDir()), "where upload build contexts are extracted")
 		dataDir     = flag.String("data-dir", envOr("DEPLO_AGENT_DATA_DIR", "/"), "filesystem measured for disk metrics")
 		dataBase    = flag.String("data-base", envOr("DEPLO_AGENT_DATA_BASE", ""), "host data root for dev workspaces + the SSH gateway (empty => parent of --stack-dir)")
-		insecure    = flag.Bool("insecure", os.Getenv("DEPLO_AGENT_INSECURE") == "1", "DANGEROUS: serve without mTLS (tests/local only)")
 
 		bootstrapURL   = flag.String("bootstrap-url", envOr("DEPLO_BOOTSTRAP_URL", ""), "control-plane URL to call home to on first run")
 		bootstrapTok   = flag.String("bootstrap-token", envOr("DEPLO_BOOTSTRAP_TOKEN", ""), "one-time bootstrap token")
 		bootstrapFP    = flag.String("bootstrap-fingerprint", envOr("DEPLO_BOOTSTRAP_FINGERPRINT", ""), "expected control-plane cert sha256 (HTTPS only)")
 		advertisedHost = flag.String("advertised-host", envOr("DEPLO_AGENT_ADVERTISED_HOST", ""), "address the agent reports it is reachable at (informational)")
 	)
+	flag.Usage = usage
 	flag.Parse()
 	for _, k := range []string{"DEPLO_BOOTSTRAP_URL", "DEPLO_BOOTSTRAP_TOKEN", "DEPLO_BOOTSTRAP_FINGERPRINT"} {
 		_ = os.Unsetenv(k)
@@ -61,8 +61,8 @@ func main() {
 		return
 	}
 
-	if *insecure && !loopbackAddr(*addr) {
-		log.Fatalf("deplo-agent: --insecure serves without mTLS, so it needs a loopback --addr (got %q)", *addr)
+	if *addr != "" {
+		log.Printf("deplo-agent: ignoring --addr %s: the agent listens nowhere, it links out to its panel", *addr)
 	}
 
 	if err := os.MkdirAll(*buildTmpDir, 0o755); err != nil {
@@ -76,16 +76,11 @@ func main() {
 			if *bootstrapTok == "" || *bootstrapURL == "" {
 				log.Fatalf("deplo-agent: not provisioned and no bootstrap token/url given (run via the dashboard's install command)")
 			}
-			port := 0 // a linking agent has no port to report
-			if *addr != "" {
-				port = portFromAddr(*addr)
-			}
 			log.Printf("deplo-agent: bootstrapping against %s", *bootstrapURL)
 			if _, err := bootstrap.Run(bootstrap.Config{
 				ControlPlaneURL: *bootstrapURL,
 				Token:           *bootstrapTok,
 				Fingerprint:     *bootstrapFP,
-				AgentPort:       port,
 				AdvertisedHost:  *advertisedHost,
 				AgentDir:        *agentDir,
 			}); err != nil {
@@ -96,67 +91,56 @@ func main() {
 		cert, key, ca = m.CertPath, m.KeyPath, m.CAPath
 	}
 
-	var certMgr *server.CertManager
-	if !*insecure {
-		cm, err := server.NewCertManager(cert, key, ca)
-		if err != nil {
-			log.Fatalf("deplo-agent: mTLS setup: %v", err)
-		}
-		certMgr = cm
-	} else {
-		log.Printf("deplo-agent: WARNING serving WITHOUT mTLS (--insecure)")
+	certMgr, err := server.NewCertManager(cert, key, ca)
+	if err != nil {
+		log.Fatalf("deplo-agent: mTLS setup: %v", err)
 	}
 
 	srv := newGRPCServer(certMgr)
 	svc := server.New(*stackDir, *buildTmpDir, *dataDir, *dataBase)
 	svc.SetAgentDir(*agentDir)
-	if certMgr != nil {
-		svc.EnableCertRenewal(certMgr)
-	}
+	svc.EnableCertRenewal(certMgr)
 	pb.RegisterAgentServer(srv, svc)
 
-	lis, err := listen(*addr, *agentDir)
-	if err != nil {
-		log.Fatalf("deplo-agent: listen %s: %v", *addr, err)
-	}
-	svc.SetPort(lis)
-	if lis != nil {
-		log.Printf("deplo-agent %s listening on %s (mtls=%v)", server.AgentVersion, *addr, !*insecure)
-	} else if *addr != "" {
-		log.Printf("deplo-agent %s: no listener, it closed its port once its link worked (--addr %s unused)", server.AgentVersion, *addr)
-	} else {
-		log.Printf("deplo-agent %s: no listener, it links out to its panel", server.AgentVersion)
-	}
-
-	lc, err := linkConfig(*insecure, *agentDir, cert)
+	addrs, err := linkAddresses(*agentDir, *bootstrapURL)
 	if err != nil {
 		log.Printf("deplo-agent: agent link: %v", err)
 	}
-	if lc != nil {
-		svc.EnableAgentLink(lc.Addresses)
-		if a := lc.Addresses.Current(); a.Primary != "" {
-			log.Printf("deplo-agent: linking to %s", a.Primary)
-		}
+	if addrs.Primary == "" {
+		log.Fatalf("deplo-agent: no panel address to link to, so nothing could reach this agent")
 	}
-	if lis == nil && (lc == nil || lc.Addresses.Current().Primary == "") {
-		log.Fatalf("deplo-agent: no --addr and no panel address to link to, so nothing could reach this agent")
-	}
+	lc := link.Config{Addresses: link.NewStore(*agentDir, addrs), CertFile: cert, Logf: log.Printf}
+	svc.EnableAgentLink(lc.Addresses)
+	log.Printf("deplo-agent %s: linking to %s", server.AgentVersion, addrs.Primary)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 	go svc.WarmRailpack(ctx)
-	if err := serveAgent(ctx, srv, lis, lc); err != nil {
+	if err := serveAgent(ctx, srv, lc); err != nil {
 		log.Fatalf("deplo-agent: serve: %v", err)
 	}
 }
 
-// newGRPCServer is the agent's one gRPC server; every listener and link it serves shares these credentials.
+// legacyAddrFlag is the listen-address flag of agents from before the link, hidden from the usage text.
+const legacyAddrFlag = "addr"
+
+// usage is flag's own, without the flags kept only so that old units still start.
+func usage() {
+	shown := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	shown.SetOutput(flag.CommandLine.Output())
+	flag.VisitAll(func(f *flag.Flag) {
+		if f.Name != legacyAddrFlag {
+			shown.Var(f.Value, f.Name, f.Usage)
+		}
+	})
+	fmt.Fprintf(shown.Output(), "Usage of %s:\n", os.Args[0])
+	shown.PrintDefaults()
+}
+
+// newGRPCServer is the agent's one gRPC server, served over each agent link in turn.
 func newGRPCServer(certMgr *server.CertManager) *grpc.Server {
-	var opts []grpc.ServerOption
-	if certMgr != nil {
-		opts = append(opts, grpc.Creds(credentials.NewTLS(certMgr.ServerTLSConfig())))
-	}
-	opts = append(opts,
+	return grpc.NewServer(
+		grpc.Creds(credentials.NewTLS(certMgr.ServerTLSConfig())),
 		grpc.MaxRecvMsgSize(256*1024*1024),
 		grpc.KeepaliveEnforcementPolicy(keepalive.EnforcementPolicy{
 			MinTime:             15 * time.Second,
@@ -167,19 +151,6 @@ func newGRPCServer(certMgr *server.CertManager) *grpc.Server {
 			Timeout: 10 * time.Second,
 		}),
 	)
-	return grpc.NewServer(opts...)
-}
-
-// listen opens the listener for --addr; none when it is empty or the agent closed it once linked (ADR-0040).
-func listen(addr, agentDir string) (*link.Port, error) {
-	if addr == "" || agentDir != "" && link.ListenerStopped(agentDir) {
-		return nil, nil
-	}
-	lis, err := net.Listen("tcp", addr)
-	if err != nil {
-		return nil, err
-	}
-	return link.NewPort(lis, agentDir), nil
 }
 
 // printCapabilities answers an installer asking what this binary can do, e.g. whether it links.
@@ -189,22 +160,15 @@ func printCapabilities(w io.Writer) {
 	}
 }
 
-// serveAgent serves srv on lis (when there is one) and, given lc, over an agent link, until ctx ends or lis fails.
-func serveAgent(ctx context.Context, srv *grpc.Server, lis *link.Port, lc *link.Config) error {
-	serveErr := make(chan error, 2)
-	if lis != nil {
-		go func() { serveErr <- srv.Serve(lis) }()
-	}
+// serveAgent serves srv over the agent link lc keeps open, until ctx ends (ADR-0040).
+func serveAgent(ctx context.Context, srv *grpc.Server, lc link.Config) error {
+	serveErr := make(chan error, 1)
+	ll := link.NewListener()
+	go func() { serveErr <- srv.Serve(ll) }()
 	linkCtx, closeLink := context.WithCancel(context.Background())
 	defer closeLink()
 	unlinked := make(chan struct{})
-	if lc != nil {
-		ll := link.NewListener()
-		go func() { serveErr <- srv.Serve(ll) }()
-		go func() { link.Run(linkCtx, *lc, ll); close(unlinked) }()
-	} else {
-		close(unlinked)
-	}
+	go func() { link.Run(linkCtx, lc, ll); close(unlinked) }()
 	select {
 	case err := <-serveErr:
 		return err
@@ -226,26 +190,20 @@ func serveAgent(ctx context.Context, srv *grpc.Server, lis *link.Port, lc *link.
 	return nil
 }
 
-// linkConfig is where the agent links, or nil: never without mTLS, since the link crosses the internet.
-// With no saved address (or an unreadable one) it waits for the panel to send a pair over the listener.
-func linkConfig(insecure bool, agentDir, certFile string) (*link.Config, error) {
-	if insecure || agentDir == "" {
-		return nil, nil
+// linkAddresses is the saved pair. Without one, or with an unreadable one, the agent saves its install
+// URL: nothing else could reach it. None at all without an agent dir to keep a pair in.
+func linkAddresses(agentDir, bootstrapURL string) (link.Addresses, error) {
+	if agentDir == "" {
+		return link.Addresses{}, nil
 	}
-	a, err := linkAddresses(agentDir)
-	return &link.Config{Addresses: link.NewStore(agentDir, a), CertFile: certFile, Logf: log.Printf}, err
-}
-
-// linkAddresses is the saved pair; an agent enrolled before the agent link saves its install URL once.
-func linkAddresses(agentDir string) (link.Addresses, error) {
 	a, err := link.LoadAddresses(agentDir)
-	if err != nil || a.Primary != "" {
-		return a, err
-	}
-	if a.Primary = bootstrap.InstallURL(agentDir); a.Primary == "" {
+	if a.Primary != "" {
 		return a, nil
 	}
-	return a, link.SaveAddresses(agentDir, a)
+	if a.Primary = bootstrap.InstallURL(agentDir, bootstrapURL); a.Primary == "" {
+		return a, err
+	}
+	return a, errors.Join(err, link.SaveAddresses(agentDir, a))
 }
 
 func envOr(key, def string) string {
@@ -253,31 +211,4 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
-}
-
-func loopbackAddr(addr string) bool {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return false
-	}
-	ip := net.ParseIP(host)
-	return host == "localhost" || ip != nil && ip.IsLoopback()
-}
-
-func portFromAddr(addr string) int {
-	_, p, err := net.SplitHostPort(addr)
-	if err != nil {
-		return 9443
-	}
-	port := 0
-	for _, c := range strings.TrimSpace(p) {
-		if c < '0' || c > '9' {
-			return 9443
-		}
-		port = port*10 + int(c-'0')
-	}
-	if port == 0 {
-		return 9443
-	}
-	return port
 }

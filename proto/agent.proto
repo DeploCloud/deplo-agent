@@ -321,8 +321,8 @@ service Agent {
   // an empty fallback dropped, and dials it from its next link on. Advertised as `agent-link`.
   rpc SetLinkAddresses(LinkAddresses) returns (LinkAddresses);
 
-  // Close this agent's own port for good, once its agent link works (ADR-0040). Taken over
-  // the link only, and kept across restarts. Advertised as `agent-link`.
+  // Kept in V1 for agents that had a port of their own (ADR-0040). An agent since the link-only
+  // release never listens, so this is a no-op that succeeds. Advertised as `agent-link`.
   rpc StopListening(StopListeningRequest) returns (StopListeningResponse);
   // Opens a deployment in a throwaway browser that has no network of its own and returns
   // a light and a dark picture of it. Advertised as `screenshot`.
@@ -387,8 +387,8 @@ message HelloResponse {
   // The panel addresses this agent links to, as it keeps them. Trusted only with the
   // "agent-link" capability, and unset on an agent that cannot link.
   LinkAddresses link_addresses = 9;
-  // Whether this agent still listens on a port of its own, which it stops doing once its
-  // agent link works. Trusted only with the "agent-link" capability.
+  // Kept in V1: true only on an older agent still listening on a port of its own. An agent since
+  // the link-only release never listens and leaves it unset. Trusted only with "agent-link".
   bool listening = 10;
 }
 
