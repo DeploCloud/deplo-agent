@@ -294,11 +294,12 @@ func inspectImages(ctx context.Context, ids []string) ([]imageInfo, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
+	// range, not join: the CLI's raw-JSON fallback hands arrays over as []interface{}.
 	args := append([]string{"image", "inspect", "--format",
 		`{{.Id}}|{{with (index .Config "Labels")}}{{index . "deplo.slug"}}|{{index . "deplo.service"}}{{else}}|{{end}}|{{.Created}}|{{.Size}}|` +
 			`{{if .RepoTags}}{{index .RepoTags 0}}{{else if .RepoDigests}}{{index .RepoDigests 0}}{{end}}|` +
 			`{{with (index .Config "Labels")}}{{index . "deplo.managed"}}{{end}}|` +
-			`{{with (index . "Metadata")}}{{with (index . "LastTagTime")}}{{json .}}{{end}}{{end}}|{{join .RepoTags ","}}|{{join .RepoDigests ","}}`}, ids...)
+			`{{with (index . "Metadata")}}{{with (index . "LastTagTime")}}{{json .}}{{end}}{{end}}|{{range .RepoTags}}{{.}},{{end}}|{{range .RepoDigests}}{{.}},{{end}}`}, ids...)
 	res, err := dockerQuery(ctx, cleanupQueryTimeout, args...)
 	if err != nil {
 		return nil, err

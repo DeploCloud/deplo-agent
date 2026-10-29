@@ -2,10 +2,12 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 	"strings"
 	"testing"
+	"text/template"
 	"time"
 )
 
@@ -442,6 +444,42 @@ func TestInspectImages_labelsThroughWith(t *testing.T) {
 	format := got[3]
 	if strings.Contains(format, ".Config.Labels") || !strings.Contains(format, `(index .Config "Labels")`) {
 		t.Fatalf("labels must be reached with index, never dotted, got %q", format)
+	}
+}
+
+// The CLI retries a failing format on the raw JSON, where arrays are []interface{}: a `join` there failed the whole batch.
+func TestInspectImages_rawJSONFallback(t *testing.T) {
+	const raw = `{"Id":"sha256:a","Created":"2026-10-29T10:00:00Z","Size":5,"RepoTags":["deplo/web:dpl_1","web:latest"],` +
+		`"RepoDigests":["web@sha256:d"],"Config":{"Labels":{"deplo.slug":"web"}},"Metadata":{"LastTagTime":"2026-10-29T10:00:00Z"}}`
+	orig := dockerQuery
+	dockerQuery = func(_ context.Context, _ time.Duration, args ...string) (dockercli.Result, error) {
+		var v any
+		dec := json.NewDecoder(strings.NewReader(raw))
+		dec.UseNumber()
+		if err := dec.Decode(&v); err != nil {
+			return dockercli.Result{}, err
+		}
+		tmpl, err := template.New("").Option("missingkey=error").Funcs(template.FuncMap{
+			"join": strings.Join,
+			"json": func(v any) string { b, _ := json.Marshal(v); return string(b) },
+		}).Parse(args[3])
+		if err != nil {
+			return dockercli.Result{}, err
+		}
+		var out strings.Builder
+		if err := tmpl.Execute(&out, v); err != nil {
+			return dockercli.Result{}, err
+		}
+		return okResult(out.String() + "\n"), nil
+	}
+	t.Cleanup(func() { dockerQuery = orig })
+	got, err := inspectImages(context.Background(), []string{"a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].slug != "web" || strings.Join(got[0].tags, ",") != "deplo/web:dpl_1,web:latest" ||
+		strings.Join(got[0].digests, ",") != "web@sha256:d" {
+		t.Fatalf("got %+v", got)
 	}
 }
 
