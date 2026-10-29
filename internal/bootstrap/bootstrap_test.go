@@ -98,6 +98,7 @@ func TestBootstrap_happyPathOverHTTP(t *testing.T) {
 		ControlPlaneURL: srv.URL,
 		Token:           "tok-123",
 		Fingerprint:     "",
+		AgentPort:       9443,
 		AgentDir:        dir,
 	})
 	if err != nil {
@@ -181,6 +182,7 @@ func TestBootstrap_rejectsTamperedMACOverHTTP(t *testing.T) {
 		ControlPlaneURL: srv.URL,
 		Token:           "tok-123",
 		Fingerprint:     "",
+		AgentPort:       9443,
 		AgentDir:        t.TempDir(),
 	})
 	if err == nil {

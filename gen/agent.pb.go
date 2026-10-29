@@ -755,8 +755,8 @@ type HelloResponse struct {
 	// The panel addresses this agent links to, as it keeps them. Trusted only with the
 	// "agent-link" capability, and unset on an agent that cannot link.
 	LinkAddresses *LinkAddresses `protobuf:"bytes,9,opt,name=link_addresses,json=linkAddresses,proto3" json:"link_addresses,omitempty"`
-	// Kept in V1: true only on an older agent still listening on a port of its own. An agent since
-	// the link-only release never listens and leaves it unset. Trusted only with "agent-link".
+	// Whether this agent still listens on a port of its own, which it stops doing once its
+	// agent link works. Trusted only with the "agent-link" capability.
 	Listening     bool `protobuf:"varint,10,opt,name=listening,proto3" json:"listening,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
