@@ -39,7 +39,7 @@ func TestListenSplice_carriesBothWays(t *testing.T) {
 	}()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	addr, err := ListenSplice(ctx, sock)
+	addr, err := listenSplice(ctx, sock)
 	if err != nil {
 		t.Fatal(err)
 	}

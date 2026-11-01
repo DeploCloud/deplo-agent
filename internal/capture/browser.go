@@ -60,7 +60,7 @@ func capturePage(ctx context.Context, spec Spec, sock, exe string) Result {
 	if err != nil || target.Hostname() == "" {
 		return Result{Outcome: OutcomeUnreachable, Detail: "bad url"}
 	}
-	proxy, err := ListenSplice(ctx, sock)
+	proxy, err := listenSplice(ctx, sock)
 	if err != nil {
 		return Result{Outcome: OutcomeUnreachable, Detail: err.Error()}
 	}
@@ -361,8 +361,8 @@ func sleep(ctx context.Context, d time.Duration) {
 	}
 }
 
-// ListenSplice gives a loopback proxy address whose every connection is carried to sock.
-func ListenSplice(ctx context.Context, sock string) (string, error) {
+// listenSplice gives the browser a loopback proxy address whose every connection is carried to sock.
+func listenSplice(ctx context.Context, sock string) (string, error) {
 	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return "", fmt.Errorf("proxy listener: %w", err)
