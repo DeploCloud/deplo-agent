@@ -342,7 +342,7 @@ func parseSyftJSON(path string) (*pb.InventoryImageResponse, *syftDoc, error) {
 	return resp, &doc, nil
 }
 
-// applyDepMarks copies build_only and via onto the packages they belong to.
+// applyDepMarks copies build_only, via and direct onto the packages they belong to.
 func applyDepMarks(resp *pb.InventoryImageResponse, doc *syftDoc, marks map[string]depMark) {
 	if len(marks) == 0 {
 		return
@@ -355,7 +355,7 @@ func applyDepMarks(resp *pb.InventoryImageResponse, doc *syftDoc, marks map[stri
 	}
 	for _, p := range resp.Packages {
 		if m, ok := byPkg[p.Purl+"\x00"+p.Location]; ok {
-			p.BuildOnly, p.Via = m.buildOnly, m.via
+			p.BuildOnly, p.Via, p.Direct = m.buildOnly, m.via, m.direct
 		}
 	}
 }

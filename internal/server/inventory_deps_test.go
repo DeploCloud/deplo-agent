@@ -45,7 +45,7 @@ func TestMarkDeps_pnpmGraph(t *testing.T) {
 		[][2]string{{"body-parser", "express"}, {"bytes", "body-parser"}, {"debug", "mocha"}, {"debug", "express"}})
 	got := markDeps(doc, "/app", []byte(manifest))
 	want := map[string]depMark{
-		"i-express":     {},
+		"i-express":     {direct: true},
 		"i-body-parser": {via: []string{"express"}},
 		"i-bytes":       {via: []string{"body-parser", "express"}},
 		"i-debug":       {via: []string{"express"}},
@@ -57,14 +57,16 @@ func TestMarkDeps_pnpmGraph(t *testing.T) {
 	}
 }
 
-func TestMarkDeps_npmLockLeavesDevOut(t *testing.T) {
-	// npm's lockfile reaches syft without dev packages: installed but absent is build-only.
-	doc := depsDoc(t, "package-lock.json",
-		[]string{"express", "body-parser", "bytes", "debug"},
-		[][2]string{{"body-parser", "express"}, {"bytes", "body-parser"}, {"debug", "express"}})
-	got := markDeps(doc, "/app/", []byte(manifest))
-	if !got["i-mocha"].buildOnly || !got["i-left-pad"].buildOnly || got["i-bytes"].buildOnly {
-		t.Fatalf("unexpected marks: %v", got)
+func TestMarkDeps_devlessLockLeavesDevOut(t *testing.T) {
+	// npm's and bun's lockfiles reach syft without dev packages: installed but absent is build-only.
+	for _, lock := range []string{"package-lock.json", "bun.lock"} {
+		doc := depsDoc(t, lock,
+			[]string{"express", "body-parser", "bytes", "debug"},
+			[][2]string{{"body-parser", "express"}, {"bytes", "body-parser"}, {"debug", "express"}})
+		got := markDeps(doc, "/app/", []byte(manifest))
+		if !got["i-mocha"].buildOnly || !got["i-left-pad"].buildOnly || got["i-bytes"].buildOnly {
+			t.Fatalf("%s: unexpected marks: %v", lock, got)
+		}
 	}
 }
 
@@ -79,8 +81,35 @@ func TestMarkDeps_marksNothingItCannotTell(t *testing.T) {
 			t.Errorf("%s: want no marks, got %v", name, got)
 		}
 	}
-	if got := markDeps(depsDoc(t, "yarn.lock", nil, nil), "/app", []byte(manifest)); len(got) != 0 {
-		t.Errorf("no lockfile: want no marks, got %v", got)
+	// Without a lockfile only the manifest speaks: what it names is direct, the rest unknown.
+	got := markDeps(depsDoc(t, "yarn.lock", nil, nil), "/app", []byte(manifest))
+	if want := map[string]depMark{"i-express": {direct: true}}; !reflect.DeepEqual(got, want) {
+		t.Errorf("no lockfile: got %v, want %v", got, want)
+	}
+}
+
+func TestMarkDeps_bunPeersAreFollowed(t *testing.T) {
+	// syft draws no edge for a peer; bun.lock still names it, and the chain goes through it.
+	doc := depsDoc(t, "bun.lock", []string{"express", "body-parser", "bytes"}, [][2]string{{"bytes", "body-parser"}})
+	for i := range doc.Artifacts {
+		if doc.Artifacts[i].ID == "l-express" {
+			doc.Artifacts[i].Metadata.PeerDependencies = map[string]string{"body-parser": "^1"}
+		}
+	}
+	got := markDeps(doc, "/app", []byte(manifest))
+	if !reflect.DeepEqual(got["i-bytes"], depMark{via: []string{"body-parser", "express"}}) {
+		t.Fatalf("bytes: got %v", got["i-bytes"])
+	}
+	if got["i-body-parser"].direct || !got["i-express"].direct {
+		t.Fatalf("direct marks wrong: %v", got)
+	}
+}
+
+func TestMarkDeps_nestedCopyIsNotDirect(t *testing.T) {
+	doc := depsDoc(t, "bun.lock", []string{"express"}, nil)
+	doc.Artifacts[0].Locations[0].Path = "/app/node_modules/foo/node_modules/express/package.json"
+	if got := markDeps(doc, "/app", []byte(manifest)); got["i-express"].direct {
+		t.Fatalf("a nested copy is another package's: %v", got["i-express"])
 	}
 }
 
@@ -90,8 +119,8 @@ func TestApplyDepMarks(t *testing.T) {
 		{Purl: "pkg:npm/mocha@1.0.0", Location: "/app/node_modules/mocha/package.json"},
 		{Purl: "pkg:npm/express@1.0.0", Location: "/app/node_modules/express/package.json"},
 	}}
-	applyDepMarks(resp, doc, map[string]depMark{"i-mocha": {buildOnly: true}, "i-express": {via: nil}})
-	if !resp.Packages[0].BuildOnly || resp.Packages[1].BuildOnly {
+	applyDepMarks(resp, doc, map[string]depMark{"i-mocha": {buildOnly: true}, "i-express": {direct: true}})
+	if !resp.Packages[0].BuildOnly || resp.Packages[1].BuildOnly || !resp.Packages[1].Direct || resp.Packages[0].Direct {
 		t.Fatalf("marks not applied: %v", resp.Packages)
 	}
 }

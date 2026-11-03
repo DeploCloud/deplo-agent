@@ -19,6 +19,10 @@ type syftDoc struct {
 		Locations                              []struct {
 			Path string `json:"path"`
 		} `json:"locations"`
+		// bun.lock entries carry their peers here; syft draws no edge for them.
+		Metadata struct {
+			PeerDependencies map[string]string `json:"peerDependencies"`
+		} `json:"metadata"`
 	} `json:"artifacts"`
 	Relationships []struct {
 		Parent, Child, Type string
@@ -37,10 +41,11 @@ const (
 	installedCataloger = "javascript-package-cataloger"
 )
 
-// depMark is what the lockfile says about one installed package.
+// depMark is what the manifest and the lockfile say about one installed package.
 type depMark struct {
 	buildOnly bool
 	via       []string
+	direct    bool
 }
 
 // appManifest is the app's own package.json: the roots of what runs and of what only builds.
@@ -53,8 +58,8 @@ type appManifest struct {
 }
 
 // markDeps walks the lockfile graph from the app's dependencies. A package reached only from its
-// devDependencies is build-only; a reached one carries the chain that pulls it in. Nothing is
-// marked without a manifest and a lockfile, nor for workspaces, whose roots live elsewhere.
+// devDependencies is build-only; a reached one carries the chain that pulls it in, and a top-level
+// copy the manifest names is direct. Nothing is marked for workspaces, whose roots live elsewhere.
 func markDeps(doc *syftDoc, workingDir string, manifest []byte) map[string]depMark {
 	wd := strings.TrimSuffix(workingDir, "/")
 	if wd == "" || len(manifest) == 0 {
@@ -70,27 +75,51 @@ func markDeps(doc *syftDoc, workingDir string, manifest []byte) map[string]depMa
 		return len(locs) > 0 && strings.HasPrefix(locs[0].Path, wd+"/")
 	}
 
+	prodRoots := map[string]string{}
+	for _, set := range []map[string]string{m.Dependencies, m.OptionalDependencies, m.PeerDependencies} {
+		for k, v := range set {
+			prodRoots[k] = v
+		}
+	}
+	out := map[string]depMark{}
+	for _, a := range doc.Artifacts {
+		if _, ok := prodRoots[a.Name]; ok && a.FoundBy == installedCataloger && a.Type == "npm" &&
+			len(a.Locations) > 0 && a.Locations[0].Path == wd+"/node_modules/"+a.Name+"/package.json" {
+			out[a.ID] = depMark{direct: true}
+		}
+	}
+
 	name := map[string]string{}
 	byKey := map[string][]string{}
-	npmLock := false
+	byName := map[string][]string{}
+	devless := false
 	for _, a := range doc.Artifacts {
 		if a.FoundBy != lockCataloger || !under(a.Locations) {
 			continue
 		}
 		name[a.ID] = a.Name
 		byKey[a.Name+"@"+a.Version] = append(byKey[a.Name+"@"+a.Version], a.ID)
-		if path.Base(a.Locations[0].Path) == "package-lock.json" {
-			npmLock = true
+		byName[a.Name] = append(byName[a.Name], a.ID)
+		if b := path.Base(a.Locations[0].Path); b == "package-lock.json" || b == "bun.lock" {
+			devless = true
 		}
 	}
 	if len(name) == 0 {
-		return nil
+		return out
 	}
-	// A dependency-of B: B needs A.
+	// A dependency-of B: B needs A. A peer is needed just the same.
 	deps := map[string][]string{}
 	for _, r := range doc.Relationships {
 		if r.Type == "dependency-of" && name[r.Parent] != "" && name[r.Child] != "" {
 			deps[r.Child] = append(deps[r.Child], r.Parent)
+		}
+	}
+	for _, a := range doc.Artifacts {
+		if name[a.ID] == "" {
+			continue
+		}
+		for peer := range a.Metadata.PeerDependencies {
+			deps[a.ID] = append(deps[a.ID], byName[peer]...)
 		}
 	}
 	walk := func(roots map[string]string) map[string]string {
@@ -114,15 +143,8 @@ func markDeps(doc *syftDoc, workingDir string, manifest []byte) map[string]depMa
 		}
 		return prev
 	}
-	prodRoots := map[string]string{}
-	for _, set := range []map[string]string{m.Dependencies, m.OptionalDependencies, m.PeerDependencies} {
-		for k, v := range set {
-			prodRoots[k] = v
-		}
-	}
 	prod, dev := walk(prodRoots), walk(m.DevDependencies)
 
-	out := map[string]depMark{}
 	for _, a := range doc.Artifacts {
 		if a.FoundBy != installedCataloger || a.Type != "npm" || !under(a.Locations) {
 			continue
@@ -143,9 +165,11 @@ func markDeps(doc *syftDoc, workingDir string, manifest []byte) map[string]depMa
 			for p := prod[reached]; p != ""; p = prod[p] {
 				via = append(via, name[p])
 			}
-			out[a.ID] = depMark{via: via}
-		case inDev || (npmLock && len(ids) == 0):
-			// npm's lockfile reaches syft without its dev packages, so absent there means dev.
+			out[a.ID] = depMark{via: via, direct: out[a.ID].direct}
+		case out[a.ID].direct:
+		case inDev || (devless && len(ids) == 0 && strings.HasSuffix(a.Locations[0].Path, "/node_modules/"+a.Name+"/package.json")):
+			// npm's and bun's lockfiles reach syft without their dev packages: absent there means dev.
+			// A copy bundled inside another package (next/dist/compiled/...) is not a dependency.
 			out[a.ID] = depMark{buildOnly: true}
 		}
 	}
