@@ -104,3 +104,12 @@ jobs:
           # every stable server and install-agent.sh follow - never names it.
           prerelease: ${{ contains(github.ref_name, '-') }}
           make_latest: ${{ !contains(github.ref_name, '-') }}
+
+  notify-discord:
+    needs: release
+    permissions:
+      contents: read
+    uses: DeploCloud/.github/.github/workflows/notify-discord.yml@88c633db5638410f11fcb580fea6cd029ca59399 # main
+    with:
+      tag: ${{ github.ref_name }}
+    secrets: inherit
