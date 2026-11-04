@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"go.yaml.in/yaml/v3"
+
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
@@ -31,6 +33,9 @@ func (s *Service) prepareStackImages(ctx context.Context, req *pb.DeployRequest,
 	}
 	if req.GetPullBaseImages() {
 		steps[1] = append(steps[1], "--pull")
+	}
+	if req.GetBuildKind() != pb.BuildKind_BUILD_KIND_COMPOSE && !stackBuilds(req.GetComposeYaml()) {
+		steps = steps[:1]
 	}
 	for _, args := range steps {
 		verb := args[len(base)]
@@ -66,6 +71,25 @@ func (s *Service) prepareStackImages(ctx context.Context, req *pb.DeployRequest,
 		return nil, false
 	}
 	return images, true
+}
+
+// stackBuilds: some service has a build section; a stack of ready-made images skips `compose build`.
+// YAML it cannot read counts as building, so compose itself decides.
+func stackBuilds(stack string) bool {
+	var doc struct {
+		Services map[string]struct {
+			Build any `yaml:"build"`
+		} `yaml:"services"`
+	}
+	if yaml.Unmarshal([]byte(stack), &doc) != nil {
+		return true
+	}
+	for _, svc := range doc.Services {
+		if svc.Build != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func composeImages(ctx context.Context, env, base []string) ([]string, error) {

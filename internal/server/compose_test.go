@@ -132,3 +132,18 @@ func TestWriteMountFiles_noMountsIsNoop(t *testing.T) {
 		t.Fatal("files dir created for an empty mount list")
 	}
 }
+
+// Only a stack with a build section runs `compose build`; YAML that does not parse leaves it to compose.
+func TestStackBuilds(t *testing.T) {
+	for stack, want := range map[string]bool{
+		"services:\n  web:\n    image: nginx\n  db:\n    image: postgres\n":           false,
+		"services:\n  web:\n    build: .\n":                                           true,
+		"services:\n  web:\n    build:\n      context: ./web\n  db:\n    image: x\n":  true,
+		"x-base: &b\n  build: .\nservices:\n  web:\n    <<: *b\n    image: deplo/x\n": true,
+		"services: [": true,
+	} {
+		if got := stackBuilds(stack); got != want {
+			t.Errorf("stackBuilds(%q) = %v, want %v", stack, got, want)
+		}
+	}
+}

@@ -178,7 +178,7 @@ func TestPrepareStackImagesNamespacesTheBuildCache(t *testing.T) {
 	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
 
 	s := New(t.TempDir(), t.TempDir(), "/", "")
-	req := &pb.DeployRequest{Slug: "deplo-agent-test-stack"}
+	req := &pb.DeployRequest{Slug: "deplo-agent-test-stack", ComposeYaml: "services:\n  web:\n    build: .\n"}
 	base := composeBaseArgs("deplo-deplo-agent-test-stack", "/s/x.yml", "", "")
 	if _, ok := s.prepareStackImages(context.Background(), req, base, &emitter{send: func(*pb.DeployEvent) error { return nil }}); !ok {
 		t.Fatal("prepareStackImages failed")
