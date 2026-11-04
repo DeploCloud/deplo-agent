@@ -256,18 +256,7 @@ func runGitScoped(ctx context.Context, e *emitter, dir, scope, authHeader string
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ALLOW_PROTOCOL="+gitAllowProtocol)
-	if strings.TrimSpace(authHeader) != "" {
-		key := "http.extraHeader"
-		if scope != "" {
-			key = "http." + scope + ".extraHeader"
-		}
-		cmd.Env = append(cmd.Env,
-			"GIT_CONFIG_COUNT=1",
-			"GIT_CONFIG_KEY_0="+key,
-			"GIT_CONFIG_VALUE_0="+authHeader,
-		)
-	}
+	cmd.Env = gitEnv(scope, authHeader)
 	err := dockercli.RunLines(cctx, cmd, func(line string) {
 		e.log("info", sanitizeGitLine(line))
 	})
@@ -278,6 +267,19 @@ func runGitScoped(ctx context.Context, e *emitter, dir, scope, authHeader string
 		return fmt.Errorf("git %s failed: %w", args[0], err)
 	}
 	return nil
+}
+
+// gitEnv is the environment of a git command that may send authHeader to the URLs under scope.
+func gitEnv(scope, authHeader string) []string {
+	env := append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_ALLOW_PROTOCOL="+gitAllowProtocol)
+	if strings.TrimSpace(authHeader) == "" {
+		return env
+	}
+	key := "http.extraHeader"
+	if scope != "" {
+		key = "http." + scope + ".extraHeader"
+	}
+	return append(env, "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0="+key, "GIT_CONFIG_VALUE_0="+authHeader)
 }
 
 func gitOutput(ctx context.Context, dir string, args ...string) (string, error) {

@@ -149,6 +149,10 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 			return
 		}
 	case pb.SourceKind_SOURCE_KIND_GIT:
+		if sha, ok := reuseBuiltImage(ctx, req, e); ok {
+			commitSha = sha
+			break
+		}
 		g := req.GetGit()
 		if req.GetBuildKind() == pb.BuildKind_BUILD_KIND_COMPOSE && !readsCompose(req) {
 			// The working copy holds the whole repository; the subdir is its project directory.

@@ -678,7 +678,13 @@ message DeployRequest {
   // Fetch a Dockerfile's base images again instead of reusing the copies on this host, for
   // a rebuild that has to pick up a fixed base. Advertised as `deploy.pull-base`.
   bool pull_base_images = 26;
+
+  // An earlier deployment's image of the same app, built from commit_sha with the same build
+  // settings: when the branch still points there and the image is on this host, it is tagged as
+  // image_ref and nothing is cloned or built. Advertised as `deploy.reuse-image`.
+  ReuseImage reuse_image = 27;
 }
+
 
 // When a deploy counts as up: every container stays running (no restart, no exit) for a
 // settle window, and the app listens on `port` from outside its container.
@@ -2212,4 +2218,9 @@ message CaptureScreenshotResponse {
   bytes dark_webp = 4;
   // Why it was not OK, for logs.
   string detail = 5;
+}
+
+message ReuseImage {
+  string image_ref = 1;
+  string commit_sha = 2;
 }

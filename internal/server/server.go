@@ -113,6 +113,7 @@ var Capabilities = []string{
 	"image-inventory.deps",
 	"image-inventory.direct",
 	"deploy.pull-base",
+	"deploy.reuse-image",
 	"reroute.pull",
 	"agent-link",
 	"screenshot",
