@@ -8,6 +8,7 @@ import (
 
 const (
 	readySettle    = 10 * time.Second // up this long with no restart before a container counts
+	quickSettle    = 2 * time.Second  // enough once it serves a port or passes its own health check
 	readyPortGrace = 10 * time.Second // how long the expected port may lag behind another one
 	workerGrace    = 20 * time.Second // after settling, how long a process may take to open a port
 	// A stack's service may crash a few times while a sibling (its database) boots.
@@ -167,7 +168,7 @@ func (r *readyCheck) observe(now time.Time, samples []readySample) readyVerdict 
 		case c.health == "starting":
 			settled = false
 			r.wait(c, who+" never passed its health check")
-		case now.Sub(c.startedAt) < readySettle:
+		case now.Sub(c.startedAt) < settleFor(c, restarted):
 			settled = false
 		}
 		if r.service == "" || c.service == r.service {
@@ -239,6 +240,15 @@ func (r *readyCheck) observe(now time.Time, samples []readySample) readyVerdict 
 		r.pending, r.pendingID = "", ""
 	}
 	return v
+}
+
+// settleFor is how long c must stay up before it counts: a first start that serves or passes its
+// health check proves itself sooner; one that already restarted gets the whole window.
+func settleFor(c readySample, restarted bool) time.Duration {
+	if !restarted && (c.health == "healthy" || slices.ContainsFunc(c.listeners, func(l listener) bool { return !l.loopback })) {
+		return quickSettle
+	}
+	return readySettle
 }
 
 // expire is the verdict when the timeout ends the wait: what was still missing, and whose log says why.

@@ -104,13 +104,36 @@ func step(now time.Time, samples ...readySample) func() (time.Time, []readySampl
 
 func TestReadyCheckSettlesBeforeItCounts(t *testing.T) {
 	rc := newReadyCheck(3000, true, "", false)
-	v := runReady(rc, step(at(1), up("app", t0, public(3000))), step(at(9), up("app", t0, public(3000))))
+	v := runReady(rc, step(at(1), up("app", t0, public(3000))))
 	if v.done {
 		t.Fatalf("ready before the settle window: %+v", v)
 	}
-	v = rc.observe(at(10), []readySample{up("app", t0, public(3000))})
+	v = rc.observe(at(2), []readySample{up("app", t0, public(3000))})
 	if !v.done || !v.ok || v.observed != 0 || !slices.Equal(v.listening, []int32{3000}) {
 		t.Fatalf("verdict = %+v", v)
+	}
+}
+
+// Serving a port or passing its own health check cuts the wait; a container that shows neither keeps it.
+func TestReadyCheckSettlesQuicklyOnlyWhenItServes(t *testing.T) {
+	healthy := stackUp("db", "db", t0, t0, 0)
+	healthy.health = "healthy"
+	quiet := stackUp("db", "db", t0, t0, 0, loopback(5432))
+	for _, c := range []struct {
+		s    readySample
+		want time.Duration
+	}{
+		{up("app", t0, public(3000)), quickSettle},
+		{healthy, quickSettle},
+		{quiet, readySettle},
+		{up("worker", t0), readySettle},
+	} {
+		if got := settleFor(c.s, false); got != c.want {
+			t.Errorf("settleFor(%s %v health %q) = %v, want %v", c.s.id, c.s.listeners, c.s.health, got, c.want)
+		}
+	}
+	if got := settleFor(up("app", t0, public(3000)), true); got != readySettle {
+		t.Errorf("a container that restarted settles in %v, want the whole window", got)
 	}
 }
 

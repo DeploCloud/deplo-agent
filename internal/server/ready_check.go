@@ -50,10 +50,12 @@ func (s *Service) waitReady(ctx context.Context, req *pb.DeployRequest, stack bo
 		case <-ctx.Done():
 			e.finish(&pb.DeployResult{Error: "the deploy was canceled while the app was starting", CommitSha: commitSha})
 			return
-		case <-time.After(time.Second):
+		case <-time.After(readyPoll):
 		}
 	}
 }
+
+const readyPoll = 500 * time.Millisecond
 
 func (s *Service) reportReady(ctx context.Context, rc *readyCheck, v readyVerdict, commitSha string, e *emitter) {
 	res := &pb.DeployResult{Ready: v.ok, CommitSha: commitSha, ListeningPorts: v.listening}
