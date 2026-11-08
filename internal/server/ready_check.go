@@ -26,7 +26,8 @@ const readyInspectTemplate = `{"id":{{json .ID}},"name":{{json .Name}},` +
 
 // waitReady holds the deploy until every container has stayed up through the settle window and
 // the app listens where it is routed, failing fast on a restart, an exit or a failing health check.
-func (s *Service) waitReady(ctx context.Context, req *pb.DeployRequest, stack bool, since time.Time, commitSha string, e *emitter) {
+// container is the single image's container; a stack watches every container of its slug.
+func (s *Service) waitReady(ctx context.Context, req *pb.DeployRequest, container string, stack bool, since time.Time, commitSha string, e *emitter) *pb.DeployResult {
 	ready := req.GetReady()
 	rc := newReadyCheck(ready.GetPort(), ready.GetPortRequired(), ready.GetService(), stack)
 	rc.since = since
@@ -38,18 +39,16 @@ func (s *Service) waitReady(ctx context.Context, req *pb.DeployRequest, stack bo
 	e.log("info", "Waiting for the app to start and stay up…")
 	deadline := time.Now().Add(timeout)
 	for {
-		v := rc.observe(time.Now(), sampleReady(ctx, req.GetSlug(), stack))
+		v := rc.observe(time.Now(), sampleReady(ctx, req.GetSlug(), container, stack))
 		if !v.done && !time.Now().Before(deadline) {
 			v = rc.expire(v)
 		}
 		if v.done {
-			s.reportReady(ctx, rc, v, commitSha, e)
-			return
+			return s.reportReady(ctx, rc, v, commitSha, e)
 		}
 		select {
 		case <-ctx.Done():
-			e.finish(&pb.DeployResult{Error: "the deploy was canceled while the app was starting", CommitSha: commitSha})
-			return
+			return &pb.DeployResult{Error: "the deploy was canceled while the app was starting", CommitSha: commitSha}
 		case <-time.After(readyPoll):
 		}
 	}
@@ -57,7 +56,7 @@ func (s *Service) waitReady(ctx context.Context, req *pb.DeployRequest, stack bo
 
 const readyPoll = 500 * time.Millisecond
 
-func (s *Service) reportReady(ctx context.Context, rc *readyCheck, v readyVerdict, commitSha string, e *emitter) {
+func (s *Service) reportReady(ctx context.Context, rc *readyCheck, v readyVerdict, commitSha string, e *emitter) *pb.DeployResult {
 	res := &pb.DeployResult{Ready: v.ok, CommitSha: commitSha, ListeningPorts: v.listening}
 	if !v.ok {
 		res.Error = v.err
@@ -75,8 +74,7 @@ func (s *Service) reportReady(ctx context.Context, rc *readyCheck, v readyVerdic
 				res.Error += ". " + hint
 			}
 		}
-		e.finish(res)
-		return
+		return res
 	}
 	switch {
 	case v.observed > 0:
@@ -89,7 +87,7 @@ func (s *Service) reportReady(ctx context.Context, rc *readyCheck, v readyVerdic
 	default:
 		e.log("info", "Up")
 	}
-	e.finish(res)
+	return res
 }
 
 func portList(ports []int32) string {
@@ -156,8 +154,8 @@ var missingStart = []*regexp.Regexp{
 }
 
 // sampleReady inspects the app's container, or every container of its stack.
-func sampleReady(ctx context.Context, slug string, stack bool) []readySample {
-	targets := []string{"deplo-" + slug}
+func sampleReady(ctx context.Context, slug, container string, stack bool) []readySample {
+	targets := []string{container}
 	if stack {
 		res, err := dockercli.Run(ctx, 15*time.Second, "ps", "-aq", "--filter", "label=deplo.slug="+slug)
 		if err != nil || res.Code != 0 {

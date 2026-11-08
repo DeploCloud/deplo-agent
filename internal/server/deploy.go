@@ -230,14 +230,34 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 		e.result(false, admitErr.Error(), "")
 		return
 	}
+	// The live container keeps serving until a copy of the new version is up beside it.
+	standIn := false
+	if !isCompose && req.GetStandInComposeYaml() != "" {
+		var failed *pb.DeployResult
+		if standIn, failed = s.startStandIn(ctx, req, name, started, commitSha, e); failed != nil {
+			e.finish(failed)
+			return
+		}
+	}
 	if !s.startStack(ctx, req, e) {
+		if standIn {
+			s.removeStandIn(slug, e)
+		}
 		return
 	}
 
 	e.phase(pb.DeployPhase_DEPLOY_PHASE_WAITING)
+	res := s.awaitStarted(ctx, req, name, isCompose, started, commitSha, e)
+	if standIn {
+		s.removeStandIn(slug, e)
+	}
+	e.finish(res)
+}
+
+// awaitStarted waits for container (or the whole stack) to count as up, and says how it went.
+func (s *Service) awaitStarted(ctx context.Context, req *pb.DeployRequest, container string, isCompose bool, started time.Time, commitSha string, e *emitter) *pb.DeployResult {
 	if req.GetReady() != nil {
-		s.waitReady(ctx, req, isCompose, started, commitSha, e)
-		return
+		return s.waitReady(ctx, req, container, isCompose, started, commitSha, e)
 	}
 	timeout := time.Duration(req.GetReadyTimeoutMs()) * time.Millisecond
 	if timeout <= 0 {
@@ -245,19 +265,16 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 	}
 	if isCompose {
 		e.log("info", "Waiting for the stack to become healthy…")
-		if waitStackRunning(ctx, slug, timeout) {
-			e.result(true, "", commitSha)
-			return
+		if waitStackRunning(ctx, req.GetSlug(), timeout) {
+			return &pb.DeployResult{Ready: true, CommitSha: commitSha}
 		}
-		e.result(false, "Stack did not reach a running state", commitSha)
-		return
+		return &pb.DeployResult{Error: "Stack did not reach a running state", CommitSha: commitSha}
 	}
 	e.log("info", "Waiting for the container to become healthy…")
-	if waitRunning(ctx, name, timeout) {
-		e.result(true, "", commitSha)
-		return
+	if waitRunning(ctx, container, timeout) {
+		return &pb.DeployResult{Ready: true, CommitSha: commitSha}
 	}
-	e.result(false, "Container did not reach a running state", commitSha)
+	return &pb.DeployResult{Error: "Container did not reach a running state", CommitSha: commitSha}
 }
 
 // startStack writes the admitted stack and brings it up under the stack lock, so a Reroute, Stop

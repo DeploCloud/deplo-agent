@@ -683,6 +683,14 @@ message DeployRequest {
   // settings: when the branch still points there and the image is on this host, it is tagged as
   // image_ref and nothing is cloned or built. Advertised as `deploy.reuse-image`.
   ReuseImage reuse_image = 27;
+
+  // Keep the app online through the deploy (single-image apps). The agent brings this stack up
+  // as project `deplo-<slug>_next` beside the live container, waits for it to be ready and
+  // healthy, replaces the live container with compose_yaml while it serves, waits again, then
+  // removes it. A stand-in that never gets ready is removed and the live container is never
+  // touched, unless the live container mounts storage (which may refuse a second copy): then
+  // the agent swaps in place instead. Empty => the in-place swap. Advertised as `deploy.overlap`.
+  string stand_in_compose_yaml = 28;
 }
 
 
