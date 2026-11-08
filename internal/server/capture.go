@@ -22,7 +22,7 @@ import (
 )
 
 // captureImage is the browser the screenshots run in. Bump the digest with agent releases.
-const captureImage = "chromedp/headless-shell:157.0.8103.15@sha256:f76fce2964611eb1e25b90d906727884db12a8918a6d85a0df2619a9ef845c7c"
+const captureImage = "chromedp/headless-shell:158.0.8127.18@sha256:830fa77e0602cb42e5cb2cbd9237ba27b649ad69d5fb82b54713aac8b7ab4f29"
 
 const (
 	captureRunTimeout  = 90 * time.Second
