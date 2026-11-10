@@ -107,6 +107,7 @@ func main() {
 	svc.SetAgentDir(*agentDir)
 	svc.StartRestartWatch(context.Background())
 	svc.StartCluster()
+	svc.StartClusterMember()
 	if certMgr != nil {
 		svc.EnableCertRenewal(certMgr)
 	}

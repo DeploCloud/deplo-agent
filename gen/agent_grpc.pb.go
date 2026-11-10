@@ -54,6 +54,7 @@ const (
 	Agent_RemoveCluster_FullMethodName       = "/deplo.agent.v1.Agent/RemoveCluster"
 	Agent_ClusterStatus_FullMethodName       = "/deplo.agent.v1.Agent/ClusterStatus"
 	Agent_ClusterCall_FullMethodName         = "/deplo.agent.v1.Agent/ClusterCall"
+	Agent_SetClusterMember_FullMethodName    = "/deplo.agent.v1.Agent/SetClusterMember"
 	Agent_Backup_FullMethodName              = "/deplo.agent.v1.Agent/Backup"
 	Agent_Restore_FullMethodName             = "/deplo.agent.v1.Agent/Restore"
 	Agent_S3Check_FullMethodName             = "/deplo.agent.v1.Agent/S3Check"
@@ -207,6 +208,9 @@ type AgentClient interface {
 	// Forward one call to the leader process on this host and return its answer verbatim.
 	// The agent does not read the payload; an unreachable leader is UNAVAILABLE.
 	ClusterCall(ctx context.Context, in *ClusterCallRequest, opts ...grpc.CallOption) (*ClusterCallResponse, error)
+	// Make this agent a cluster member (or stop being one) and name the relays to dial besides
+	// Deplo's own. A saved choice survives a restart; the relay set follows the panel's address.
+	SetClusterMember(ctx context.Context, in *SetClusterMemberRequest, opts ...grpc.CallOption) (*SetClusterMemberResponse, error)
 	// Back up a database or a project to a destination, streaming progress.
 	Backup(ctx context.Context, in *BackupRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[BackupEvent], error)
 	// Restore a database or project from a previously-written artifact, IN PLACE,
@@ -726,6 +730,16 @@ func (c *agentClient) ClusterCall(ctx context.Context, in *ClusterCallRequest, o
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ClusterCallResponse)
 	err := c.cc.Invoke(ctx, Agent_ClusterCall_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) SetClusterMember(ctx context.Context, in *SetClusterMemberRequest, opts ...grpc.CallOption) (*SetClusterMemberResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetClusterMemberResponse)
+	err := c.cc.Invoke(ctx, Agent_SetClusterMember_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1360,6 +1374,9 @@ type AgentServer interface {
 	// Forward one call to the leader process on this host and return its answer verbatim.
 	// The agent does not read the payload; an unreachable leader is UNAVAILABLE.
 	ClusterCall(context.Context, *ClusterCallRequest) (*ClusterCallResponse, error)
+	// Make this agent a cluster member (or stop being one) and name the relays to dial besides
+	// Deplo's own. A saved choice survives a restart; the relay set follows the panel's address.
+	SetClusterMember(context.Context, *SetClusterMemberRequest) (*SetClusterMemberResponse, error)
 	// Back up a database or a project to a destination, streaming progress.
 	Backup(*BackupRequest, grpc.ServerStreamingServer[BackupEvent]) error
 	// Restore a database or project from a previously-written artifact, IN PLACE,
@@ -1589,6 +1606,9 @@ func (UnimplementedAgentServer) ClusterStatus(context.Context, *ClusterStatusReq
 }
 func (UnimplementedAgentServer) ClusterCall(context.Context, *ClusterCallRequest) (*ClusterCallResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ClusterCall not implemented")
+}
+func (UnimplementedAgentServer) SetClusterMember(context.Context, *SetClusterMemberRequest) (*SetClusterMemberResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetClusterMember not implemented")
 }
 func (UnimplementedAgentServer) Backup(*BackupRequest, grpc.ServerStreamingServer[BackupEvent]) error {
 	return status.Error(codes.Unimplemented, "method Backup not implemented")
@@ -2199,6 +2219,24 @@ func _Agent_ClusterCall_Handler(srv interface{}, ctx context.Context, dec func(i
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(AgentServer).ClusterCall(ctx, req.(*ClusterCallRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_SetClusterMember_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetClusterMemberRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).SetClusterMember(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_SetClusterMember_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).SetClusterMember(ctx, req.(*SetClusterMemberRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -3038,6 +3076,10 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ClusterCall",
 			Handler:    _Agent_ClusterCall_Handler,
+		},
+		{
+			MethodName: "SetClusterMember",
+			Handler:    _Agent_SetClusterMember_Handler,
 		},
 		{
 			MethodName: "S3Check",

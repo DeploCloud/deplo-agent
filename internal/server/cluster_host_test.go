@@ -23,7 +23,8 @@ import (
 )
 
 // A stand-in for the release binary: it records how it was started, then stays up.
-const fakeCluster = "#!/bin/sh\necho \"$@\" >> \"$(dirname \"$0\")/starts\"\necho \"$DEPLO_CLUSTER_SOCKET\" >> \"$(dirname \"$0\")/sockets\"\nexec sleep 300\n"
+// Everything is recorded before `starts`, which is what the tests wait on.
+const fakeCluster = "#!/bin/sh\nd=\"$(dirname \"$0\")\"\necho \"$DEPLO_CLUSTER_SOCKET\" >> \"$d/sockets\"\nenv | grep -E '^DEPLO_(CLUSTER|RELAY)_' | sort > \"$d/env.${1:-leader}\"\necho \"$@\" >> \"$d/starts\"\nexec sleep 300\n"
 
 func clusterHostFor(t *testing.T) (*Service, string) {
 	t.Helper()

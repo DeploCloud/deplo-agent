@@ -17,6 +17,8 @@ control plane never touches a Docker socket; everything host-coupled arrives her
 - `internal/dockercli/`, `internal/hostmetrics/`, `internal/hostinfo/`, `internal/s3client/`,
   `internal/safepath/`, `internal/bootstrap/`, `internal/netguard/` - leaf helpers.
 - `internal/link/` - the agent link: the WebSocket the agent opens to its panel and serves gRPC on.
+- `internal/clusterlink/` - a cluster party's side of the relay (ADR-0044): dials out, never listens. Its
+  `wire/` is a contract with `deplo-cluster` `internal/wire`; keep the two in step.
 - `internal/capture/` - the deployment screenshot browser (see below).
 - `proto/agent.proto` - the wire contract, owned here.
 - `gen/` - generated. Never hand-edit; `make proto` owns it.
