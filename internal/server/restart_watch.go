@@ -33,6 +33,8 @@ type restartWatcher struct {
 	list    func(ctx context.Context, slug string) []readySample
 	probe   func(ctx context.Context, rule *pb.RestartRule, c readySample) bool
 	restart func(ctx context.Context, id string) error
+	// held reports a container paused for a volume copy; it is neither probed nor counted.
+	held func(id string) bool
 
 	mu     sync.Mutex
 	states map[string]*restartState
@@ -55,7 +57,10 @@ func newRestartWatcher(dir string) *restartWatcher {
 }
 
 func (s *Service) restartWatch() *restartWatcher {
-	s.restartOnce.Do(func() { s.rw = newRestartWatcher(s.stackDir) })
+	s.restartOnce.Do(func() {
+		s.rw = newRestartWatcher(s.stackDir)
+		s.rw.held = s.HeldForBackup
+	})
 	return s.rw
 }
 
@@ -226,6 +231,9 @@ func (w *restartWatcher) tickSlug(ctx context.Context, slug string) {
 			return
 		}
 		if c.status != "running" || (st.rule.GetService() != "" && c.service != st.rule.GetService()) {
+			continue
+		}
+		if w.held != nil && w.held(c.id) {
 			continue
 		}
 		targets = append(targets, c)
