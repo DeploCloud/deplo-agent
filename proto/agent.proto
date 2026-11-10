@@ -1543,6 +1543,9 @@ message ConsoleInstance {
   // When the container last started, epoch seconds. 0 = never started, or an
   // agent too old to send it - both mean "no uptime to show", never 1970.
   int64 started_at_unix = 13;
+  // What the restart rule's last probe said (health.restart): "starting" | "answering" |
+  // "not_answering". Empty when no rule watches this container or none has probed yet.
+  string answer = 14;
 }
 
 message ListInstancesResponse {

@@ -186,6 +186,18 @@ func (w *restartWatcher) give(evs []*pb.RestartEvent) {
 	}
 }
 
+// answerFor is what the last probe said about one container: "starting", "answering" or
+// "not_answering". Empty when no rule watches it, none has run yet, or a deploy holds the app.
+func (w *restartWatcher) answerFor(slug, container string) string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	st := w.states[slug]
+	if st == nil || w.hold[slug] > 0 {
+		return ""
+	}
+	return st.answer[container]
+}
+
 func (w *restartWatcher) slugs() []string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -254,6 +266,7 @@ func (w *restartWatcher) check(ctx context.Context, slug string, st *restartStat
 	w.mu.Lock()
 	w.due[c.id] = now.Add(interval)
 	v := st.record(now, c.id, c.startedAt, ok)
+	st.note(now, c, ok, v.restart)
 	if v.pause {
 		w.emit(&pb.RestartEvent{Kind: pb.RestartEvent_KIND_PAUSED, Slug: slug, Container: c.name, Restarts: int32(v.inWindowNow)})
 	}

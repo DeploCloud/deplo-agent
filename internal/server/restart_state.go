@@ -23,6 +23,8 @@ type restartState struct {
 	lastFail time.Time
 	// A restarted container has not answered yet.
 	recovering bool
+	// What the last probe of each container (by name) said: starting, answering or not_answering.
+	answer map[string]string
 }
 
 type restartVerdict struct {
@@ -34,7 +36,7 @@ type restartVerdict struct {
 }
 
 func newRestartState(rule *pb.RestartRule) *restartState {
-	return &restartState{rule: rule, fails: map[string]int{}, since: map[string]time.Time{}}
+	return &restartState{rule: rule, fails: map[string]int{}, since: map[string]time.Time{}, answer: map[string]string{}}
 }
 
 func (st *restartState) threshold() int {
@@ -116,4 +118,17 @@ func (st *restartState) resume() bool {
 	st.fails = map[string]int{}
 	st.since = map[string]time.Time{}
 	return was
+}
+
+// note keeps the verdict the app page shows. One miss is not one yet: it takes the same
+// number of failures in a row that restarts the app.
+func (st *restartState) note(now time.Time, c readySample, ok, restarted bool) {
+	switch {
+	case st.inStartPeriod(now, c.startedAt):
+		st.answer[c.name] = "starting"
+	case ok:
+		st.answer[c.name] = "answering"
+	case restarted || st.fails[c.id] >= st.threshold():
+		st.answer[c.name] = "not_answering"
+	}
 }
