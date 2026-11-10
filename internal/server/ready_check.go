@@ -28,6 +28,13 @@ const readyInspectTemplate = `{"id":{{json .ID}},"name":{{json .Name}},` +
 // the app listens where it is routed, failing fast on a restart, an exit or a failing health check.
 // container is the single image's container; a stack watches every container of its slug.
 func (s *Service) waitReady(ctx context.Context, req *pb.DeployRequest, container string, stack bool, since time.Time, commitSha string, e *emitter) *pb.DeployResult {
+	return s.waitReadyWith(ctx, req, stack, since, commitSha, e, func() []readySample {
+		return sampleReady(ctx, req.GetSlug(), container, stack)
+	})
+}
+
+// waitReadyWith is waitReady over whatever containers sample returns.
+func (s *Service) waitReadyWith(ctx context.Context, req *pb.DeployRequest, stack bool, since time.Time, commitSha string, e *emitter, sample func() []readySample) *pb.DeployResult {
 	ready := req.GetReady()
 	rc := newReadyCheck(ready.GetPort(), ready.GetPortRequired(), ready.GetService(), stack)
 	rc.since = since
@@ -39,7 +46,7 @@ func (s *Service) waitReady(ctx context.Context, req *pb.DeployRequest, containe
 	e.log("info", "Waiting for the app to start and stay up…")
 	deadline := time.Now().Add(timeout)
 	for {
-		v := rc.observe(time.Now(), sampleReady(ctx, req.GetSlug(), container, stack))
+		v := rc.observe(time.Now(), sample())
 		if !v.done && !time.Now().Before(deadline) {
 			v = rc.expire(v)
 		}
@@ -166,6 +173,23 @@ func sampleReady(ctx context.Context, slug, container string, stack bool) []read
 		}
 	}
 	res, err := dockercli.Run(ctx, 15*time.Second, append([]string{"inspect", "-f", readyInspectTemplate}, targets...)...)
+	if err != nil {
+		return nil
+	}
+	return parseReadySamples(res.Stdout)
+}
+
+// sampleProject inspects every container of a compose project: the copies of a replicated app.
+func sampleProject(ctx context.Context, project string) []readySample {
+	res, err := dockercli.Run(ctx, 15*time.Second, "ps", "-aq", "--filter", "label=com.docker.compose.project="+project)
+	if err != nil || res.Code != 0 {
+		return nil
+	}
+	targets := splitLines(res.Stdout)
+	if len(targets) == 0 {
+		return nil
+	}
+	res, err = dockercli.Run(ctx, 15*time.Second, append([]string{"inspect", "-f", readyInspectTemplate}, targets...)...)
 	if err != nil {
 		return nil
 	}
