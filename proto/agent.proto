@@ -132,6 +132,24 @@ service Agent {
   // of SelfUpdate, and the ONLY RPC that ends the agent's own life.
   rpc SelfUninstall(SelfUninstallRequest) returns (SelfUninstallResponse);
 
+  // ---- CLUSTER HOST (Hello capability "cluster.host"): this agent installs, supervises
+  // and removes the deplo-cluster binary and forwards the control plane's calls to it, so
+  // the control plane never dials a leader (ADR-0043). ----
+
+  // Install the pinned deplo-cluster binary (checksum verified, forward-only) and run it as
+  // the cluster leader, or as the relay too. Calling it again with a newer version updates it.
+  rpc InstallCluster(InstallClusterRequest) returns (InstallClusterResponse);
+
+  // Stop the supervised leader and delete its binary and state. Idempotent.
+  rpc RemoveCluster(RemoveClusterRequest) returns (RemoveClusterResponse);
+
+  // What this host runs: installed or not, running or not, which version.
+  rpc ClusterStatus(ClusterStatusRequest) returns (ClusterStatusResponse);
+
+  // Forward one call to the leader process on this host and return its answer verbatim.
+  // The agent does not read the payload; an unreachable leader is UNAVAILABLE.
+  rpc ClusterCall(ClusterCallRequest) returns (ClusterCallResponse);
+
   // ---- BACKUPS: dump/restore a database or project to/from a DESTINATION, plus the
   // affordances the control plane needs (connectivity check + object delete).
   // StoreTarget - a directory on THIS host's filesystem.
@@ -2287,4 +2305,48 @@ message CaptureScreenshotResponse {
 message ReuseImage {
   string image_ref = 1;
   string commit_sha = 2;
+}
+
+message InstallClusterRequest {
+  // The target version, normalized without a leading v. Never older than the one installed.
+  string version = 1;
+  // The published binaries, keyed by Go arch, as in SelfUpdateRequest.
+  map<string, ArchBinary> binaries = 2;
+  // Also run the cluster relay beside the leader (a host that answers on 443).
+  bool relay = 3;
+}
+
+message InstallClusterResponse {
+  // The version now installed and running.
+  string version = 1;
+  bool running = 2;
+}
+
+message RemoveClusterRequest {}
+
+message RemoveClusterResponse {
+  // True when something was installed and is now gone.
+  bool removed = 1;
+}
+
+message ClusterStatusRequest {}
+
+message ClusterStatusResponse {
+  bool installed = 1;
+  bool running = 2;
+  // The installed version; empty when nothing is installed.
+  string version = 3;
+  bool relay = 4;
+}
+
+message ClusterCallRequest {
+  // The leader's method name, e.g. "place". Opaque to the agent apart from its charset.
+  string method = 1;
+  // The request body, forwarded as is.
+  bytes payload = 2;
+}
+
+message ClusterCallResponse {
+  // The leader's answer body, returned as is.
+  bytes payload = 1;
 }
