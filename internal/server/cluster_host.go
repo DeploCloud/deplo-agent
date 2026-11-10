@@ -45,6 +45,7 @@ type clusterState struct {
 
 // clusterHost is what this agent has running: one supervised process per role.
 type clusterHost struct {
+	svc    *Service
 	mu     sync.Mutex
 	state  clusterState
 	cancel context.CancelFunc
@@ -52,6 +53,7 @@ type clusterHost struct {
 }
 
 type clusterProc struct {
+	role    string
 	args    []string
 	pidFile string
 	mu      sync.Mutex
@@ -79,7 +81,7 @@ func (s *Service) clusterDir() (string, error) {
 }
 
 func (s *Service) clusterHost() *clusterHost {
-	s.clusterOnce.Do(func() { s.cluster = &clusterHost{} })
+	s.clusterOnce.Do(func() { s.cluster = &clusterHost{svc: s} })
 	return s.cluster
 }
 
@@ -110,26 +112,19 @@ func (s *Service) StartCluster() {
 func (h *clusterHost) start(dir string, st clusterState) {
 	ctx, cancel := context.WithCancel(context.Background())
 	h.state, h.cancel = st, cancel
-	roles := []struct {
-		name string
-		args []string
-	}{{"leader", nil}}
-	if st.Relay {
-		roles = append(roles, struct {
-			name string
-			args []string
-		}{"relay", []string{"relay"}})
-	}
 	h.procs = nil
-	for _, r := range roles {
-		p := &clusterProc{args: r.args, pidFile: filepath.Join(dir, r.name+".pid"), done: make(chan struct{})}
-		h.procs = append(h.procs, p)
-		env := os.Environ()
-		if r.name == "leader" {
-			env = append(env, clusterSocketEnv+"="+clusterSocket(dir))
+	for _, name := range []string{"leader", "relay"} {
+		if name == "relay" && !st.Relay {
+			continue
 		}
-		go p.supervise(ctx, filepath.Join(dir, clusterBinaryName), env)
+		p := &clusterProc{role: name, pidFile: filepath.Join(dir, name+".pid"), done: make(chan struct{})}
+		if name == "relay" {
+			p.args = []string{"relay"}
+		}
+		h.procs = append(h.procs, p)
+		go p.supervise(ctx, filepath.Join(dir, clusterBinaryName), func() []string { return h.svc.clusterEnv(dir, name) })
 	}
+	go h.svc.keepRelaysFile(ctx, dir, st)
 }
 
 // stop ends every supervised process and waits for them; the caller holds h.mu.
@@ -148,13 +143,13 @@ func clusterSocket(dir string) string { return filepath.Join(dir, "leader.sock")
 var clusterBackoff = time.Second
 
 // supervise keeps one process running until ctx ends, restarting it with a growing pause.
-func (p *clusterProc) supervise(ctx context.Context, bin string, env []string) {
+func (p *clusterProc) supervise(ctx context.Context, bin string, env func() []string) {
 	defer close(p.done)
 	reapStale(p.pidFile, bin)
 	pause := clusterBackoff
 	for ctx.Err() == nil {
 		cmd := exec.CommandContext(ctx, bin, p.args...)
-		cmd.Env = env
+		cmd.Env = env()
 		cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
 		cmd.WaitDelay = 5 * time.Second
 		started := time.Now()
@@ -299,10 +294,15 @@ func (s *Service) ClusterStatus(context.Context, *pb.ClusterStatusRequest) (*pb.
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	st := readClusterState(dir)
+	m := s.clusterMember()
+	m.mu.Lock()
+	resp := &pb.ClusterStatusResponse{Member: m.st.Member, RelayLinks: s.relayLinks(m)}
+	m.mu.Unlock()
 	if _, err := os.Stat(filepath.Join(dir, clusterBinaryName)); err != nil || st.Version == "" {
-		return &pb.ClusterStatusResponse{}, nil
+		return resp, nil
 	}
-	return &pb.ClusterStatusResponse{Installed: true, Running: h.allUp(), Version: st.Version, Relay: st.Relay}, nil
+	resp.Installed, resp.Running, resp.Version, resp.Relay = true, h.allUp(), st.Version, st.Relay
+	return resp, nil
 }
 
 // ClusterCall forwards one call to the leader's local socket and returns its answer untouched.
@@ -315,6 +315,12 @@ func (s *Service) ClusterCall(ctx context.Context, req *pb.ClusterCallRequest) (
 		return nil, status.Errorf(codes.InvalidArgument, "%q is not a cluster call", req.GetMethod())
 	}
 	sock := clusterSocket(dir)
+	if strings.HasPrefix(req.GetMethod(), "relay.") {
+		if !readClusterState(dir).Relay {
+			return nil, status.Error(codes.FailedPrecondition, "this host runs no cluster relay")
+		}
+		sock = relaySocket(dir)
+	}
 	client := &http.Client{Transport: &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, "unix", sock)

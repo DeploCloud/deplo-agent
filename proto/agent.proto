@@ -150,6 +150,14 @@ service Agent {
   // The agent does not read the payload; an unreachable leader is UNAVAILABLE.
   rpc ClusterCall(ClusterCallRequest) returns (ClusterCallResponse);
 
+  // ---- CLUSTER MEMBER (Hello capability "cluster"): this agent is a party of a cluster
+  // (ADR-0044). It dials every relay it knows and holds one connection to each; it never
+  // accepts an incoming one. ----
+
+  // Make this agent a cluster member (or stop being one) and name the relays to dial besides
+  // Deplo's own. A saved choice survives a restart; the relay set follows the panel's address.
+  rpc SetClusterMember(SetClusterMemberRequest) returns (SetClusterMemberResponse);
+
   // ---- BACKUPS: dump/restore a database or project to/from a DESTINATION, plus the
   // affordances the control plane needs (connectivity check + object delete).
   // StoreTarget - a directory on THIS host's filesystem.
@@ -2340,10 +2348,27 @@ message ClusterStatusResponse {
   // The installed version; empty when nothing is installed.
   string version = 3;
   bool relay = 4;
+  // Whether this agent is a cluster member, and how many relays hold its connection now.
+  bool member = 5;
+  int32 relay_links = 6;
+}
+
+message SetClusterMemberRequest {
+  bool member = 1;
+  // Relay addresses (http or https origin, no path) to dial in addition to the one on this
+  // host and the panel's own. Only read when member is true.
+  repeated string relays = 2;
+}
+
+message SetClusterMemberResponse {
+  bool member = 1;
+  // Relays this agent is connected to at the moment of the answer.
+  int32 relay_links = 2;
 }
 
 message ClusterCallRequest {
-  // The leader's method name, e.g. "place". Opaque to the agent apart from its charset.
+  // The leader's method name, e.g. "place". A name starting "relay." goes to the relay on this host
+  // instead, which is where the control plane pushes a cluster's roster. Opaque otherwise.
   string method = 1;
   // The request body, forwarded as is.
   bytes payload = 2;
