@@ -125,6 +125,7 @@ var Capabilities = []string{
 	"cluster.host",
 	"cluster",
 	"cluster.images",
+	"cluster.failover",
 }
 
 // AgentVersion is the version this agent reports over Hello.

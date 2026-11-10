@@ -13,7 +13,10 @@ import (
 const FenceAfter = 60 * time.Second
 
 // MaxLine bounds one order or reply.
-const MaxLine = 1 << 20
+const MaxLine = 16 << 20
+
+// StartTimeout is how long a member may take to bring a moved workload up.
+const StartTimeout = 5 * time.Minute
 
 // StaleEpoch is the reply Error of a member that has seen a newer leader.
 const StaleEpoch = "stale_epoch"
@@ -34,13 +37,39 @@ type Order struct {
 	Member    string  `json:"member"`
 	Epoch     uint64  `json:"epoch"`
 	Placement []Entry `json:"placement"`
+	// ExtendSeconds adds to the time this lease lives without a renewal: a leader about to restart sends it.
+	ExtendSeconds int `json:"extendSeconds,omitempty"`
+	// Start asks this member to bring one moved workload up from its failover bundle.
+	Start *Start `json:"start,omitempty"`
+}
+
+// RegistryAuth is a registry login a pulled image needs.
+type RegistryAuth struct {
+	Host     string `json:"host"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+// Start is a failover bundle opened for one restart, a contract with deplo-cluster's internal/lease.
+type Start struct {
+	DeploymentID  string            `json:"deploymentId"`
+	Slug          string            `json:"slug"`
+	ProjectID     string            `json:"projectId"`
+	ImageRef      string            `json:"imageRef"`
+	ComposeYAML   string            `json:"composeYaml"`
+	Network       string            `json:"network"`
+	Env           map[string]string `json:"env"`
+	RegistryAuth  []RegistryAuth    `json:"registryAuth"`
+	ComposeUpArgs []string          `json:"composeUpArgs"`
 }
 
 // Reply is a member's answer; on StaleEpoch, Epoch is the one it holds.
 type Reply struct {
-	OK    bool   `json:"ok"`
-	Error string `json:"error,omitempty"`
-	Epoch uint64 `json:"epoch,omitempty"`
+	// Started is true only when a Start order ran and the workload came up.
+	Started bool   `json:"started,omitempty"`
+	OK      bool   `json:"ok"`
+	Error   string `json:"error,omitempty"`
+	Epoch   uint64 `json:"epoch,omitempty"`
 }
 
 // ReadOrder reads one order line.
