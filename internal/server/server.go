@@ -67,6 +67,7 @@ var Capabilities = []string{
 	"backup-s3-args",
 	"backup-s3-read",
 	"backup-untrusted-config",
+	"backup.volume-hold",
 	"docker-cleanup",
 	"cleanup.keep-per-slug",
 	"cleanup.leftover-files",
@@ -157,6 +158,9 @@ type Service struct {
 
 	restartOnce sync.Once
 	rw          *restartWatcher
+
+	heldMu sync.Mutex
+	held   map[string]bool
 }
 
 type stackLock struct {
@@ -196,6 +200,7 @@ func New(stackDir, buildTmpDir, dataDir, dataBase string) *Service {
 	}
 	sweepTempSecrets()
 	sweepInventoryDirs(buildTmpDir)
+	sweepBackupHolds(filepath.Join(dataBase, "backup-holds"))
 	return &Service{
 		stackDir:    stackDir,
 		buildTmpDir: buildTmpDir,

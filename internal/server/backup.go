@@ -23,6 +23,9 @@ const (
 type bkEmitter struct {
 	mu   sync.Mutex
 	send func(*pb.BackupEvent) error
+	held time.Duration
+	// holding is true while the app is paused, when a failed tar is a real failure.
+	holding bool
 }
 
 func (e *bkEmitter) emit(ev *pb.BackupEvent) error {
@@ -48,6 +51,7 @@ func (e *bkEmitter) emitResult(ok bool, errMsg, objectKey string, w artifactWrit
 			SizeBytes:          w.size,
 			Sha256:             w.digest,
 			DecryptedSizeBytes: w.decryptedSize,
+			HeldMs:             e.held.Milliseconds(),
 		},
 	}})
 }

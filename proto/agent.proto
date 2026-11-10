@@ -1294,6 +1294,9 @@ message BackupResult {
   // emits when it is handed an age identity, which is what a download hands to a
   // browser.
   int64 decrypted_size_bytes = 6;
+  // How long the app's containers were paused so its volumes could be copied
+  // consistently, in milliseconds. 0 when nothing was held.
+  int64 held_ms = 7;
 }
 
 message RestoreRequest {
