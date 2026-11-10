@@ -216,8 +216,8 @@ func (s *Service) startMember(m *clusterMember, st memberState) {
 			dir, _ := s.clusterDir()
 			return s.relayURLs(readClusterState(dir).Relay, extra)
 		},
-		// The only stream a member serves is the leader's lease order; a stream from anyone else is closed unanswered.
-		Accept: s.leaseGuard().Serve,
+		// The leader's lease order, or another member's image copy; any other stream is closed unanswered.
+		Accept: s.acceptClusterStream,
 		Logf:   func(f string, a ...any) { fmt.Fprintf(os.Stderr, "deplo-agent: "+f+"\n", a...) },
 	})
 	m.cancel, m.party = cancel, p
@@ -266,4 +266,13 @@ func (s *Service) relayLinks(m *clusterMember) int32 {
 		return 0
 	}
 	return int32(m.party.Connected())
+}
+
+// acceptClusterStream sends a stream to the handler for who opened it.
+func (s *Service) acceptClusterStream(from wire.Party, c net.Conn) {
+	if from.Role == wire.RoleLeader {
+		s.leaseGuard().Serve(from, c)
+		return
+	}
+	s.acceptMemberStream(from, c)
 }

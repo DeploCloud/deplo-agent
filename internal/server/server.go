@@ -124,6 +124,7 @@ var Capabilities = []string{
 	"health.restart",
 	"cluster.host",
 	"cluster",
+	"cluster.images",
 }
 
 // AgentVersion is the version this agent reports over Hello.
@@ -164,6 +165,8 @@ type Service struct {
 
 	memberOnce sync.Once
 	member     *clusterMember
+	// imageOps is the docker side of cluster image copies; tests replace it.
+	imageOps clusterImageOps
 
 	leaseOnce sync.Once
 	lease     *leaseGuard

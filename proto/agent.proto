@@ -166,6 +166,13 @@ service Agent {
   // agent does not read the lines. A leader that is not running is UNAVAILABLE.
   rpc ClusterWatch(ClusterWatchRequest) returns (stream ClusterWatchLine);
 
+  // ---- CLUSTER IMAGES (Hello capability "cluster.images"): copy a built image to another
+  // member of the same cluster over the relay, as ciphertext (ADR-0044). ----
+
+  // Send a locally built image to one member, which keeps the App's last releases and prunes
+  // older ones. A member that already holds the ref answers without a transfer.
+  rpc CopyClusterImage(CopyClusterImageRequest) returns (CopyClusterImageResponse);
+
   // ---- BACKUPS: dump/restore a database or project to/from a DESTINATION, plus the
   // affordances the control plane needs (connectivity check + object delete).
   // StoreTarget - a directory on THIS host's filesystem.
@@ -2397,4 +2404,21 @@ message ClusterWatchRequest {
 message ClusterWatchLine {
   // One line of the leader's watch, forwarded as is (no trailing newline).
   bytes line = 1;
+}
+
+message CopyClusterImageRequest {
+  // A deplo/<key>:<tag> image this host holds.
+  string image_ref = 1;
+  // The target member's certificate fingerprint (sha256 hex of its DER).
+  string target_fingerprint = 2;
+  // How many releases of the App the target keeps, this one included. 0 means 2.
+  int32 keep = 3;
+}
+
+message CopyClusterImageResponse {
+  // The target already held the image, so nothing was sent.
+  bool already_present = 1;
+  int64 bytes = 2;
+  // Releases the target removed to stay within keep.
+  repeated string pruned = 3;
 }
