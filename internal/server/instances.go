@@ -53,6 +53,7 @@ func (s *Service) ListInstances(ctx context.Context, req *pb.ListInstancesReques
 			Health:        d.Health,
 			RestartCount:  d.RestartCount,
 			StartedAtUnix: startedAtUnix(d.StartedAt),
+			Answer:        s.restartWatch().answerFor(req.GetSlug(), c.Name),
 		})
 	}
 	sort.SliceStable(out, func(i, j int) bool {
