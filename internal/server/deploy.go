@@ -247,7 +247,7 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 	}
 
 	e.phase(pb.DeployPhase_DEPLOY_PHASE_WAITING)
-	res := s.awaitStarted(ctx, req, name, isCompose, started, commitSha, e)
+	res := s.awaitStarted(ctx, req, name, isCompose, replicaCount(req.GetComposeYaml()), started, commitSha, e)
 	if standIn {
 		s.removeStandIn(slug, e)
 	}
@@ -255,8 +255,12 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 }
 
 // awaitStarted waits for container (or the whole stack) to count as up, and says how it went.
-func (s *Service) awaitStarted(ctx context.Context, req *pb.DeployRequest, container string, isCompose bool, started time.Time, commitSha string, e *emitter) *pb.DeployResult {
+// With replicas > 1 the container is a compose project and every one of its copies has to be up.
+func (s *Service) awaitStarted(ctx context.Context, req *pb.DeployRequest, container string, isCompose bool, replicas int, started time.Time, commitSha string, e *emitter) *pb.DeployResult {
 	if req.GetReady() != nil {
+		if replicas > 1 && !isCompose {
+			return s.waitReadyWith(ctx, req, false, started, commitSha, e, func() []readySample { return sampleProject(ctx, container) })
+		}
 		return s.waitReady(ctx, req, container, isCompose, started, commitSha, e)
 	}
 	timeout := time.Duration(req.GetReadyTimeoutMs()) * time.Millisecond
@@ -269,6 +273,13 @@ func (s *Service) awaitStarted(ctx context.Context, req *pb.DeployRequest, conta
 			return &pb.DeployResult{Ready: true, CommitSha: commitSha}
 		}
 		return &pb.DeployResult{Error: "Stack did not reach a running state", CommitSha: commitSha}
+	}
+	if replicas > 1 && !isCompose {
+		e.log("info", fmt.Sprintf("Waiting for all %d copies to become healthy…", replicas))
+		if waitProjectRunning(ctx, container, replicas, timeout) {
+			return &pb.DeployResult{Ready: true, CommitSha: commitSha}
+		}
+		return &pb.DeployResult{Error: "Not every copy reached a running state", CommitSha: commitSha}
 	}
 	e.log("info", "Waiting for the container to become healthy…")
 	if waitRunning(ctx, container, timeout) {

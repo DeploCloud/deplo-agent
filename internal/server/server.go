@@ -115,6 +115,7 @@ var Capabilities = []string{
 	"deploy.pull-base",
 	"deploy.reuse-image",
 	"deploy.overlap",
+	"deploy.replicas",
 	"reroute.pull",
 	"agent-link",
 	"screenshot",

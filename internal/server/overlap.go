@@ -3,10 +3,13 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"os"
 	"strings"
 	"time"
+
+	"go.yaml.in/yaml/v3"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
@@ -19,7 +22,8 @@ const standInSuffix = "_next"
 // standIn reports that it serves and has to be removed once the live container is replaced; failed
 // ends the deploy with the live container untouched. Neither: nothing to keep online, swap in place.
 func (s *Service) startStandIn(ctx context.Context, req *pb.DeployRequest, live string, started time.Time, commitSha string, e *emitter) (standIn bool, failed *pb.DeployResult) {
-	if !dockercli.IsRunning(ctx, live) {
+	replicas := replicaCount(req.GetStandInComposeYaml())
+	if !dockercli.IsRunning(ctx, live) && len(projectContainers(ctx, live)) == 0 {
 		return false, nil
 	}
 	slug := req.GetSlug()
@@ -35,7 +39,7 @@ func (s *Service) startStandIn(ctx context.Context, req *pb.DeployRequest, live 
 		res, err := dockercli.RunEnv(ctx, 5*time.Minute, dockerConfigEnv(req), append(base, "up", "--no-start")...)
 		return err == nil && res.Code == 0
 	}()
-	if !created || !sameRoutes(ctx, live, live+standInSuffix) {
+	if !created || !sameRoutes(ctx, firstContainer(ctx, live, replicas), firstContainer(ctx, live+standInSuffix, replicas)) {
 		s.removeStandIn(slug, e)
 		if created {
 			e.log("info", "The app's domains changed, so it goes offline briefly while the new version starts.")
@@ -45,7 +49,11 @@ func (s *Service) startStandIn(ctx context.Context, req *pb.DeployRequest, live 
 		return false, nil
 	}
 
-	e.log("info", "Starting the new version beside the one that is online…")
+	if replicas > 1 {
+		e.log("info", fmt.Sprintf("Starting %d copies of the new version beside the ones that are online…", replicas))
+	} else {
+		e.log("info", "Starting the new version beside the one that is online…")
+	}
 	up := func() bool {
 		defer s.lockStack(slug)()
 		code, err := dockercli.StreamEnv(ctx, 15*time.Minute, func(l string) { e.log("info", l) },
@@ -54,12 +62,13 @@ func (s *Service) startStandIn(ctx context.Context, req *pb.DeployRequest, live 
 	}()
 	res := &pb.DeployResult{Error: "compose up of the new version failed", CommitSha: commitSha}
 	if up {
-		res = s.awaitStarted(ctx, req, live+standInSuffix, false, started, commitSha, e)
+		res = s.awaitStarted(ctx, req, live+standInSuffix, false, replicas, started, commitSha, e)
 	}
 	if !res.GetReady() {
 		s.removeStandIn(slug, e)
 		// Storage may refuse a second copy (a lock file, an embedded database): swap in place instead.
-		if hasStorage(ctx, live) {
+		// Replicas never swap in place: that would stop every copy at once.
+		if replicas <= 1 && hasStorage(ctx, live) {
 			e.log("info", "The new version could not start beside the old one while they share storage, "+
 				"so the app goes offline briefly while it starts on its own.")
 			return false, nil
@@ -117,4 +126,60 @@ func traefikLabels(ctx context.Context, container string) (map[string]string, bo
 		}
 	}
 	return out, true
+}
+
+// replicaCount is the most copies a service of the stack asks for through deploy.replicas (1 when none).
+func replicaCount(composeYaml string) int {
+	var doc struct {
+		Services map[string]struct {
+			Deploy struct {
+				Replicas int `yaml:"replicas"`
+			} `yaml:"deploy"`
+		} `yaml:"services"`
+	}
+	if yaml.Unmarshal([]byte(composeYaml), &doc) != nil {
+		return 1
+	}
+	most := 1
+	for _, svc := range doc.Services {
+		most = max(most, svc.Deploy.Replicas)
+	}
+	return most
+}
+
+// projectContainers lists the running containers of a compose project. A project is named like
+// its single container, so this also finds the one copy an app ran before it had replicas.
+func projectContainers(ctx context.Context, project string) []string {
+	res, err := dockercli.Run(ctx, 15*time.Second, "ps", "-q",
+		"--filter", "label=com.docker.compose.project="+project, "--filter", "status=running")
+	if err != nil || res.Code != 0 {
+		return nil
+	}
+	return splitLines(res.Stdout)
+}
+
+// firstContainer is what to inspect for a project: the container itself, or with replicas one of its copies.
+func firstContainer(ctx context.Context, name string, replicas int) string {
+	if replicas > 1 {
+		if all := projectContainers(ctx, name); len(all) > 0 {
+			return all[0]
+		}
+	}
+	return name
+}
+
+// waitProjectRunning holds until every one of n copies of the project runs.
+func waitProjectRunning(ctx context.Context, project string, n int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if len(projectContainers(ctx, project)) >= n {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(2 * time.Second):
+		}
+	}
+	return false
 }
