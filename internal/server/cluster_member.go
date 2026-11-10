@@ -84,7 +84,9 @@ func (s *Service) clusterEnv(dir, role string) []string {
 	}
 	switch role {
 	case "leader":
-		env = append(env, clusterSocketEnv+"="+clusterSocket(dir), "DEPLO_CLUSTER_RELAYS_FILE="+relaysFile(dir))
+		state := filepath.Join(dir, "leader")
+		_ = os.MkdirAll(state, 0o700)
+		env = append(env, clusterSocketEnv+"="+clusterSocket(dir), "DEPLO_CLUSTER_RELAYS_FILE="+relaysFile(dir), "DEPLO_CLUSTER_STATE="+state)
 	case "relay":
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -200,6 +202,7 @@ func (s *Service) startMember(m *clusterMember, st memberState) {
 	}
 	m.st = st
 	if !st.Member {
+		s.leaseGuard().Forget()
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -213,12 +216,13 @@ func (s *Service) startMember(m *clusterMember, st memberState) {
 			dir, _ := s.clusterDir()
 			return s.relayURLs(readClusterState(dir).Relay, extra)
 		},
-		// Streams between members arrive with the lease protocol; until then none is served.
-		Accept: func(_ wire.Party, c net.Conn) { c.Close() },
+		// The only stream a member serves is the leader's lease order; a stream from anyone else is closed unanswered.
+		Accept: s.leaseGuard().Serve,
 		Logf:   func(f string, a ...any) { fmt.Fprintf(os.Stderr, "deplo-agent: "+f+"\n", a...) },
 	})
 	m.cancel, m.party = cancel, p
 	go p.Run(ctx)
+	go s.leaseGuard().Run(ctx)
 }
 
 // SetClusterMember makes this agent a cluster party, or stops it being one; see the RPC's contract in proto/agent.proto.

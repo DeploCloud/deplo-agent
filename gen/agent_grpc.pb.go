@@ -55,6 +55,7 @@ const (
 	Agent_ClusterStatus_FullMethodName       = "/deplo.agent.v1.Agent/ClusterStatus"
 	Agent_ClusterCall_FullMethodName         = "/deplo.agent.v1.Agent/ClusterCall"
 	Agent_SetClusterMember_FullMethodName    = "/deplo.agent.v1.Agent/SetClusterMember"
+	Agent_ClusterWatch_FullMethodName        = "/deplo.agent.v1.Agent/ClusterWatch"
 	Agent_Backup_FullMethodName              = "/deplo.agent.v1.Agent/Backup"
 	Agent_Restore_FullMethodName             = "/deplo.agent.v1.Agent/Restore"
 	Agent_S3Check_FullMethodName             = "/deplo.agent.v1.Agent/S3Check"
@@ -211,6 +212,10 @@ type AgentClient interface {
 	// Make this agent a cluster member (or stop being one) and name the relays to dial besides
 	// Deplo's own. A saved choice survives a restart; the relay set follows the panel's address.
 	SetClusterMember(ctx context.Context, in *SetClusterMemberRequest, opts ...grpc.CallOption) (*SetClusterMemberResponse, error)
+	// Stream the leader's events after `since`, one JSON line each, until the caller cancels. The
+	// first line is the leader's hello (newest sequence, whether the buffer dropped events). The
+	// agent does not read the lines. A leader that is not running is UNAVAILABLE.
+	ClusterWatch(ctx context.Context, in *ClusterWatchRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ClusterWatchLine], error)
 	// Back up a database or a project to a destination, streaming progress.
 	Backup(ctx context.Context, in *BackupRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[BackupEvent], error)
 	// Restore a database or project from a previously-written artifact, IN PLACE,
@@ -746,9 +751,28 @@ func (c *agentClient) SetClusterMember(ctx context.Context, in *SetClusterMember
 	return out, nil
 }
 
+func (c *agentClient) ClusterWatch(ctx context.Context, in *ClusterWatchRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ClusterWatchLine], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[12], Agent_ClusterWatch_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[ClusterWatchRequest, ClusterWatchLine]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Agent_ClusterWatchClient = grpc.ServerStreamingClient[ClusterWatchLine]
+
 func (c *agentClient) Backup(ctx context.Context, in *BackupRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[BackupEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[12], Agent_Backup_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[13], Agent_Backup_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -767,7 +791,7 @@ type Agent_BackupClient = grpc.ServerStreamingClient[BackupEvent]
 
 func (c *agentClient) Restore(ctx context.Context, in *RestoreRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RestoreEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[13], Agent_Restore_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[14], Agent_Restore_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -806,7 +830,7 @@ func (c *agentClient) S3Delete(ctx context.Context, in *S3DeleteRequest, opts ..
 
 func (c *agentClient) ReadStoreFile(ctx context.Context, in *ReadStoreFileRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[StoreChunk], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[14], Agent_ReadStoreFile_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[15], Agent_ReadStoreFile_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -825,7 +849,7 @@ type Agent_ReadStoreFileClient = grpc.ServerStreamingClient[StoreChunk]
 
 func (c *agentClient) WriteStoreFile(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[StoreChunk, StoreResult], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[15], Agent_WriteStoreFile_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[16], Agent_WriteStoreFile_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -838,7 +862,7 @@ type Agent_WriteStoreFileClient = grpc.ClientStreamingClient[StoreChunk, StoreRe
 
 func (c *agentClient) RestoreFrom(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[RestoreChunk, RestoreEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[16], Agent_RestoreFrom_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[17], Agent_RestoreFrom_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -851,7 +875,7 @@ type Agent_RestoreFromClient = grpc.BidiStreamingClient[RestoreChunk, RestoreEve
 
 func (c *agentClient) FollowLogs(ctx context.Context, in *FollowLogsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LogChunk], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[17], Agent_FollowLogs_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[18], Agent_FollowLogs_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -870,7 +894,7 @@ type Agent_FollowLogsClient = grpc.ServerStreamingClient[LogChunk]
 
 func (c *agentClient) Attach(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AttachInput, AttachOutput], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[18], Agent_Attach_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[19], Agent_Attach_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1023,7 +1047,7 @@ func (c *agentClient) FilesExist(ctx context.Context, in *FilesExistRequest, opt
 
 func (c *agentClient) StartDev(ctx context.Context, in *StartDevRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[DeployEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[19], Agent_StartDev_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[20], Agent_StartDev_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1052,7 +1076,7 @@ func (c *agentClient) StopDev(ctx context.Context, in *StopDevRequest, opts ...g
 
 func (c *agentClient) ResetDevWorkspace(ctx context.Context, in *StartDevRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[DeployEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[20], Agent_ResetDevWorkspace_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[21], Agent_ResetDevWorkspace_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1377,6 +1401,10 @@ type AgentServer interface {
 	// Make this agent a cluster member (or stop being one) and name the relays to dial besides
 	// Deplo's own. A saved choice survives a restart; the relay set follows the panel's address.
 	SetClusterMember(context.Context, *SetClusterMemberRequest) (*SetClusterMemberResponse, error)
+	// Stream the leader's events after `since`, one JSON line each, until the caller cancels. The
+	// first line is the leader's hello (newest sequence, whether the buffer dropped events). The
+	// agent does not read the lines. A leader that is not running is UNAVAILABLE.
+	ClusterWatch(*ClusterWatchRequest, grpc.ServerStreamingServer[ClusterWatchLine]) error
 	// Back up a database or a project to a destination, streaming progress.
 	Backup(*BackupRequest, grpc.ServerStreamingServer[BackupEvent]) error
 	// Restore a database or project from a previously-written artifact, IN PLACE,
@@ -1609,6 +1637,9 @@ func (UnimplementedAgentServer) ClusterCall(context.Context, *ClusterCallRequest
 }
 func (UnimplementedAgentServer) SetClusterMember(context.Context, *SetClusterMemberRequest) (*SetClusterMemberResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetClusterMember not implemented")
+}
+func (UnimplementedAgentServer) ClusterWatch(*ClusterWatchRequest, grpc.ServerStreamingServer[ClusterWatchLine]) error {
+	return status.Error(codes.Unimplemented, "method ClusterWatch not implemented")
 }
 func (UnimplementedAgentServer) Backup(*BackupRequest, grpc.ServerStreamingServer[BackupEvent]) error {
 	return status.Error(codes.Unimplemented, "method Backup not implemented")
@@ -2240,6 +2271,17 @@ func _Agent_SetClusterMember_Handler(srv interface{}, ctx context.Context, dec f
 	}
 	return interceptor(ctx, in, info, handler)
 }
+
+func _Agent_ClusterWatch_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(ClusterWatchRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(AgentServer).ClusterWatch(m, &grpc.GenericServerStream[ClusterWatchRequest, ClusterWatchLine]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Agent_ClusterWatchServer = grpc.ServerStreamingServer[ClusterWatchLine]
 
 func _Agent_Backup_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(BackupRequest)
@@ -3291,6 +3333,11 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 			StreamName:    "ImportImage",
 			Handler:       _Agent_ImportImage_Handler,
 			ClientStreams: true,
+		},
+		{
+			StreamName:    "ClusterWatch",
+			Handler:       _Agent_ClusterWatch_Handler,
+			ServerStreams: true,
 		},
 		{
 			StreamName:    "Backup",

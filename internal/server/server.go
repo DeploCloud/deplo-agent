@@ -165,6 +165,9 @@ type Service struct {
 	memberOnce sync.Once
 	member     *clusterMember
 
+	leaseOnce sync.Once
+	lease     *leaseGuard
+
 	heldMu sync.Mutex
 	held   map[string]bool
 

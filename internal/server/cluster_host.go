@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -354,3 +355,55 @@ func (s *Service) ClusterCall(ctx context.Context, req *pb.ClusterCallRequest) (
 	}
 	return &pb.ClusterCallResponse{Payload: body}, nil
 }
+
+// watchPingTimeout is how long a watch may stay silent before the agent gives it up; the leader pings every 20 s.
+var watchPingTimeout = time.Minute
+
+// ClusterWatch forwards the leader's event stream, line by line, until the caller or the leader leaves.
+func (s *Service) ClusterWatch(req *pb.ClusterWatchRequest, stream pb.Agent_ClusterWatchServer) error {
+	dir, err := s.clusterDir()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithCancel(stream.Context())
+	defer cancel()
+	sock := clusterSocket(dir)
+	client := &http.Client{Transport: &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "unix", sock)
+		},
+		DisableKeepAlives: true,
+	}}
+	hreq, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://cluster/watch?since=%d", req.GetSince()), nil)
+	if err != nil {
+		return status.Errorf(codes.Internal, "build the cluster watch: %v", err)
+	}
+	resp, err := client.Do(hreq)
+	if err != nil {
+		return status.Errorf(codes.Unavailable, "the cluster leader on this server is not answering: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return status.Errorf(codes.FailedPrecondition, "the cluster leader refused the watch (%d)", resp.StatusCode)
+	}
+	// A leader that stops talking, pings included, is as good as gone.
+	idle := time.AfterFunc(watchPingTimeout, cancel)
+	defer idle.Stop()
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 0, 64<<10), maxWatchLine)
+	for sc.Scan() {
+		idle.Reset(watchPingTimeout)
+		if err := stream.Send(&pb.ClusterWatchLine{Line: append([]byte(nil), sc.Bytes()...)}); err != nil {
+			return err
+		}
+	}
+	if ctx.Err() != nil && stream.Context().Err() == nil {
+		return status.Error(codes.Unavailable, "the cluster leader on this server went quiet")
+	}
+	if err := sc.Err(); err != nil && stream.Context().Err() == nil {
+		return status.Errorf(codes.Unavailable, "the cluster leader on this server stopped answering: %v", err)
+	}
+	return nil
+}
+
+const maxWatchLine = 1 << 20
