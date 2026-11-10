@@ -118,6 +118,7 @@ var Capabilities = []string{
 	"reroute.pull",
 	"agent-link",
 	"screenshot",
+	"health.restart",
 }
 
 // AgentVersion is the version this agent reports over Hello.
@@ -152,6 +153,9 @@ type Service struct {
 	stackLocks   map[string]*stackLock
 
 	inventoryMu sync.Mutex
+
+	restartOnce sync.Once
+	rw          *restartWatcher
 }
 
 type stackLock struct {
@@ -427,6 +431,7 @@ func (s *Service) StartStack(ctx context.Context, ref *pb.StackRef) (*pb.StackRe
 		return nil, err
 	}
 	defer s.lockStack(slug)()
+	s.restartWatch().resume(slug, "restart")
 	if err := s.stripSourceLinks(slug); err != nil {
 		return &pb.StackResult{Ok: false, Error: err.Error()}, nil
 	}
@@ -507,6 +512,7 @@ func removeStackContainers(ctx context.Context, slug string) (dockercli.Result, 
 }
 
 func (s *Service) removeStackFiles(slug string) {
+	s.restartWatch().forget(slug)
 	_ = os.Remove(s.stackPath(slug))
 	_ = os.Remove(s.legacyEnvPath(slug))
 	_ = os.Remove(filepath.Join(s.stackDir, "files", slug, ".env"))

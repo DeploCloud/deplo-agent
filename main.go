@@ -105,6 +105,7 @@ func main() {
 	srv := newGRPCServer(certMgr)
 	svc := server.New(*stackDir, *buildTmpDir, *dataDir, *dataBase)
 	svc.SetAgentDir(*agentDir)
+	svc.StartRestartWatch(context.Background())
 	if certMgr != nil {
 		svc.EnableCertRenewal(certMgr)
 	}

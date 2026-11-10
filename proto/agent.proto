@@ -691,6 +691,57 @@ message DeployRequest {
   // touched, unless the live container mounts storage (which may refuse a second copy): then
   // the agent swaps in place instead. Empty => the in-place swap. Advertised as `deploy.overlap`.
   string stand_in_compose_yaml = 28;
+
+  // When the app stops answering, restart it. The agent keeps the rule on disk and probes on its
+  // own, so it works while the control plane is down. Unset => none, and a stored rule is removed.
+  // Advertised as `health.restart`.
+  RestartRule restart_rule = 29;
+}
+
+// How the agent decides an app has stopped answering, and when it restarts it.
+message RestartRule {
+  enum Probe {
+    PROBE_UNSPECIFIED = 0;
+    // GET port+path from the host; any HTTP status counts as alive.
+    PROBE_HTTP = 1;
+    // Docker's own health verdict (the app's command check); `unhealthy` is a failure.
+    PROBE_DOCKER_HEALTH = 2;
+  }
+  Probe probe = 1;
+  int32 port = 2;
+  string path = 3;
+  int32 interval_s = 4;
+  int32 timeout_s = 5;
+  // Failures in a row before a restart. Ignored for PROBE_DOCKER_HEALTH, where Docker already counted.
+  int32 retries = 6;
+  // Nothing counts this long after a container starts.
+  int32 start_period_s = 7;
+  // Compose stacks: the service to watch. Empty => the app's single container.
+  string service = 8;
+}
+
+// Something the restart rule did, reported on the metrics stream (buffered while none is open).
+message RestartEvent {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    KIND_RESTARTED = 1;
+    // Too many restarts in 30 minutes: restarting stops, the app keeps running.
+    KIND_PAUSED = 2;
+    // Restarting is back on (a deploy, a manual restart or 30 quiet minutes).
+    KIND_RESUMED = 3;
+    // A restarted container answers again.
+    KIND_RECOVERED = 4;
+  }
+  Kind kind = 1;
+  string slug = 2;
+  string container = 3;
+  // KIND_RESTARTED: how long it had not answered. Otherwise 0.
+  int32 unanswered_s = 4;
+  // Restarts in the last 30 minutes, this one included.
+  int32 restarts = 5;
+  // KIND_RESUMED: "deploy" | "restart" | "quiet".
+  string reason = 6;
+  int64 at_unix_ms = 7;
 }
 
 
@@ -1994,6 +2045,8 @@ message MetricsSample {
   // plane surface "this host is on the slow path" (~18x the CPU cost) without a second
   // RPC, and makes an automatic demotion visible instead of silent.
   string source = 4;
+  // Restart-rule events since the last frame that carried them.
+  repeated RestartEvent restart_events = 5;
 }
 
 // ---------------------------------------------------------------------------
