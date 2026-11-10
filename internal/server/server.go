@@ -108,6 +108,7 @@ var Capabilities = []string{
 	"git.submodules",
 	"deploy.files-bind-check",
 	"backup.db-owner-check",
+	"backup.redis-aof",
 	"image-inventory",
 	"deploy.pull-base",
 	"reroute.pull",

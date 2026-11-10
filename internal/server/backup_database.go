@@ -214,6 +214,12 @@ func (s *Service) restoreRedis(ctx context.Context, d *pb.DatabaseDescriptor, sr
 		e.result(false, "redis CONFIG SET save: "+combineErr(err, res.Stderr))
 		return
 	}
+	// Append-only stays off from here: the next start must load the snapshot written below, not the
+	// append-only file, which still holds the data being replaced.
+	if res, err := dockercli.RunEnv(ctx, 15*time.Second, cliEnv, cli("CONFIG", "SET", "appendonly", "no")...); err != nil || res.Code != 0 {
+		e.result(false, "redis CONFIG SET appendonly: "+combineErr(err, res.Stderr))
+		return
+	}
 	if res, err := dockercli.RunEnv(ctx, 30*time.Second, cliEnv, cli("FLUSHALL")...); err != nil || res.Code != 0 {
 		e.result(false, "redis FLUSHALL: "+combineErr(err, res.Stderr))
 		return
@@ -224,6 +230,12 @@ func (s *Service) restoreRedis(ctx context.Context, d *pb.DatabaseDescriptor, sr
 		return
 	} else if code != 0 {
 		e.result(false, fmt.Sprintf("write RDB into container exited %d", code))
+		return
+	}
+
+	if code, rerr := dockercli.Run(ctx, 30*time.Second, "exec", c, "sh", "-c",
+		"rm -rf "+shellQuote(dir+"/appendonlydir")+" "+shellQuote(dir+"/appendonly.aof")); rerr != nil || code.Code != 0 {
+		e.result(false, "remove the append-only file: "+combineErr(rerr, code.Stderr))
 		return
 	}
 
