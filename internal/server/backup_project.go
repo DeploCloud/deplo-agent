@@ -44,15 +44,25 @@ func (s *Service) backupProject(ctx context.Context, p *pb.ProjectDescriptor, de
 }
 
 func (s *Service) writeProjectArchive(ctx context.Context, p *pb.ProjectDescriptor, tw *tar.Writer, e *bkEmitter) error {
+	hold, herr := s.holdVolumes(ctx, p.GetVolumeNames())
+	if herr != nil {
+		return herr
+	}
+	if hold != nil {
+		e.holding = true
+		e.log("info", "Paused the app while its data is copied")
+	}
 	for _, vol := range p.GetVolumeNames() {
 		if vol == "" {
 			continue
 		}
 		e.log("info", "Archiving volume "+vol)
 		if err := s.archiveVolume(ctx, vol, tw, e); err != nil {
+			s.endHold(hold, e)
 			return fmt.Errorf("archive volume %q: %w", vol, err)
 		}
 	}
+	s.endHold(hold, e)
 
 	if p.GetIncludeFiles() {
 		root := s.filesRoot(p.GetSlug())
@@ -87,6 +97,19 @@ func (s *Service) writeProjectArchive(ctx context.Context, p *pb.ProjectDescript
 	return nil
 }
 
+// endHold resumes the app and records how long it was held.
+func (s *Service) endHold(hold *volumeHold, e *bkEmitter) {
+	if hold == nil {
+		return
+	}
+	held := hold.release()
+	e.mu.Lock()
+	e.holding = false
+	e.held = held
+	e.mu.Unlock()
+	e.log("info", fmt.Sprintf("The app was paused for %s and is running again", held.Round(time.Millisecond)))
+}
+
 func (s *Service) archiveVolume(ctx context.Context, vol string, tw *tar.Writer, e *bkEmitter) error {
 	if err := validateVolumeName(vol); err != nil {
 		return err
@@ -109,7 +132,9 @@ func (s *Service) archiveVolume(ctx context.Context, vol string, tw *tar.Writer,
 		hdr, err := tr.Next()
 		if err == io.EOF {
 			_, _ = io.Copy(io.Discard, pr)
-			if perr := <-done; perr != nil {
+			if perr := <-done; perr != nil && e.holding {
+				return perr
+			} else if perr != nil {
 				e.log("warn", fmt.Sprintf("volume %q: %v (archive completed; a file likely changed during read)", vol, perr))
 			}
 			return nil
