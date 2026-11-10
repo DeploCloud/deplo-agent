@@ -55,6 +55,7 @@ const (
 	Agent_ClusterStatus_FullMethodName       = "/deplo.agent.v1.Agent/ClusterStatus"
 	Agent_ClusterCall_FullMethodName         = "/deplo.agent.v1.Agent/ClusterCall"
 	Agent_SetClusterMember_FullMethodName    = "/deplo.agent.v1.Agent/SetClusterMember"
+	Agent_CopyClusterImage_FullMethodName    = "/deplo.agent.v1.Agent/CopyClusterImage"
 	Agent_Backup_FullMethodName              = "/deplo.agent.v1.Agent/Backup"
 	Agent_Restore_FullMethodName             = "/deplo.agent.v1.Agent/Restore"
 	Agent_S3Check_FullMethodName             = "/deplo.agent.v1.Agent/S3Check"
@@ -211,6 +212,9 @@ type AgentClient interface {
 	// Make this agent a cluster member (or stop being one) and name the relays to dial besides
 	// Deplo's own. A saved choice survives a restart; the relay set follows the panel's address.
 	SetClusterMember(ctx context.Context, in *SetClusterMemberRequest, opts ...grpc.CallOption) (*SetClusterMemberResponse, error)
+	// Send a locally built image to one member, which keeps the App's last releases and prunes
+	// older ones. A member that already holds the ref answers without a transfer.
+	CopyClusterImage(ctx context.Context, in *CopyClusterImageRequest, opts ...grpc.CallOption) (*CopyClusterImageResponse, error)
 	// Back up a database or a project to a destination, streaming progress.
 	Backup(ctx context.Context, in *BackupRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[BackupEvent], error)
 	// Restore a database or project from a previously-written artifact, IN PLACE,
@@ -740,6 +744,16 @@ func (c *agentClient) SetClusterMember(ctx context.Context, in *SetClusterMember
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SetClusterMemberResponse)
 	err := c.cc.Invoke(ctx, Agent_SetClusterMember_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) CopyClusterImage(ctx context.Context, in *CopyClusterImageRequest, opts ...grpc.CallOption) (*CopyClusterImageResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CopyClusterImageResponse)
+	err := c.cc.Invoke(ctx, Agent_CopyClusterImage_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1377,6 +1391,9 @@ type AgentServer interface {
 	// Make this agent a cluster member (or stop being one) and name the relays to dial besides
 	// Deplo's own. A saved choice survives a restart; the relay set follows the panel's address.
 	SetClusterMember(context.Context, *SetClusterMemberRequest) (*SetClusterMemberResponse, error)
+	// Send a locally built image to one member, which keeps the App's last releases and prunes
+	// older ones. A member that already holds the ref answers without a transfer.
+	CopyClusterImage(context.Context, *CopyClusterImageRequest) (*CopyClusterImageResponse, error)
 	// Back up a database or a project to a destination, streaming progress.
 	Backup(*BackupRequest, grpc.ServerStreamingServer[BackupEvent]) error
 	// Restore a database or project from a previously-written artifact, IN PLACE,
@@ -1609,6 +1626,9 @@ func (UnimplementedAgentServer) ClusterCall(context.Context, *ClusterCallRequest
 }
 func (UnimplementedAgentServer) SetClusterMember(context.Context, *SetClusterMemberRequest) (*SetClusterMemberResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetClusterMember not implemented")
+}
+func (UnimplementedAgentServer) CopyClusterImage(context.Context, *CopyClusterImageRequest) (*CopyClusterImageResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CopyClusterImage not implemented")
 }
 func (UnimplementedAgentServer) Backup(*BackupRequest, grpc.ServerStreamingServer[BackupEvent]) error {
 	return status.Error(codes.Unimplemented, "method Backup not implemented")
@@ -2237,6 +2257,24 @@ func _Agent_SetClusterMember_Handler(srv interface{}, ctx context.Context, dec f
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(AgentServer).SetClusterMember(ctx, req.(*SetClusterMemberRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_CopyClusterImage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CopyClusterImageRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).CopyClusterImage(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_CopyClusterImage_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).CopyClusterImage(ctx, req.(*CopyClusterImageRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -3080,6 +3118,10 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SetClusterMember",
 			Handler:    _Agent_SetClusterMember_Handler,
+		},
+		{
+			MethodName: "CopyClusterImage",
+			Handler:    _Agent_CopyClusterImage_Handler,
 		},
 		{
 			MethodName: "S3Check",

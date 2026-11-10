@@ -213,8 +213,8 @@ func (s *Service) startMember(m *clusterMember, st memberState) {
 			dir, _ := s.clusterDir()
 			return s.relayURLs(readClusterState(dir).Relay, extra)
 		},
-		// Streams between members arrive with the lease protocol; until then none is served.
-		Accept: func(_ wire.Party, c net.Conn) { c.Close() },
+		// Image copies between members; the lease protocol joins them.
+		Accept: s.acceptMemberStream,
 		Logf:   func(f string, a ...any) { fmt.Fprintf(os.Stderr, "deplo-agent: "+f+"\n", a...) },
 	})
 	m.cancel, m.party = cancel, p
