@@ -41,6 +41,15 @@ func mysqlClient(dbType, kind string) string {
 	return "mysql"
 }
 
+// One consistent snapshot without blocking writers; the binlog position goes in as a comment when the
+// binary log is on (a database without one must still back up). Args: dump tool, client, user, database.
+const mysqlDumpScript = `tool=$1 cli=$2 u=$3 db=$4
+flags="--single-transaction --add-drop-table"
+if [ "$($cli -u "$u" -N -B -e 'SELECT @@log_bin' 2>/dev/null)" = 1 ]; then
+  if $tool --help 2>/dev/null | grep -q -e --source-data; then flags="$flags --source-data=2"; else flags="$flags --master-data=2"; fi
+fi
+exec $tool -u "$u" $flags --databases "$db"`
+
 func dumpArgv(d *pb.DatabaseDescriptor) (argv []string, env []string, err error) {
 	c, user, db := d.GetContainer(), d.GetUser(), d.GetDbName()
 	pw := d.GetPassword()
@@ -52,7 +61,7 @@ func dumpArgv(d *pb.DatabaseDescriptor) (argv []string, env []string, err error)
 		return a, env, nil
 	case "mysql", "mariadb":
 		a, env := execWithSecretEnv(pw, "MYSQL_PWD")
-		a = append(a, c, mysqlClient(dbType, "dump"), "-u", user, "--add-drop-table", "--databases", db)
+		a = append(a, c, "sh", "-c", mysqlDumpScript, "sh", mysqlClient(dbType, "dump"), mysqlClient(dbType, "shell"), user, db)
 		return a, env, nil
 	case "mongodb":
 		a, env := execWithSecretEnv(pw, "MONGO_PW")
