@@ -21,8 +21,8 @@ type restartState struct {
 	restarts []time.Time
 	paused   bool
 	lastFail time.Time
-	// A restarted container has not answered yet.
-	recovering bool
+	// Restarted containers that have not answered yet.
+	recovering map[string]bool
 	// What the last probe of each container (by name) said: starting, answering or not_answering.
 	answer map[string]string
 }
@@ -36,7 +36,7 @@ type restartVerdict struct {
 }
 
 func newRestartState(rule *pb.RestartRule) *restartState {
-	return &restartState{rule: rule, fails: map[string]int{}, since: map[string]time.Time{}, answer: map[string]string{}}
+	return &restartState{rule: rule, fails: map[string]int{}, since: map[string]time.Time{}, recovering: map[string]bool{}, answer: map[string]string{}}
 }
 
 func (st *restartState) threshold() int {
@@ -64,8 +64,8 @@ func (st *restartState) record(now time.Time, id string, startedAt time.Time, ok
 	if ok {
 		delete(st.fails, id)
 		delete(st.since, id)
-		if st.recovering {
-			st.recovering = false
+		if st.recovering[id] {
+			delete(st.recovering, id)
 			return restartVerdict{recovered: true}
 		}
 		return restartVerdict{}
@@ -90,7 +90,7 @@ func (st *restartState) record(now time.Time, id string, startedAt time.Time, ok
 	st.restarts = append(st.restarts, now)
 	delete(st.fails, id)
 	delete(st.since, id)
-	st.recovering = true
+	st.recovering[id] = true
 	return restartVerdict{restart: true, unanswered: unanswered, inWindowNow: len(st.restarts)}
 }
 
@@ -114,7 +114,7 @@ func (st *restartState) resume() bool {
 	was := st.paused
 	st.paused = false
 	st.restarts = nil
-	st.recovering = false
+	st.recovering = map[string]bool{}
 	st.fails = map[string]int{}
 	st.since = map[string]time.Time{}
 	return was
