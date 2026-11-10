@@ -128,14 +128,18 @@ func (s *Service) applyUpdate(ctx context.Context, exePath string, req *pb.SelfU
 }
 
 func (s *Service) stageVerifiedBinary(ctx context.Context, exe, url, wantSha256 string) (string, error) {
+	return stageVerified(ctx, filepath.Dir(exe), ".deplo-agent-update-*", "agent", url, wantSha256)
+}
+
+// stageVerified downloads one release binary into dir and returns its path once the sha256 matches; `what` names it in errors.
+func stageVerified(ctx context.Context, dir, pattern, what, url, wantSha256 string) (string, error) {
 	body, err := downloadFile(ctx, url)
 	if err != nil {
-		return "", status.Errorf(codes.Unavailable, "download new agent binary: %v", err)
+		return "", status.Errorf(codes.Unavailable, "download new "+what+" binary: %v", err)
 	}
 	defer body.Close()
 
-	dir := filepath.Dir(exe)
-	tmp, err := os.CreateTemp(dir, ".deplo-agent-update-*")
+	tmp, err := os.CreateTemp(dir, pattern)
 	if err != nil {
 		return "", status.Errorf(codes.FailedPrecondition,
 			"cannot stage the update in %s: %v (re-run the installer to upgrade)", dir, err)
@@ -150,14 +154,14 @@ func (s *Service) stageVerifiedBinary(ctx context.Context, exe, url, wantSha256 
 	h := sha256.New()
 	n, err := io.Copy(io.MultiWriter(tmp, h), io.LimitReader(body, maxAgentBinary+1))
 	if err != nil {
-		return cleanup(status.Errorf(codes.Unavailable, "download new agent binary: %v", err))
+		return cleanup(status.Errorf(codes.Unavailable, "download new "+what+" binary: %v", err))
 	}
 	if n > maxAgentBinary {
-		return cleanup(status.Errorf(codes.FailedPrecondition, "agent binary is larger than %d bytes", maxAgentBinary))
+		return cleanup(status.Errorf(codes.FailedPrecondition, what+" binary is larger than %d bytes", maxAgentBinary))
 	}
 	if got := hex.EncodeToString(h.Sum(nil)); got != wantSha256 {
 		return cleanup(status.Errorf(codes.FailedPrecondition,
-			"agent binary checksum mismatch: expected %s, got %s (refusing to install an unverified binary)", wantSha256, got))
+			what+" binary checksum mismatch: expected %s, got %s (refusing to install an unverified binary)", wantSha256, got))
 	}
 	if err := tmp.Chmod(0o755); err != nil {
 		return cleanup(status.Errorf(codes.Internal, "chmod staged binary: %v", err))
