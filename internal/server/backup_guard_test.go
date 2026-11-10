@@ -1,6 +1,8 @@
 package server
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -170,5 +172,33 @@ func TestDatabaseBackup_noProjectIDSkipsTheCheck(t *testing.T) {
 		if strings.HasPrefix(a, "inspect") {
 			t.Fatalf("no project_id must mean no ownership check, got %q", a)
 		}
+	}
+}
+
+// Redis may run append-only: a restart loads that file over the snapshot, so the restore must switch it off and drop it first.
+func TestRestoreRedis_dropsTheAppendOnlyFileBeforeReloading(t *testing.T) {
+	argv := dockerOnPath(t, `case "$*" in *"CONFIG GET"*) printf 'dir\n/data\n';; *PING*) echo PONG;; esac; exit 0`)
+	s := New(t.TempDir(), t.TempDir(), "/", "")
+	var gz bytes.Buffer
+	w := gzip.NewWriter(&gz)
+	_, _ = w.Write([]byte("REDIS0011"))
+	_ = w.Close()
+	e, result := collectRestore()
+	s.restoreDatabase(context.Background(), &pb.DatabaseDescriptor{Container: "deplo-agent-test-redis", DbType: "redis"},
+		&artifactSource{stream: &gz}, e)
+	if r := result(); r == nil || !r.GetOk() {
+		t.Fatalf("restore failed: %+v", r)
+	}
+	at := func(sub string) int {
+		for i, a := range argv() {
+			if strings.Contains(a, sub) {
+				return i
+			}
+		}
+		return -1
+	}
+	off, flush, rm, shutdown := at("CONFIG SET appendonly no"), at("FLUSHALL"), at("rm -rf '/data/appendonlydir'"), at("SHUTDOWN")
+	if off < 0 || off > flush || flush > rm || rm > shutdown {
+		t.Fatalf("want append-only off, flush, drop the file, then shutdown; got %v", argv())
 	}
 }
