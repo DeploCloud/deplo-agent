@@ -158,6 +158,14 @@ service Agent {
   // Deplo's own. A saved choice survives a restart; the relay set follows the panel's address.
   rpc SetClusterMember(SetClusterMemberRequest) returns (SetClusterMemberResponse);
 
+  // ---- CLUSTER WATCH (#195, Hello capability "cluster.host"): the control plane's long-lived
+  // view of the leader on this host. ----
+
+  // Stream the leader's events after `since`, one JSON line each, until the caller cancels. The
+  // first line is the leader's hello (newest sequence, whether the buffer dropped events). The
+  // agent does not read the lines. A leader that is not running is UNAVAILABLE.
+  rpc ClusterWatch(ClusterWatchRequest) returns (stream ClusterWatchLine);
+
   // ---- BACKUPS: dump/restore a database or project to/from a DESTINATION, plus the
   // affordances the control plane needs (connectivity check + object delete).
   // StoreTarget - a directory on THIS host's filesystem.
@@ -2377,4 +2385,16 @@ message ClusterCallRequest {
 message ClusterCallResponse {
   // The leader's answer body, returned as is.
   bytes payload = 1;
+}
+
+// ---- CLUSTER WATCH (#195) ----
+
+message ClusterWatchRequest {
+  // The last sequence the caller applied; 0 asks for everything the leader still holds.
+  uint64 since = 1;
+}
+
+message ClusterWatchLine {
+  // One line of the leader's watch, forwarded as is (no trailing newline).
+  bytes line = 1;
 }
