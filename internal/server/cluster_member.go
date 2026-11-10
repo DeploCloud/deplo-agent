@@ -203,6 +203,7 @@ func (s *Service) startMember(m *clusterMember, st memberState) {
 	m.st = st
 	if !st.Member {
 		s.leaseGuard().Forget()
+		go s.forwarders().Clear()
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -223,6 +224,7 @@ func (s *Service) startMember(m *clusterMember, st memberState) {
 	m.cancel, m.party = cancel, p
 	go p.Run(ctx)
 	go s.leaseGuard().Run(ctx)
+	go s.forwarders().Resume()
 }
 
 // SetClusterMember makes this agent a cluster party, or stops it being one; see the RPC's contract in proto/agent.proto.

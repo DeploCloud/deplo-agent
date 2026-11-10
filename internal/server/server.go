@@ -125,6 +125,7 @@ var Capabilities = []string{
 	"cluster.host",
 	"cluster",
 	"cluster.images",
+	"cluster.forwarders",
 }
 
 // AgentVersion is the version this agent reports over Hello.
@@ -170,6 +171,11 @@ type Service struct {
 
 	leaseOnce sync.Once
 	lease     *leaseGuard
+
+	// Name forwarders (#200); fwdOps is their docker side, which tests replace.
+	fwdOnce sync.Once
+	fwd     *forwarders
+	fwdOps  forwardOps
 
 	heldMu sync.Mutex
 	held   map[string]bool

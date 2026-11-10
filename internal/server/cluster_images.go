@@ -132,8 +132,11 @@ func (s *Service) acceptMemberStream(from wire.Party, c net.Conn) {
 		return
 	}
 	_ = c.SetReadDeadline(time.Time{})
-	if verb == imageVerb {
+	switch verb {
+	case imageVerb:
 		s.receiveImage(c, arg)
+	case fwdVerb:
+		s.serveForward(from, c, arg)
 	}
 }
 

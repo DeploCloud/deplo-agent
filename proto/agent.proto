@@ -173,6 +173,13 @@ service Agent {
   // older ones. A member that already holds the ref answers without a transfer.
   rpc CopyClusterImage(CopyClusterImageRequest) returns (CopyClusterImageResponse);
 
+  // ---- CLUSTER NAME FORWARDERS (#200, Hello capability "cluster.forwarders") ----
+
+  // Hand this member the names it holds on its Environments' networks and the streams it accepts
+  // for its own workloads. The full set each time; one not listed is removed. Never sent to a
+  // member that is not in a cluster.
+  rpc SetClusterForwarders(SetClusterForwardersRequest) returns (SetClusterForwardersResponse);
+
   // ---- BACKUPS: dump/restore a database or project to/from a DESTINATION, plus the
   // affordances the control plane needs (connectivity check + object delete).
   // StoreTarget - a directory on THIS host's filesystem.
@@ -2421,4 +2428,52 @@ message CopyClusterImageResponse {
   int64 bytes = 2;
   // Releases the target removed to stay within keep.
   repeated string pruned = 3;
+}
+
+// ---- CLUSTER NAME FORWARDERS (#200) ----
+
+// A cluster member's certificate, by the server id the leader's placement names it with.
+message ClusterForwarderMember {
+  string server_id = 1;
+  // sha256 hex of the member's certificate DER.
+  string fingerprint = 2;
+}
+
+// A workload's public name, held on this member's network for the Environment. The forwarder
+// answers it and addresses the workload by id: the leader's placement says where it runs now.
+message ClusterHeldName {
+  // The Environment's network, deplo-env-<id>.
+  string network = 1;
+  // "app" | "database".
+  string kind = 2;
+  string workload_id = 3;
+  // The public name (db-<slug>, or the App's name).
+  string name = 4;
+  // The port the workload answers on.
+  uint32 port = 5;
+  // The container that answers under the internal alias, for when the workload runs on this member.
+  string origin = 6;
+}
+
+// A workload placed on THIS member that other members of its Environment may reach over the relay.
+message ClusterServedName {
+  string network = 1;
+  string kind = 2;
+  string workload_id = 3;
+  uint32 port = 4;
+  string origin = 5;
+  // Certificate fingerprints of the other members of the same Environment, and no one else.
+  repeated string source_fingerprints = 6;
+}
+
+message SetClusterForwardersRequest {
+  string cluster_id = 1;
+  repeated ClusterForwarderMember members = 2;
+  repeated ClusterHeldName hold = 3;
+  repeated ClusterServedName serve = 4;
+}
+
+message SetClusterForwardersResponse {
+  int32 held = 1;
+  int32 served = 2;
 }
