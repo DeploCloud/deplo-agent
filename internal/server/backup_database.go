@@ -20,12 +20,19 @@ func execWithSecretEnv(pw, name string, flags ...string) (argv []string, env []s
 	return a, env
 }
 
+// A replica set dumps with its oplog (one point in time); a standalone, which a database not yet
+// converted still is, keeps the per-database dump. Restore replays an oplog if the archive has one.
 func mongoShell(tool string, withPassword bool) string {
-	script := "exec " + tool + ` ${1:+--db="$1"} ${2:+-u "$2" --authenticationDatabase=admin}`
+	auth := ` ${2:+-u "$2" --authenticationDatabase=admin}`
 	if withPassword {
-		script += ` -p "$MONGO_PW"`
+		auth += ` -p "$MONGO_PW"`
 	}
-	return script
+	if tool == "mongorestore --archive --drop" {
+		return "exec " + tool + ` --oplogReplay --nsExclude='admin.*' --nsExclude='config.*'` + auth
+	}
+	probe := "mongosh --quiet" + auth + ` --eval 'quit(db.hello().setName?0:3)' >/dev/null 2>&1`
+	return "if " + probe + "; then exec " + tool + " --oplog" + auth + "; fi; " +
+		"exec " + tool + ` ${1:+--db="$1"}` + auth
 }
 
 func mysqlClient(dbType, kind string) string {
