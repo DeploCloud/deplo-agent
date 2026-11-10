@@ -122,6 +122,7 @@ var Capabilities = []string{
 	"agent-link",
 	"screenshot",
 	"health.restart",
+	"cluster.host",
 }
 
 // AgentVersion is the version this agent reports over Hello.
@@ -156,6 +157,9 @@ type Service struct {
 	stackLocks   map[string]*stackLock
 
 	inventoryMu sync.Mutex
+
+	clusterOnce sync.Once
+	cluster     *clusterHost
 
 	heldMu sync.Mutex
 	held   map[string]bool

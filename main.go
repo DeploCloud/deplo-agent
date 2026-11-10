@@ -106,6 +106,7 @@ func main() {
 	svc := server.New(*stackDir, *buildTmpDir, *dataDir, *dataBase)
 	svc.SetAgentDir(*agentDir)
 	svc.StartRestartWatch(context.Background())
+	svc.StartCluster()
 	if certMgr != nil {
 		svc.EnableCertRenewal(certMgr)
 	}
