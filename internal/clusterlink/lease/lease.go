@@ -53,7 +53,28 @@ type Order struct {
 	// Return asks a member that was presumed dead what it removed; sent until it answers with Returned.
 	Return bool `json:"return,omitempty"`
 	// Keep says, to a member whose work moved, where to save what it still holds of each before it removes it.
+	// It goes on after the return for what the member could not save, until the member says it keeps nothing.
 	Keep []Keep `json:"keep,omitempty"`
+	// Stores is, to the member whose disk a destination is on, the archives other members may send it.
+	Stores []Store `json:"stores,omitempty"`
+}
+
+// Store is one archive another member of the cluster may send this one, to keep in its own backup store.
+type Store struct {
+	// From is the sender's certificate.
+	From      string `json:"from"`
+	Root      string `json:"root,omitempty"`
+	ObjectKey string `json:"objectKey"`
+}
+
+// LeftName ends the name of what a member had left of a workload: the failover's time and the member, so a
+// second try writes over the first.
+func LeftName(failedOverAt time.Time, member string, encrypted bool) string {
+	name := "-" + failedOverAt.UTC().Format("20060102T150405Z") + "-" + member + ".tar.gz"
+	if encrypted {
+		name += ".age"
+	}
+	return name
 }
 
 // Returned is the stacks a member that came back stopped and removed, because they run elsewhere now.
@@ -73,6 +94,11 @@ type Keep struct {
 	StoreMember string `json:"storeMember,omitempty"`
 	// Request is this agent's own backup request as JSON; empty is a workload the leader holds no destination for.
 	Request json.RawMessage `json:"request,omitempty"`
+	// StoreFingerprint is StoreMember's certificate, set when it is a member of this cluster: the archive is
+	// sent to it over the relay.
+	StoreFingerprint string `json:"storeFingerprint,omitempty"`
+	// FailedOverAt is when the workload moved away, which names the archive.
+	FailedOverAt string `json:"failedOverAt,omitempty"`
 }
 
 // Saved is one volume archive a returning member wrote, as its backup result reported it.
@@ -165,6 +191,15 @@ type Reply struct {
 	Epoch    uint64 `json:"epoch,omitempty"`
 	// Returned answers an order's Return once this member is done removing what moved away.
 	Returned *Returned `json:"returned,omitempty"`
+	// Later answers a Keep sent after the return, once this member keeps nothing of a stack any more.
+	Later *Later `json:"later,omitempty"`
+}
+
+// Later is what became of data a member kept past its return.
+type Later struct {
+	// Saved is what a later try wrote as a backup; Gone is every stack it keeps nothing of now, saved or not.
+	Saved []Saved  `json:"saved,omitempty"`
+	Gone  []string `json:"gone"`
 }
 
 // ReadOrder reads one order line.
