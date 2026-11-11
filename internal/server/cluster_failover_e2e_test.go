@@ -288,6 +288,8 @@ func TestE2E_aMembersDeathMovesItsDatabaseAndAppWithNoControlPlaneInTheLoop(t *t
 	m := a.clusterMember()
 	m.mu.Lock()
 	m.cancel()
+	// Gone for good, as after a power cut: coming back dials the relays afresh.
+	m.cancel, m.party = nil, nil
 	m.mu.Unlock()
 	died := time.Now()
 
