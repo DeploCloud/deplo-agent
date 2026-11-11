@@ -11,8 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"go.yaml.in/yaml/v3"
-
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/clusterlink/lease"
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
@@ -321,14 +319,8 @@ func (s *Service) trimReplicas(ctx context.Context, slug string, n int) (bool, e
 	if err != nil {
 		return false, nil
 	}
-	var doc struct {
-		Services map[string]struct {
-			Deploy struct {
-				Replicas *int `yaml:"replicas"`
-			} `yaml:"deploy"`
-		} `yaml:"services"`
-	}
-	if yaml.Unmarshal(raw, &doc) != nil {
+	declared := stackReplicas(string(raw))
+	if declared == nil {
 		return false, nil
 	}
 	defer s.lockStack(slug)()
@@ -347,7 +339,10 @@ func (s *Service) trimReplicas(ctx context.Context, slug string, n int) (bool, e
 	by := map[string][]copyOf{}
 	for _, line := range splitLines(res.Stdout) {
 		f := strings.Fields(line)
-		if len(f) != 3 || doc.Services[f[1]].Deploy.Replicas == nil {
+		if len(f) != 3 {
+			continue
+		}
+		if _, ok := declared[f[1]]; !ok {
 			continue
 		}
 		num, _ := strconv.Atoi(f[2])
