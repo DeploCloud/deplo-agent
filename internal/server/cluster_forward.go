@@ -26,8 +26,9 @@ import (
 // one, and carries each connection to it over the relay. The control plane renders the table; this only runs it.
 // Stream, member to member: "FWD <network> <kind>:<id>", answered OK or ERR, then raw bytes.
 const (
-	fwdVerb       = "FWD"
-	maxFwdEntries = 512
+	fwdVerb = "FWD"
+	// Every member of an Environment is handed an entry for each of its workloads, held or served.
+	maxFwdEntries = 1024
 )
 
 var (
