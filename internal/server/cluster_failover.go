@@ -7,9 +7,14 @@ import (
 	"os"
 	"time"
 
+	"google.golang.org/protobuf/encoding/protojson"
+
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/clusterlink/lease"
 )
+
+// bundleJSON reads a message a newer control plane wrote: a field this agent does not know is skipped.
+var bundleJSON = protojson.UnmarshalOptions{DiscardUnknown: true}
 
 // runFailoverDeploy runs one deploy request to its result; a var so a test can answer without Docker.
 var runFailoverDeploy = func(s *Service, ctx context.Context, req *pb.DeployRequest, e *emitter) {
@@ -33,6 +38,25 @@ func (s *Service) startFromBundle(ctx context.Context, st *lease.Start) error {
 		Env:           st.Env,
 		Network:       st.Network,
 		ComposeUpArgs: st.ComposeUpArgs,
+		// ponytail: carried only; the deploy holds these services back once ticket #199's start-after-ready lands.
+		StartAfterReady:  st.StartAfterReady,
+		FilesBindSources: st.FilesBindSources,
+	}
+	for _, m := range st.Mounts {
+		req.Mounts = append(req.Mounts, &pb.MountFile{Path: m.Path, Content: m.Content})
+	}
+	// Both arrive as the deploy's own messages, so a moved App is checked and restarted exactly as before.
+	if len(st.Ready) > 0 {
+		req.Ready = &pb.ReadyCheck{}
+		if err := bundleJSON.Unmarshal(st.Ready, req.Ready); err != nil {
+			return fmt.Errorf("the bundle's ready check is unreadable: %w", err)
+		}
+	}
+	if len(st.RestartRule) > 0 {
+		req.RestartRule = &pb.RestartRule{}
+		if err := bundleJSON.Unmarshal(st.RestartRule, req.RestartRule); err != nil {
+			return fmt.Errorf("the bundle's restart rule is unreadable: %w", err)
+		}
 	}
 	for _, a := range st.RegistryAuth {
 		req.RegistryAuth = append(req.RegistryAuth, &pb.RegistryAuth{Host: a.Host, Username: a.Username, Password: a.Password})

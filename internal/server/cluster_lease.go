@@ -167,7 +167,9 @@ func (g *leaseGuard) startWorkload(c net.Conn, o lease.Order) lease.Reply {
 		return lease.Reply{Error: "this stack is not placed on this member"}
 	}
 	_ = c.SetDeadline(time.Now().Add(lease.StartTimeout + time.Minute))
-	if err := g.start(context.Background(), o.Start); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), lease.StartTimeout)
+	defer cancel()
+	if err := g.start(ctx, o.Start); err != nil {
 		return lease.Reply{Error: err.Error()}
 	}
 	return lease.Reply{OK: true, Started: true, Epoch: o.Epoch}

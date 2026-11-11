@@ -130,3 +130,82 @@ func TestFailover_helloNamesTheCapability(t *testing.T) {
 		t.Fatal("Hello does not name cluster.failover")
 	}
 }
+
+func TestFailover_aMovedAppKeepsItsReadyCheckRestartRuleFilesAndLateServices(t *testing.T) {
+	var got *pb.DeployRequest
+	old := runFailoverDeploy
+	defer func() { runFailoverDeploy = old }()
+	runFailoverDeploy = func(_ *Service, _ context.Context, req *pb.DeployRequest, e *emitter) {
+		got = req
+		e.result(true, "", "")
+	}
+	s := &Service{}
+	f := newGuard(t)
+	f.g.start = s.startFromBundle
+	o := startOrder(2)
+	// The control plane writes both as the deploy's own messages in JSON; a field this agent does not know is skipped.
+	o.Start.Ready = json.RawMessage(`{"port":3000,"portRequired":true,"service":"web","later":1}`)
+	o.Start.RestartRule = json.RawMessage(`{"probe":"PROBE_HTTP","port":3000,"path":"/health","intervalS":10,"timeoutS":5,"retries":3,"startPeriodS":30,"service":"web"}`)
+	o.Start.StartAfterReady = []string{"connector"}
+	o.Start.Mounts = []lease.MountFile{{Path: "config/app.toml", Content: "a = 1"}}
+	o.Start.FilesBindSources = []string{"data"}
+	if r := serve(t, f.g, o); !r.Started {
+		t.Fatalf("reply %+v", r)
+	}
+	if rc := got.GetReady(); rc.GetPort() != 3000 || !rc.GetPortRequired() || rc.GetService() != "web" {
+		t.Fatalf("ready check %+v", rc)
+	}
+	rr := got.GetRestartRule()
+	if rr.GetProbe() != pb.RestartRule_PROBE_HTTP || rr.GetPort() != 3000 || rr.GetPath() != "/health" || rr.GetIntervalS() != 10 ||
+		rr.GetTimeoutS() != 5 || rr.GetRetries() != 3 || rr.GetStartPeriodS() != 30 || rr.GetService() != "web" {
+		t.Fatalf("restart rule %+v", rr)
+	}
+	if l := got.GetStartAfterReady(); len(l) != 1 || l[0] != "connector" {
+		t.Fatalf("late services %v", l)
+	}
+	if m := got.GetMounts(); len(m) != 1 || m[0].GetPath() != "config/app.toml" || m[0].GetContent() != "a = 1" {
+		t.Fatalf("mounts %+v", m)
+	}
+	if b := got.GetFilesBindSources(); len(b) != 1 || b[0] != "data" {
+		t.Fatalf("files binds %v", b)
+	}
+}
+
+func TestFailover_aBundleWithNoReadyCheckOrRestartRuleSendsNone(t *testing.T) {
+	var got *pb.DeployRequest
+	old := runFailoverDeploy
+	defer func() { runFailoverDeploy = old }()
+	runFailoverDeploy = func(_ *Service, _ context.Context, req *pb.DeployRequest, e *emitter) {
+		got = req
+		e.result(true, "", "")
+	}
+	f := newGuard(t)
+	f.g.start = (&Service{}).startFromBundle
+	if r := serve(t, f.g, startOrder(2)); !r.Started {
+		t.Fatalf("reply %+v", r)
+	}
+	if got.GetReady() != nil || got.GetRestartRule() != nil || len(got.GetStartAfterReady()) != 0 {
+		t.Fatalf("deploy request %+v", got)
+	}
+	bad := startOrder(3)
+	bad.Start.RestartRule = json.RawMessage(`{"probe":7`)
+	if r := serve(t, f.g, bad); r.Started || r.Error == "" {
+		t.Fatalf("an unreadable restart rule was started: %+v", r)
+	}
+}
+
+func TestFailover_aStartIsGivenUpAfterTheStartTimeout(t *testing.T) {
+	var left time.Duration
+	f := newGuard(t)
+	f.g.start = func(ctx context.Context, _ *lease.Start) error {
+		d, ok := ctx.Deadline()
+		if ok {
+			left = time.Until(d)
+		}
+		return nil
+	}
+	serve(t, f.g, startOrder(1))
+	if left <= 0 || left > lease.StartTimeout {
+		t.Fatalf("the start ran with %s left, want at most %s", left, lease.StartTimeout)
+	}
+}

@@ -737,6 +737,10 @@ message DeployRequest {
   // own, so it works while the control plane is down. Unset => none, and a stored rule is removed.
   // Advertised as `health.restart`.
   RestartRule restart_rule = 29;
+
+  // Compose services to start only once the deploy is ready: the stack comes up without them, and a
+  // deploy that is not ready never starts them. Advertised as `deploy.start-after-ready`.
+  repeated string start_after_ready = 30;
 }
 
 // How the agent decides an app has stopped answering, and when it restarts it.
