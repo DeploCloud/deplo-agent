@@ -52,17 +52,25 @@ func (s *Service) writeProjectArchive(ctx context.Context, p *pb.ProjectDescript
 		e.holding = true
 		e.log("info", "Paused the app while its data is copied")
 	}
+	// Also on a panic: an App left paused stays so until the agent restarts.
+	ended := false
+	end := func() {
+		if !ended {
+			ended = true
+			s.endHold(hold, e)
+		}
+	}
+	defer end()
 	for _, vol := range p.GetVolumeNames() {
 		if vol == "" {
 			continue
 		}
 		e.log("info", "Archiving volume "+vol)
 		if err := s.archiveVolume(ctx, vol, tw, e); err != nil {
-			s.endHold(hold, e)
 			return fmt.Errorf("archive volume %q: %w", vol, err)
 		}
 	}
-	s.endHold(hold, e)
+	end()
 
 	if p.GetIncludeFiles() {
 		root := s.filesRoot(p.GetSlug())
