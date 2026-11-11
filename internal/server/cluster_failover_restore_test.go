@@ -157,11 +157,10 @@ func TestFailover_nothingStartsWhenTheRestoreCannotBeReadOrTheStackFails(t *test
 	if r := serve(t, f.g, bad); r.Started || r.Error == "" {
 		t.Fatalf("an unreadable restore was started: %+v", r)
 	}
-	// ponytail: an App's volumes (ticket #204) are not restored here yet, so such a start is refused, never run empty.
-	volumes := dbStartOrder(3)
-	volumes.Start.Restore.Request = json.RawMessage(`{"kind":"BACKUP_KIND_PROJECT"}`)
-	if r := serve(t, f.g, volumes); r.Started || r.Error == "" {
-		t.Fatalf("a volume restore was accepted: %+v", r)
+	unknown := dbStartOrder(3)
+	unknown.Start.Restore.Request = json.RawMessage(`{"kind":"BACKUP_KIND_UNSPECIFIED"}`)
+	if r := serve(t, f.g, unknown); r.Started || r.Error == "" {
+		t.Fatalf("a restore of no known kind was accepted: %+v", r)
 	}
 	if len(st.steps) != 0 {
 		t.Fatalf("something ran: %v", st.steps)
@@ -196,5 +195,67 @@ func TestFailover_aStartWithARestoreMayTakeAsLongAsABackupStep(t *testing.T) {
 	serve(t, f.g, dbStartOrder(1))
 	if left <= lease.StartTimeout || left > lease.RestoreTimeout {
 		t.Fatalf("the restore ran with %s left, want more than %s and at most %s", left, lease.StartTimeout, lease.RestoreTimeout)
+	}
+}
+
+const volumeRestoreJSON = `{"kind":"BACKUP_KIND_PROJECT",
+	"s3":{"endpoint":"s3.example.com","bucket":"backups","accessKey":"AKIA","secretKey":"s3cr3t","objectKey":"t1/prj_1/brun_2.tar.gz.age"},
+	"project":{"slug":"web","volumeNames":["deplo-web-uploads"],"includeFiles":true,"network":"deplo-team-t1"},
+	"ageIdentity":"AGE-SECRET-KEY-1TEST","expectedSha256":"abc123"}`
+
+func volumeStartOrder(epoch uint64) lease.Order {
+	o := startOrder(epoch)
+	o.Placement[0].SingleWriter = true
+	o.Start.Restore = &lease.Restore{BackupID: "brun_2", TakenAt: "2026-03-01T14:15:00Z", Request: json.RawMessage(volumeRestoreJSON)}
+	return o
+}
+
+func TestFailover_anAppsVolumesAreRestoredBeforeItsStackStarts(t *testing.T) {
+	st := stubFailover(t)
+	f := newGuard(t)
+	f.g.start = (&Service{}).startFromBundle
+	r := serve(t, f.g, volumeStartOrder(2))
+	if !r.OK || !r.Started || !r.Restored {
+		t.Fatalf("reply %+v", r)
+	}
+	// The App must never run on an empty Volume, so its data is there first.
+	if got := strings.Join(st.steps, ","); got != "restore,deploy" {
+		t.Fatalf("steps %q", got)
+	}
+	req := st.restores[0]
+	if req.GetKind() != pb.BackupKind_BACKUP_KIND_PROJECT || req.GetProject().GetSlug() != "web" ||
+		strings.Join(req.GetProject().GetVolumeNames(), ",") != "deplo-web-uploads" || !req.GetProject().GetIncludeFiles() {
+		t.Fatalf("restore request %+v", req)
+	}
+	if d := st.deploys[0]; d.GetSlug() != "web" || d.GetImageRef() != "deplo/web:abc" {
+		t.Fatalf("deploy request %+v", d)
+	}
+}
+
+func TestFailover_anAppWhoseVolumeRestoreFailsNeverStarts(t *testing.T) {
+	st := stubFailover(t)
+	st.restoreErr = []error{errors.New("the backup does not match what Deplo wrote")}
+	f := newGuard(t)
+	f.g.start = (&Service{}).startFromBundle
+	r := serve(t, f.g, volumeStartOrder(2))
+	if r.Started || r.Restored || !strings.Contains(r.Error, "does not match") {
+		t.Fatalf("reply %+v", r)
+	}
+	if got := strings.Join(st.steps, ","); got != "restore" {
+		t.Fatalf("steps %q: nothing starts on a Volume that was not restored", got)
+	}
+}
+
+func TestFailover_anAppThatDoesNotComeUpOnItsRestoredVolumeIsStopped(t *testing.T) {
+	st := stubFailover(t)
+	st.deployErr = "the stack did not become ready"
+	f := newGuard(t)
+	f.g.start = (&Service{}).startFromBundle
+	if r := serve(t, f.g, volumeStartOrder(2)); r.Started || r.Error == "" {
+		t.Fatalf("reply %+v", r)
+	}
+	// The leader tries another member next: no half-started copy stays behind on this one.
+	if got := strings.Join(st.steps, ","); got != "restore,deploy,stop web" {
+		t.Fatalf("steps %q", got)
 	}
 }

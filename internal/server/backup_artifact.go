@@ -135,6 +135,8 @@ type artifactSource struct {
 	stream          io.Reader
 	spooled         string
 	label           string
+	// dataOnly restores an App's Volumes and Files and leaves its stack alone: a failover starts it from its bundle.
+	dataOnly bool
 }
 
 func sourceFromRestore(s *Service, req *pb.RestoreRequest) (*artifactSource, error) {
