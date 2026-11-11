@@ -23,6 +23,8 @@ const (
 	restartTick      = 5 * time.Second
 	restartEventsCap = 200
 	restartRuleExt   = ".restart.json"
+	// Not a rule: the name must not end in restartRuleExt.
+	restartEventsFile = "restart-events.jsonl"
 )
 
 // restartWatcher probes every app that carries a restart rule, with or without the control plane.
@@ -88,6 +90,15 @@ func (w *restartWatcher) load() {
 	matches, _ := filepath.Glob(filepath.Join(w.dir, "*"+restartRuleExt))
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	defer w.keepEvents()
+	if raw, err := os.ReadFile(w.eventsPath()); err == nil {
+		for _, line := range strings.Split(string(raw), "\n") {
+			ev := &pb.RestartEvent{}
+			if line != "" && protojson.Unmarshal([]byte(line), ev) == nil {
+				w.events = append(w.events, ev)
+			}
+		}
+	}
 	for _, m := range matches {
 		slug := strings.TrimSuffix(filepath.Base(m), restartRuleExt)
 		raw, err := os.ReadFile(m)
@@ -171,6 +182,26 @@ func (w *restartWatcher) emit(ev *pb.RestartEvent) {
 	if len(w.events) > restartEventsCap {
 		w.events = w.events[len(w.events)-restartEventsCap:]
 	}
+	w.keepEvents()
+}
+
+func (w *restartWatcher) eventsPath() string { return filepath.Join(w.dir, restartEventsFile) }
+
+// keepEvents writes what no frame has taken yet, so it outlives this process. It needs w.mu held.
+func (w *restartWatcher) keepEvents() {
+	if len(w.events) == 0 {
+		_ = os.Remove(w.eventsPath())
+		return
+	}
+	var buf []byte
+	for _, ev := range w.events {
+		if raw, err := protojson.Marshal(ev); err == nil {
+			buf = append(append(buf, raw...), '\n')
+		}
+	}
+	if err := writeFileAtomic(w.eventsPath(), buf, 0o600); err != nil {
+		log.Printf("deplo-agent: could not keep %d restart events for Deplo: %v", len(w.events), err)
+	}
 }
 
 // drain hands the buffered events to a metrics frame; give puts them back when the frame did not go out.
@@ -179,6 +210,9 @@ func (w *restartWatcher) drain() []*pb.RestartEvent {
 	defer w.mu.Unlock()
 	out := w.events
 	w.events = nil
+	if len(out) > 0 {
+		w.keepEvents()
+	}
 	return out
 }
 
@@ -192,6 +226,7 @@ func (w *restartWatcher) give(evs []*pb.RestartEvent) {
 	if len(w.events) > restartEventsCap {
 		w.events = w.events[len(w.events)-restartEventsCap:]
 	}
+	w.keepEvents()
 }
 
 // answerFor is what the last probe said about one container: "starting", "answering" or

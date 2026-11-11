@@ -375,3 +375,25 @@ func TestUsableRule(t *testing.T) {
 		t.Fatal("a full http rule is usable")
 	}
 }
+
+// Deplo may be away for a night: what the agent restarted meanwhile must outlive a restart of the agent itself.
+func TestWatcherKeepsUnsentEventsAcrossARestartOfTheAgent(t *testing.T) {
+	h := &fakeHost{now: rt0.Add(10 * time.Minute), containers: []readySample{web(rt0)}}
+	w := newWatcherOn(t, h)
+	w.release("web", httpRule(), true)
+	runTicks(w, h, 3)
+	again := newWatcherOn(t, h)
+	again.dir = w.dir
+	again.load()
+	evs := again.drain()
+	if len(evs) != 2 || evs[0].Kind != pb.RestartEvent_KIND_RESTARTED || evs[0].Slug != "web" || evs[1].Kind != pb.RestartEvent_KIND_RESUMED {
+		t.Fatalf("events after the agent started again = %v", evs)
+	}
+	// What a frame took is not told twice.
+	third := newWatcherOn(t, h)
+	third.dir = w.dir
+	third.load()
+	if evs := third.drain(); len(evs) != 1 || evs[0].Kind != pb.RestartEvent_KIND_RESUMED {
+		t.Fatalf("events a frame already took came back: %v", evs)
+	}
+}
