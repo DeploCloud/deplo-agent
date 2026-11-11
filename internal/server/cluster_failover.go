@@ -29,16 +29,15 @@ func (s *Service) startFromBundle(ctx context.Context, st *lease.Start) error {
 		return errors.New("the bundle holds no stack to start")
 	}
 	req := &pb.DeployRequest{
-		DeployId:      fmt.Sprintf("failover-%s-%d", st.DeploymentID, time.Now().Unix()),
-		Slug:          st.Slug,
-		ProjectId:     st.ProjectID,
-		ImageRef:      st.ImageRef,
-		SourceKind:    pb.SourceKind_SOURCE_KIND_IMAGE,
-		ComposeYaml:   st.ComposeYAML,
-		Env:           st.Env,
-		Network:       st.Network,
-		ComposeUpArgs: st.ComposeUpArgs,
-		// ponytail: carried only; the deploy holds these services back once ticket #199's start-after-ready lands.
+		DeployId:         fmt.Sprintf("failover-%s-%d", st.DeploymentID, time.Now().Unix()),
+		Slug:             st.Slug,
+		ProjectId:        st.ProjectID,
+		ImageRef:         st.ImageRef,
+		SourceKind:       pb.SourceKind_SOURCE_KIND_IMAGE,
+		ComposeYaml:      st.ComposeYAML,
+		Env:              st.Env,
+		Network:          st.Network,
+		ComposeUpArgs:    st.ComposeUpArgs,
 		StartAfterReady:  st.StartAfterReady,
 		FilesBindSources: st.FilesBindSources,
 	}

@@ -35,6 +35,7 @@ var Capabilities = []string{
 	"deploy.buildenv",
 	"deploy.nocache",
 	"deploy.force-recreate",
+	"deploy.start-after-ready",
 	"deploy.compose-args",
 	"deploy.compose.projectdir",
 	"build.skip_steps",
@@ -463,7 +464,14 @@ func (s *Service) StartStack(ctx context.Context, ref *pb.StackRef) (*pb.StackRe
 	if err := s.stripSourceLinks(slug); err != nil {
 		return &pb.StackResult{Ok: false, Error: err.Error()}, nil
 	}
-	res, err := dockercli.Run(ctx, time.Minute, s.composeCtl(slug, "start")...)
+	var res dockercli.Result
+	var err error
+	stack, _ := os.ReadFile(s.stackPath(slug))
+	if late := lateServices(string(stack), nil); len(late) > 0 {
+		res, err = s.startHolding(ctx, slug, late)
+	} else {
+		res, err = dockercli.Run(ctx, time.Minute, s.composeCtl(slug, "start")...)
+	}
 	if err == nil && res.Code == 0 {
 		return &pb.StackResult{Ok: true}, nil
 	}
@@ -623,9 +631,14 @@ func (s *Service) Reroute(ctx context.Context, req *pb.RerouteRequest) (*pb.Stac
 	if err := s.stripSourceLinks(slug); err != nil {
 		return &pb.StackResult{Ok: false, Error: err.Error()}, nil
 	}
-	composeArgs := composeUpArgs(name, stackFile, envFile, projectDir, false, req.GetComposeUpArgs())
+	held := heldBack(ctx, name, lateServices(req.GetComposeYaml(), nil))
+	composeArgs := withoutLate(composeUpArgs(name, stackFile, envFile, projectDir, false, req.GetComposeUpArgs()), held)
 
 	res, err := dockercli.Run(ctx, 120*time.Second, composeArgs...)
+	if err == nil && res.Code == 0 && len(held) > 0 {
+		// ponytail: a reroute carries no ready check, so "ready" here is the rest of the stack being up.
+		res, err = dockercli.Run(ctx, 120*time.Second, lateUp(composeBaseArgs(name, stackFile, envFile, projectDir), held)...)
+	}
 	if err != nil {
 		return &pb.StackResult{Ok: false, Error: err.Error()}, nil
 	}
