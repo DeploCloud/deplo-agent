@@ -347,3 +347,62 @@ func TestClusterCall_refusesAnUnsafeMethodName(t *testing.T) {
 		}
 	}
 }
+
+// A leader that takes a moment to stop, as one that extends every lease first does; the relay stops at once.
+const slowLeader = "#!/bin/sh\nd=\"$(dirname \"$0\")\"\nrole=\"${1:-leader}\"\n" +
+	"trap 'kill $!; [ \"$role\" = leader ] && sleep 0.3; echo \"$role\" >> \"$d/stops\"; exit 0' TERM\n" +
+	"echo \"$@\" >> \"$d/starts\"\nsleep 300 &\nwait\n"
+
+// The leader sends its last orders through the relay beside it, so the relay outlives it on every stop.
+func TestInstallCluster_updateStopsTheLeaderBeforeTheRelay(t *testing.T) {
+	s, dir := clusterHostFor(t)
+	stubDownload(t, []byte(slowLeader), nil)
+	if _, err := s.InstallCluster(context.Background(), installReq("0.1.0", slowLeader, true)); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "both to start", func() bool { return startsOf(dir) == 2 })
+	newer := slowLeader + "# 0.2.0\n"
+	stubDownload(t, []byte(newer), nil)
+	if _, err := s.InstallCluster(context.Background(), installReq("0.2.0", newer, true)); err != nil {
+		t.Fatal(err)
+	}
+	if got := fileLines(filepath.Join(dir, "stops")); !slices.Equal(got, []string{"leader", "relay"}) {
+		t.Fatalf("stopped in the order %q, want the leader first", got)
+	}
+}
+
+// An agent that re-execs for its own update finds both still running: the same order holds when it ends them.
+func TestStartCluster_endsALeftBehindLeaderBeforeItsRelay(t *testing.T) {
+	sh, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("no sh")
+	}
+	s, dir := clusterHostFor(t)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(dir, clusterBinaryName)
+	sh, _ = filepath.EvalSymlinks(sh)
+	raw, _ := os.ReadFile(sh)
+	if err := os.WriteFile(bin, raw, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := "trap 'kill $!; [ \"$0\" = leader ] && sleep 0.3; echo \"$0\" >> \"" + dir + "/stops\"; exit 0' TERM; echo up >> \"" + dir + "/up\"; sleep 300 & wait"
+	for _, role := range []string{"leader", "relay"} {
+		cmd := exec.Command(bin, "-c", script, role)
+		if err := cmd.Start(); err != nil {
+			t.Skipf("cannot run a copy of sh: %v", err)
+		}
+		// Nobody waits for it, as after a re-exec: it stays in the process table once it has ended.
+		t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
+		os.WriteFile(filepath.Join(dir, role+".pid"), []byte(strconv.Itoa(cmd.Process.Pid)), 0o600)
+	}
+	eventually(t, "both to run", func() bool { return len(fileLines(filepath.Join(dir, "up"))) == 2 })
+	os.WriteFile(filepath.Join(dir, "state.json"), []byte(`{"version":"0.1.0","relay":true}`), 0o600)
+
+	s.StartCluster()
+	eventually(t, "both to end", func() bool { return len(fileLines(filepath.Join(dir, "stops"))) == 2 })
+	if got := fileLines(filepath.Join(dir, "stops")); !slices.Equal(got, []string{"leader", "relay"}) {
+		t.Fatalf("ended in the order %q, want the leader first", got)
+	}
+}
