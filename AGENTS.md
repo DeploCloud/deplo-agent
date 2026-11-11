@@ -82,9 +82,13 @@ make vet         # go vet ./...
 make fmt-check   # gofmt + Prettier, what CI runs
 ```
 
-**`go test ./...` drives real Docker on this host** - it pulls images, creates volumes and
-containers, and the `TestE2E_*` tests stand up real databases. Do not run it casually on a machine
-that also serves production. For a change that cannot alter behaviour, the verification is:
+**`go test ./...` reaches no Docker daemon unless you ask.** `internal/server` aims every docker call
+of its tests at a socket that does not exist, so the `TestE2E_*` tests skip and a test that forgot its
+fake fails instead of touching a container. `DEPLO_AGENT_TEST_REAL_DOCKER=1` (CI sets it) turns the real
+daemon on: it pulls images, creates volumes and containers and stands up real databases. Never set it
+on a machine that also serves production. A new test that needs the daemon starts with
+`needsRealDocker(t)` and names what it creates `deplo-agent-test-*`, unique per run. For a change that
+cannot alter behaviour, the verification is:
 
 ```sh
 gofmt -l $(git ls-files '*.go')

@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -35,7 +36,7 @@ func archiveWith(t *testing.T, s *Service) (error, []string) {
 	}}
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
-	err := s.writeProjectArchive(context.Background(), &pb.ProjectDescriptor{Slug: "web", VolumeNames: []string{"deplo-web-data"}}, tw, e)
+	err := s.writeProjectArchive(context.Background(), &pb.ProjectDescriptor{Slug: "agent-test-web", VolumeNames: []string{"deplo-agent-test-web-data"}}, tw, e)
 	if e.held > 0 {
 		logs = append(logs, "held")
 	}
@@ -134,15 +135,16 @@ func TestHeldForBackup_whileHeld(t *testing.T) {
 
 // A writer that never stops must not be copied mid-write, and must be writing again afterwards.
 func TestE2E_VolumeBackupPausesAWritingApp(t *testing.T) {
+	needsRealDocker(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	if !dockercli.Available(ctx) {
 		t.Skip("docker not available")
 	}
 	svc := New(t.TempDir(), t.TempDir(), "/", t.TempDir())
-	vol, ctr := "agentlink-181-vol", "agentlink-181-writer"
-	_, _ = dockercli.Run(ctx, 10*time.Second, "rm", "-f", ctr)
-	_, _ = dockercli.Run(ctx, 10*time.Second, "volume", "rm", "-f", vol)
+	// Names no other run and nothing real can hold: nothing is removed before they are created.
+	tag := fmt.Sprintf("deplo-agent-test-hold-%d-%d", os.Getpid(), time.Now().UnixNano())
+	vol, ctr := tag+"-vol", tag+"-writer"
 	if res, err := dockercli.Run(ctx, 20*time.Second, "volume", "create", vol); err != nil || res.Code != 0 {
 		t.Skipf("cannot create volume (%v / %s)", err, res.Stderr)
 	}
@@ -157,7 +159,7 @@ func TestE2E_VolumeBackupPausesAWritingApp(t *testing.T) {
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
 	e := &bkEmitter{send: func(*pb.BackupEvent) error { return nil }}
-	if err := svc.writeProjectArchive(ctx, &pb.ProjectDescriptor{Slug: "agentlink-181", VolumeNames: []string{vol}}, tw, e); err != nil {
+	if err := svc.writeProjectArchive(ctx, &pb.ProjectDescriptor{Slug: tag, VolumeNames: []string{vol}}, tw, e); err != nil {
 		t.Fatalf("a held copy of a busy writer must succeed: %v", err)
 	}
 	if e.held <= 0 {

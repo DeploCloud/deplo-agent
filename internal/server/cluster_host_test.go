@@ -28,6 +28,10 @@ const fakeCluster = "#!/bin/sh\nd=\"$(dirname \"$0\")\"\necho \"$DEPLO_CLUSTER_S
 
 func clusterHostFor(t *testing.T) (*Service, string) {
 	t.Helper()
+	// A relay asks Docker for the bridge gateway: no test of this host ever asks the real one.
+	if !bridgeStubbed {
+		stubBridge(t, "")
+	}
 	agentDir, err := os.MkdirTemp("", "ag")
 	if err != nil {
 		t.Fatal(err)

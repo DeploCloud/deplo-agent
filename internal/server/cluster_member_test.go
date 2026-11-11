@@ -21,11 +21,14 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/link"
 )
 
+// bridgeStubbed says a test already answers for Docker's bridge.
+var bridgeStubbed bool
+
 func stubBridge(t *testing.T, gw string) {
 	t.Helper()
-	old := bridgeGateway
-	bridgeGateway = func(context.Context) string { return gw }
-	t.Cleanup(func() { bridgeGateway = old })
+	old, was := bridgeGateway, bridgeStubbed
+	bridgeGateway, bridgeStubbed = func(context.Context) string { return gw }, true
+	t.Cleanup(func() { bridgeGateway, bridgeStubbed = old, was })
 }
 
 func envOf(t *testing.T, dir, role string) map[string]string {
