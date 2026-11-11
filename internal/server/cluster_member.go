@@ -198,6 +198,11 @@ func (s *Service) StartClusterMember() {
 
 // startMember (re)starts the party for st; the caller holds m.mu.
 func (s *Service) startMember(m *clusterMember, st memberState) {
+	// Deplo pushes the same membership often: the connections stay unless the relays to dial changed.
+	if st.Member && m.party != nil && slices.Equal(m.st.Relays, st.Relays) {
+		m.st = st
+		return
+	}
 	if m.cancel != nil {
 		m.cancel()
 		m.cancel, m.party = nil, nil

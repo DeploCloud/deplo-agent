@@ -131,3 +131,51 @@ func TestSetClusterMember_refusesALeaderThatIsNotAFingerprint(t *testing.T) {
 		t.Fatalf("got %v, want InvalidArgument", err)
 	}
 }
+
+// Deplo pushes the roster on every join, certificate renewal and sweep. A push that changes no relay leaves the
+// member's connections alone: a stream that was open goes on.
+func TestSetClusterMember_aPushThatChangesNoRelayCutsNoStream(t *testing.T) {
+	stubBridge(t, "")
+	s, id, ca := memberService(t)
+	leaderID, next := ca.Leaf(t, "leader"), ca.Leaf(t, "the leader after a move")
+	me := wire.Party{Fingerprint: id.Fingerprint, Role: wire.RoleMember}
+	relay := testrelay.New(t, ca.Leaf(t, "relay"), me, wire.Party{Fingerprint: leaderID.Fingerprint, Role: wire.RoleLeader})
+	join := func(leaders ...string) {
+		t.Helper()
+		if _, err := s.SetClusterMember(context.Background(), &pb.SetClusterMemberRequest{Member: true, Relays: []string{relay.URL}, ClusterId: "clu_1", LeaderFingerprints: leaders}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	join(leaderID.Fingerprint)
+	p := clusterlink.New(clusterlink.Config{
+		Role:     wire.RoleLeader,
+		Identity: func() (*wire.Identity, error) { return leaderID, nil },
+		Relays:   func() []string { return []string{relay.URL} },
+		Accept:   func(_ wire.Party, c net.Conn) { c.Close() },
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go p.Run(ctx)
+	var c net.Conn
+	eventually(t, "the leader to reach the member", func() bool {
+		var err error
+		c, err = p.Dial(ctx, me)
+		return err == nil
+	})
+	defer c.Close()
+
+	join(leaderID.Fingerprint)
+	join(leaderID.Fingerprint, next.Fingerprint)
+
+	c.SetDeadline(time.Now().Add(3 * time.Second))
+	raw, _ := json.Marshal(orderFor(2))
+	c.Write(append(raw, '\n'))
+	var reply lease.Reply
+	if line, err := bufio.NewReader(c).ReadBytes('\n'); err != nil || json.Unmarshal(line, &reply) != nil || !reply.OK {
+		t.Fatalf("the stream opened before the pushes was cut: %v %+v", err, reply)
+	}
+	// The new leader's certificate counts all the same.
+	if _, leaders := s.leaderPins(); len(leaders) != 2 {
+		t.Fatalf("the member holds %d leaders after the push", len(leaders))
+	}
+}
