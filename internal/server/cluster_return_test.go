@@ -19,15 +19,37 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/clusterlink/wire"
 )
 
+// rebooted is the server itself starting again: the kernel hands out a new boot id.
+func rebooted(t *testing.T) {
+	t.Helper()
+	old := bootID
+	bootID = func() string { return old() + "-next" }
+	t.Cleanup(func() { bootID = old })
+}
+
 func TestReturn_anAgentThatStartsWithADeadLeaseStopsEverythingItRunsForTheCluster(t *testing.T) {
 	f := newGuard(t)
 	f.g.Renew(orderFor(3))
 	// The server was away five minutes; Docker's restart policy brought every container back before the agent.
 	f.clk.Add(5 * time.Minute)
+	rebooted(t)
 	f.reopen().Check(context.Background())
 	slices.Sort(f.fenced)
 	if got := strings.Join(f.fenced, ","); got != "db-main,files,web" {
 		t.Fatalf("stopped %q, want every stack this member ran for the cluster: a stateless App moved while it was away", got)
+	}
+}
+
+// Only the agent restarted (an update, a crash) while the leader was away: the server never stopped, so its
+// stateless Apps keep answering, and what must never run twice stops as it would have under a live agent.
+func TestReturn_anAgentThatOnlyRestartedStopsNoStatelessApp(t *testing.T) {
+	f := newGuard(t)
+	f.g.Renew(orderFor(3))
+	f.clk.Add(5 * time.Minute)
+	f.reopen().Check(context.Background())
+	slices.Sort(f.fenced)
+	if got := strings.Join(f.fenced, ","); got != "db-main,files" {
+		t.Fatalf("stopped %q, want only the single-writer workloads", got)
 	}
 }
 
@@ -64,6 +86,9 @@ func (f *returnFixture) wire() {
 
 // restart is the server coming back: the agent starts again with the lease it had on disk.
 func (f *returnFixture) restart() {
+	old := bootID
+	bootID = func() string { return old() + "-next" }
+	defer func() { bootID = old }()
 	f.reopen()
 	f.wire()
 	f.g.Check(context.Background())

@@ -46,7 +46,10 @@ type clusterLease struct {
 	Keeping []lease.Kept `json:"keeping,omitempty"`
 	// Late is what such a try wrote, kept until the leader no longer names its stack.
 	Late []lease.Saved `json:"late,omitempty"`
-	// cold is a lease that was dead when this agent started: nothing of it runs until the leader speaks.
+	// Boot is the server's boot the lease was last renewed in: see cold.
+	Boot string `json:"boot,omitempty"`
+	// cold is a lease that was dead when this agent started after the server itself did: Docker brought every
+	// stack back, so nothing of it runs until the leader speaks. An agent that only restarted fences as usual.
 	cold bool
 	// since is when the return under way began, and asked whether the leader has said it moved this member's work.
 	since time.Time
@@ -118,10 +121,16 @@ func newLeaseGuard(file string, now func() time.Time, fence func(context.Context
 	// Docker's restart policy brought these stacks back before this agent; a dead lease stops them all again.
 	for _, c := range g.clusters {
 		if c != nil && c.ranOut(now()) {
-			c.cold, c.Fenced = true, false
+			c.cold, c.Fenced = c.Boot == "" || c.Boot != bootID(), false
 		}
 	}
 	return g
+}
+
+// bootID names this boot of the server; empty when the kernel does not say, which reads as another boot.
+var bootID = func() string {
+	raw, _ := os.ReadFile("/proc/sys/kernel/random/boot_id")
+	return strings.TrimSpace(string(raw))
 }
 
 // save writes the leases; the caller holds g.mu.
@@ -191,7 +200,7 @@ func (g *leaseGuard) Renew(o lease.Order) lease.Reply {
 		g.clusters[o.Cluster] = u
 	}
 	delete(g.clusters, unreadableLease)
-	next := &clusterLease{Epoch: o.Epoch, Member: o.Member, RenewedAt: g.now(), Placement: o.Placement, ExtraSeconds: min(max(o.ExtendSeconds, 0), int(lease.ExtendFor/time.Second))}
+	next := &clusterLease{Epoch: o.Epoch, Member: o.Member, RenewedAt: g.now(), Boot: bootID(), Placement: o.Placement, ExtraSeconds: min(max(o.ExtendSeconds, 0), int(lease.ExtendFor/time.Second))}
 	g.confirmStarts(o)
 	r := lease.Reply{OK: true, Epoch: o.Epoch}
 	g.comeBack(o, g.clusters[o.Cluster], next, &r)
