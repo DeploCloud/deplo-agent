@@ -28,7 +28,7 @@ func replicasDocker(t *testing.T, projects map[string]string, mounts map[string]
 	return dockerOnPath(t, `D=`+dir+`
 for last; do :; done
 case "$*" in
-"ps -q --filter label=com.docker.compose.project="*)
+"ps "*"label=com.docker.compose.project="*)
   for a; do case "$a" in label=com.docker.compose.project=*) p=${a#label=com.docker.compose.project=} ;; esac; done
   cat $D/ps/$p 2>/dev/null ;;
 "inspect -f {{.State.Running}} "*) echo false ;;

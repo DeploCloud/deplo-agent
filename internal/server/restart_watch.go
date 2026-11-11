@@ -239,7 +239,7 @@ func (w *restartWatcher) tickSlug(ctx context.Context, slug string) {
 	all := w.list(ctx, slug)
 	var targets []readySample
 	for _, c := range all {
-		if strings.HasSuffix(c.name, standInSuffix) {
+		if c.standIn() {
 			return
 		}
 		if c.status != "running" || (st.rule.GetService() != "" && c.service != st.rule.GetService()) {

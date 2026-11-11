@@ -253,7 +253,8 @@ func (s *Service) runDeployBody(ctx context.Context, req *pb.DeployRequest, cont
 	}
 	// The live container keeps serving until a copy of the new version is up beside it.
 	standIn := false
-	if !isCompose && req.GetStandInComposeYaml() != "" {
+	// A stack's stand-in is judged by the deploy's ready check, so one without it swaps in place.
+	if req.GetStandInComposeYaml() != "" && (!isCompose || req.GetReady() != nil) {
 		var failed *pb.DeployResult
 		if standIn, failed = s.startStandIn(ctx, req, name, started, commitSha, e); failed != nil {
 			e.finish(failed)

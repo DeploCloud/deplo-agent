@@ -20,6 +20,7 @@ const (
 // readySample is one inspect of a container the ready check watches.
 type readySample struct {
 	id, name, service string
+	project           string // the compose project, which names a deploy's stand-in
 	status            string
 	restarts          int
 	created           time.Time
