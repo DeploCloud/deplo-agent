@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -20,12 +21,19 @@ func execWithSecretEnv(pw, name string, flags ...string) (argv []string, env []s
 	return a, env
 }
 
+// A replica set dumps with its oplog (one point in time); a standalone, which a database not yet
+// converted still is, keeps the per-database dump. Restore replays an oplog if the archive has one.
 func mongoShell(tool string, withPassword bool) string {
-	script := "exec " + tool + ` ${1:+--db="$1"} ${2:+-u "$2" --authenticationDatabase=admin}`
+	auth := ` ${2:+-u "$2" --authenticationDatabase=admin}`
 	if withPassword {
-		script += ` -p "$MONGO_PW"`
+		auth += ` -p "$MONGO_PW"`
 	}
-	return script
+	if tool == "mongorestore --archive --drop" {
+		return "exec " + tool + ` --oplogReplay --nsExclude='admin.*' --nsExclude='config.*'` + auth
+	}
+	probe := "mongosh --quiet" + auth + ` --eval 'quit(db.hello().setName?0:3)' >/dev/null 2>&1`
+	return "if " + probe + "; then exec " + tool + " --oplog" + auth + "; fi; " +
+		"exec " + tool + ` ${1:+--db="$1"}` + auth
 }
 
 func mysqlClient(dbType, kind string) string {
@@ -41,6 +49,15 @@ func mysqlClient(dbType, kind string) string {
 	return "mysql"
 }
 
+// One consistent snapshot without blocking writers; the binlog position goes in as a comment when the
+// binary log is on (a database without one must still back up). Args: dump tool, client, user, database.
+const mysqlDumpScript = `tool=$1 cli=$2 u=$3 db=$4
+flags="--single-transaction --add-drop-table"
+if [ "$($cli -u "$u" -N -B -e 'SELECT @@log_bin' 2>/dev/null)" = 1 ]; then
+  if $tool --help 2>/dev/null | grep -q -e --source-data; then flags="$flags --source-data=2"; else flags="$flags --master-data=2"; fi
+fi
+exec $tool -u "$u" $flags --databases "$db"`
+
 func dumpArgv(d *pb.DatabaseDescriptor) (argv []string, env []string, err error) {
 	c, user, db := d.GetContainer(), d.GetUser(), d.GetDbName()
 	pw := d.GetPassword()
@@ -52,7 +69,7 @@ func dumpArgv(d *pb.DatabaseDescriptor) (argv []string, env []string, err error)
 		return a, env, nil
 	case "mysql", "mariadb":
 		a, env := execWithSecretEnv(pw, "MYSQL_PWD")
-		a = append(a, c, mysqlClient(dbType, "dump"), "-u", user, "--add-drop-table", "--databases", db)
+		a = append(a, c, "sh", "-c", mysqlDumpScript, "sh", mysqlClient(dbType, "dump"), mysqlClient(dbType, "shell"), user, db)
 		return a, env, nil
 	case "mongodb":
 		a, env := execWithSecretEnv(pw, "MONGO_PW")
@@ -166,6 +183,14 @@ func (s *Service) restoreDatabase(ctx context.Context, d *pb.DatabaseDescriptor,
 		return
 	}
 	defer closeSrc()
+	if isPostgres(d) {
+		head := bufio.NewReader(rd)
+		if isBaseBackup(head) {
+			s.restorePostgresBase(ctx, d, head, src, e)
+			return
+		}
+		rd = head
+	}
 
 	code, rerr := dockercli.PipeIn(ctx, backupStepTimeout, rd, env, argv...)
 	if rerr != nil {
@@ -214,6 +239,12 @@ func (s *Service) restoreRedis(ctx context.Context, d *pb.DatabaseDescriptor, sr
 		e.result(false, "redis CONFIG SET save: "+combineErr(err, res.Stderr))
 		return
 	}
+	// Append-only stays off from here: the next start must load the snapshot written below, not the
+	// append-only file, which still holds the data being replaced.
+	if res, err := dockercli.RunEnv(ctx, 15*time.Second, cliEnv, cli("CONFIG", "SET", "appendonly", "no")...); err != nil || res.Code != 0 {
+		e.result(false, "redis CONFIG SET appendonly: "+combineErr(err, res.Stderr))
+		return
+	}
 	if res, err := dockercli.RunEnv(ctx, 30*time.Second, cliEnv, cli("FLUSHALL")...); err != nil || res.Code != 0 {
 		e.result(false, "redis FLUSHALL: "+combineErr(err, res.Stderr))
 		return
@@ -224,6 +255,12 @@ func (s *Service) restoreRedis(ctx context.Context, d *pb.DatabaseDescriptor, sr
 		return
 	} else if code != 0 {
 		e.result(false, fmt.Sprintf("write RDB into container exited %d", code))
+		return
+	}
+
+	if code, rerr := dockercli.Run(ctx, 30*time.Second, "exec", c, "sh", "-c",
+		"rm -rf "+shellQuote(dir+"/appendonlydir")+" "+shellQuote(dir+"/appendonly.aof")); rerr != nil || code.Code != 0 {
+		e.result(false, "remove the append-only file: "+combineErr(rerr, code.Stderr))
 		return
 	}
 

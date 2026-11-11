@@ -23,6 +23,9 @@ const (
 type bkEmitter struct {
 	mu   sync.Mutex
 	send func(*pb.BackupEvent) error
+	held time.Duration
+	// holding is true while the app is paused, when a failed tar is a real failure.
+	holding bool
 }
 
 func (e *bkEmitter) emit(ev *pb.BackupEvent) error {
@@ -48,6 +51,7 @@ func (e *bkEmitter) emitResult(ok bool, errMsg, objectKey string, w artifactWrit
 			SizeBytes:          w.size,
 			Sha256:             w.digest,
 			DecryptedSizeBytes: w.decryptedSize,
+			HeldMs:             e.held.Milliseconds(),
 		},
 	}})
 }
@@ -93,10 +97,12 @@ func (s *Service) Backup(req *pb.BackupRequest, stream pb.Agent_BackupServer) er
 		e.result(false, statusMessage(err), "", 0)
 		return nil
 	}
-	switch req.GetKind() {
-	case pb.BackupKind_BACKUP_KIND_DATABASE:
+	switch {
+	case req.GetKind() == pb.BackupKind_BACKUP_KIND_DATABASE && req.GetArchive() != pb.PostgresArchive_POSTGRES_ARCHIVE_NONE:
+		s.backupPostgresArchive(ctx, req.GetArchive(), req.GetDatabase(), dest, e)
+	case req.GetKind() == pb.BackupKind_BACKUP_KIND_DATABASE:
 		s.backupDatabase(ctx, req.GetDatabase(), dest, e)
-	case pb.BackupKind_BACKUP_KIND_PROJECT:
+	case req.GetKind() == pb.BackupKind_BACKUP_KIND_PROJECT:
 		s.backupProject(ctx, req.GetProject(), dest, e)
 	default:
 		e.result(false, "unknown backup kind", "", 0)

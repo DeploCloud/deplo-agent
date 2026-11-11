@@ -23,79 +23,88 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Agent_Hello_FullMethodName               = "/deplo.agent.v1.Agent/Hello"
-	Agent_Metrics_FullMethodName             = "/deplo.agent.v1.Agent/Metrics"
-	Agent_ContainerStats_FullMethodName      = "/deplo.agent.v1.Agent/ContainerStats"
-	Agent_StreamMetrics_FullMethodName       = "/deplo.agent.v1.Agent/StreamMetrics"
-	Agent_Deploy_FullMethodName              = "/deplo.agent.v1.Agent/Deploy"
-	Agent_ReattachDeploy_FullMethodName      = "/deplo.agent.v1.Agent/ReattachDeploy"
-	Agent_DeployStream_FullMethodName        = "/deplo.agent.v1.Agent/DeployStream"
-	Agent_StopStack_FullMethodName           = "/deplo.agent.v1.Agent/StopStack"
-	Agent_StartStack_FullMethodName          = "/deplo.agent.v1.Agent/StartStack"
-	Agent_DestroyStack_FullMethodName        = "/deplo.agent.v1.Agent/DestroyStack"
-	Agent_Reroute_FullMethodName             = "/deplo.agent.v1.Agent/Reroute"
-	Agent_ExportVolume_FullMethodName        = "/deplo.agent.v1.Agent/ExportVolume"
-	Agent_ImportVolume_FullMethodName        = "/deplo.agent.v1.Agent/ImportVolume"
-	Agent_VolumeUsage_FullMethodName         = "/deplo.agent.v1.Agent/VolumeUsage"
-	Agent_ExportFiles_FullMethodName         = "/deplo.agent.v1.Agent/ExportFiles"
-	Agent_ImportFiles_FullMethodName         = "/deplo.agent.v1.Agent/ImportFiles"
-	Agent_ExportHostPath_FullMethodName      = "/deplo.agent.v1.Agent/ExportHostPath"
-	Agent_ImportHostPath_FullMethodName      = "/deplo.agent.v1.Agent/ImportHostPath"
-	Agent_ExportImage_FullMethodName         = "/deplo.agent.v1.Agent/ExportImage"
-	Agent_ImportImage_FullMethodName         = "/deplo.agent.v1.Agent/ImportImage"
-	Agent_ReadStack_FullMethodName           = "/deplo.agent.v1.Agent/ReadStack"
-	Agent_Inspect_FullMethodName             = "/deplo.agent.v1.Agent/Inspect"
-	Agent_CheckPort_FullMethodName           = "/deplo.agent.v1.Agent/CheckPort"
-	Agent_ProbeHttp_FullMethodName           = "/deplo.agent.v1.Agent/ProbeHttp"
-	Agent_DockerCleanup_FullMethodName       = "/deplo.agent.v1.Agent/DockerCleanup"
-	Agent_SelfUpdate_FullMethodName          = "/deplo.agent.v1.Agent/SelfUpdate"
-	Agent_SelfUninstall_FullMethodName       = "/deplo.agent.v1.Agent/SelfUninstall"
-	Agent_Backup_FullMethodName              = "/deplo.agent.v1.Agent/Backup"
-	Agent_Restore_FullMethodName             = "/deplo.agent.v1.Agent/Restore"
-	Agent_S3Check_FullMethodName             = "/deplo.agent.v1.Agent/S3Check"
-	Agent_S3Delete_FullMethodName            = "/deplo.agent.v1.Agent/S3Delete"
-	Agent_ReadStoreFile_FullMethodName       = "/deplo.agent.v1.Agent/ReadStoreFile"
-	Agent_WriteStoreFile_FullMethodName      = "/deplo.agent.v1.Agent/WriteStoreFile"
-	Agent_RestoreFrom_FullMethodName         = "/deplo.agent.v1.Agent/RestoreFrom"
-	Agent_FollowLogs_FullMethodName          = "/deplo.agent.v1.Agent/FollowLogs"
-	Agent_Attach_FullMethodName              = "/deplo.agent.v1.Agent/Attach"
-	Agent_ListInstances_FullMethodName       = "/deplo.agent.v1.Agent/ListInstances"
-	Agent_Exec_FullMethodName                = "/deplo.agent.v1.Agent/Exec"
-	Agent_ShellLabel_FullMethodName          = "/deplo.agent.v1.Agent/ShellLabel"
-	Agent_StartJob_FullMethodName            = "/deplo.agent.v1.Agent/StartJob"
-	Agent_PollJob_FullMethodName             = "/deplo.agent.v1.Agent/PollJob"
-	Agent_KillJob_FullMethodName             = "/deplo.agent.v1.Agent/KillJob"
-	Agent_ListFiles_FullMethodName           = "/deplo.agent.v1.Agent/ListFiles"
-	Agent_ReadFile_FullMethodName            = "/deplo.agent.v1.Agent/ReadFile"
-	Agent_WriteFile_FullMethodName           = "/deplo.agent.v1.Agent/WriteFile"
-	Agent_UploadFile_FullMethodName          = "/deplo.agent.v1.Agent/UploadFile"
-	Agent_CreateDir_FullMethodName           = "/deplo.agent.v1.Agent/CreateDir"
-	Agent_DeleteFile_FullMethodName          = "/deplo.agent.v1.Agent/DeleteFile"
-	Agent_RenameFile_FullMethodName          = "/deplo.agent.v1.Agent/RenameFile"
-	Agent_FilesExist_FullMethodName          = "/deplo.agent.v1.Agent/FilesExist"
-	Agent_StartDev_FullMethodName            = "/deplo.agent.v1.Agent/StartDev"
-	Agent_StopDev_FullMethodName             = "/deplo.agent.v1.Agent/StopDev"
-	Agent_ResetDevWorkspace_FullMethodName   = "/deplo.agent.v1.Agent/ResetDevWorkspace"
-	Agent_TeardownDev_FullMethodName         = "/deplo.agent.v1.Agent/TeardownDev"
-	Agent_EnsureGateway_FullMethodName       = "/deplo.agent.v1.Agent/EnsureGateway"
-	Agent_ProvisionSshUser_FullMethodName    = "/deplo.agent.v1.Agent/ProvisionSshUser"
-	Agent_DeprovisionSshUser_FullMethodName  = "/deplo.agent.v1.Agent/DeprovisionSshUser"
-	Agent_StartTunnel_FullMethodName         = "/deplo.agent.v1.Agent/StartTunnel"
-	Agent_GetTunnel_FullMethodName           = "/deplo.agent.v1.Agent/GetTunnel"
-	Agent_StopTunnel_FullMethodName          = "/deplo.agent.v1.Agent/StopTunnel"
-	Agent_RenewalCSR_FullMethodName          = "/deplo.agent.v1.Agent/RenewalCSR"
-	Agent_InstallRenewedCert_FullMethodName  = "/deplo.agent.v1.Agent/InstallRenewedCert"
-	Agent_HostInfo_FullMethodName            = "/deplo.agent.v1.Agent/HostInfo"
-	Agent_SetTimezone_FullMethodName         = "/deplo.agent.v1.Agent/SetTimezone"
-	Agent_TraefikConfig_FullMethodName       = "/deplo.agent.v1.Agent/TraefikConfig"
-	Agent_RestartControlPlane_FullMethodName = "/deplo.agent.v1.Agent/RestartControlPlane"
-	Agent_UpdateControlPlane_FullMethodName  = "/deplo.agent.v1.Agent/UpdateControlPlane"
-	Agent_ListWorkloadImages_FullMethodName  = "/deplo.agent.v1.Agent/ListWorkloadImages"
-	Agent_InventoryImage_FullMethodName      = "/deplo.agent.v1.Agent/InventoryImage"
-	Agent_InventoryCandidate_FullMethodName  = "/deplo.agent.v1.Agent/InventoryCandidate"
-	Agent_SetLinkAddresses_FullMethodName    = "/deplo.agent.v1.Agent/SetLinkAddresses"
-	Agent_StopListening_FullMethodName       = "/deplo.agent.v1.Agent/StopListening"
-	Agent_CaptureScreenshot_FullMethodName   = "/deplo.agent.v1.Agent/CaptureScreenshot"
+	Agent_Hello_FullMethodName                = "/deplo.agent.v1.Agent/Hello"
+	Agent_Metrics_FullMethodName              = "/deplo.agent.v1.Agent/Metrics"
+	Agent_ContainerStats_FullMethodName       = "/deplo.agent.v1.Agent/ContainerStats"
+	Agent_StreamMetrics_FullMethodName        = "/deplo.agent.v1.Agent/StreamMetrics"
+	Agent_Deploy_FullMethodName               = "/deplo.agent.v1.Agent/Deploy"
+	Agent_ReattachDeploy_FullMethodName       = "/deplo.agent.v1.Agent/ReattachDeploy"
+	Agent_DeployStream_FullMethodName         = "/deplo.agent.v1.Agent/DeployStream"
+	Agent_StopStack_FullMethodName            = "/deplo.agent.v1.Agent/StopStack"
+	Agent_StartStack_FullMethodName           = "/deplo.agent.v1.Agent/StartStack"
+	Agent_DestroyStack_FullMethodName         = "/deplo.agent.v1.Agent/DestroyStack"
+	Agent_Reroute_FullMethodName              = "/deplo.agent.v1.Agent/Reroute"
+	Agent_ExportVolume_FullMethodName         = "/deplo.agent.v1.Agent/ExportVolume"
+	Agent_ImportVolume_FullMethodName         = "/deplo.agent.v1.Agent/ImportVolume"
+	Agent_VolumeUsage_FullMethodName          = "/deplo.agent.v1.Agent/VolumeUsage"
+	Agent_ExportFiles_FullMethodName          = "/deplo.agent.v1.Agent/ExportFiles"
+	Agent_ImportFiles_FullMethodName          = "/deplo.agent.v1.Agent/ImportFiles"
+	Agent_ExportHostPath_FullMethodName       = "/deplo.agent.v1.Agent/ExportHostPath"
+	Agent_ImportHostPath_FullMethodName       = "/deplo.agent.v1.Agent/ImportHostPath"
+	Agent_ExportImage_FullMethodName          = "/deplo.agent.v1.Agent/ExportImage"
+	Agent_ImportImage_FullMethodName          = "/deplo.agent.v1.Agent/ImportImage"
+	Agent_ReadStack_FullMethodName            = "/deplo.agent.v1.Agent/ReadStack"
+	Agent_Inspect_FullMethodName              = "/deplo.agent.v1.Agent/Inspect"
+	Agent_CheckPort_FullMethodName            = "/deplo.agent.v1.Agent/CheckPort"
+	Agent_ProbeHttp_FullMethodName            = "/deplo.agent.v1.Agent/ProbeHttp"
+	Agent_DockerCleanup_FullMethodName        = "/deplo.agent.v1.Agent/DockerCleanup"
+	Agent_SelfUpdate_FullMethodName           = "/deplo.agent.v1.Agent/SelfUpdate"
+	Agent_SelfUninstall_FullMethodName        = "/deplo.agent.v1.Agent/SelfUninstall"
+	Agent_InstallCluster_FullMethodName       = "/deplo.agent.v1.Agent/InstallCluster"
+	Agent_RemoveCluster_FullMethodName        = "/deplo.agent.v1.Agent/RemoveCluster"
+	Agent_ClusterStatus_FullMethodName        = "/deplo.agent.v1.Agent/ClusterStatus"
+	Agent_ClusterCall_FullMethodName          = "/deplo.agent.v1.Agent/ClusterCall"
+	Agent_SetClusterMember_FullMethodName     = "/deplo.agent.v1.Agent/SetClusterMember"
+	Agent_ClusterWatch_FullMethodName         = "/deplo.agent.v1.Agent/ClusterWatch"
+	Agent_CopyClusterImage_FullMethodName     = "/deplo.agent.v1.Agent/CopyClusterImage"
+	Agent_ExpectClusterImage_FullMethodName   = "/deplo.agent.v1.Agent/ExpectClusterImage"
+	Agent_SetClusterForwarders_FullMethodName = "/deplo.agent.v1.Agent/SetClusterForwarders"
+	Agent_Backup_FullMethodName               = "/deplo.agent.v1.Agent/Backup"
+	Agent_Restore_FullMethodName              = "/deplo.agent.v1.Agent/Restore"
+	Agent_S3Check_FullMethodName              = "/deplo.agent.v1.Agent/S3Check"
+	Agent_S3Delete_FullMethodName             = "/deplo.agent.v1.Agent/S3Delete"
+	Agent_ReadStoreFile_FullMethodName        = "/deplo.agent.v1.Agent/ReadStoreFile"
+	Agent_WriteStoreFile_FullMethodName       = "/deplo.agent.v1.Agent/WriteStoreFile"
+	Agent_RestoreFrom_FullMethodName          = "/deplo.agent.v1.Agent/RestoreFrom"
+	Agent_FollowLogs_FullMethodName           = "/deplo.agent.v1.Agent/FollowLogs"
+	Agent_Attach_FullMethodName               = "/deplo.agent.v1.Agent/Attach"
+	Agent_ListInstances_FullMethodName        = "/deplo.agent.v1.Agent/ListInstances"
+	Agent_Exec_FullMethodName                 = "/deplo.agent.v1.Agent/Exec"
+	Agent_ShellLabel_FullMethodName           = "/deplo.agent.v1.Agent/ShellLabel"
+	Agent_StartJob_FullMethodName             = "/deplo.agent.v1.Agent/StartJob"
+	Agent_PollJob_FullMethodName              = "/deplo.agent.v1.Agent/PollJob"
+	Agent_KillJob_FullMethodName              = "/deplo.agent.v1.Agent/KillJob"
+	Agent_ListFiles_FullMethodName            = "/deplo.agent.v1.Agent/ListFiles"
+	Agent_ReadFile_FullMethodName             = "/deplo.agent.v1.Agent/ReadFile"
+	Agent_WriteFile_FullMethodName            = "/deplo.agent.v1.Agent/WriteFile"
+	Agent_UploadFile_FullMethodName           = "/deplo.agent.v1.Agent/UploadFile"
+	Agent_CreateDir_FullMethodName            = "/deplo.agent.v1.Agent/CreateDir"
+	Agent_DeleteFile_FullMethodName           = "/deplo.agent.v1.Agent/DeleteFile"
+	Agent_RenameFile_FullMethodName           = "/deplo.agent.v1.Agent/RenameFile"
+	Agent_FilesExist_FullMethodName           = "/deplo.agent.v1.Agent/FilesExist"
+	Agent_StartDev_FullMethodName             = "/deplo.agent.v1.Agent/StartDev"
+	Agent_StopDev_FullMethodName              = "/deplo.agent.v1.Agent/StopDev"
+	Agent_ResetDevWorkspace_FullMethodName    = "/deplo.agent.v1.Agent/ResetDevWorkspace"
+	Agent_TeardownDev_FullMethodName          = "/deplo.agent.v1.Agent/TeardownDev"
+	Agent_EnsureGateway_FullMethodName        = "/deplo.agent.v1.Agent/EnsureGateway"
+	Agent_ProvisionSshUser_FullMethodName     = "/deplo.agent.v1.Agent/ProvisionSshUser"
+	Agent_DeprovisionSshUser_FullMethodName   = "/deplo.agent.v1.Agent/DeprovisionSshUser"
+	Agent_StartTunnel_FullMethodName          = "/deplo.agent.v1.Agent/StartTunnel"
+	Agent_GetTunnel_FullMethodName            = "/deplo.agent.v1.Agent/GetTunnel"
+	Agent_StopTunnel_FullMethodName           = "/deplo.agent.v1.Agent/StopTunnel"
+	Agent_RenewalCSR_FullMethodName           = "/deplo.agent.v1.Agent/RenewalCSR"
+	Agent_InstallRenewedCert_FullMethodName   = "/deplo.agent.v1.Agent/InstallRenewedCert"
+	Agent_HostInfo_FullMethodName             = "/deplo.agent.v1.Agent/HostInfo"
+	Agent_SetTimezone_FullMethodName          = "/deplo.agent.v1.Agent/SetTimezone"
+	Agent_TraefikConfig_FullMethodName        = "/deplo.agent.v1.Agent/TraefikConfig"
+	Agent_RestartControlPlane_FullMethodName  = "/deplo.agent.v1.Agent/RestartControlPlane"
+	Agent_UpdateControlPlane_FullMethodName   = "/deplo.agent.v1.Agent/UpdateControlPlane"
+	Agent_ListWorkloadImages_FullMethodName   = "/deplo.agent.v1.Agent/ListWorkloadImages"
+	Agent_InventoryImage_FullMethodName       = "/deplo.agent.v1.Agent/InventoryImage"
+	Agent_InventoryCandidate_FullMethodName   = "/deplo.agent.v1.Agent/InventoryCandidate"
+	Agent_SetLinkAddresses_FullMethodName     = "/deplo.agent.v1.Agent/SetLinkAddresses"
+	Agent_StopListening_FullMethodName        = "/deplo.agent.v1.Agent/StopListening"
+	Agent_CaptureScreenshot_FullMethodName    = "/deplo.agent.v1.Agent/CaptureScreenshot"
 )
 
 // AgentClient is the client API for Agent service.
@@ -193,6 +202,33 @@ type AgentClient interface {
 	// binary, and the state dir under --agent-dir (mTLS materials included). The sibling
 	// of SelfUpdate, and the ONLY RPC that ends the agent's own life.
 	SelfUninstall(ctx context.Context, in *SelfUninstallRequest, opts ...grpc.CallOption) (*SelfUninstallResponse, error)
+	// Install the pinned deplo-cluster binary (checksum verified, forward-only) and run it as
+	// the cluster leader, or as the relay too. Calling it again with a newer version updates it.
+	InstallCluster(ctx context.Context, in *InstallClusterRequest, opts ...grpc.CallOption) (*InstallClusterResponse, error)
+	// Stop the supervised leader and delete its binary and state. Idempotent.
+	RemoveCluster(ctx context.Context, in *RemoveClusterRequest, opts ...grpc.CallOption) (*RemoveClusterResponse, error)
+	// What this host runs: installed or not, running or not, which version.
+	ClusterStatus(ctx context.Context, in *ClusterStatusRequest, opts ...grpc.CallOption) (*ClusterStatusResponse, error)
+	// Forward one call to the leader process on this host and return its answer verbatim.
+	// The agent does not read the payload; an unreachable leader is UNAVAILABLE.
+	ClusterCall(ctx context.Context, in *ClusterCallRequest, opts ...grpc.CallOption) (*ClusterCallResponse, error)
+	// Make this agent a cluster member (or stop being one) and name the relays to dial besides
+	// Deplo's own. A saved choice survives a restart; the relay set follows the panel's address.
+	SetClusterMember(ctx context.Context, in *SetClusterMemberRequest, opts ...grpc.CallOption) (*SetClusterMemberResponse, error)
+	// Stream the leader's events after `since`, one JSON line each, until the caller cancels. The
+	// first line is the leader's hello (newest sequence, whether the buffer dropped events). The
+	// agent does not read the lines. A leader that is not running is UNAVAILABLE.
+	ClusterWatch(ctx context.Context, in *ClusterWatchRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ClusterWatchLine], error)
+	// Send a locally built image to one member, which keeps the App's last releases and prunes
+	// older ones. A member that already holds the ref answers without a transfer.
+	CopyClusterImage(ctx context.Context, in *CopyClusterImageRequest, opts ...grpc.CallOption) (*CopyClusterImageResponse, error)
+	// Tell this member to accept one image from one member, once, within the copy's time limit.
+	// An image stream that matches no such entry is refused.
+	ExpectClusterImage(ctx context.Context, in *ExpectClusterImageRequest, opts ...grpc.CallOption) (*ExpectClusterImageResponse, error)
+	// Hand this member the names it holds on its Environments' networks and the streams it accepts
+	// for its own workloads. The full set each time; one not listed is removed. Never sent to a
+	// member that is not in a cluster.
+	SetClusterForwarders(ctx context.Context, in *SetClusterForwardersRequest, opts ...grpc.CallOption) (*SetClusterForwardersResponse, error)
 	// Back up a database or a project to a destination, streaming progress.
 	Backup(ctx context.Context, in *BackupRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[BackupEvent], error)
 	// Restore a database or project from a previously-written artifact, IN PLACE,
@@ -678,9 +714,108 @@ func (c *agentClient) SelfUninstall(ctx context.Context, in *SelfUninstallReques
 	return out, nil
 }
 
+func (c *agentClient) InstallCluster(ctx context.Context, in *InstallClusterRequest, opts ...grpc.CallOption) (*InstallClusterResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(InstallClusterResponse)
+	err := c.cc.Invoke(ctx, Agent_InstallCluster_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) RemoveCluster(ctx context.Context, in *RemoveClusterRequest, opts ...grpc.CallOption) (*RemoveClusterResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RemoveClusterResponse)
+	err := c.cc.Invoke(ctx, Agent_RemoveCluster_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) ClusterStatus(ctx context.Context, in *ClusterStatusRequest, opts ...grpc.CallOption) (*ClusterStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ClusterStatusResponse)
+	err := c.cc.Invoke(ctx, Agent_ClusterStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) ClusterCall(ctx context.Context, in *ClusterCallRequest, opts ...grpc.CallOption) (*ClusterCallResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ClusterCallResponse)
+	err := c.cc.Invoke(ctx, Agent_ClusterCall_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) SetClusterMember(ctx context.Context, in *SetClusterMemberRequest, opts ...grpc.CallOption) (*SetClusterMemberResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetClusterMemberResponse)
+	err := c.cc.Invoke(ctx, Agent_SetClusterMember_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) ClusterWatch(ctx context.Context, in *ClusterWatchRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[ClusterWatchLine], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[12], Agent_ClusterWatch_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[ClusterWatchRequest, ClusterWatchLine]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Agent_ClusterWatchClient = grpc.ServerStreamingClient[ClusterWatchLine]
+
+func (c *agentClient) CopyClusterImage(ctx context.Context, in *CopyClusterImageRequest, opts ...grpc.CallOption) (*CopyClusterImageResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CopyClusterImageResponse)
+	err := c.cc.Invoke(ctx, Agent_CopyClusterImage_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) ExpectClusterImage(ctx context.Context, in *ExpectClusterImageRequest, opts ...grpc.CallOption) (*ExpectClusterImageResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExpectClusterImageResponse)
+	err := c.cc.Invoke(ctx, Agent_ExpectClusterImage_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) SetClusterForwarders(ctx context.Context, in *SetClusterForwardersRequest, opts ...grpc.CallOption) (*SetClusterForwardersResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetClusterForwardersResponse)
+	err := c.cc.Invoke(ctx, Agent_SetClusterForwarders_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *agentClient) Backup(ctx context.Context, in *BackupRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[BackupEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[12], Agent_Backup_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[13], Agent_Backup_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -699,7 +834,7 @@ type Agent_BackupClient = grpc.ServerStreamingClient[BackupEvent]
 
 func (c *agentClient) Restore(ctx context.Context, in *RestoreRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[RestoreEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[13], Agent_Restore_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[14], Agent_Restore_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -738,7 +873,7 @@ func (c *agentClient) S3Delete(ctx context.Context, in *S3DeleteRequest, opts ..
 
 func (c *agentClient) ReadStoreFile(ctx context.Context, in *ReadStoreFileRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[StoreChunk], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[14], Agent_ReadStoreFile_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[15], Agent_ReadStoreFile_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -757,7 +892,7 @@ type Agent_ReadStoreFileClient = grpc.ServerStreamingClient[StoreChunk]
 
 func (c *agentClient) WriteStoreFile(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[StoreChunk, StoreResult], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[15], Agent_WriteStoreFile_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[16], Agent_WriteStoreFile_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -770,7 +905,7 @@ type Agent_WriteStoreFileClient = grpc.ClientStreamingClient[StoreChunk, StoreRe
 
 func (c *agentClient) RestoreFrom(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[RestoreChunk, RestoreEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[16], Agent_RestoreFrom_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[17], Agent_RestoreFrom_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -783,7 +918,7 @@ type Agent_RestoreFromClient = grpc.BidiStreamingClient[RestoreChunk, RestoreEve
 
 func (c *agentClient) FollowLogs(ctx context.Context, in *FollowLogsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[LogChunk], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[17], Agent_FollowLogs_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[18], Agent_FollowLogs_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -802,7 +937,7 @@ type Agent_FollowLogsClient = grpc.ServerStreamingClient[LogChunk]
 
 func (c *agentClient) Attach(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AttachInput, AttachOutput], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[18], Agent_Attach_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[19], Agent_Attach_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -955,7 +1090,7 @@ func (c *agentClient) FilesExist(ctx context.Context, in *FilesExistRequest, opt
 
 func (c *agentClient) StartDev(ctx context.Context, in *StartDevRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[DeployEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[19], Agent_StartDev_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[20], Agent_StartDev_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -984,7 +1119,7 @@ func (c *agentClient) StopDev(ctx context.Context, in *StopDevRequest, opts ...g
 
 func (c *agentClient) ResetDevWorkspace(ctx context.Context, in *StartDevRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[DeployEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[20], Agent_ResetDevWorkspace_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Agent_ServiceDesc.Streams[21], Agent_ResetDevWorkspace_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1296,6 +1431,33 @@ type AgentServer interface {
 	// binary, and the state dir under --agent-dir (mTLS materials included). The sibling
 	// of SelfUpdate, and the ONLY RPC that ends the agent's own life.
 	SelfUninstall(context.Context, *SelfUninstallRequest) (*SelfUninstallResponse, error)
+	// Install the pinned deplo-cluster binary (checksum verified, forward-only) and run it as
+	// the cluster leader, or as the relay too. Calling it again with a newer version updates it.
+	InstallCluster(context.Context, *InstallClusterRequest) (*InstallClusterResponse, error)
+	// Stop the supervised leader and delete its binary and state. Idempotent.
+	RemoveCluster(context.Context, *RemoveClusterRequest) (*RemoveClusterResponse, error)
+	// What this host runs: installed or not, running or not, which version.
+	ClusterStatus(context.Context, *ClusterStatusRequest) (*ClusterStatusResponse, error)
+	// Forward one call to the leader process on this host and return its answer verbatim.
+	// The agent does not read the payload; an unreachable leader is UNAVAILABLE.
+	ClusterCall(context.Context, *ClusterCallRequest) (*ClusterCallResponse, error)
+	// Make this agent a cluster member (or stop being one) and name the relays to dial besides
+	// Deplo's own. A saved choice survives a restart; the relay set follows the panel's address.
+	SetClusterMember(context.Context, *SetClusterMemberRequest) (*SetClusterMemberResponse, error)
+	// Stream the leader's events after `since`, one JSON line each, until the caller cancels. The
+	// first line is the leader's hello (newest sequence, whether the buffer dropped events). The
+	// agent does not read the lines. A leader that is not running is UNAVAILABLE.
+	ClusterWatch(*ClusterWatchRequest, grpc.ServerStreamingServer[ClusterWatchLine]) error
+	// Send a locally built image to one member, which keeps the App's last releases and prunes
+	// older ones. A member that already holds the ref answers without a transfer.
+	CopyClusterImage(context.Context, *CopyClusterImageRequest) (*CopyClusterImageResponse, error)
+	// Tell this member to accept one image from one member, once, within the copy's time limit.
+	// An image stream that matches no such entry is refused.
+	ExpectClusterImage(context.Context, *ExpectClusterImageRequest) (*ExpectClusterImageResponse, error)
+	// Hand this member the names it holds on its Environments' networks and the streams it accepts
+	// for its own workloads. The full set each time; one not listed is removed. Never sent to a
+	// member that is not in a cluster.
+	SetClusterForwarders(context.Context, *SetClusterForwardersRequest) (*SetClusterForwardersResponse, error)
 	// Back up a database or a project to a destination, streaming progress.
 	Backup(*BackupRequest, grpc.ServerStreamingServer[BackupEvent]) error
 	// Restore a database or project from a previously-written artifact, IN PLACE,
@@ -1513,6 +1675,33 @@ func (UnimplementedAgentServer) SelfUpdate(context.Context, *SelfUpdateRequest) 
 }
 func (UnimplementedAgentServer) SelfUninstall(context.Context, *SelfUninstallRequest) (*SelfUninstallResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SelfUninstall not implemented")
+}
+func (UnimplementedAgentServer) InstallCluster(context.Context, *InstallClusterRequest) (*InstallClusterResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method InstallCluster not implemented")
+}
+func (UnimplementedAgentServer) RemoveCluster(context.Context, *RemoveClusterRequest) (*RemoveClusterResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RemoveCluster not implemented")
+}
+func (UnimplementedAgentServer) ClusterStatus(context.Context, *ClusterStatusRequest) (*ClusterStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ClusterStatus not implemented")
+}
+func (UnimplementedAgentServer) ClusterCall(context.Context, *ClusterCallRequest) (*ClusterCallResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ClusterCall not implemented")
+}
+func (UnimplementedAgentServer) SetClusterMember(context.Context, *SetClusterMemberRequest) (*SetClusterMemberResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetClusterMember not implemented")
+}
+func (UnimplementedAgentServer) ClusterWatch(*ClusterWatchRequest, grpc.ServerStreamingServer[ClusterWatchLine]) error {
+	return status.Error(codes.Unimplemented, "method ClusterWatch not implemented")
+}
+func (UnimplementedAgentServer) CopyClusterImage(context.Context, *CopyClusterImageRequest) (*CopyClusterImageResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CopyClusterImage not implemented")
+}
+func (UnimplementedAgentServer) ExpectClusterImage(context.Context, *ExpectClusterImageRequest) (*ExpectClusterImageResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ExpectClusterImage not implemented")
+}
+func (UnimplementedAgentServer) SetClusterForwarders(context.Context, *SetClusterForwardersRequest) (*SetClusterForwardersResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetClusterForwarders not implemented")
 }
 func (UnimplementedAgentServer) Backup(*BackupRequest, grpc.ServerStreamingServer[BackupEvent]) error {
 	return status.Error(codes.Unimplemented, "method Backup not implemented")
@@ -2051,6 +2240,161 @@ func _Agent_SelfUninstall_Handler(srv interface{}, ctx context.Context, dec func
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(AgentServer).SelfUninstall(ctx, req.(*SelfUninstallRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_InstallCluster_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(InstallClusterRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).InstallCluster(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_InstallCluster_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).InstallCluster(ctx, req.(*InstallClusterRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_RemoveCluster_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemoveClusterRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).RemoveCluster(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_RemoveCluster_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).RemoveCluster(ctx, req.(*RemoveClusterRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_ClusterStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ClusterStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).ClusterStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_ClusterStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).ClusterStatus(ctx, req.(*ClusterStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_ClusterCall_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ClusterCallRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).ClusterCall(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_ClusterCall_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).ClusterCall(ctx, req.(*ClusterCallRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_SetClusterMember_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetClusterMemberRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).SetClusterMember(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_SetClusterMember_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).SetClusterMember(ctx, req.(*SetClusterMemberRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_ClusterWatch_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(ClusterWatchRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(AgentServer).ClusterWatch(m, &grpc.GenericServerStream[ClusterWatchRequest, ClusterWatchLine]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Agent_ClusterWatchServer = grpc.ServerStreamingServer[ClusterWatchLine]
+
+func _Agent_CopyClusterImage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CopyClusterImageRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).CopyClusterImage(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_CopyClusterImage_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).CopyClusterImage(ctx, req.(*CopyClusterImageRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_ExpectClusterImage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExpectClusterImageRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).ExpectClusterImage(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_ExpectClusterImage_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).ExpectClusterImage(ctx, req.(*ExpectClusterImageRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_SetClusterForwarders_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetClusterForwardersRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).SetClusterForwarders(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_SetClusterForwarders_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).SetClusterForwarders(ctx, req.(*SetClusterForwardersRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -2876,6 +3220,38 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _Agent_SelfUninstall_Handler,
 		},
 		{
+			MethodName: "InstallCluster",
+			Handler:    _Agent_InstallCluster_Handler,
+		},
+		{
+			MethodName: "RemoveCluster",
+			Handler:    _Agent_RemoveCluster_Handler,
+		},
+		{
+			MethodName: "ClusterStatus",
+			Handler:    _Agent_ClusterStatus_Handler,
+		},
+		{
+			MethodName: "ClusterCall",
+			Handler:    _Agent_ClusterCall_Handler,
+		},
+		{
+			MethodName: "SetClusterMember",
+			Handler:    _Agent_SetClusterMember_Handler,
+		},
+		{
+			MethodName: "CopyClusterImage",
+			Handler:    _Agent_CopyClusterImage_Handler,
+		},
+		{
+			MethodName: "ExpectClusterImage",
+			Handler:    _Agent_ExpectClusterImage_Handler,
+		},
+		{
+			MethodName: "SetClusterForwarders",
+			Handler:    _Agent_SetClusterForwarders_Handler,
+		},
+		{
 			MethodName: "S3Check",
 			Handler:    _Agent_S3Check_Handler,
 		},
@@ -3085,6 +3461,11 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 			StreamName:    "ImportImage",
 			Handler:       _Agent_ImportImage_Handler,
 			ClientStreams: true,
+		},
+		{
+			StreamName:    "ClusterWatch",
+			Handler:       _Agent_ClusterWatch_Handler,
+			ServerStreams: true,
 		},
 		{
 			StreamName:    "Backup",

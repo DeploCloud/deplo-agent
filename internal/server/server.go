@@ -35,6 +35,7 @@ var Capabilities = []string{
 	"deploy.buildenv",
 	"deploy.nocache",
 	"deploy.force-recreate",
+	"deploy.start-after-ready",
 	"deploy.compose-args",
 	"deploy.compose.projectdir",
 	"build.skip_steps",
@@ -67,6 +68,7 @@ var Capabilities = []string{
 	"backup-s3-args",
 	"backup-s3-read",
 	"backup-untrusted-config",
+	"backup.volume-hold",
 	"docker-cleanup",
 	"cleanup.keep-per-slug",
 	"cleanup.leftover-files",
@@ -108,6 +110,7 @@ var Capabilities = []string{
 	"git.submodules",
 	"deploy.files-bind-check",
 	"backup.db-owner-check",
+	"backup.redis-aof",
 	"image-inventory",
 	"image-inventory.candidate",
 	"image-inventory.deps",
@@ -115,9 +118,21 @@ var Capabilities = []string{
 	"deploy.pull-base",
 	"deploy.reuse-image",
 	"deploy.overlap",
+	"deploy.overlap.stack",
+	"deploy.replicas",
+	"deploy.spread",
 	"reroute.pull",
 	"agent-link",
 	"screenshot",
+	"health.restart",
+	"cluster.host",
+	"cluster",
+	"cluster.images",
+	"cluster.failover",
+	"cluster.failover.restore",
+	"cluster.forwarders",
+	"backup.postgres-archive",
+	"cluster.standby",
 }
 
 // AgentVersion is the version this agent reports over Hello.
@@ -152,6 +167,31 @@ type Service struct {
 	stackLocks   map[string]*stackLock
 
 	inventoryMu sync.Mutex
+
+	clusterOnce sync.Once
+	cluster     *clusterHost
+
+	memberOnce sync.Once
+	member     *clusterMember
+	// imageOps is the docker side of cluster image copies; tests replace it.
+	imageOps clusterImageOps
+	// expected is the images Deplo told this member to take from another one, by ref.
+	expectedMu sync.Mutex
+	expected   map[string]expectedImage
+
+	leaseOnce sync.Once
+	lease     *leaseGuard
+
+	// Name forwarders (#200); fwdOps is their docker side, which tests replace.
+	fwdOnce sync.Once
+	fwd     *forwarders
+	fwdOps  forwardOps
+
+	heldMu sync.Mutex
+	held   map[string]bool
+
+	restartOnce sync.Once
+	rw          *restartWatcher
 }
 
 type stackLock struct {
@@ -191,6 +231,7 @@ func New(stackDir, buildTmpDir, dataDir, dataBase string) *Service {
 	}
 	sweepTempSecrets()
 	sweepInventoryDirs(buildTmpDir)
+	sweepBackupHolds(filepath.Join(dataBase, "backup-holds"))
 	return &Service{
 		stackDir:    stackDir,
 		buildTmpDir: buildTmpDir,
@@ -265,6 +306,7 @@ func (s *Service) Deploy(req *pb.DeployRequest, stream pb.Agent_DeployServer) er
 	}
 	deployCtx, cancel := context.WithCancel(context.Background())
 	f := newInflight(cancel)
+	f.slug = req.GetSlug()
 	s.deploys[id] = f
 	s.mu.Unlock()
 
@@ -311,6 +353,7 @@ func (s *Service) DeployStream(stream pb.Agent_DeployStreamServer) error {
 	}
 	deployCtx, cancel := context.WithCancel(context.Background())
 	f := newInflight(cancel)
+	f.slug = req.GetSlug()
 	s.deploys[id] = f
 	s.mu.Unlock()
 
@@ -364,6 +407,17 @@ func (s *Service) ReattachDeploy(req *pb.ReattachRequest, stream pb.Agent_Reatta
 	return f.subscribe(stream.Context(), req.GetFromSeq(), stream.Send)
 }
 
+// cancelDeploysOf ends every deploy in flight of those stacks; one that already finished takes no harm.
+func (s *Service) cancelDeploysOf(slugs map[string]bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, f := range s.deploys {
+		if slugs[f.slug] {
+			f.cancel()
+		}
+	}
+}
+
 func (s *Service) driveDeploy(ctx context.Context, id string, req *pb.DeployRequest, contextFile string, f *inflight) {
 	defer f.cancel()
 	if contextFile != "" {
@@ -379,6 +433,10 @@ func (s *Service) driveDeploy(ctx context.Context, id string, req *pb.DeployRequ
 				e.result(false, fmt.Sprintf("deploy panicked: %v", r), "")
 			}
 		}()
+		if !req.GetBuildOnly() && s.leaseGuard().Holds(req.GetSlug()) {
+			e.result(false, awaitingLeader, "")
+			return
+		}
 		s.runDeployFrom(ctx, req, contextFile, e)
 	}()
 	s.trimFinished()
@@ -426,11 +484,31 @@ func (s *Service) StartStack(ctx context.Context, ref *pb.StackRef) (*pb.StackRe
 	if err := validateSlug(slug); err != nil {
 		return nil, err
 	}
-	defer s.lockStack(slug)()
+	done, ok := s.lockToStart(slug)
+	if !ok {
+		return nil, status.Error(codes.FailedPrecondition, awaitingLeader)
+	}
+	res, err := s.startLocked(ctx, slug)
+	if done() {
+		return nil, status.Error(codes.FailedPrecondition, awaitingLeader)
+	}
+	return res, err
+}
+
+// startLocked is StartStack for a caller that holds the stack's lock.
+func (s *Service) startLocked(ctx context.Context, slug string) (*pb.StackResult, error) {
+	s.restartWatch().resume(slug, "restart")
 	if err := s.stripSourceLinks(slug); err != nil {
 		return &pb.StackResult{Ok: false, Error: err.Error()}, nil
 	}
-	res, err := dockercli.Run(ctx, time.Minute, s.composeCtl(slug, "start")...)
+	var res dockercli.Result
+	var err error
+	stack, _ := os.ReadFile(s.stackPath(slug))
+	if late := lateServices(string(stack), nil); len(late) > 0 {
+		res, err = s.startHolding(ctx, slug, late)
+	} else {
+		res, err = dockercli.Run(ctx, time.Minute, s.composeCtl(slug, "start")...)
+	}
 	if err == nil && res.Code == 0 {
 		return &pb.StackResult{Ok: true}, nil
 	}
@@ -448,6 +526,12 @@ func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.Stack
 		return nil, err
 	}
 	defer s.lockStack(slug)()
+	return s.destroyStack(ctx, ref)
+}
+
+// destroyStack is DestroyStack for a caller that already holds the stack's lock.
+func (s *Service) destroyStack(ctx context.Context, ref *pb.StackRef) (*pb.StackResult, error) {
+	slug := ref.GetSlug()
 	previewNets := stackPreviewNetworks(ctx, slug)
 	if !isFile(s.stackPath(slug)) {
 		r2, err := removeStackContainers(ctx, slug)
@@ -507,6 +591,7 @@ func removeStackContainers(ctx context.Context, slug string) (dockercli.Result, 
 }
 
 func (s *Service) removeStackFiles(slug string) {
+	s.restartWatch().forget(slug)
 	_ = os.Remove(s.stackPath(slug))
 	_ = os.Remove(s.legacyEnvPath(slug))
 	_ = os.Remove(filepath.Join(s.stackDir, "files", slug, ".env"))
@@ -543,7 +628,20 @@ func (s *Service) Reroute(ctx context.Context, req *pb.RerouteRequest) (*pb.Stac
 	if err := validateSlug(slug); err != nil {
 		return nil, err
 	}
-	defer s.lockStack(slug)()
+	done, ok := s.lockToStart(slug)
+	if !ok {
+		return nil, status.Error(codes.FailedPrecondition, awaitingLeader)
+	}
+	res, err := s.rerouteLocked(ctx, req)
+	if done() {
+		return nil, status.Error(codes.FailedPrecondition, awaitingLeader)
+	}
+	return res, err
+}
+
+// rerouteLocked is Reroute for a caller that holds the stack's lock.
+func (s *Service) rerouteLocked(ctx context.Context, req *pb.RerouteRequest) (*pb.StackResult, error) {
+	slug := req.GetSlug()
 	name := "deplo-" + slug
 
 	if req.GetComposeYaml() == "" {
@@ -589,9 +687,14 @@ func (s *Service) Reroute(ctx context.Context, req *pb.RerouteRequest) (*pb.Stac
 	if err := s.stripSourceLinks(slug); err != nil {
 		return &pb.StackResult{Ok: false, Error: err.Error()}, nil
 	}
-	composeArgs := composeUpArgs(name, stackFile, envFile, projectDir, false, req.GetComposeUpArgs())
+	held := heldBack(ctx, name, lateServices(req.GetComposeYaml(), nil))
+	composeArgs := withoutLate(composeUpArgs(name, stackFile, envFile, projectDir, false, req.GetComposeUpArgs()), held)
 
 	res, err := dockercli.Run(ctx, 120*time.Second, composeArgs...)
+	if err == nil && res.Code == 0 && len(held) > 0 {
+		// ponytail: a reroute carries no ready check, so "ready" here is the rest of the stack being up.
+		res, err = dockercli.Run(ctx, 120*time.Second, lateUp(composeBaseArgs(name, stackFile, envFile, projectDir), held)...)
+	}
 	if err != nil {
 		return &pb.StackResult{Ok: false, Error: err.Error()}, nil
 	}

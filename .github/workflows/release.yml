@@ -43,6 +43,8 @@ jobs:
         run: go test ./...
         env:
           CGO_ENABLED: "0"
+          # A runner serves nothing, so the tests that drive a real Docker daemon run here and nowhere by accident.
+          DEPLO_AGENT_TEST_REAL_DOCKER: "1"
 
       - name: Build static binaries (amd64, arm64)
         run: |

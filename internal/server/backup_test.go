@@ -6,6 +6,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -24,8 +25,8 @@ func TestDumpArgv_perEngine(t *testing.T) {
 		pwEnvKey   string
 	}{
 		{"postgres", "pg_dump", []string{"-Fc", "mydb", "-U", "admin"}, "PGPASSWORD"},
-		{"mysql", "mysqldump", []string{"--add-drop-table", "--databases", "mydb"}, "MYSQL_PWD"},
-		{"mariadb", "mariadb-dump", []string{"--add-drop-table", "--databases", "mydb"}, "MYSQL_PWD"},
+		{"mysql", "mysqldump", []string{"mysql", "mydb"}, "MYSQL_PWD"},
+		{"mariadb", "mariadb-dump", []string{"mariadb", "mydb"}, "MYSQL_PWD"},
 		{"mongodb", "sh", nil, "MONGO_PW"},
 		{"redis", "redis-cli", []string{"--rdb", "-"}, "REDISCLI_AUTH"},
 	}
@@ -575,5 +576,48 @@ func TestHasDotDot(t *testing.T) {
 		if hasDotDot(ok) {
 			t.Errorf("%q is a legitimate name and must not be rejected", ok)
 		}
+	}
+}
+
+// Runs the MySQL/MariaDB dump script against fake client tools: it must always take a single-transaction
+// dump, and ask for the binlog position only when the binary log is on and in the flavour the tool knows.
+func TestMysqlDumpScript_flags(t *testing.T) {
+	cases := []struct {
+		name, logBin, help string
+		want, dontWant     []string
+	}{
+		{"binlog on, source-data", "1", "--source-data", []string{"--single-transaction", "--add-drop-table", "--source-data=2", "--databases mydb"}, []string{"--master-data"}},
+		{"binlog on, master-data only", "1", "--master-data", []string{"--single-transaction", "--master-data=2"}, []string{"--source-data"}},
+		{"binlog off", "0", "--source-data", []string{"--single-transaction", "--add-drop-table"}, []string{"--source-data", "--master-data"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			write := func(name, body string) {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"+body), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write("fakecli", "echo "+tc.logBin)
+			write("fakedump", `if [ "$1" = "--help" ]; then echo "`+tc.help+`"; exit 0; fi
+echo "$@"`)
+			cmd := exec.Command("sh", "-c", mysqlDumpScript, "sh", "fakedump", "fakecli", "root", "mydb")
+			cmd.Env = append(os.Environ(), "PATH="+dir+":"+os.Getenv("PATH"))
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := string(out)
+			for _, w := range tc.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("missing %q in %q", w, got)
+				}
+			}
+			for _, w := range tc.dontWant {
+				if strings.Contains(got, w) {
+					t.Errorf("unexpected %q in %q", w, got)
+				}
+			}
+		})
 	}
 }

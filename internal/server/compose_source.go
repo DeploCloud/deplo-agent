@@ -306,12 +306,32 @@ func readLines(path string) []string {
 	return splitLines(string(b))
 }
 
+// writeFileAtomic replaces a file so that a crash or pulled power leaves the old one or the new one, whole.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, perm); err != nil {
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	_, err = f.Write(data)
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp, path)
+	}
+	if err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if d, derr := os.Open(filepath.Dir(path)); derr == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
 }
 
 // removeWorkingCopy deletes a source-built stack's working copy, data folders included.

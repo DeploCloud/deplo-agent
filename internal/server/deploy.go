@@ -26,6 +26,8 @@ type emitter struct {
 	send func(*pb.DeployEvent) error
 	// What auto detection chose to build with, reported on every result after it.
 	builtWith string
+	// The command that starts the services held back until the deploy is ready (see startLate).
+	lateArgs []string
 }
 
 func (e *emitter) log(level, text string) {
@@ -56,6 +58,25 @@ func (s *Service) runDeploy(ctx context.Context, req *pb.DeployRequest, e *emitt
 
 // runDeployFrom deploys, reading an upload's build context from contextFile when set, else from the request.
 func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, contextFile string, e *emitter) {
+	if slug := req.GetSlug(); validateSlug(slug) == nil && !req.GetBuildOnly() {
+		w := s.restartWatch()
+		w.holdFor(slug)
+		send, deployed := e.send, false
+		e.send = func(ev *pb.DeployEvent) error {
+			if r := ev.GetResult(); r != nil {
+				deployed = r.GetReady()
+			}
+			return send(ev)
+		}
+		defer func() {
+			e.send = send
+			w.release(slug, req.GetRestartRule(), deployed)
+		}()
+	}
+	s.runDeployBody(ctx, req, contextFile, e)
+}
+
+func (s *Service) runDeployBody(ctx context.Context, req *pb.DeployRequest, contextFile string, e *emitter) {
 	started := time.Now()
 	slug := req.GetSlug()
 	if err := validateSlug(slug); err != nil {
@@ -232,7 +253,8 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 	}
 	// The live container keeps serving until a copy of the new version is up beside it.
 	standIn := false
-	if !isCompose && req.GetStandInComposeYaml() != "" {
+	// A stack's stand-in is judged by the deploy's ready check, so one without it swaps in place.
+	if req.GetStandInComposeYaml() != "" && (!isCompose || req.GetReady() != nil) {
 		var failed *pb.DeployResult
 		if standIn, failed = s.startStandIn(ctx, req, name, started, commitSha, e); failed != nil {
 			e.finish(failed)
@@ -247,7 +269,8 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 	}
 
 	e.phase(pb.DeployPhase_DEPLOY_PHASE_WAITING)
-	res := s.awaitStarted(ctx, req, name, isCompose, started, commitSha, e)
+	res := s.awaitStarted(ctx, req, name, isCompose, replicaCount(req.GetComposeYaml()), started, commitSha, e)
+	res = s.startLate(ctx, req, res, e)
 	if standIn {
 		s.removeStandIn(slug, e)
 	}
@@ -255,8 +278,13 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 }
 
 // awaitStarted waits for container (or the whole stack) to count as up, and says how it went.
-func (s *Service) awaitStarted(ctx context.Context, req *pb.DeployRequest, container string, isCompose bool, started time.Time, commitSha string, e *emitter) *pb.DeployResult {
+// With replicas > 1 the container is a compose project and every one of its copies has to be up.
+func (s *Service) awaitStarted(ctx context.Context, req *pb.DeployRequest, container string, isCompose bool, replicas int, started time.Time, commitSha string, e *emitter) *pb.DeployResult {
+	project := !isCompose && runsAsProject(req.GetComposeYaml())
 	if req.GetReady() != nil {
+		if project {
+			return s.waitReadyWith(ctx, req, false, started, commitSha, e, func() []readySample { return sampleProject(ctx, container) })
+		}
 		return s.waitReady(ctx, req, container, isCompose, started, commitSha, e)
 	}
 	timeout := time.Duration(req.GetReadyTimeoutMs()) * time.Millisecond
@@ -270,6 +298,13 @@ func (s *Service) awaitStarted(ctx context.Context, req *pb.DeployRequest, conta
 		}
 		return &pb.DeployResult{Error: "Stack did not reach a running state", CommitSha: commitSha}
 	}
+	if project {
+		e.log("info", fmt.Sprintf("Waiting for all %d replicas to become healthy.", replicas))
+		if waitProjectRunning(ctx, container, replicas, timeout) {
+			return &pb.DeployResult{Ready: true, CommitSha: commitSha}
+		}
+		return &pb.DeployResult{Error: "Not every replica reached a running state", CommitSha: commitSha}
+	}
 	e.log("info", "Waiting for the container to become healthy…")
 	if waitRunning(ctx, container, timeout) {
 		return &pb.DeployResult{Ready: true, CommitSha: commitSha}
@@ -280,7 +315,23 @@ func (s *Service) awaitStarted(ctx context.Context, req *pb.DeployRequest, conta
 // startStack writes the admitted stack and brings it up under the stack lock, so a Reroute, Stop
 // or Destroy of the same app cannot interleave with it. Builds stay outside the lock.
 func (s *Service) startStack(ctx context.Context, req *pb.DeployRequest, e *emitter) bool {
-	defer s.lockStack(req.GetSlug())()
+	done, ok := s.lockToStart(req.GetSlug())
+	if !ok {
+		e.result(false, awaitingLeader, "")
+		return false
+	}
+	up := s.upLocked(ctx, req, e)
+	if done() {
+		if up {
+			e.result(false, awaitingLeader, "")
+		}
+		return false
+	}
+	return up
+}
+
+// upLocked writes the stack and runs compose up; the caller holds the stack's lock.
+func (s *Service) upLocked(ctx context.Context, req *pb.DeployRequest, e *emitter) bool {
 	envFile, projectDir, ok := s.writeStackFiles(req, e)
 	if !ok {
 		return false
@@ -290,6 +341,10 @@ func (s *Service) startStack(ctx context.Context, req *pb.DeployRequest, e *emit
 	}
 	composeArgs := composeUpArgs("deplo-"+req.GetSlug(), s.stackPath(req.GetSlug()), envFile, projectDir,
 		req.GetForceRecreate(), req.GetComposeUpArgs())
+	if late := lateServices(req.GetComposeYaml(), req.GetStartAfterReady()); len(late) > 0 {
+		composeArgs = withoutLate(composeArgs, heldBack(ctx, "deplo-"+req.GetSlug(), late))
+		e.lateArgs = lateUp(composeBaseArgs("deplo-"+req.GetSlug(), s.stackPath(req.GetSlug()), envFile, projectDir), late)
+	}
 	upLog := "docker compose up -d"
 	if req.GetForceRecreate() {
 		upLog += " --force-recreate"

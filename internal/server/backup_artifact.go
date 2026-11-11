@@ -135,6 +135,10 @@ type artifactSource struct {
 	stream          io.Reader
 	spooled         string
 	label           string
+	// logPrefix is the folder of change-log artifacts a Postgres base backup is followed by.
+	logPrefix string
+	// dataOnly restores an App's Volumes and Files and leaves its stack alone: a failover starts it from its bundle.
+	dataOnly bool
 }
 
 func sourceFromRestore(s *Service, req *pb.RestoreRequest) (*artifactSource, error) {
@@ -156,6 +160,7 @@ func sourceFromRestore(s *Service, req *pb.RestoreRequest) (*artifactSource, err
 			identity:        req.GetAgeIdentity(),
 			integrityProven: req.GetExpectedSha256() != "",
 			label:           filepath.Join(root, req.GetStore().GetObjectKey()),
+			logPrefix:       req.GetLogPrefix(),
 		}, nil
 	case req.GetS3() != nil && req.GetS3().GetObjectKey() != "":
 		return &artifactSource{
@@ -163,6 +168,7 @@ func sourceFromRestore(s *Service, req *pb.RestoreRequest) (*artifactSource, err
 			identity:       req.GetAgeIdentity(),
 			expectedSha256: req.GetExpectedSha256(),
 			label:          req.GetS3().GetObjectKey(),
+			logPrefix:      req.GetLogPrefix(),
 		}, nil
 	default:
 		return nil, status.Error(codes.InvalidArgument, "restore request names no artifact to restore from")

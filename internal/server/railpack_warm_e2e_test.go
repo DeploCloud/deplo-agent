@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -23,7 +24,14 @@ func TestE2E_WarmRailpackFillsTheCacheOnce(t *testing.T) {
 	t.Cleanup(func() { railpackWarmDelay = orig })
 	// Its own tools dir: the marker lives there, and the shared e2e one already has it.
 	s := New(t.TempDir(), t.TempDir(), "/", t.TempDir())
-	before, _ := dockercli.Run(ctx, 30*time.Second, "image", "ls", "-q")
+	// Sorted: docker lists two images of the same age in either order.
+	images := func() string {
+		out, _ := dockercli.Run(ctx, 30*time.Second, "image", "ls", "-q")
+		ids := strings.Fields(out.Stdout)
+		slices.Sort(ids)
+		return strings.Join(ids, "\n")
+	}
+	before := images()
 
 	s.WarmRailpack(ctx)
 	marker := filepath.Join(s.dataBase, "tools", "railpack-warm-"+railpackVersion)
@@ -34,9 +42,8 @@ func TestE2E_WarmRailpackFillsTheCacheOnce(t *testing.T) {
 	if err != nil || !strings.Contains(du.Stdout, "railpack-builder:mise-") {
 		t.Fatalf("railpack's builder is not in the build cache: %v\n%s", err, du.Stdout)
 	}
-	after, _ := dockercli.Run(ctx, 30*time.Second, "image", "ls", "-q")
-	if after.Stdout != before.Stdout {
-		t.Fatalf("the warm-up wrote an image:\nbefore %s\nafter %s", before.Stdout, after.Stdout)
+	if after := images(); after != before {
+		t.Fatalf("the warm-up wrote an image:\nbefore %s\nafter %s", before, after)
 	}
 
 	// Already warm for this version: nothing runs, even with docker gone.

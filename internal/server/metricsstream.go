@@ -50,7 +50,11 @@ func (s *Service) StreamMetrics(req *pb.MetricsStreamRequest, stream pb.Agent_St
 		}
 
 		sample := buildSample(ctx, host, containers)
+		s.restartWatch().stampAnswers(sample.GetContainers())
+		events := s.restartWatch().drain()
+		sample.RestartEvents = events
 		if err := stream.Send(sample); err != nil {
+			s.restartWatch().give(events)
 			return err
 		}
 	}

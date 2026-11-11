@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -71,9 +72,6 @@ func (s *Service) ExportImage(req *pb.ExportImageRequest, stream pb.Agent_Export
 func (s *Service) ImportImage(stream pb.Agent_ImportImageServer) error {
 	ctx := stream.Context()
 
-	imageLoadMu.Lock()
-	defer imageLoadMu.Unlock()
-
 	first, err := stream.Recv()
 	if err != nil {
 		return fmt.Errorf("import image: read header: %w", err)
@@ -87,9 +85,36 @@ func (s *Service) ImportImage(stream pb.Agent_ImportImageServer) error {
 		return sendImageResult(stream, false, fmt.Sprintf("import image: %v", err), 0, "")
 	}
 
+	n, sum, err := loadImageArchive(ctx, ref, func(w io.Writer) error {
+		for {
+			msg, rerr := stream.Recv()
+			if rerr == io.EOF {
+				return nil
+			}
+			if rerr != nil {
+				return rerr
+			}
+			if data := msg.GetData(); len(data) > 0 {
+				if _, werr := w.Write(data); werr != nil {
+					return werr
+				}
+			}
+		}
+	})
+	if err != nil {
+		return sendImageResult(stream, false, fmt.Sprintf("import image %q: %v", ref, err), n, sum)
+	}
+	return sendImageResult(stream, true, "", n, sum)
+}
+
+// loadImageArchive feeds a gzipped `docker save` archive to docker load and refuses one that carries any deplo/ tag but ref.
+func loadImageArchive(ctx context.Context, ref string, feed func(w io.Writer) error) (int64, string, error) {
+	imageLoadMu.Lock()
+	defer imageLoadMu.Unlock()
+
 	before, err := listImageTags(ctx)
 	if err != nil {
-		return sendImageResult(stream, false, fmt.Sprintf("import image %q: %v", ref, err), 0, "")
+		return 0, "", err
 	}
 
 	pr, pw := io.Pipe()
@@ -104,55 +129,37 @@ func (s *Service) ImportImage(stream pb.Agent_ImportImageServer) error {
 		done <- perr
 	}()
 
-	var recvErr error
-	for {
-		msg, rerr := stream.Recv()
-		if rerr == io.EOF {
-			break
-		}
-		if rerr != nil {
-			recvErr = rerr
-			break
-		}
-		if data := msg.GetData(); len(data) > 0 {
-			if _, werr := tally.WriteTo(pw, data); werr != nil {
-				recvErr = werr
-				break
-			}
-		}
-	}
-
+	recvErr := feed(writerFunc(func(p []byte) (int, error) { return tally.WriteTo(pw, p) }))
 	_ = pw.Close()
 	loadErr := <-done
 
 	if recvErr != nil {
-		return sendImageResult(stream, false, fmt.Sprintf("import image %q: receive: %v", ref, recvErr), 0, "")
+		return 0, "", fmt.Errorf("receive: %v", recvErr)
 	}
 	if loadErr != nil {
-		return sendImageResult(stream, false, fmt.Sprintf("import image %q: load: %v", ref, loadErr), 0, "")
+		return 0, "", fmt.Errorf("load: %v", loadErr)
 	}
 
 	after, err := listImageTags(ctx)
 	if err != nil {
-		return sendImageResult(stream, false, fmt.Sprintf("import image %q: %v", ref, err), tally.n, tally.sum())
+		return tally.n, tally.sum(), err
 	}
 	unexpected := unexpectedTags(before, after, ref)
 	if len(unexpected) > 0 {
 		for _, tag := range unexpected {
 			_, _ = dockercli.Run(ctx, imageRemoveTimeout, "rmi", tag)
 		}
-		return sendImageResult(stream, false,
-			fmt.Sprintf("import image %q: the archive also carried %s - refused and removed",
-				ref, strings.Join(unexpected, ", ")),
-			tally.n, tally.sum())
+		return tally.n, tally.sum(), fmt.Errorf("the archive also carried %s - refused and removed", strings.Join(unexpected, ", "))
 	}
 	if !after[ref] {
-		return sendImageResult(stream, false,
-			fmt.Sprintf("import image %q: the archive loaded but that tag is not present on this host", ref),
-			tally.n, tally.sum())
+		return tally.n, tally.sum(), errors.New("the archive loaded but that tag is not present on this host")
 	}
-	return sendImageResult(stream, true, "", tally.n, tally.sum())
+	return tally.n, tally.sum(), nil
 }
+
+type writerFunc func(p []byte) (int, error)
+
+func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 
 func unexpectedTags(before, after map[string]bool, declared string) []string {
 	var out []string

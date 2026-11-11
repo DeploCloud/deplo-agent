@@ -132,6 +132,58 @@ service Agent {
   // of SelfUpdate, and the ONLY RPC that ends the agent's own life.
   rpc SelfUninstall(SelfUninstallRequest) returns (SelfUninstallResponse);
 
+  // ---- CLUSTER HOST (Hello capability "cluster.host"): this agent installs, supervises
+  // and removes the deplo-cluster binary and forwards the control plane's calls to it, so
+  // the control plane never dials a leader (ADR-0043). ----
+
+  // Install the pinned deplo-cluster binary (checksum verified, forward-only) and run it as
+  // the cluster leader, or as the relay too. Calling it again with a newer version updates it.
+  rpc InstallCluster(InstallClusterRequest) returns (InstallClusterResponse);
+
+  // Stop the supervised leader and delete its binary and state. Idempotent.
+  rpc RemoveCluster(RemoveClusterRequest) returns (RemoveClusterResponse);
+
+  // What this host runs: installed or not, running or not, which version.
+  rpc ClusterStatus(ClusterStatusRequest) returns (ClusterStatusResponse);
+
+  // Forward one call to the leader process on this host and return its answer verbatim.
+  // The agent does not read the payload; an unreachable leader is UNAVAILABLE.
+  rpc ClusterCall(ClusterCallRequest) returns (ClusterCallResponse);
+
+  // ---- CLUSTER MEMBER (Hello capability "cluster"): this agent is a party of a cluster
+  // (ADR-0044). It dials every relay it knows and holds one connection to each; it never
+  // accepts an incoming one. ----
+
+  // Make this agent a cluster member (or stop being one) and name the relays to dial besides
+  // Deplo's own. A saved choice survives a restart; the relay set follows the panel's address.
+  rpc SetClusterMember(SetClusterMemberRequest) returns (SetClusterMemberResponse);
+
+  // ---- CLUSTER WATCH (#195, Hello capability "cluster.host"): the control plane's long-lived
+  // view of the leader on this host. ----
+
+  // Stream the leader's events after `since`, one JSON line each, until the caller cancels. The
+  // first line is the leader's hello (newest sequence, whether the buffer dropped events). The
+  // agent does not read the lines. A leader that is not running is UNAVAILABLE.
+  rpc ClusterWatch(ClusterWatchRequest) returns (stream ClusterWatchLine);
+
+  // ---- CLUSTER IMAGES (Hello capability "cluster.images"): copy a built image to another
+  // member of the same cluster over the relay, as ciphertext (ADR-0044). ----
+
+  // Send a locally built image to one member, which keeps the App's last releases and prunes
+  // older ones. A member that already holds the ref answers without a transfer.
+  rpc CopyClusterImage(CopyClusterImageRequest) returns (CopyClusterImageResponse);
+
+  // Tell this member to accept one image from one member, once, within the copy's time limit.
+  // An image stream that matches no such entry is refused.
+  rpc ExpectClusterImage(ExpectClusterImageRequest) returns (ExpectClusterImageResponse);
+
+  // ---- CLUSTER NAME FORWARDERS (#200, Hello capability "cluster.forwarders") ----
+
+  // Hand this member the names it holds on its Environments' networks and the streams it accepts
+  // for its own workloads. The full set each time; one not listed is removed. Never sent to a
+  // member that is not in a cluster.
+  rpc SetClusterForwarders(SetClusterForwardersRequest) returns (SetClusterForwardersResponse);
+
   // ---- BACKUPS: dump/restore a database or project to/from a DESTINATION, plus the
   // affordances the control plane needs (connectivity check + object delete).
   // StoreTarget - a directory on THIS host's filesystem.
@@ -690,7 +742,67 @@ message DeployRequest {
   // removes it. A stand-in that never gets ready is removed and the live container is never
   // touched, unless the live container mounts storage (which may refuse a second copy): then
   // the agent swaps in place instead. Empty => the in-place swap. Advertised as `deploy.overlap`.
+  // A compose stack (`deploy.overlap.stack`) is copied whole, each service `<name>_next`: the
+  // deploy's `ready` check judges the copy, and one that never gets ready always fails the deploy.
   string stand_in_compose_yaml = 28;
+
+  // When the app stops answering, restart it. The agent keeps the rule on disk and probes on its
+  // own, so it works while the control plane is down. Unset => none, and a stored rule is removed.
+  // Advertised as `health.restart`.
+  RestartRule restart_rule = 29;
+
+  // Compose services to start only once the deploy is ready: the stack comes up without them, and a
+  // deploy that is not ready never starts them. Advertised as `deploy.start-after-ready`.
+  repeated string start_after_ready = 30;
+}
+
+// How the agent decides an app has stopped answering, and when it restarts it.
+message RestartRule {
+  enum Probe {
+    PROBE_UNSPECIFIED = 0;
+    // GET port+path from the host; see fail_on_error_status.
+    PROBE_HTTP = 1;
+    // Docker's own health verdict (the app's command check); `unhealthy` is a failure.
+    PROBE_DOCKER_HEALTH = 2;
+  }
+  Probe probe = 1;
+  int32 port = 2;
+  string path = 3;
+  int32 interval_s = 4;
+  int32 timeout_s = 5;
+  // Failures in a row before a restart. Ignored for PROBE_DOCKER_HEALTH, where Docker already counted.
+  int32 retries = 6;
+  // Nothing counts this long after a container starts.
+  int32 start_period_s = 7;
+  // Compose stacks: the service to watch. Empty => the app's single container.
+  string service = 8;
+  // The App's own http check: a status of 400 or more is a failure. Unset (the default GET /)
+  // counts any HTTP status as alive.
+  bool fail_on_error_status = 9;
+}
+
+// Something the restart rule did, reported on the metrics stream (buffered while none is open).
+message RestartEvent {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    KIND_RESTARTED = 1;
+    // Too many restarts in 30 minutes: restarting stops, the app keeps running.
+    KIND_PAUSED = 2;
+    // Restarting is back on (a deploy, a manual restart or 30 quiet minutes).
+    KIND_RESUMED = 3;
+    // A restarted container answers again.
+    KIND_RECOVERED = 4;
+  }
+  Kind kind = 1;
+  string slug = 2;
+  string container = 3;
+  // KIND_RESTARTED: how long it had not answered. Otherwise 0.
+  int32 unanswered_s = 4;
+  // Restarts in the last 30 minutes, this one included.
+  int32 restarts = 5;
+  // KIND_RESUMED: "deploy" | "restart" | "quiet".
+  string reason = 6;
+  int64 at_unix_ms = 7;
 }
 
 
@@ -1214,6 +1326,16 @@ message BackupRequest {
   // BackupResult still reports the size this host produced - the durable number is the
   // destination's StoreResult.bytes_written.
   bool stream_out = 7;
+  // Postgres only. BASE writes a physical base backup instead of a dump; LOG writes the change-log
+  // segments Postgres archived into <PGDATA>/deplo-wal since the last LOG, then removes them there.
+  // A LOG with nothing waiting succeeds with an empty object_key and writes no artifact.
+  PostgresArchive archive = 8;
+}
+
+enum PostgresArchive {
+  POSTGRES_ARCHIVE_NONE = 0;
+  POSTGRES_ARCHIVE_BASE = 1;
+  POSTGRES_ARCHIVE_LOG = 2;
 }
 
 // One event in the backup stream. Exactly one arm is set; the terminal arm is
@@ -1243,6 +1365,9 @@ message BackupResult {
   // emits when it is handed an age identity, which is what a download hands to a
   // browser.
   int64 decrypted_size_bytes = 6;
+  // How long the app's containers were paused so its volumes could be copied
+  // consistently, in milliseconds. 0 when nothing was held.
+  int64 held_ms = 7;
 }
 
 message RestoreRequest {
@@ -1258,6 +1383,9 @@ message RestoreRequest {
   // The hex sha256 the control plane recorded when it WROTE this artifact, so the agent
   // can prove the bytes it is about to act on are that artifact.
   string expected_sha256 = 7;
+  // Postgres base backups only: the folder, at the same destination, of the change-log artifacts
+  // (BackupRequest.archive LOG) to replay after the base backup, in name order.
+  string log_prefix = 8;
 }
 
 message RestoreEvent {
@@ -1492,6 +1620,9 @@ message ConsoleInstance {
   // When the container last started, epoch seconds. 0 = never started, or an
   // agent too old to send it - both mean "no uptime to show", never 1970.
   int64 started_at_unix = 13;
+  // What the restart rule's last probe said (health.restart): "starting" | "answering" |
+  // "not_answering". Empty when no rule watches this container or none has probed yet.
+  string answer = 14;
 }
 
 message ListInstancesResponse {
@@ -1580,6 +1711,9 @@ message PollJobResponse {
   bool timed_out = 6;          // killed at timeout_seconds rather than exiting
   int64 started_at_unix = 7;
   int64 finished_at_unix = 8;  // 0 while running
+  // The agent stopped the job itself because this member's cluster lease ran out.
+  // The control plane records the run as lost with its server and never retries it.
+  bool fenced = 9;
 }
 
 message KillJobRequest { string job_id = 1; }
@@ -1957,6 +2091,9 @@ message ContainerStat {
   // for running out of memory, counted from docker's `oom` events since the agent
   // started. Keyed by container_id, so it never goes down for the same id.
   int32 oom_kills = 19;
+  // ADDITIVE. What the restart rule's last check said about this container: "starting",
+  // "answering" or "not_answering", as InstanceInfo.answer. Empty when no rule watches it.
+  string answer = 20;
 }
 
 message ContainerStatsResponse {
@@ -1994,6 +2131,8 @@ message MetricsSample {
   // plane surface "this host is on the slow path" (~18x the CPU cost) without a second
   // RPC, and makes an automatic demotion visible instead of silent.
   string source = 4;
+  // Restart-rule events since the last frame that carried them.
+  repeated RestartEvent restart_events = 5;
 }
 
 // ---------------------------------------------------------------------------
@@ -2231,4 +2370,156 @@ message CaptureScreenshotResponse {
 message ReuseImage {
   string image_ref = 1;
   string commit_sha = 2;
+}
+
+message InstallClusterRequest {
+  // The target version, normalized without a leading v. Never older than the one installed.
+  string version = 1;
+  // The published binaries, keyed by Go arch, as in SelfUpdateRequest.
+  map<string, ArchBinary> binaries = 2;
+  // Also run the cluster relay beside the leader (a host that answers on 443).
+  bool relay = 3;
+}
+
+message InstallClusterResponse {
+  // The version now installed and running.
+  string version = 1;
+  bool running = 2;
+}
+
+message RemoveClusterRequest {}
+
+message RemoveClusterResponse {
+  // True when something was installed and is now gone.
+  bool removed = 1;
+}
+
+message ClusterStatusRequest {}
+
+message ClusterStatusResponse {
+  bool installed = 1;
+  bool running = 2;
+  // The installed version; empty when nothing is installed.
+  string version = 3;
+  bool relay = 4;
+  // Whether this agent is a cluster member, and how many relays hold its connection now.
+  bool member = 5;
+  int32 relay_links = 6;
+}
+
+message SetClusterMemberRequest {
+  bool member = 1;
+  // Relay addresses (http or https origin, no path) to dial in addition to the one on this
+  // host and the panel's own. Only read when member is true.
+  repeated string relays = 2;
+  // The cluster this server is a member of.
+  string cluster_id = 3;
+  // Certificates (sha256 hex of the DER) that may lead that cluster. An order from any other
+  // certificate, or naming another cluster, is refused whatever the relay says.
+  repeated string leader_fingerprints = 4;
+}
+
+message SetClusterMemberResponse {
+  bool member = 1;
+  // Relays this agent is connected to at the moment of the answer.
+  int32 relay_links = 2;
+}
+
+message ClusterCallRequest {
+  // The leader's method name, e.g. "place". A name starting "relay." goes to the relay on this host
+  // instead, which is where the control plane pushes a cluster's roster. Opaque otherwise.
+  string method = 1;
+  // The request body, forwarded as is.
+  bytes payload = 2;
+}
+
+message ClusterCallResponse {
+  // The leader's answer body, returned as is.
+  bytes payload = 1;
+}
+
+// ---- CLUSTER WATCH (#195) ----
+
+message ClusterWatchRequest {
+  // The last sequence the caller applied; 0 asks for everything the leader still holds.
+  uint64 since = 1;
+}
+
+message ClusterWatchLine {
+  // One line of the leader's watch, forwarded as is (no trailing newline).
+  bytes line = 1;
+}
+
+message CopyClusterImageRequest {
+  // A deplo/<key>:<tag> image this host holds.
+  string image_ref = 1;
+  // The target member's certificate fingerprint (sha256 hex of its DER).
+  string target_fingerprint = 2;
+  // How many releases of the App the target keeps, this one included. 0 means 2.
+  int32 keep = 3;
+}
+
+message CopyClusterImageResponse {
+  // The target already held the image, so nothing was sent.
+  bool already_present = 1;
+  int64 bytes = 2;
+  // Releases the target removed to stay within keep.
+  repeated string pruned = 3;
+}
+
+message ExpectClusterImageRequest {
+  // The deplo/<key>:<tag> image the source is about to send.
+  string image_ref = 1;
+  // The sending member's certificate fingerprint (sha256 hex of its DER).
+  string source_fingerprint = 2;
+  // How many releases of the App this member keeps, this one included. 0 means 2.
+  int32 keep = 3;
+}
+
+message ExpectClusterImageResponse {}
+
+// ---- CLUSTER NAME FORWARDERS (#200) ----
+
+// A cluster member's certificate, by the server id the leader's placement names it with.
+message ClusterForwarderMember {
+  string server_id = 1;
+  // sha256 hex of the member's certificate DER.
+  string fingerprint = 2;
+}
+
+// The public name of a workload that runs on ANOTHER member, held on this member's network for
+// the Environment. The workload is addressed by id: the leader's placement says where it runs.
+message ClusterHeldName {
+  // The Environment's network (deplo-env-<id>, or deplo-team-<id> for an App with none).
+  string network = 1;
+  // "app" | "database".
+  string kind = 2;
+  // The workload's id, which is also the deplo.project label of its containers.
+  string workload_id = 3;
+  // The public name (db-<slug>, or the App's name).
+  string name = 4;
+  // The port the workload answers on.
+  uint32 port = 5;
+}
+
+// A workload placed on THIS member that other members of its Environment may reach over the relay.
+message ClusterServedName {
+  string network = 1;
+  string kind = 2;
+  string workload_id = 3;
+  uint32 port = 4;
+  // Certificate fingerprints of the other members of the same Environment, and no one else.
+  repeated string source_fingerprints = 5;
+}
+
+message SetClusterForwardersRequest {
+  string cluster_id = 1;
+  repeated ClusterForwarderMember members = 2;
+  repeated ClusterHeldName hold = 3;
+  repeated ClusterServedName serve = 4;
+}
+
+message SetClusterForwardersResponse {
+  int32 held = 1;
+  int32 served = 2;
 }

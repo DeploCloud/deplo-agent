@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -17,6 +18,7 @@ import (
 // health check has no Health key and the whole inspect fails.
 const readyInspectTemplate = `{"id":{{json .ID}},"name":{{json .Name}},` +
 	`"service":{{json (index .Config.Labels "com.docker.compose.service")}},` +
+	`"project":{{json (index .Config.Labels "com.docker.compose.project")}},` +
 	`"status":{{json .State.Status}},"restarts":{{json .RestartCount}},"created":{{json .Created}},` +
 	`"startedAt":{{json .State.StartedAt}},"pid":{{json .State.Pid}},` +
 	`"exitCode":{{json .State.ExitCode}},"oomKilled":{{json .State.OOMKilled}},` +
@@ -28,6 +30,14 @@ const readyInspectTemplate = `{"id":{{json .ID}},"name":{{json .Name}},` +
 // the app listens where it is routed, failing fast on a restart, an exit or a failing health check.
 // container is the single image's container; a stack watches every container of its slug.
 func (s *Service) waitReady(ctx context.Context, req *pb.DeployRequest, container string, stack bool, since time.Time, commitSha string, e *emitter) *pb.DeployResult {
+	return s.waitReadyWith(ctx, req, stack, since, commitSha, e, func() []readySample {
+		// A stack's stand-in carries its slug too; it was judged before the live stack was touched.
+		return slices.DeleteFunc(sampleReady(ctx, req.GetSlug(), container, stack), readySample.standIn)
+	})
+}
+
+// waitReadyWith is waitReady over whatever containers sample returns.
+func (s *Service) waitReadyWith(ctx context.Context, req *pb.DeployRequest, stack bool, since time.Time, commitSha string, e *emitter, sample func() []readySample) *pb.DeployResult {
 	ready := req.GetReady()
 	rc := newReadyCheck(ready.GetPort(), ready.GetPortRequired(), ready.GetService(), stack)
 	rc.since = since
@@ -39,7 +49,7 @@ func (s *Service) waitReady(ctx context.Context, req *pb.DeployRequest, containe
 	e.log("info", "Waiting for the app to start and stay up…")
 	deadline := time.Now().Add(timeout)
 	for {
-		v := rc.observe(time.Now(), sampleReady(ctx, req.GetSlug(), container, stack))
+		v := rc.observe(time.Now(), sample())
 		if !v.done && !time.Now().Before(deadline) {
 			v = rc.expire(v)
 		}
@@ -172,13 +182,30 @@ func sampleReady(ctx context.Context, slug, container string, stack bool) []read
 	return parseReadySamples(res.Stdout)
 }
 
+// sampleProject inspects every container of a compose project: the copies of a replicated app.
+func sampleProject(ctx context.Context, project string) []readySample {
+	res, err := dockercli.Run(ctx, 15*time.Second, "ps", "-aq", "--filter", "label=com.docker.compose.project="+project)
+	if err != nil || res.Code != 0 {
+		return nil
+	}
+	targets := splitLines(res.Stdout)
+	if len(targets) == 0 {
+		return nil
+	}
+	res, err = dockercli.Run(ctx, 15*time.Second, append([]string{"inspect", "-f", readyInspectTemplate}, targets...)...)
+	if err != nil {
+		return nil
+	}
+	return parseReadySamples(res.Stdout)
+}
+
 func parseReadySamples(out string) []readySample {
 	var samples []readySample
 	for _, line := range splitLines(out) {
 		var raw struct {
-			ID, Name, Service, Status, Created, StartedAt, Health, RestartPolicy, IP string
-			Restarts, Pid, ExitCode                                                  int
-			OOMKilled                                                                bool
+			ID, Name, Service, Project, Status, Created, StartedAt, Health, RestartPolicy, IP string
+			Restarts, Pid, ExitCode                                                           int
+			OOMKilled                                                                         bool
 		}
 		if json.Unmarshal([]byte(line), &raw) != nil || raw.ID == "" {
 			continue
@@ -188,7 +215,7 @@ func parseReadySamples(out string) []readySample {
 		if started.Year() <= 1 {
 			started = time.Time{}
 		}
-		c := readySample{id: raw.ID, name: strings.TrimPrefix(raw.Name, "/"), service: raw.Service, status: raw.Status,
+		c := readySample{id: raw.ID, name: strings.TrimPrefix(raw.Name, "/"), service: raw.Service, project: raw.Project, status: raw.Status,
 			restarts: raw.Restarts, created: created, startedAt: started, pid: raw.Pid, exitCode: raw.ExitCode,
 			oomKilled: raw.OOMKilled, health: raw.Health, restartPolicy: raw.RestartPolicy}
 		if ips := strings.Fields(raw.IP); len(ips) > 0 {

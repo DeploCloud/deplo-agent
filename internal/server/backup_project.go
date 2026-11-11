@@ -44,6 +44,23 @@ func (s *Service) backupProject(ctx context.Context, p *pb.ProjectDescriptor, de
 }
 
 func (s *Service) writeProjectArchive(ctx context.Context, p *pb.ProjectDescriptor, tw *tar.Writer, e *bkEmitter) error {
+	hold, herr := s.holdVolumes(ctx, p.GetVolumeNames())
+	if herr != nil {
+		return herr
+	}
+	if hold != nil {
+		e.holding = true
+		e.log("info", "Paused the app while its data is copied")
+	}
+	// Also on a panic: an App left paused stays so until the agent restarts.
+	ended := false
+	end := func() {
+		if !ended {
+			ended = true
+			s.endHold(hold, e)
+		}
+	}
+	defer end()
 	for _, vol := range p.GetVolumeNames() {
 		if vol == "" {
 			continue
@@ -53,6 +70,7 @@ func (s *Service) writeProjectArchive(ctx context.Context, p *pb.ProjectDescript
 			return fmt.Errorf("archive volume %q: %w", vol, err)
 		}
 	}
+	end()
 
 	if p.GetIncludeFiles() {
 		root := s.filesRoot(p.GetSlug())
@@ -87,6 +105,19 @@ func (s *Service) writeProjectArchive(ctx context.Context, p *pb.ProjectDescript
 	return nil
 }
 
+// endHold resumes the app and records how long it was held.
+func (s *Service) endHold(hold *volumeHold, e *bkEmitter) {
+	if hold == nil {
+		return
+	}
+	held := hold.release()
+	e.mu.Lock()
+	e.holding = false
+	e.held = held
+	e.mu.Unlock()
+	e.log("info", fmt.Sprintf("The app was paused for %s and is running again", held.Round(time.Millisecond)))
+}
+
 func (s *Service) archiveVolume(ctx context.Context, vol string, tw *tar.Writer, e *bkEmitter) error {
 	if err := validateVolumeName(vol); err != nil {
 		return err
@@ -109,7 +140,9 @@ func (s *Service) archiveVolume(ctx context.Context, vol string, tw *tar.Writer,
 		hdr, err := tr.Next()
 		if err == io.EOF {
 			_, _ = io.Copy(io.Discard, pr)
-			if perr := <-done; perr != nil {
+			if perr := <-done; perr != nil && e.holding {
+				return perr
+			} else if perr != nil {
 				e.log("warn", fmt.Sprintf("volume %q: %v (archive completed; a file likely changed during read)", vol, perr))
 			}
 			return nil
@@ -174,6 +207,11 @@ func (s *Service) restoreProject(ctx context.Context, p *pb.ProjectDescriptor, s
 		return
 	}
 
+	if src.dataOnly {
+		e.log("info", "Restore complete; the stack starts from its failover bundle")
+		e.result(true, "")
+		return
+	}
 	rr := restoreConfig(slug, p, snapshot, src.integrityProven, src.configUntrusted)
 	if rr.ComposeYaml == "" {
 		e.log("warn", "No compose snapshot in the archive; leaving the stack stopped")
