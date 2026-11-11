@@ -113,7 +113,8 @@ func within(t *testing.T, limit time.Duration, what string, ok func() bool) {
 }
 
 // The real leader and relay, two real members, and nobody playing Deplo once the cluster is set up: a member
-// that dies has its App started on the other one. Takes about 90 s of real time, the floor being the point.
+// that dies has its App started on the other one, and removes its own copy when it returns. Takes about 2 min of real
+// time, the 81 s floor being the point.
 func TestE2E_aMembersDeathMovesItsAppWithNoControlPlaneInTheLoop(t *testing.T) {
 	if testing.Short() {
 		t.Skip("waits out the real 81 s failover floor")
@@ -285,6 +286,32 @@ func TestE2E_aMembersDeathMovesItsAppWithNoControlPlaneInTheLoop(t *testing.T) {
 	}
 	if types := watchTypes(t, deplo, 5); !strings.Contains(types, "placement,failed_over,failover") {
 		t.Fatalf("the buffered events: %s", types)
+	}
+
+	// The member comes back: on the leader's word it removes its copy of the App, and the leader says so once.
+	var removed []string
+	g := a.leaseGuard()
+	g.has = func(string) bool { return true }
+	g.remove = func(_ context.Context, e lease.Entry) error {
+		mu.Lock()
+		removed = append(removed, e.Slug)
+		mu.Unlock()
+		return nil
+	}
+	if _, err := a.SetClusterMember(context.Background(), &pb.SetClusterMemberRequest{Member: true, Relays: []string{"http://" + relayAddr}}); err != nil {
+		t.Fatal(err)
+	}
+	within(t, 60*time.Second, "the leader to report the return", func() bool {
+		return strings.Contains(watchTypes(t, deplo, 5), "member_returned")
+	})
+	time.Sleep(12 * time.Second)
+	mu.Lock()
+	defer mu.Unlock()
+	if strings.Join(removed, ",") != "web" || len(started[a]) != 0 {
+		t.Fatalf("the returning member removed %v and started %d", removed, len(started[a]))
+	}
+	if n := strings.Count(watchTypes(t, deplo, 5), "member_returned"); n != 1 {
+		t.Fatalf("%d return events for one return", n)
 	}
 }
 
