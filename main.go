@@ -20,6 +20,7 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/bootstrap"
 	"github.com/DeploCloud/deplo-agent/internal/capture"
+	"github.com/DeploCloud/deplo-agent/internal/forwarder"
 	"github.com/DeploCloud/deplo-agent/internal/link"
 	"github.com/DeploCloud/deplo-agent/internal/server"
 )
@@ -28,6 +29,10 @@ func main() {
 	// The same binary, mounted into the screenshot browser's container.
 	if len(os.Args) > 1 && os.Args[1] == "capture" {
 		os.Exit(capture.Main(os.Stdin, os.Stdout))
+	}
+	// The same binary, mounted into a name forwarder's container (#200).
+	if len(os.Args) > 1 && os.Args[1] == "forward" {
+		os.Exit(forwarder.Main(os.Args[2:], os.Stderr))
 	}
 	var (
 		addr        = flag.String("addr", "", "listen address (host:port); none by default, the agent links out to its panel")
