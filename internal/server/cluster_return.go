@@ -93,7 +93,7 @@ func (g *leaseGuard) settle(cluster string) {
 		}
 	}
 	failed := false
-	var removed, keep []string
+	var removed, done []string
 	if returning {
 		for slug, e := range moved {
 			if !slices.Contains(held, slug) && g.has != nil && !g.has(slug) {
@@ -111,13 +111,15 @@ func (g *leaseGuard) settle(cluster string) {
 		switch {
 		// A stack the cluster no longer names is not the leader's to start; one waiting for room stays held.
 		case slices.Contains(removed, slug), !named[slug]:
+			done = append(done, slug)
 		case !mine[slug]:
-			keep = append(keep, slug)
 		default:
 			if err := g.resume(ctx, slug); err != nil {
 				fmt.Fprintf(os.Stderr, "deplo-agent: cluster %s: could not start %s again: %v\n", cluster, slug, err)
-				keep, failed = append(keep, slug), true
+				failed = true
+				continue
 			}
+			done = append(done, slug)
 		}
 	}
 	slices.Sort(removed)
@@ -125,13 +127,10 @@ func (g *leaseGuard) settle(cluster string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	delete(g.settling, cluster)
-	if c = g.clusters[cluster]; c == nil {
+	if c = g.clusters[cluster]; c == nil || (!returning && len(done) == 0) {
 		return
 	}
-	if !returning && slices.Equal(c.Held, keep) {
-		return
-	}
-	c.Held = keep
+	c.Held = slices.DeleteFunc(c.Held, func(s string) bool { return slices.Contains(done, s) })
 	if returning {
 		if c.Returned == nil {
 			c.Returned = &lease.Returned{Removed: []string{}}
