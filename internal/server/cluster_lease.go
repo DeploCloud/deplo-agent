@@ -125,6 +125,19 @@ func (g *leaseGuard) Check(ctx context.Context) {
 	}
 }
 
+// RanOut reports a lease that has gone unrenewed past the fence: until a renewal, this member starts no scheduled job.
+func (g *leaseGuard) RanOut() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := g.now()
+	for _, c := range g.clusters {
+		if !c.RenewedAt.IsZero() && now.Sub(c.RenewedAt) >= lease.FenceAfter+time.Duration(c.ExtraSeconds)*time.Second {
+			return true
+		}
+	}
+	return false
+}
+
 // Forget drops everything held for a cluster this agent has left.
 func (g *leaseGuard) Forget() {
 	g.mu.Lock()
@@ -200,8 +213,9 @@ func (s *Service) leaseGuard() *leaseGuard {
 	return s.lease
 }
 
-// fenceStacks stops each stack; the stack lock keeps it from racing a deploy of the same one.
+// fenceStacks stops each stack and every running scheduled job; the stack lock keeps it from racing a deploy of the same one.
 func (s *Service) fenceStacks(ctx context.Context, entries []lease.Entry) error {
+	s.fenceJobs()
 	var first error
 	for _, e := range entries {
 		res, err := s.StopStack(ctx, &pb.StackRef{Slug: e.Slug})

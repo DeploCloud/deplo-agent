@@ -34,9 +34,11 @@ type job struct {
 	done       bool
 	exitCode   int32
 	timedOut   bool
-	stdout     *dockercli.TailBuf
-	stderr     *dockercli.TailBuf
-	cancel     context.CancelFunc
+	// fenced is set when this member's cluster lease ran out and the job was stopped for it.
+	fenced bool
+	stdout *dockercli.TailBuf
+	stderr *dockercli.TailBuf
+	cancel context.CancelFunc
 }
 
 func newJobID() string {
@@ -72,6 +74,11 @@ func (s *Service) StartJob(ctx context.Context, req *pb.StartJobRequest) (*pb.St
 		case strings.ContainsAny(e.GetValue(), "\r\n"):
 			return nil, status.Errorf(codes.InvalidArgument, "the value of %s has a line break, which a cron job cannot pass", name)
 		}
+	}
+
+	if s.leaseGuard().RanOut() {
+		return nil, status.Error(codes.FailedPrecondition,
+			"This server lost touch with its cluster, so it runs no cron jobs until it is back.")
 	}
 
 	s.mu.Lock()
@@ -238,6 +245,13 @@ func (s *Service) finishJob(j *job, code int32, timedOut bool, extraOut, extraEr
 	if j.done {
 		return
 	}
+	// A job that ended on its own just as the lease ran out keeps its real outcome.
+	if code != -1 {
+		j.fenced = false
+	}
+	if j.fenced {
+		extraErr = "The job was stopped: this server lost touch with its cluster."
+	}
 	if extraOut != "" {
 		_, _ = j.stdout.Write([]byte(extraOut))
 	}
@@ -248,6 +262,18 @@ func (s *Service) finishJob(j *job, code int32, timedOut bool, extraOut, extraEr
 	j.timedOut = timedOut
 	j.finishedAt = time.Now()
 	j.done = true
+}
+
+// fenceJobs stops every running job when this member's lease runs out: its App may start on another member (spec #176).
+func (s *Service) fenceJobs() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, j := range s.jobs {
+		if !j.done {
+			j.fenced = true
+			j.cancel()
+		}
+	}
 }
 
 func hasShell(ctx context.Context, container, shell string) bool {
@@ -273,6 +299,7 @@ func (s *Service) PollJob(_ context.Context, req *pb.PollJobRequest) (*pb.PollJo
 	}
 	resp.ExitCode = j.exitCode
 	resp.TimedOut = j.timedOut
+	resp.Fenced = j.fenced
 	resp.Stdout = j.stdout.String()
 	resp.Stderr = j.stderr.String()
 	resp.FinishedAtUnix = j.finishedAt.Unix()

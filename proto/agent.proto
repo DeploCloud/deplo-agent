@@ -1689,6 +1689,9 @@ message PollJobResponse {
   bool timed_out = 6;          // killed at timeout_seconds rather than exiting
   int64 started_at_unix = 7;
   int64 finished_at_unix = 8;  // 0 while running
+  // The agent stopped the job itself because this member's cluster lease ran out.
+  // The control plane records the run as lost with its server and never retries it.
+  bool fenced = 9;
 }
 
 message KillJobRequest { string job_id = 1; }
