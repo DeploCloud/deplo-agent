@@ -197,6 +197,9 @@ func TestE2E_aMembersDeathMovesItsDatabaseAndAppWithNoControlPlaneInTheLoop(t *t
 	}
 	a, aID := member("srv_a")
 	b, bID := member("srv_b")
+	// With nobody playing Deplo the leader leads only while more than half of its members answer: a third one,
+	// which takes nothing over, is what lets it move the work of the one that dies.
+	c, cID := member("srv_c")
 
 	within(t, 10*time.Second, "the relay's socket", func() bool { _, err := os.Stat(relaySock); return err == nil })
 	relay := callerOn(relaySock)
@@ -204,6 +207,7 @@ func TestE2E_aMembersDeathMovesItsDatabaseAndAppWithNoControlPlaneInTheLoop(t *t
 		{Fingerprint: leaderID.Fingerprint, Role: wire.RoleLeader},
 		{Fingerprint: aID.Fingerprint, Role: wire.RoleMember},
 		{Fingerprint: bID.Fingerprint, Role: wire.RoleMember},
+		{Fingerprint: cID.Fingerprint, Role: wire.RoleMember},
 	}}, nil)
 
 	relaysFile := filepath.Join(leaderDir, "relays")
@@ -212,7 +216,7 @@ func TestE2E_aMembersDeathMovesItsDatabaseAndAppWithNoControlPlaneInTheLoop(t *t
 	}
 	leaderSock := filepath.Join(leaderDir, "leader.sock")
 	runCluster(t, bin, with(certs(leaderDir), map[string]string{"DEPLO_CLUSTER_SOCKET": leaderSock, "DEPLO_CLUSTER_RELAYS_FILE": relaysFile, "DEPLO_CLUSTER_STATE": dir("leader/state")}))
-	for _, s := range []*Service{a, b} {
+	for _, s := range []*Service{a, b, c} {
 		if _, err := s.SetClusterMember(context.Background(), &pb.SetClusterMemberRequest{Member: true, Relays: []string{"http://" + relayAddr}}); err != nil {
 			t.Fatal(err)
 		}
@@ -222,10 +226,10 @@ func TestE2E_aMembersDeathMovesItsDatabaseAndAppWithNoControlPlaneInTheLoop(t *t
 	within(t, 10*time.Second, "the leader's socket", func() bool { _, err := os.Stat(leaderSock); return err == nil })
 	deplo := callerOn(leaderSock)
 	fact := func(id string, fp string) map[string]any {
-		return map[string]any{"id": id, "fingerprint": fp, "arch": "amd64", "freeMb": 4096}
+		return map[string]any{"id": id, "fingerprint": fp, "arch": "amd64", "freeMb": 4096, "noFailover": id == "srv_c"}
 	}
 	deplo.call(t, "leader.roster", map[string]any{"cluster": "clu_1", "epoch": 1,
-		"members": []any{fact("srv_a", aID.Fingerprint), fact("srv_b", bID.Fingerprint)},
+		"members": []any{fact("srv_a", aID.Fingerprint), fact("srv_b", bID.Fingerprint), fact("srv_c", cID.Fingerprint)},
 		"placement": []lease.Entry{{Kind: "app", ID: "prj_1", Member: "srv_a", Slug: "web"},
 			{Kind: "database", ID: "db_1", Member: "srv_a", Slug: dbSlug, SingleWriter: true}}}, nil)
 	var key struct {
@@ -271,7 +275,7 @@ func TestE2E_aMembersDeathMovesItsDatabaseAndAppWithNoControlPlaneInTheLoop(t *t
 		"sealed": seal(dbBundle), "meta": map[string]any{"name": "main", "createdAt": "2026-06-01T00:00:00Z"}}, nil)
 
 	held := func(s *Service) bool { _, ok := s.leaseGuard().Admit("clu_1", 1); return ok && leaseHeld(s, "clu_1") }
-	within(t, 30*time.Second, "both members to hold a lease", func() bool { return held(a) && held(b) })
+	within(t, 30*time.Second, "every member to hold a lease", func() bool { return held(a) && held(b) && held(c) })
 
 	// Deplo stops here: from now on nothing calls the leader. Then the member running the App dies.
 	silentFrom := deplo.n

@@ -267,3 +267,41 @@ func TestClusterWatch_aLeaderThatGoesQuietIsGivenUp(t *testing.T) {
 		t.Fatalf("got %v, want Unavailable", err)
 	}
 }
+
+// A leader that is not sure it still leads asks before it renews (spec #176). The question renews nothing, and
+// the member that answered it refuses every older epoch from then on, across a restart too.
+func TestLease_aProbeRenewsNothingAndRefusesOlderEpochsFromThenOn(t *testing.T) {
+	f := newGuard(t)
+	f.g.Renew(orderFor(3))
+	f.clk.Add(50 * time.Second)
+	if got := serveOrder(t, f.g, wire.RoleLeader, `{"cluster":"clu_1","member":"srv_a","epoch":4,"probe":true}`); got != `{"ok":true,"epoch":4}` {
+		t.Fatalf("a probe got %q", got)
+	}
+	if got := serveOrder(t, f.g, wire.RoleLeader, `{"cluster":"clu_1","member":"srv_a","epoch":3,"probe":true}`); !strings.Contains(got, `"stale_epoch"`) || !strings.Contains(got, `"epoch":4`) {
+		t.Fatalf("an older probe got %q", got)
+	}
+	if r := f.reopen().Renew(orderFor(3)); r.OK || r.Error != lease.StaleEpoch || r.Epoch != 4 {
+		t.Fatalf("the leader that was replaced still renews: %+v", r)
+	}
+	f.clk.Add(10 * time.Second)
+	f.g.Check(context.Background())
+	slices.Sort(f.fenced)
+	if strings.Join(f.fenced, ",") != "db-main,files" {
+		t.Fatalf("fenced %v: the probe renewed the lease or dropped its placement", f.fenced)
+	}
+}
+
+func TestLease_aProbeToAMemberWithNoLeaseStartsNone(t *testing.T) {
+	f := newGuard(t)
+	if got := serveOrder(t, f.g, wire.RoleLeader, `{"cluster":"clu_1","member":"srv_a","epoch":2,"probe":true}`); got != `{"ok":true,"epoch":2}` {
+		t.Fatalf("a probe got %q", got)
+	}
+	f.clk.Add(time.Hour)
+	f.g.Check(context.Background())
+	if len(f.fenced) != 0 || f.g.RanOut() || f.g.Holds("db-main") {
+		t.Fatalf("a probe made a lease that ran out: fenced %v", f.fenced)
+	}
+	if r := f.g.Renew(orderFor(1)); r.OK {
+		t.Fatalf("an older epoch was taken after the probe: %+v", r)
+	}
+}

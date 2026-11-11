@@ -464,3 +464,54 @@ func TestReturn_trimRemovesTheNewestCopiesOfTheReplicatedService(t *testing.T) {
 		t.Fatal("a stack with no surplus was trimmed")
 	}
 }
+
+// A leader that takes over may read a stack as waiting for room that the old one had handed back (spec #176).
+// The member names the stacks its order places nowhere that it still has, so no second copy starts beside it.
+func TestReturn_aMemberNamesWhatItStillHasOfTheStacksItsOrderPlacesNowhere(t *testing.T) {
+	f := newReturn(t)
+	f.renew(orderFor(1))
+	waiting := orderFor(2)
+	waiting.Placement[0].Member, waiting.Placement[1].Member = "", ""
+	// "elsewhere" is waiting too, and was never on this host; web is here and does not run.
+	waiting.Placement[3].Member = ""
+	f.stopped["web"] = true
+	raw, _ := json.Marshal(waiting)
+	if got := serveOrder(t, f.g, wire.RoleLeader, string(raw)); got != `{"ok":true,"epoch":2,"unplaced":["db-main"]}` {
+		t.Fatalf("the member answered %q", got)
+	}
+	f.g.work.Wait()
+
+	// Its lease runs out: it stops the database itself and still holds it.
+	f.clk.Add(61 * time.Second)
+	f.g.Check(context.Background())
+	f.stopped["db-main"] = true
+	if got := serveOrder(t, f.g, wire.RoleLeader, string(raw)); got != `{"ok":true,"epoch":2,"unplaced":["db-main"]}` {
+		t.Fatalf("a member that stopped the stack itself answered %q", got)
+	}
+	f.g.work.Wait()
+
+	// A stack with one copy placed on a member is not waiting: its other copies are not this member's to claim.
+	spread := orderFor(2)
+	spread.Placement = append(spread.Placement, lease.Entry{Kind: "app", ID: "prj_1", Replica: 1, Slug: "web"})
+	f.stopped["web"] = false
+	raw, _ = json.Marshal(spread)
+	if got := serveOrder(t, f.g, wire.RoleLeader, string(raw)); got != `{"ok":true,"epoch":2}` {
+		t.Fatalf("an order that places everything got %q", got)
+	}
+	f.g.work.Wait()
+}
+
+// A database the order places on no member still stops with the lease of the member that runs it (spec #176):
+// the leader takes it for that member's, and moves it once that member has been silent long enough.
+func TestReturn_aLeaseThatRunsOutStopsTheStackItsOrderPlacedNowhereToo(t *testing.T) {
+	f := newReturn(t)
+	waiting := orderFor(1)
+	waiting.Placement[0].Member, waiting.Placement[3].Member = "", ""
+	f.renew(waiting)
+	f.clk.Add(61 * time.Second)
+	f.g.Check(context.Background())
+	slices.Sort(f.fenced)
+	if got := strings.Join(f.fenced, ","); got != "db-main,files" {
+		t.Fatalf("stopped %q, want the database it has and nothing that was never on this server", got)
+	}
+}
