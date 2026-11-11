@@ -206,6 +206,22 @@ func (w *restartWatcher) answerFor(slug, container string) string {
 	return st.answer[container]
 }
 
+// stampAnswers puts answerFor on a metrics frame, whose containers carry a name and no slug.
+func (w *restartWatcher) stampAnswers(stats []*pb.ContainerStat) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for slug, st := range w.states {
+		if w.hold[slug] > 0 {
+			continue
+		}
+		for _, c := range stats {
+			if a := st.answer[c.GetName()]; a != "" {
+				c.Answer = a
+			}
+		}
+	}
+}
+
 func (w *restartWatcher) slugs() []string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
