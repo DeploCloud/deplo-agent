@@ -140,7 +140,7 @@ func (g *leaseGuard) settle(cluster string) {
 	for _, slug := range held {
 		switch {
 		// A stack the cluster no longer names is not the leader's to start; one waiting for room stays held.
-		case slices.Contains(removed, slug) && !mine[slug], !named[slug]:
+		case slices.Contains(removed, slug), !named[slug]:
 			done = append(done, slug)
 		case !mine[slug]:
 		default:
