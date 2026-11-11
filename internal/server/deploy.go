@@ -315,7 +315,23 @@ func (s *Service) awaitStarted(ctx context.Context, req *pb.DeployRequest, conta
 // startStack writes the admitted stack and brings it up under the stack lock, so a Reroute, Stop
 // or Destroy of the same app cannot interleave with it. Builds stay outside the lock.
 func (s *Service) startStack(ctx context.Context, req *pb.DeployRequest, e *emitter) bool {
-	defer s.lockStack(req.GetSlug())()
+	done, ok := s.lockToStart(req.GetSlug())
+	if !ok {
+		e.result(false, awaitingLeader, "")
+		return false
+	}
+	up := s.upLocked(ctx, req, e)
+	if done() {
+		if up {
+			e.result(false, awaitingLeader, "")
+		}
+		return false
+	}
+	return up
+}
+
+// upLocked writes the stack and runs compose up; the caller holds the stack's lock.
+func (s *Service) upLocked(ctx context.Context, req *pb.DeployRequest, e *emitter) bool {
 	envFile, projectDir, ok := s.writeStackFiles(req, e)
 	if !ok {
 		return false

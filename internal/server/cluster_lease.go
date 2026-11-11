@@ -9,12 +9,13 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
-	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/clusterlink/lease"
 	"github.com/DeploCloud/deplo-agent/internal/clusterlink/wire"
+	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
 // A member lives on the leader's lease: each renewal carries the leader's epoch and the placement. Without one
@@ -183,7 +184,7 @@ func (g *leaseGuard) Check(ctx context.Context) {
 		}
 		var mine []lease.Entry
 		for _, e := range c.Placement {
-			if e.Slug != "" && ((e.Member == c.Member && (e.SingleWriter || c.cold)) || (e.SingleWriter && g.hasUnplaced(c.Placement, e))) {
+			if g.fences(c, e) {
 				mine = append(mine, e)
 			}
 		}
@@ -207,6 +208,29 @@ func (g *leaseGuard) Check(ctx context.Context) {
 		}
 		g.mu.Unlock()
 	}
+}
+
+// fences says whether a lease that ran out stops this entry here; the caller holds g.mu.
+func (g *leaseGuard) fences(c *clusterLease, e lease.Entry) bool {
+	return e.Slug != "" && ((e.Member == c.Member && (e.SingleWriter || c.cold)) || (e.SingleWriter && g.hasUnplaced(c.Placement, e)))
+}
+
+// mustStayDown says a stack is one the fence stops and its lease has run out: whatever just started it stops it again.
+func (g *leaseGuard) mustStayDown(slug string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := g.now()
+	for _, c := range g.clusters {
+		if !c.ranOut(now) {
+			continue
+		}
+		for _, e := range c.Placement {
+			if e.Slug == slug && g.fences(c, e) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // hasUnplaced says a stack the order placed on no member is on this host: the leader takes it for this
@@ -342,18 +366,73 @@ func (s *Service) leaseGuard() *leaseGuard {
 	return s.lease
 }
 
-// fenceStacks stops each stack and every running scheduled job; the stack lock keeps it from racing a deploy of the same one.
+// fenceGrace is what a fenced stack gets to stop cleanly before it is killed. With the kill and the 1 s check it
+// stays well under the 21 s between the fence and the leader starting the work elsewhere; a var so tests can hurry it.
+var fenceGrace = 8 * time.Second
+
+// fenceStacks stops every stack at once, and every running scheduled job. It never waits for a stack's lock: a
+// deploy that holds one is cancelled, and whatever it started is stopped by the deploy itself on its way out.
 func (s *Service) fenceStacks(ctx context.Context, entries []lease.Entry) error {
 	s.fenceJobs()
-	var first error
+	slugs := map[string]bool{}
 	for _, e := range entries {
-		res, err := s.StopStack(ctx, &pb.StackRef{Slug: e.Slug})
-		if err == nil && !res.GetOk() {
-			err = fmt.Errorf("%s: %s", e.Slug, res.GetError())
-		}
-		if err != nil && first == nil {
+		slugs[e.Slug] = true
+	}
+	s.cancelDeploysOf(slugs)
+	ctx, cancel := context.WithTimeout(ctx, fenceGrace+10*time.Second)
+	defer cancel()
+	errs := make(chan error, len(slugs))
+	for slug := range slugs {
+		go func() { errs <- s.fenceStack(ctx, slug) }()
+	}
+	var first error
+	for range slugs {
+		if err := <-errs; err != nil && first == nil {
 			first = err
 		}
 	}
 	return first
+}
+
+// fenceStack stops one stack within fenceGrace, kills what is left, and fails when something of it still runs.
+func (s *Service) fenceStack(ctx context.Context, slug string) error {
+	if err := validateSlug(slug); err != nil {
+		return err
+	}
+	grace := strconv.Itoa(max(int(fenceGrace/time.Second), 1))
+	res, err := dockercli.Run(ctx, fenceGrace+3*time.Second, s.composeCtl(slug, "stop", "-t", grace)...)
+	if err != nil || res.Code != 0 || stackRuns(ctx, slug) {
+		_, _ = dockercli.Run(ctx, 3*time.Second, s.composeCtl(slug, "kill")...)
+		_, _ = dockercli.Run(ctx, 3*time.Second, "kill", "deplo-"+slug)
+	}
+	// A deploy's stand-in mounts the same volume: it goes with the stack.
+	if isFile(s.stackPath(slug + standInSuffix)) {
+		_, _ = dockercli.Run(ctx, 3*time.Second, append(s.standInCompose(slug), "kill")...)
+	}
+	if stackRuns(ctx, slug) {
+		return fmt.Errorf("%s: still running", slug)
+	}
+	return nil
+}
+
+// lockToStart takes a stack's lock for something that brings it up, refused while this member has no live lease.
+// done releases the lock and says whether the lease ran out meanwhile: the stack is then stopped again.
+func (s *Service) lockToStart(slug string) (done func() bool, ok bool) {
+	unlock := s.lockStack(slug)
+	if s.leaseGuard().Holds(slug) {
+		unlock()
+		return nil, false
+	}
+	return func() bool {
+		defer unlock()
+		if !s.leaseGuard().mustStayDown(slug) {
+			return false
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), fenceGrace+10*time.Second)
+		defer cancel()
+		if err := s.fenceStack(ctx, slug); err != nil {
+			fmt.Fprintf(os.Stderr, "deplo-agent: the lease ran out while %s started, and it could not be stopped again: %v\n", slug, err)
+		}
+		return true
+	}, true
 }

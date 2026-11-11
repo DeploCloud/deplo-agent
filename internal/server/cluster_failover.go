@@ -16,16 +16,18 @@ import (
 // bundleJSON reads a message a newer control plane wrote: a field this agent does not know is skipped.
 var bundleJSON = protojson.UnmarshalOptions{DiscardUnknown: true}
 
-// runFailoverDeploy runs one deploy request to its result; a var so a test can answer without Docker.
-var runFailoverDeploy = func(s *Service, ctx context.Context, req *pb.DeployRequest, e *emitter) {
-	s.runDeploy(ctx, req, e)
+// runFailoverDeploy runs one deploy request to its result, and runFailoverRestore restores one backup the way
+// the Restore RPC does; vars so a test can answer without Docker.
+var (
+	runFailoverDeploy  func(s *Service, ctx context.Context, req *pb.DeployRequest, e *emitter)
+	runFailoverRestore func(s *Service, ctx context.Context, req *pb.RestoreRequest) error
+)
+
+// Set here, not in the declarations: a deploy and a restore both read the lease guard that starts them.
+func init() {
+	runFailoverDeploy = func(s *Service, ctx context.Context, req *pb.DeployRequest, e *emitter) { s.runDeploy(ctx, req, e) }
+	runFailoverRestore = restoreLikeTheRPC
 }
-
-// runFailoverRestore restores one backup the way the Restore RPC does; a var so a test can answer without Docker.
-var runFailoverRestore func(s *Service, ctx context.Context, req *pb.RestoreRequest) error
-
-// Set here, not in the declaration: a restore reroutes, and Reroute reads the lease guard that starts this.
-func init() { runFailoverRestore = restoreLikeTheRPC }
 
 func restoreLikeTheRPC(s *Service, ctx context.Context, req *pb.RestoreRequest) error {
 	src, err := sourceFromRestore(s, req)

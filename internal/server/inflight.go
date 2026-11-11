@@ -19,6 +19,8 @@ const (
 
 type inflight struct {
 	startedAt time.Time
+	// slug is the stack this deploy brings up, so a fence can end it.
+	slug string
 
 	mu       sync.Mutex
 	cond     *sync.Cond

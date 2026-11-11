@@ -306,6 +306,7 @@ func (s *Service) Deploy(req *pb.DeployRequest, stream pb.Agent_DeployServer) er
 	}
 	deployCtx, cancel := context.WithCancel(context.Background())
 	f := newInflight(cancel)
+	f.slug = req.GetSlug()
 	s.deploys[id] = f
 	s.mu.Unlock()
 
@@ -352,6 +353,7 @@ func (s *Service) DeployStream(stream pb.Agent_DeployStreamServer) error {
 	}
 	deployCtx, cancel := context.WithCancel(context.Background())
 	f := newInflight(cancel)
+	f.slug = req.GetSlug()
 	s.deploys[id] = f
 	s.mu.Unlock()
 
@@ -403,6 +405,17 @@ func (s *Service) ReattachDeploy(req *pb.ReattachRequest, stream pb.Agent_Reatta
 		return status.Errorf(codes.NotFound, "no record of deploy %q", id)
 	}
 	return f.subscribe(stream.Context(), req.GetFromSeq(), stream.Send)
+}
+
+// cancelDeploysOf ends every deploy in flight of those stacks; one that already finished takes no harm.
+func (s *Service) cancelDeploysOf(slugs map[string]bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, f := range s.deploys {
+		if slugs[f.slug] {
+			f.cancel()
+		}
+	}
 }
 
 func (s *Service) driveDeploy(ctx context.Context, id string, req *pb.DeployRequest, contextFile string, f *inflight) {
@@ -471,10 +484,19 @@ func (s *Service) StartStack(ctx context.Context, ref *pb.StackRef) (*pb.StackRe
 	if err := validateSlug(slug); err != nil {
 		return nil, err
 	}
-	if s.leaseGuard().Holds(slug) {
+	done, ok := s.lockToStart(slug)
+	if !ok {
 		return nil, status.Error(codes.FailedPrecondition, awaitingLeader)
 	}
-	defer s.lockStack(slug)()
+	res, err := s.startLocked(ctx, slug)
+	if done() {
+		return nil, status.Error(codes.FailedPrecondition, awaitingLeader)
+	}
+	return res, err
+}
+
+// startLocked is StartStack for a caller that holds the stack's lock.
+func (s *Service) startLocked(ctx context.Context, slug string) (*pb.StackResult, error) {
 	s.restartWatch().resume(slug, "restart")
 	if err := s.stripSourceLinks(slug); err != nil {
 		return &pb.StackResult{Ok: false, Error: err.Error()}, nil
@@ -606,10 +628,20 @@ func (s *Service) Reroute(ctx context.Context, req *pb.RerouteRequest) (*pb.Stac
 	if err := validateSlug(slug); err != nil {
 		return nil, err
 	}
-	if s.leaseGuard().Holds(slug) {
+	done, ok := s.lockToStart(slug)
+	if !ok {
 		return nil, status.Error(codes.FailedPrecondition, awaitingLeader)
 	}
-	defer s.lockStack(slug)()
+	res, err := s.rerouteLocked(ctx, req)
+	if done() {
+		return nil, status.Error(codes.FailedPrecondition, awaitingLeader)
+	}
+	return res, err
+}
+
+// rerouteLocked is Reroute for a caller that holds the stack's lock.
+func (s *Service) rerouteLocked(ctx context.Context, req *pb.RerouteRequest) (*pb.StackResult, error) {
+	slug := req.GetSlug()
 	name := "deplo-" + slug
 
 	if req.GetComposeYaml() == "" {
