@@ -137,6 +137,8 @@ type artifactSource struct {
 	label           string
 	// logPrefix is the folder of change-log artifacts a Postgres base backup is followed by.
 	logPrefix string
+	// dataOnly restores an App's Volumes and Files and leaves its stack alone: a failover starts it from its bundle.
+	dataOnly bool
 }
 
 func sourceFromRestore(s *Service, req *pb.RestoreRequest) (*artifactSource, error) {

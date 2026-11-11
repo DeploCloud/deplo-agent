@@ -199,6 +199,11 @@ func (s *Service) restoreProject(ctx context.Context, p *pb.ProjectDescriptor, s
 		return
 	}
 
+	if src.dataOnly {
+		e.log("info", "Restore complete; the stack starts from its failover bundle")
+		e.result(true, "")
+		return
+	}
 	rr := restoreConfig(slug, p, snapshot, src.integrityProven, src.configUntrusted)
 	if rr.ComposeYaml == "" {
 		e.log("warn", "No compose snapshot in the archive; leaving the stack stopped")

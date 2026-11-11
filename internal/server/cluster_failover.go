@@ -32,6 +32,8 @@ func restoreLikeTheRPC(s *Service, ctx context.Context, req *pb.RestoreRequest) 
 	if err != nil {
 		return errors.New(statusMessage(err))
 	}
+	// The stack is started from its bundle, which is newer than the one the backup holds.
+	src.dataOnly = restoresBeforeStart(req)
 	var res *pb.RestoreResult
 	e := &rsEmitter{send: func(ev *pb.RestoreEvent) error {
 		if r := ev.GetResult(); r != nil {
@@ -72,12 +74,17 @@ func failoverRestore(st *lease.Start) (*pb.RestoreRequest, error) {
 	if err := bundleJSON.Unmarshal(st.Restore.Request, req); err != nil {
 		return nil, fmt.Errorf("the bundle's restore is unreadable: %w", err)
 	}
-	// ponytail: a database is restored into its running engine. An App's volumes must be restored before its
-	// stack starts: ticket #204 adds that case here.
-	if req.GetKind() != pb.BackupKind_BACKUP_KIND_DATABASE {
-		return nil, errors.New("this server cannot restore that kind of backup on a failover yet")
+	switch req.GetKind() {
+	case pb.BackupKind_BACKUP_KIND_DATABASE, pb.BackupKind_BACKUP_KIND_PROJECT:
+		return req, nil
 	}
-	return req, nil
+	return nil, errors.New("this server cannot restore that kind of backup on a failover")
+}
+
+// restoresBeforeStart is an App's backup: its Volumes and Files are put back before its stack starts, so it
+// never runs on empty ones. A database is the other way round, restored into its running engine.
+func restoresBeforeStart(req *pb.RestoreRequest) bool {
+	return req.GetKind() == pb.BackupKind_BACKUP_KIND_PROJECT
 }
 
 // restoreAfterStart restores the bundle's backup into the stack that just came up, and stops it when that fails.
@@ -108,6 +115,13 @@ func (s *Service) startFromBundle(ctx context.Context, st *lease.Start) error {
 	restore, err := failoverRestore(st)
 	if err != nil {
 		return err
+	}
+	first := restore != nil && restoresBeforeStart(restore)
+	if first {
+		if err := runFailoverRestore(s, ctx, restore); err != nil {
+			fmt.Fprintf(os.Stderr, "deplo-agent: failover restore of %s failed: %v\n", st.Slug, err)
+			return err
+		}
 	}
 	req := &pb.DeployRequest{
 		DeployId:         fmt.Sprintf("failover-%s-%d", st.DeploymentID, time.Now().Unix()),
@@ -162,9 +176,15 @@ func (s *Service) startFromBundle(ctx context.Context, st *lease.Start) error {
 			msg = "the stack did not become ready"
 		}
 		fmt.Fprintf(os.Stderr, "deplo-agent: failover start of %s failed: %s\n", st.Slug, msg)
+		if first {
+			// The leader tries another member: a copy that half started on restored data must not stay up here.
+			stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			stopFailoverStack(s, stopCtx, st.Slug)
+		}
 		return errors.New(msg)
 	}
-	if restore != nil {
+	if restore != nil && !first {
 		return s.restoreAfterStart(ctx, st.Slug, restore)
 	}
 	return nil
