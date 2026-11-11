@@ -129,6 +129,7 @@ var Capabilities = []string{
 	"cluster.failover",
 	"cluster.failover.restore",
 	"cluster.forwarders",
+	"backup.postgres-archive",
 }
 
 // AgentVersion is the version this agent reports over Hello.

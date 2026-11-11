@@ -254,6 +254,22 @@ func DeleteOne(ctx context.Context, cfg Config, key string) (int64, error) {
 	return existed, nil
 }
 
+// List names every object whose key starts with `prefix`.
+func List(ctx context.Context, cfg Config, prefix string) ([]string, error) {
+	cl, err := New(cfg)
+	if err != nil {
+		return nil, err
+	}
+	var keys []string
+	for o := range cl.ListObjects(ctx, cfg.Bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
+		if o.Err != nil {
+			return nil, fmt.Errorf("list %q: %w", prefix, o.Err)
+		}
+		keys = append(keys, o.Key)
+	}
+	return keys, nil
+}
+
 // DeletePrefix removes every object whose key starts with `prefix` (a target's whole folder, for retention + delete-with-artifacts).
 func DeletePrefix(ctx context.Context, cfg Config, prefix string) (int64, error) {
 	cl, err := New(cfg)
