@@ -6,7 +6,11 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strconv"
+	"strings"
 	"time"
+
+	"go.yaml.in/yaml/v3"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/clusterlink/lease"
@@ -93,10 +97,36 @@ func (g *leaseGuard) settle(cluster string) {
 		}
 	}
 	failed := false
-	var removed, done []string
+	var removed, trimmed, done []string
+	if returning && g.trim != nil {
+		here, all := map[string]int{}, map[string]int{}
+		for _, e := range placement {
+			all[e.Slug]++
+			if e.Member == me {
+				here[e.Slug]++
+			}
+		}
+		// Some of its replicas were started elsewhere: the copies beyond what is still placed here go.
+		for slug, n := range here {
+			if slug == "" || n == all[slug] {
+				continue
+			}
+			cut, err := g.trim(ctx, slug, n)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "deplo-agent: cluster %s: could not stop the surplus copies of %s: %v\n", cluster, slug, err)
+				failed = true
+			} else if cut {
+				trimmed = append(trimmed, slug)
+			}
+		}
+	}
 	if returning {
 		for slug, e := range moved {
 			if !slices.Contains(held, slug) && g.has != nil && !g.has(slug) {
+				continue
+			}
+			if g.isStarting(slug) {
+				failed = true
 				continue
 			}
 			if err := g.remove(ctx, e); err != nil {
@@ -122,6 +152,7 @@ func (g *leaseGuard) settle(cluster string) {
 			done = append(done, slug)
 		}
 	}
+	removed = union(removed, trimmed)
 	slices.Sort(removed)
 
 	g.mu.Lock()
@@ -139,6 +170,44 @@ func (g *leaseGuard) settle(cluster string) {
 		c.Returning = failed
 	}
 	g.save()
+}
+
+// startGrace is how long a stack started here is kept while no renewal has placed it here yet.
+const startGrace = time.Minute
+
+// markStart notes a start order running on this member, its end, or (failed) that nothing was left to guard.
+func (g *leaseGuard) markStart(slug string, failed bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	_, running := g.starting[slug]
+	switch {
+	case failed:
+		delete(g.starting, slug)
+	case running:
+		g.starting[slug] = g.now()
+	default:
+		g.starting[slug] = time.Time{}
+	}
+}
+
+// confirmStarts ends the guard of a started stack the leader now places here; the caller holds g.mu.
+func (g *leaseGuard) confirmStarts(o lease.Order) {
+	for slug, at := range g.starting {
+		if at.IsZero() {
+			continue
+		}
+		placed := slices.ContainsFunc(o.Placement, func(e lease.Entry) bool { return e.Slug == slug && e.Member == o.Member })
+		if placed || g.now().Sub(at) >= startGrace {
+			delete(g.starting, slug)
+		}
+	}
+}
+
+func (g *leaseGuard) isStarting(slug string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	_, ok := g.starting[slug]
+	return ok
 }
 
 // Holds says whether a stack is the cluster's while this member has no live lease: nothing of it starts then.
@@ -182,4 +251,59 @@ func (s *Service) resumeHeld(ctx context.Context, slug string) error {
 		err = errors.New(res.GetError())
 	}
 	return err
+}
+
+// trimReplicas removes the newest copies of every service that declares replicas until n are left of each.
+func (s *Service) trimReplicas(ctx context.Context, slug string, n int) (bool, error) {
+	raw, err := os.ReadFile(s.stackPath(slug))
+	if err != nil {
+		return false, nil
+	}
+	var doc struct {
+		Services map[string]struct {
+			Deploy struct {
+				Replicas *int `yaml:"replicas"`
+			} `yaml:"deploy"`
+		} `yaml:"services"`
+	}
+	if yaml.Unmarshal(raw, &doc) != nil {
+		return false, nil
+	}
+	defer s.lockStack(slug)()
+	res, err := dockercli.Run(ctx, 15*time.Second, "ps", "-a", "--filter", "label=com.docker.compose.project=deplo-"+slug,
+		"--format", `{{.ID}} {{.Label "com.docker.compose.service"}} {{.Label "com.docker.compose.container-number"}}`)
+	if err == nil && res.Code != 0 {
+		err = errors.New(strings.TrimSpace(res.Stderr))
+	}
+	if err != nil {
+		return false, err
+	}
+	type copyOf struct {
+		id     string
+		number int
+	}
+	by := map[string][]copyOf{}
+	for _, line := range splitLines(res.Stdout) {
+		f := strings.Fields(line)
+		if len(f) != 3 || doc.Services[f[1]].Deploy.Replicas == nil {
+			continue
+		}
+		num, _ := strconv.Atoi(f[2])
+		by[f[1]] = append(by[f[1]], copyOf{f[0], num})
+	}
+	var cut []string
+	for _, copies := range by {
+		slices.SortFunc(copies, func(a, b copyOf) int { return b.number - a.number })
+		for i := 0; i < len(copies)-n; i++ {
+			cut = append(cut, copies[i].id)
+		}
+	}
+	if len(cut) == 0 {
+		return false, nil
+	}
+	res, err = dockercli.Run(ctx, 2*time.Minute, append([]string{"rm", "-f"}, cut...)...)
+	if err == nil && res.Code != 0 {
+		err = errors.New(strings.TrimSpace(res.Stderr))
+	}
+	return err == nil, err
 }

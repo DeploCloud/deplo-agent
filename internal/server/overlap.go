@@ -23,6 +23,7 @@ const standInSuffix = "_next"
 // ends the deploy with the live container untouched. Neither: nothing to keep online, swap in place.
 func (s *Service) startStandIn(ctx context.Context, req *pb.DeployRequest, live string, started time.Time, commitSha string, e *emitter) (standIn bool, failed *pb.DeployResult) {
 	replicas := replicaCount(req.GetStandInComposeYaml())
+	project := runsAsProject(req.GetStandInComposeYaml())
 	if !dockercli.IsRunning(ctx, live) && len(projectContainers(ctx, live)) == 0 {
 		return false, nil
 	}
@@ -39,7 +40,7 @@ func (s *Service) startStandIn(ctx context.Context, req *pb.DeployRequest, live 
 		res, err := dockercli.RunEnv(ctx, 5*time.Minute, dockerConfigEnv(req), append(base, "up", "--no-start")...)
 		return err == nil && res.Code == 0
 	}()
-	if !created || !sameRoutes(ctx, firstContainer(ctx, live, replicas), firstContainer(ctx, live+standInSuffix, replicas)) {
+	if !created || !sameRoutes(ctx, firstContainer(ctx, live, project), firstContainer(ctx, live+standInSuffix, project)) {
 		s.removeStandIn(slug, e)
 		if created {
 			e.log("info", "The app's domains changed, so it goes offline briefly while the new version starts.")
@@ -71,7 +72,7 @@ func (s *Service) startStandIn(ctx context.Context, req *pb.DeployRequest, live 
 		s.removeStandIn(slug, e)
 		// Storage may refuse a second copy (a lock file, an embedded database): swap in place instead.
 		// Replicas never swap in place: that would stop every copy at once.
-		if replicas <= 1 && hasStorage(ctx, live) {
+		if !project && hasStorage(ctx, live) {
 			e.log("info", "The new version could not start beside the old one while they share storage, "+
 				"so the app goes offline briefly while it starts on its own.")
 			return false, nil
@@ -131,6 +132,27 @@ func traefikLabels(ctx context.Context, container string) (map[string]string, bo
 	return out, true
 }
 
+// runsAsProject: a stack that declares deploy.replicas has no container of its own name, even with one copy
+// (a member of a cluster holding one replica of an App spread over several).
+func runsAsProject(composeYaml string) bool {
+	var doc struct {
+		Services map[string]struct {
+			Deploy struct {
+				Replicas *int `yaml:"replicas"`
+			} `yaml:"deploy"`
+		} `yaml:"services"`
+	}
+	if yaml.Unmarshal([]byte(composeYaml), &doc) != nil {
+		return false
+	}
+	for _, svc := range doc.Services {
+		if svc.Deploy.Replicas != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // replicaCount is the most copies a service of the stack asks for through deploy.replicas (1 when none).
 func replicaCount(composeYaml string) int {
 	var doc struct {
@@ -162,8 +184,8 @@ func projectContainers(ctx context.Context, project string) []string {
 }
 
 // firstContainer is what to inspect for a project: the container itself, or with replicas one of its copies.
-func firstContainer(ctx context.Context, name string, replicas int) string {
-	if replicas > 1 {
+func firstContainer(ctx context.Context, name string, project bool) string {
+	if project {
 		if all := projectContainers(ctx, name); len(all) > 0 {
 			return all[0]
 		}

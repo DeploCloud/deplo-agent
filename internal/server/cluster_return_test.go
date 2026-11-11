@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -15,6 +16,7 @@ import (
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/clusterlink/lease"
+	"github.com/DeploCloud/deplo-agent/internal/clusterlink/wire"
 )
 
 func TestReturn_anAgentThatStartsWithADeadLeaseStopsEverythingItRunsForTheCluster(t *testing.T) {
@@ -305,5 +307,160 @@ func TestReturn_removingAMovedStackKeepsItsVolume(t *testing.T) {
 	}
 	if isFile(s.stackPath(slug)) {
 		t.Fatal("the stack file is still here, so the next start would bring the copy back")
+	}
+}
+
+// send is serve without the test's goroutine: the answer to one order of the leader.
+func send(g *leaseGuard, o lease.Order) lease.Reply {
+	a, b := net.Pipe()
+	go g.Serve(wire.Party{Role: wire.RoleLeader}, b)
+	defer a.Close()
+	_ = a.SetDeadline(time.Now().Add(5 * time.Second))
+	raw, _ := json.Marshal(o)
+	_, _ = a.Write(append(raw, 10))
+	var r lease.Reply
+	_ = json.NewDecoder(a).Decode(&r)
+	return r
+}
+
+// stuckReturn is a member whose copy of files will not go, so its return stays open.
+func stuckReturn(t *testing.T) *returnFixture {
+	f := newReturn(t)
+	f.g.remove = func(_ context.Context, e lease.Entry) error {
+		if e.Slug == "files" {
+			return errors.New("docker did not answer")
+		}
+		f.removed = append(f.removed, e)
+		f.gone[e.Slug] = true
+		return nil
+	}
+	return f
+}
+
+func TestReturn_aStackBeingStartedHereIsNotRemovedByAnOrderThatStillPlacesItElsewhere(t *testing.T) {
+	f := stuckReturn(t)
+	// web and files run on srv_b; this member is back and cannot remove its copy of files yet, so every
+	// renewal tries again.
+	old := orderFor(1)
+	old.Placement[1].Member, old.Placement[2].Member, old.Return = "srv_b", "srv_b", true
+	f.gone["web"] = true
+	f.renew(old)
+
+	began, release := make(chan struct{}), make(chan struct{})
+	f.g.start = func(context.Context, *lease.Start) error { close(began); <-release; return nil }
+	f.gone["web"] = false
+	moved := orderFor(1)
+	moved.Placement[2].Member = "srv_b"
+	moved.Return, moved.Start = true, &lease.Start{Slug: "web", ComposeYAML: "services: {}"}
+	done := make(chan lease.Reply)
+	go func() { done <- send(f.g, moved) }()
+	<-began
+	f.g.work.Wait()
+	// The leader's renewals carry the placement from before the move until the start has answered.
+	f.renew(old)
+	if len(f.removed) != 0 {
+		t.Fatalf("removed %v while it was being started here", f.removedSlugs())
+	}
+	close(release)
+	if r := <-done; !r.Started {
+		t.Fatalf("start: %+v", r)
+	}
+	f.g.work.Wait()
+	f.renew(old)
+	if len(f.removed) != 0 {
+		t.Fatalf("removed %v before the leader had placed it here", f.removedSlugs())
+	}
+	// A leader that never places it here does not leave a second copy behind for good.
+	f.clk.Add(61 * time.Second)
+	f.renew(old)
+	if got := f.removedSlugs(); got != "web" {
+		t.Fatalf("removed %q, want web once the start was never confirmed", got)
+	}
+}
+
+func TestReturn_aStartThatFailedLeavesNoGuardBehind(t *testing.T) {
+	f := stuckReturn(t)
+	old := orderFor(1)
+	old.Placement[1].Member, old.Placement[2].Member, old.Return = "srv_b", "srv_b", true
+	f.gone["web"] = true
+	f.renew(old)
+	f.gone["web"] = false
+	f.g.start = func(context.Context, *lease.Start) error { return errors.New("no room on this disk") }
+	moved := orderFor(1)
+	moved.Placement[2].Member = "srv_b"
+	moved.Return, moved.Start = true, &lease.Start{Slug: "web", ComposeYAML: "services: {}"}
+	if r := send(f.g, moved); r.Started {
+		t.Fatalf("start: %+v", r)
+	}
+	f.g.work.Wait()
+	f.renew(old)
+	if got := f.removedSlugs(); got != "web" {
+		t.Fatalf("removed %q, want what the failed start left behind", got)
+	}
+}
+
+// spreadOrder places three replicas of web: n of them on this member, the rest on srv_b.
+func spreadOrder(here int) lease.Order {
+	o := lease.Order{Cluster: "clu_1", Member: "srv_a", Epoch: 1}
+	for i := 0; i < 3; i++ {
+		m := "srv_b"
+		if i < here {
+			m = "srv_a"
+		}
+		o.Placement = append(o.Placement, lease.Entry{Kind: "app", ID: "prj_1", Replica: i, Member: m, Slug: "web"})
+	}
+	return o
+}
+
+func TestReturn_aMemberLeftWithFewerReplicasStopsTheSurplus(t *testing.T) {
+	f := newReturn(t)
+	trimmed := map[string]int{}
+	f.renew(spreadOrder(2))
+	f.clk.Add(5 * time.Minute)
+	f.restart()
+	f.g.trim = func(_ context.Context, slug string, n int) (bool, error) { trimmed[slug] = n; return true, nil }
+	// One of its two replicas was started on srv_b meanwhile.
+	asks := spreadOrder(1)
+	asks.Return = true
+	f.renew(asks)
+	if len(f.removed) != 0 || trimmed["web"] != 1 {
+		t.Fatalf("removed %v, trimmed %v: want web kept with one replica", f.removed, trimmed)
+	}
+	if got := f.startedSlugs(); got != "web" {
+		t.Fatalf("started %q, want the replica that is still this member's", got)
+	}
+	if r := f.renew(asks); r.Returned == nil || strings.Join(r.Returned.Removed, ",") != "web" {
+		t.Fatalf("report %+v, want the leader told web lost a copy here", r.Returned)
+	}
+}
+
+func TestReturn_aMemberThatKeptAllItsReplicasStopsNone(t *testing.T) {
+	f := newReturn(t)
+	called := false
+	f.renew(spreadOrder(3))
+	f.clk.Add(5 * time.Minute)
+	f.restart()
+	f.g.trim = func(context.Context, string, int) (bool, error) { called = true; return false, nil }
+	f.renew(spreadOrder(3))
+	if called || f.startedSlugs() != "web" {
+		t.Fatalf("trimmed %v, started %q", called, f.startedSlugs())
+	}
+}
+
+func TestReturn_trimRemovesTheNewestCopiesOfTheReplicatedService(t *testing.T) {
+	const slug = "deplo-agent-test-return"
+	argv := dockerOnPath(t, `case "$*" in "ps -a "*) printf 'c1 web 1\nc3 web 3\nc2 web 2\nc9 deplo-connector_x 1\n' ;; esac`)
+	s := &Service{agentDir: t.TempDir(), stackDir: t.TempDir()}
+	mustWrite(t, s.stackPath(slug), "services: {web: {image: x, deploy: {replicas: 3}}, deplo-connector_x: {image: y}}")
+	cut, err := s.trimReplicas(context.Background(), slug, 1)
+	if err != nil || !cut {
+		t.Fatalf("trim: %v %v", cut, err)
+	}
+	all := argv()
+	if last := all[len(all)-1]; last != "rm -f c3 c2" {
+		t.Fatalf("docker ran %q, want the two newest copies removed and the connector left", all)
+	}
+	if cut, _ := s.trimReplicas(context.Background(), slug, 3); cut {
+		t.Fatal("a stack with no surplus was trimmed")
 	}
 }
