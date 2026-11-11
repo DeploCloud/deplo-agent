@@ -188,6 +188,8 @@ func TestLease_aLeaseFileThatCannotBeReadIsADeadLeaseNotNoLease(t *testing.T) {
 	if r := g.Renew(lease.Order{Cluster: "clu_1", Member: "srv_a", Epoch: 7, Placement: fenceEntries(fenceA)}); !r.OK {
 		t.Fatalf("renewal after an unreadable lease: %+v", r)
 	}
+	// The return it starts writes the lease again: let it end before the directory goes.
+	g.work.Wait()
 	if g.Holds(fenceA) {
 		t.Fatal("the stack is still held under a live lease")
 	}
