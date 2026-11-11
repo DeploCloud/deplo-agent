@@ -56,16 +56,21 @@ type leaseGuard struct {
 	// remove takes down this member's copy of a stack placed elsewhere; resume starts one it stopped itself.
 	remove func(ctx context.Context, e lease.Entry) error
 	resume func(ctx context.Context, slug string) error
+	// trim stops the copies of a stack beyond n, and says whether there were any.
+	trim func(ctx context.Context, slug string, n int) (bool, error)
 	// has says whether a stack is on this host, running whether it runs now; nil reads as yes.
 	has      func(slug string) bool
 	running  func(ctx context.Context, slug string) bool
 	settling map[string]bool
+	// starting are the stacks a start order is bringing up here (zero), or brought up at that time: a renewal
+	// that still places one elsewhere does not remove it until the leader has placed it here.
+	starting map[string]time.Time
 	work     sync.WaitGroup
 	clusters map[string]*clusterLease
 }
 
 func newLeaseGuard(file string, now func() time.Time, fence func(context.Context, []lease.Entry) error) *leaseGuard {
-	g := &leaseGuard{file: file, now: now, fence: fence, clusters: map[string]*clusterLease{}, settling: map[string]bool{}}
+	g := &leaseGuard{file: file, now: now, fence: fence, clusters: map[string]*clusterLease{}, settling: map[string]bool{}, starting: map[string]time.Time{}}
 	if raw, err := os.ReadFile(file); err == nil {
 		_ = json.Unmarshal(raw, &g.clusters)
 	}
@@ -108,6 +113,7 @@ func (g *leaseGuard) Renew(o lease.Order) lease.Reply {
 		return lease.Reply{Error: lease.StaleEpoch, Epoch: c.Epoch}
 	}
 	next := &clusterLease{Epoch: o.Epoch, Member: o.Member, RenewedAt: g.now(), Placement: o.Placement, ExtraSeconds: min(max(o.ExtendSeconds, 0), 3600)}
+	g.confirmStarts(o)
 	r := lease.Reply{OK: true, Epoch: o.Epoch}
 	g.comeBack(o, g.clusters[o.Cluster], next, &r)
 	g.clusters[o.Cluster] = next
@@ -217,11 +223,13 @@ func (g *leaseGuard) startWorkload(c net.Conn, o lease.Order) lease.Reply {
 	_ = c.SetDeadline(time.Now().Add(limit + time.Minute))
 	ctx, cancel := context.WithTimeout(context.Background(), limit)
 	defer cancel()
-	// ponytail: the leader's renewals still place this stack on its old member until this returns; ticket #205
-	// (a member removes what is placed elsewhere) must leave a stack alone while its start is in flight here.
+	// The leader's renewals still place this stack on its old member until this has answered.
+	g.markStart(o.Start.Slug, false)
 	if err := g.start(ctx, o.Start); err != nil {
+		g.markStart(o.Start.Slug, true)
 		return lease.Reply{Error: err.Error()}
 	}
+	g.markStart(o.Start.Slug, false)
 	return lease.Reply{OK: true, Started: true, Restored: o.Start.Restore != nil, Epoch: o.Epoch}
 }
 
@@ -252,7 +260,7 @@ func (s *Service) leaseGuard() *leaseGuard {
 	s.leaseOnce.Do(func() {
 		s.lease = newLeaseGuard(s.leaseFile(), time.Now, s.fenceStacks)
 		s.lease.start = s.startFromBundle
-		s.lease.remove, s.lease.resume = s.removeMoved, s.resumeHeld
+		s.lease.remove, s.lease.resume, s.lease.trim = s.removeMoved, s.resumeHeld, s.trimReplicas
 		s.lease.has = func(slug string) bool { return isFile(s.stackPath(slug)) }
 		s.lease.running = stackRuns
 	})
