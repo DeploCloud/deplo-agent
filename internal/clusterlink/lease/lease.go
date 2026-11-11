@@ -32,6 +32,8 @@ type Entry struct {
 	Member       string `json:"member"`
 	Slug         string `json:"slug"`
 	SingleWriter bool   `json:"singleWriter"`
+	// Standby is a copy that follows the workload from another member: it holds the stack, never the name.
+	Standby bool `json:"standby,omitempty"`
 }
 
 // Order is what each renewal carries. Member names the receiver, so it knows which entries are its own.
@@ -80,6 +82,15 @@ type Start struct {
 	FilesBindSources []string    `json:"filesBindSources,omitempty"`
 	// Restore is the backup this member restores before the workload counts as started.
 	Restore *Restore `json:"restore,omitempty"`
+	// Promote makes the standby copy this member holds the workload, before the stack is started over it.
+	Promote *Promote `json:"promote,omitempty"`
+}
+
+// Promote is the command the control plane rendered for one engine, run inside the standby's container.
+type Promote struct {
+	Container string   `json:"container"`
+	User      string   `json:"user,omitempty"`
+	Command   []string `json:"command"`
 }
 
 // Restore names one backup and carries this agent's own RestoreRequest as JSON.
@@ -100,7 +111,9 @@ type Reply struct {
 	// Started is true only when a Start order ran and the workload came up.
 	Started bool `json:"started,omitempty"`
 	// Restored is true only when the Start order's backup was restored.
-	Restored bool   `json:"restored,omitempty"`
+	Restored bool `json:"restored,omitempty"`
+	// Promoted is true only when the Start order's standby copy was promoted.
+	Promoted bool   `json:"promoted,omitempty"`
 	OK       bool   `json:"ok"`
 	Error    string `json:"error,omitempty"`
 	Epoch    uint64 `json:"epoch,omitempty"`

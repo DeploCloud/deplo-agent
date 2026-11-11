@@ -461,7 +461,8 @@ func (g *leaseGuard) locate(cluster, kind, id string) (member string, here, ok b
 		return "", false, false
 	}
 	for _, e := range c.Placement {
-		if e.Kind != kind || e.ID != id || e.Member == "" {
+		// A standby copy holds the stack, not the name: connections still go to the workload itself.
+		if e.Kind != kind || e.ID != id || e.Member == "" || e.Standby {
 			continue
 		}
 		if e.Member == c.Member {
