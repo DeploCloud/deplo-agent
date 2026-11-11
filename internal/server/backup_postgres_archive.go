@@ -56,6 +56,8 @@ func (s *Service) backupPostgresArchive(ctx context.Context, mode pb.PostgresArc
 	if mode == pb.PostgresArchive_POSTGRES_ARCHIVE_BASE {
 		argv, env = execWithSecretEnv(d.GetPassword(), "PGPASSWORD")
 		// A fast checkpoint: the default spreads it over minutes, and this runs every few.
+		// ponytail: -X fetch reads the log at the end, so a database that recycles it mid-backup fails the run; raise
+		// wal_keep_size from the render if a busy one does.
 		argv = append(argv, c, "pg_basebackup", "-U", d.GetUser(), "-D", "-", "-Ft", "-X", "fetch", "-c", "fast")
 	} else {
 		res, err := dockercli.Run(ctx, time.Minute, "exec", c, "sh", "-c", pgInSpool+"ls -1")
