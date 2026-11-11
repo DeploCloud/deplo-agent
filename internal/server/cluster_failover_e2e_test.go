@@ -113,8 +113,9 @@ func within(t *testing.T, limit time.Duration, what string, ok func() bool) {
 }
 
 // The real leader and relay, two real members, and nobody playing Deplo once the cluster is set up: a member
-// that dies has its App started on the other one. Takes about 90 s of real time, the floor being the point.
-func TestE2E_aMembersDeathMovesItsAppWithNoControlPlaneInTheLoop(t *testing.T) {
+// that dies has its database restored from its backup and then its App started on the other one. Takes about
+// 90 s of real time, the floor being the point.
+func TestE2E_aMembersDeathMovesItsDatabaseAndAppWithNoControlPlaneInTheLoop(t *testing.T) {
 	if testing.Short() {
 		t.Skip("waits out the real 81 s failover floor")
 	}
@@ -146,13 +147,24 @@ func TestE2E_aMembersDeathMovesItsAppWithNoControlPlaneInTheLoop(t *testing.T) {
 	var mu sync.Mutex
 	started := map[*Service][]*pb.DeployRequest{}
 	old := runFailoverDeploy
+	steps := map[*Service][]string{}
+	restored := map[*Service][]*pb.RestoreRequest{}
 	runFailoverDeploy = func(s *Service, _ context.Context, req *pb.DeployRequest, e *emitter) {
 		mu.Lock()
 		started[s] = append(started[s], req)
+		steps[s] = append(steps[s], "deploy "+req.GetSlug())
 		mu.Unlock()
 		e.result(true, "", "")
 	}
-	t.Cleanup(func() { runFailoverDeploy = old })
+	oldRestore := runFailoverRestore
+	runFailoverRestore = func(s *Service, _ context.Context, req *pb.RestoreRequest) error {
+		mu.Lock()
+		restored[s] = append(restored[s], req)
+		steps[s] = append(steps[s], "restore "+req.GetDatabase().GetContainer())
+		mu.Unlock()
+		return nil
+	}
+	t.Cleanup(func() { runFailoverDeploy, runFailoverRestore = old, oldRestore })
 	startsOn := func(s *Service) []*pb.DeployRequest {
 		mu.Lock()
 		defer mu.Unlock()
@@ -177,6 +189,8 @@ func TestE2E_aMembersDeathMovesItsAppWithNoControlPlaneInTheLoop(t *testing.T) {
 		id := ca.Provision(t, d, name)
 		s := New(t.TempDir(), t.TempDir(), "/", "")
 		s.SetAgentDir(d)
+		// A lease that runs out in this test stops nothing for real.
+		s.leaseGuard().fence = func(context.Context, []lease.Entry) error { return nil }
 		t.Cleanup(func() { s.SetClusterMember(context.Background(), &pb.SetClusterMemberRequest{}) })
 		return s, id
 	}
@@ -210,8 +224,9 @@ func TestE2E_aMembersDeathMovesItsAppWithNoControlPlaneInTheLoop(t *testing.T) {
 		return map[string]any{"id": id, "fingerprint": fp, "arch": "amd64", "freeMb": 4096}
 	}
 	deplo.call(t, "leader.roster", map[string]any{"cluster": "clu_1", "epoch": 1,
-		"members":   []any{fact("srv_a", aID.Fingerprint), fact("srv_b", bID.Fingerprint)},
-		"placement": []lease.Entry{{Kind: "app", ID: "prj_1", Member: "srv_a", Slug: "web"}}}, nil)
+		"members": []any{fact("srv_a", aID.Fingerprint), fact("srv_b", bID.Fingerprint)},
+		"placement": []lease.Entry{{Kind: "app", ID: "prj_1", Member: "srv_a", Slug: "web"},
+			{Kind: "database", ID: "db_1", Member: "srv_a", Slug: dbSlug, SingleWriter: true}}}, nil)
 	var key struct {
 		PublicKey string `json:"publicKey"`
 	}
@@ -226,14 +241,28 @@ func TestE2E_aMembersDeathMovesItsAppWithNoControlPlaneInTheLoop(t *testing.T) {
 		"ready":       map[string]any{"port": 3000, "portRequired": true},
 		"restartRule": map[string]any{"probe": "PROBE_HTTP", "port": 3000, "path": "/"},
 	}}
-	var sealed bytes.Buffer
-	w, _ := age.Encrypt(&sealed, rec)
-	raw, _ := json.Marshal(bundle)
-	_, _ = w.Write(raw)
-	_ = w.Close()
+	seal := func(v any) string {
+		var sealed bytes.Buffer
+		w, _ := age.Encrypt(&sealed, rec)
+		raw, _ := json.Marshal(v)
+		_, _ = w.Write(raw)
+		_ = w.Close()
+		return base64.StdEncoding.EncodeToString(sealed.Bytes())
+	}
 	deplo.call(t, "leader.bundle.put", map[string]any{"cluster": "clu_1", "kind": "app", "id": "prj_1", "deploymentId": "dep_1",
-		"sealed": base64.StdEncoding.EncodeToString(sealed.Bytes()),
+		"sealed": seal(bundle),
 		"meta":   map[string]any{"name": "web", "hasDomain": true, "createdAt": "2026-01-01T00:00:00Z"}}, nil)
+	// The database is younger than the App and has no domain: it still goes first, restored from its bundle's backup.
+	dbBundle := map[string]any{"v": 1, "kind": "database", "workload": "db_1", "deploymentId": "rev_1",
+		"stack": map[string]any{"slug": dbSlug, "projectId": "db_1", "imageRef": "", "composeYaml": "services: {db: {image: postgres:17}}",
+			"network": "deplo-team-t1", "env": map[string]string{}, "registryAuth": []any{}, "composeUpArgs": []string{"--force-recreate"}},
+		"restore": map[string]any{"backupId": "brun_1", "takenAt": "2026-03-01T11:45:00Z", "request": map[string]any{
+			"kind":        "BACKUP_KIND_DATABASE",
+			"s3":          map[string]any{"bucket": "backups", "accessKey": "AKIA", "secretKey": "s3cr3t", "objectKey": "t1/db_1/brun_1.dump.gz.age"},
+			"database":    map[string]any{"container": dbSlug, "dbType": "postgres", "dbName": "main", "user": "app", "password": "pgpass", "projectId": "db_1"},
+			"ageIdentity": "AGE-SECRET-KEY-1TEST", "expectedSha256": "abc123"}}}
+	deplo.call(t, "leader.bundle.put", map[string]any{"cluster": "clu_1", "kind": "database", "id": "db_1", "deploymentId": "rev_1",
+		"sealed": seal(dbBundle), "meta": map[string]any{"name": "main", "createdAt": "2026-06-01T00:00:00Z"}}, nil)
 
 	held := func(s *Service) bool { _, ok := s.leaseGuard().Admit("clu_1", 1); return ok && leaseHeld(s, "clu_1") }
 	within(t, 30*time.Second, "both members to hold a lease", func() bool { return held(a) && held(b) })
@@ -247,14 +276,33 @@ func TestE2E_aMembersDeathMovesItsAppWithNoControlPlaneInTheLoop(t *testing.T) {
 	died := time.Now()
 
 	time.Sleep(70 * time.Second)
-	if got := startsOn(b); len(got) != 0 {
-		t.Fatalf("the App moved %s after the member died, before the 81 s floor", time.Since(died).Round(time.Second))
+	stepsOn := func(s *Service) string {
+		mu.Lock()
+		defer mu.Unlock()
+		return strings.Join(steps[s], ", ")
 	}
-	within(t, 60*time.Second, "the App to start on the other member", func() bool { return len(startsOn(b)) == 1 })
+	if got := stepsOn(b); got != "" {
+		t.Fatalf("%q ran %s after the member died, before the 81 s floor", got, time.Since(died).Round(time.Second))
+	}
+	within(t, 60*time.Second, "the database and the App to start on the other member", func() bool { return len(startsOn(b)) == 2 })
 	if took := time.Since(died); took < 80*time.Second {
-		t.Fatalf("the App moved after %s, under the 81 s floor", took.Round(time.Second))
+		t.Fatalf("the work moved after %s, under the 81 s floor", took.Round(time.Second))
 	}
-	req := startsOn(b)[0]
+	// The database comes up, takes its backup, and only then does the App start.
+	if got := stepsOn(b); got != "deploy "+dbSlug+", restore "+dbSlug+", deploy web" {
+		t.Fatalf("the member ran: %s", got)
+	}
+	mu.Lock()
+	rs := restored[b][0]
+	mu.Unlock()
+	if rs.GetS3().GetSecretKey() != "s3cr3t" || rs.GetS3().GetObjectKey() != "t1/db_1/brun_1.dump.gz.age" || rs.GetDatabase().GetPassword() != "pgpass" ||
+		rs.GetAgeIdentity() != "AGE-SECRET-KEY-1TEST" || rs.GetExpectedSha256() != "abc123" {
+		t.Fatalf("the member was asked to restore %+v", rs)
+	}
+	if db := startsOn(b)[0]; db.GetSlug() != dbSlug || db.GetSourceKind() != pb.SourceKind_SOURCE_KIND_COMPOSE {
+		t.Fatalf("the member was asked to deploy the database as %+v", db)
+	}
+	req := startsOn(b)[1]
 	if req.GetSlug() != "web" || req.GetEnv()["TOKEN"] != "s3cret" || req.GetNetwork() != "deplo-team-t1" || req.GetImageRef() != "deplo/web:abc" ||
 		req.GetReady().GetPort() != 3000 || !req.GetReady().GetPortRequired() || req.GetRestartRule().GetProbe() != pb.RestartRule_PROBE_HTTP {
 		t.Fatalf("the member was asked to deploy %+v", req)
@@ -271,22 +319,31 @@ func TestE2E_aMembersDeathMovesItsAppWithNoControlPlaneInTheLoop(t *testing.T) {
 		Clusters map[string]struct {
 			Placement []lease.Entry `json:"placement"`
 			Moves     []struct {
-				ID, Member, From, Reason string
+				ID, Member, From, Reason, BackupID string
 			} `json:"moves"`
 		} `json:"clusters"`
 	}
 	deplo.call(t, "leader.snapshot", map[string]any{}, &snap)
 	view := snap.Clusters["clu_1"]
-	if len(view.Placement) != 1 || view.Placement[0].Member != "srv_b" {
+	if len(view.Placement) != 2 || view.Placement[0].Member != "srv_b" || view.Placement[1].Member != "srv_b" {
 		t.Fatalf("the leader's placement: %+v", view.Placement)
 	}
-	if len(view.Moves) != 1 || view.Moves[0].ID != "prj_1" || view.Moves[0].From != "srv_a" || view.Moves[0].Member != "srv_b" || view.Moves[0].Reason != "stopped_answering" {
+	if len(view.Moves) != 2 || view.Moves[0].ID != "prj_1" || view.Moves[0].From != "srv_a" || view.Moves[0].Member != "srv_b" || view.Moves[0].Reason != "stopped_answering" ||
+		view.Moves[1].ID != "db_1" || view.Moves[1].Member != "srv_b" || view.Moves[1].BackupID != "brun_1" {
 		t.Fatalf("the leader's moves: %+v", view.Moves)
+	}
+	// Nothing the restore carried was kept on the member's disk.
+	kept, _ := os.ReadFile(b.leaseFile())
+	if len(kept) == 0 || strings.Contains(string(kept), "s3cr3t") || strings.Contains(string(kept), "pgpass") {
+		t.Fatalf("the member's lease file: %s", kept)
 	}
 	if types := watchTypes(t, deplo, 5); !strings.Contains(types, "placement,failed_over,failover") {
 		t.Fatalf("the buffered events: %s", types)
 	}
 }
+
+// dbSlug is a stack name no real host has.
+const dbSlug = "db-failover-e2e"
 
 func leaseHeld(s *Service, cluster string) bool {
 	g := s.leaseGuard()

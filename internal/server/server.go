@@ -127,6 +127,7 @@ var Capabilities = []string{
 	"cluster",
 	"cluster.images",
 	"cluster.failover",
+	"cluster.failover.restore",
 	"cluster.forwarders",
 }
 

@@ -21,12 +21,88 @@ var runFailoverDeploy = func(s *Service, ctx context.Context, req *pb.DeployRequ
 	s.runDeploy(ctx, req, e)
 }
 
+// runFailoverRestore restores one backup the way the Restore RPC does; a var so a test can answer without Docker.
+var runFailoverRestore = func(s *Service, ctx context.Context, req *pb.RestoreRequest) error {
+	src, err := sourceFromRestore(s, req)
+	if err != nil {
+		return errors.New(statusMessage(err))
+	}
+	var res *pb.RestoreResult
+	e := &rsEmitter{send: func(ev *pb.RestoreEvent) error {
+		if r := ev.GetResult(); r != nil {
+			res = r
+		}
+		return nil
+	}}
+	s.restoreArtifact(ctx, req.GetKind(), req.GetDatabase(), req.GetProject(), src, e)
+	switch {
+	case res == nil:
+		return errors.New("the restore ended without a result")
+	case !res.GetOk():
+		return errors.New(res.GetError())
+	}
+	return nil
+}
+
+// stopFailoverStack stops a stack whose restore failed, so it never serves empty; a var for the same reason.
+var stopFailoverStack = func(s *Service, ctx context.Context, slug string) {
+	if _, err := s.StopStack(ctx, &pb.StackRef{Slug: slug}); err != nil {
+		fmt.Fprintf(os.Stderr, "deplo-agent: could not stop %s after its restore failed: %v\n", slug, err)
+	}
+}
+
+// ponytail: a database is up before its engine takes a restore, so a failed one is tried again for half a
+// minute. Wait on the engine itself if a big artifact makes a retry expensive.
+var (
+	failoverRestoreTries = 6
+	failoverRestoreWait  = 5 * time.Second
+)
+
+// failoverRestore reads the restore a bundle asks for, before anything starts: an unreadable one starts nothing.
+func failoverRestore(st *lease.Start) (*pb.RestoreRequest, error) {
+	if st.Restore == nil {
+		return nil, nil
+	}
+	req := &pb.RestoreRequest{}
+	if err := bundleJSON.Unmarshal(st.Restore.Request, req); err != nil {
+		return nil, fmt.Errorf("the bundle's restore is unreadable: %w", err)
+	}
+	// ponytail: a database is restored into its running engine. An App's volumes must be restored before its
+	// stack starts: ticket #204 adds that case here.
+	if req.GetKind() != pb.BackupKind_BACKUP_KIND_DATABASE {
+		return nil, errors.New("this server cannot restore that kind of backup on a failover yet")
+	}
+	return req, nil
+}
+
+// restoreAfterStart restores the bundle's backup into the stack that just came up, and stops it when that fails.
+func (s *Service) restoreAfterStart(ctx context.Context, slug string, req *pb.RestoreRequest) error {
+	var err error
+	for try := 0; try < failoverRestoreTries && ctx.Err() == nil; try++ {
+		if try > 0 {
+			time.Sleep(failoverRestoreWait)
+		}
+		if err = runFailoverRestore(s, ctx, req); err == nil {
+			return nil
+		}
+	}
+	fmt.Fprintf(os.Stderr, "deplo-agent: failover restore of %s failed: %v\n", slug, err)
+	stopCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	stopFailoverStack(s, stopCtx, slug)
+	return err
+}
+
 // startFromBundle brings a moved workload up through the same stack deploy a deploy from the control plane
 // takes: the image is already here (copied or pulled by compose), so nothing is built. A stack that never
 // becomes ready is an error, and the leader tries another member.
 func (s *Service) startFromBundle(ctx context.Context, st *lease.Start) error {
 	if st.Slug == "" || st.ComposeYAML == "" {
 		return errors.New("the bundle holds no stack to start")
+	}
+	restore, err := failoverRestore(st)
+	if err != nil {
+		return err
 	}
 	req := &pb.DeployRequest{
 		DeployId:         fmt.Sprintf("failover-%s-%d", st.DeploymentID, time.Now().Unix()),
@@ -40,6 +116,10 @@ func (s *Service) startFromBundle(ctx context.Context, st *lease.Start) error {
 		ComposeUpArgs:    st.ComposeUpArgs,
 		StartAfterReady:  st.StartAfterReady,
 		FilesBindSources: st.FilesBindSources,
+	}
+	// A stack with no image of its own (a database) is a compose stack: its images are pulled by the names it gives.
+	if st.ImageRef == "" {
+		req.SourceKind = pb.SourceKind_SOURCE_KIND_COMPOSE
 	}
 	for _, m := range st.Mounts {
 		req.Mounts = append(req.Mounts, &pb.MountFile{Path: m.Path, Content: m.Content})
@@ -78,6 +158,9 @@ func (s *Service) startFromBundle(ctx context.Context, st *lease.Start) error {
 		}
 		fmt.Fprintf(os.Stderr, "deplo-agent: failover start of %s failed: %s\n", st.Slug, msg)
 		return errors.New(msg)
+	}
+	if restore != nil {
+		return s.restoreAfterStart(ctx, st.Slug, restore)
 	}
 	return nil
 }

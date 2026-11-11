@@ -166,13 +166,19 @@ func (g *leaseGuard) startWorkload(c net.Conn, o lease.Order) lease.Reply {
 	if !mine || g.start == nil {
 		return lease.Reply{Error: "this stack is not placed on this member"}
 	}
-	_ = c.SetDeadline(time.Now().Add(lease.StartTimeout + time.Minute))
-	ctx, cancel := context.WithTimeout(context.Background(), lease.StartTimeout)
+	limit := lease.StartTimeout
+	if o.Start.Restore != nil {
+		limit = lease.RestoreTimeout
+	}
+	_ = c.SetDeadline(time.Now().Add(limit + time.Minute))
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
 	defer cancel()
+	// ponytail: the leader's renewals still place this stack on its old member until this returns; ticket #205
+	// (a member removes what is placed elsewhere) must leave a stack alone while its start is in flight here.
 	if err := g.start(ctx, o.Start); err != nil {
 		return lease.Reply{Error: err.Error()}
 	}
-	return lease.Reply{OK: true, Started: true, Epoch: o.Epoch}
+	return lease.Reply{OK: true, Started: true, Restored: o.Start.Restore != nil, Epoch: o.Epoch}
 }
 
 // Run checks the lease until ctx ends.
