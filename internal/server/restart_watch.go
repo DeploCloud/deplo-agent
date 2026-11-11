@@ -303,15 +303,16 @@ func probeContainer(ctx context.Context, rule *pb.RestartRule, c readySample) bo
 		return true
 	}
 	return httpAnswers(ctx, net.JoinHostPort(c.ip, strconv.Itoa(int(rule.GetPort()))), rule.GetPath(),
-		time.Duration(max(rule.GetTimeoutS(), 1))*time.Second)
+		time.Duration(max(rule.GetTimeoutS(), 1))*time.Second, rule.GetFailOnErrorStatus())
 }
 
 var aliveClient = &http.Client{
 	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 }
 
-// httpAnswers: any HTTP status is an answer; a refused connection or a timeout is not.
-func httpAnswers(ctx context.Context, addr, path string, timeout time.Duration) bool {
+// httpAnswers: a refused connection or a timeout is no answer. Any HTTP status is one, unless strict: the App's
+// own check fails from 400 up.
+func httpAnswers(ctx context.Context, addr, path string, timeout time.Duration, strict bool) bool {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(cctx, http.MethodGet, "http://"+addr+path, nil)
@@ -324,7 +325,7 @@ func httpAnswers(ctx context.Context, addr, path string, timeout time.Duration) 
 		return false
 	}
 	_ = resp.Body.Close()
-	return true
+	return !strict || resp.StatusCode < 400
 }
 
 func restartContainer(ctx context.Context, id string) error {

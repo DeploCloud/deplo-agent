@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -272,8 +273,27 @@ func TestEventBufferIsBoundedAndKeptWhenAFrameFails(t *testing.T) {
 func TestHttpAnswersCountsAnyStatus(t *testing.T) {
 	for _, code := range []int{200, 404, 500} {
 		srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) { rw.WriteHeader(code) }))
-		if !httpAnswers(context.Background(), strings.TrimPrefix(srv.URL, "http://"), "/", time.Second) {
+		if !httpAnswers(context.Background(), strings.TrimPrefix(srv.URL, "http://"), "/", time.Second, false) {
 			t.Errorf("status %d should count as alive", code)
+		}
+		srv.Close()
+	}
+}
+
+// The default GET / takes any status; a check the App's owner set means what it says.
+func TestProbe_anAppsOwnHttpCheckFailsFromStatus400(t *testing.T) {
+	for code, alive := range map[int]bool{200: true, 302: true, 404: false, 503: false} {
+		srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) { rw.WriteHeader(code) }))
+		host, port, _ := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+		n, _ := strconv.Atoi(port)
+		rule := &pb.RestartRule{Probe: pb.RestartRule_PROBE_HTTP, Port: int32(n), Path: "/health", TimeoutS: 1}
+		c := readySample{ip: host}
+		if !probeContainer(context.Background(), rule, c) {
+			t.Errorf("the default check took status %d for dead", code)
+		}
+		rule.FailOnErrorStatus = true
+		if got := probeContainer(context.Background(), rule, c); got != alive {
+			t.Errorf("the App's own check on status %d: alive = %v, want %v", code, got, alive)
 		}
 		srv.Close()
 	}
@@ -283,7 +303,7 @@ func TestHttpAnswersFailsOnRefusedAndOnTimeout(t *testing.T) {
 	l, _ := net.Listen("tcp", "127.0.0.1:0")
 	addr := l.Addr().String()
 	l.Close()
-	if httpAnswers(context.Background(), addr, "/", time.Second) {
+	if httpAnswers(context.Background(), addr, "/", time.Second, false) {
 		t.Fatal("a refused connection is not an answer")
 	}
 	var hit atomic.Bool
@@ -293,7 +313,7 @@ func TestHttpAnswersFailsOnRefusedAndOnTimeout(t *testing.T) {
 	}))
 	defer slow.Close()
 	start := time.Now()
-	if httpAnswers(context.Background(), strings.TrimPrefix(slow.URL, "http://"), "/", 200*time.Millisecond) {
+	if httpAnswers(context.Background(), strings.TrimPrefix(slow.URL, "http://"), "/", 200*time.Millisecond, false) {
 		t.Fatal("a hang is not an answer")
 	}
 	if !hit.Load() || time.Since(start) > 2*time.Second {
