@@ -279,8 +279,9 @@ func (s *Service) runDeployBody(ctx context.Context, req *pb.DeployRequest, cont
 // awaitStarted waits for container (or the whole stack) to count as up, and says how it went.
 // With replicas > 1 the container is a compose project and every one of its copies has to be up.
 func (s *Service) awaitStarted(ctx context.Context, req *pb.DeployRequest, container string, isCompose bool, replicas int, started time.Time, commitSha string, e *emitter) *pb.DeployResult {
+	project := !isCompose && runsAsProject(req.GetComposeYaml())
 	if req.GetReady() != nil {
-		if replicas > 1 && !isCompose {
+		if project {
 			return s.waitReadyWith(ctx, req, false, started, commitSha, e, func() []readySample { return sampleProject(ctx, container) })
 		}
 		return s.waitReady(ctx, req, container, isCompose, started, commitSha, e)
@@ -296,7 +297,7 @@ func (s *Service) awaitStarted(ctx context.Context, req *pb.DeployRequest, conta
 		}
 		return &pb.DeployResult{Error: "Stack did not reach a running state", CommitSha: commitSha}
 	}
-	if replicas > 1 && !isCompose {
+	if project {
 		e.log("info", fmt.Sprintf("Waiting for all %d copies to become healthy…", replicas))
 		if waitProjectRunning(ctx, container, replicas, timeout) {
 			return &pb.DeployResult{Ready: true, CommitSha: commitSha}

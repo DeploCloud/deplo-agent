@@ -41,6 +41,11 @@ exit 0`)
 
 func replicasDeploy(t *testing.T) *pb.DeployResult {
 	t.Helper()
+	return replicasDeployOf(t, replicasYaml)
+}
+
+func replicasDeployOf(t *testing.T, replicasYaml string) *pb.DeployResult {
+	t.Helper()
 	s := New(t.TempDir(), t.TempDir(), "/", "")
 	var res *pb.DeployResult
 	s.runDeploy(context.Background(), &pb.DeployRequest{
@@ -111,5 +116,25 @@ func TestReplicaCount(t *testing.T) {
 func TestCapabilities_advertisesReplicas(t *testing.T) {
 	if !containsString(Capabilities, "deploy.replicas") {
 		t.Error(`Capabilities must advertise "deploy.replicas"`)
+	}
+}
+
+// A member of a cluster may hold one replica of an App spread over several: it still has no container of its own name.
+func TestOneReplicaOfASpreadAppRunsAsAProject(t *testing.T) {
+	calls := replicasDocker(t, map[string]string{"deplo-web": "w1\n", "deplo-web_next": "n1\n"}, nil)
+	res := replicasDeployOf(t, "services: {%s: {image: deplo/web:2, deploy: {replicas: 1}}}\n")
+	if !res.GetReady() {
+		t.Fatalf("deploy failed: %q", res.GetError())
+	}
+	got := calls()
+	standIn := callAt(got, standInUp, " up -d")
+	if live := callAt(got, liveUp, " up -d"); standIn < 0 || live < standIn {
+		t.Fatalf("want the stand-in up before the live copy is replaced; got:\n%s", strings.Join(got, "\n"))
+	}
+}
+
+func TestCapabilities_advertisesSpread(t *testing.T) {
+	if !containsString(Capabilities, "deploy.spread") {
+		t.Error(`Capabilities must advertise "deploy.spread"`)
 	}
 }
