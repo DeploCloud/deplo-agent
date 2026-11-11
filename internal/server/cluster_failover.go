@@ -109,6 +109,9 @@ func (s *Service) startFromBundle(ctx context.Context, st *lease.Start) error {
 	if err != nil {
 		return err
 	}
+	if err := promoteStandby(ctx, st); err != nil {
+		return err
+	}
 	req := &pb.DeployRequest{
 		DeployId:         fmt.Sprintf("failover-%s-%d", st.DeploymentID, time.Now().Unix()),
 		Slug:             st.Slug,

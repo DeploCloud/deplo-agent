@@ -222,7 +222,7 @@ func (g *leaseGuard) startWorkload(c net.Conn, o lease.Order) lease.Reply {
 	if err := g.start(ctx, o.Start); err != nil {
 		return lease.Reply{Error: err.Error()}
 	}
-	return lease.Reply{OK: true, Started: true, Restored: o.Start.Restore != nil, Epoch: o.Epoch}
+	return lease.Reply{OK: true, Started: true, Restored: o.Start.Restore != nil, Promoted: o.Start.Promote != nil, Epoch: o.Epoch}
 }
 
 // Run checks the lease until ctx ends.
