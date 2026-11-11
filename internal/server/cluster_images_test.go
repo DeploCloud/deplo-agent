@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -33,10 +34,12 @@ type imageHost struct {
 	inUse     map[string]bool
 	removed   []string
 	loadCalls int
+	// arch is what an image says it was built for; one not named says nothing.
+	arch map[string]string
 }
 
 func newImageHost(tags ...string) *imageHost {
-	return &imageHost{tags: tags, archives: map[string]string{}, inUse: map[string]bool{}}
+	return &imageHost{tags: tags, archives: map[string]string{}, inUse: map[string]bool{}, arch: map[string]string{}}
 }
 
 func (f *imageHost) ops() clusterImageOps {
@@ -84,6 +87,11 @@ func (f *imageHost) ops() clusterImageOps {
 				}
 			}
 			return out, nil
+		},
+		arch: func(_ context.Context, ref string) (string, error) {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			return f.arch[ref], nil
 		},
 		remove: func(_ context.Context, ref string) error {
 			f.mu.Lock()
@@ -216,6 +224,25 @@ func TestCopyClusterImage_aFailedLoadIsAnError(t *testing.T) {
 	_, err := a.CopyClusterImage(context.Background(), &pb.CopyClusterImageRequest{ImageRef: "deplo/web:dpl_aa", TargetFingerprint: target})
 	if code(err) != codes.Aborted || !strings.Contains(err.Error(), "no space left") {
 		t.Fatalf("got %v", err)
+	}
+}
+
+func TestCopyClusterImage_aMemberRefusesAnImageBuiltForAnotherArchitecture(t *testing.T) {
+	other := "arm64"
+	if runtime.GOARCH == other {
+		other = "amd64"
+	}
+	src := newImageHost("deplo/web:dpl_cc")
+	dst := newImageHost("deplo/web:dpl_bb", "deplo/web:dpl_aa")
+	dst.arch["deplo/web:dpl_cc"] = other
+	a, _, target := twoMembers(t, src, dst)
+	_, err := a.CopyClusterImage(context.Background(), &pb.CopyClusterImageRequest{ImageRef: "deplo/web:dpl_cc", TargetFingerprint: target, Keep: 2})
+	if code(err) != codes.Aborted || !strings.Contains(err.Error(), "built for "+other) {
+		t.Fatalf("got %v", err)
+	}
+	// It is gone again, and the releases the member runs were not pruned to make room for it.
+	if want := []string{"deplo/web:dpl_bb", "deplo/web:dpl_aa"}; !slices.Equal(dst.tags, want) {
+		t.Fatalf("the member holds %v, want %v", dst.tags, want)
 	}
 }
 
