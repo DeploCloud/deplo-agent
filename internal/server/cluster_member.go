@@ -78,9 +78,19 @@ func relayListen(ctx context.Context) []string {
 	return out
 }
 
+// clusterKeeps is the part of the agent's environment a cluster process runs with: where programs and
+// certificates are, and how to dial out. Nothing an operator exported for the agent goes along.
+var clusterKeeps = []string{"PATH", "HOME", "TZ", "LANG", "SSL_CERT_FILE", "SSL_CERT_DIR",
+	"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"}
+
 // clusterEnv is what a supervised cluster process is started with.
 func (s *Service) clusterEnv(dir, role string) []string {
-	env := os.Environ()
+	var env []string
+	for _, k := range clusterKeeps {
+		if v, ok := os.LookupEnv(k); ok {
+			env = append(env, k+"="+v)
+		}
+	}
 	if s.agentDir != "" {
 		m := bootstrap.Paths(s.agentDir)
 		env = append(env, "DEPLO_CLUSTER_CERT="+m.CertPath, "DEPLO_CLUSTER_KEY="+m.KeyPath, "DEPLO_CLUSTER_CA="+m.CAPath)
