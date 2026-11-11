@@ -360,15 +360,20 @@ func TestE2E_aMembersDeathMovesItsDatabaseAndAppWithNoControlPlaneInTheLoop(t *t
 		return nil
 	}
 	g.stop = func(context.Context, string) error { return nil }
-	g.keep = func(_ context.Context, e lease.Entry, k lease.Keep, member string, still func() bool, _ *lease.Saved) (*lease.Saved, error) {
+	g.keep = func(_ context.Context, e lease.Entry, k lease.Keep, member string, still func() bool) (*lease.Saved, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		if !still() {
 			t.Errorf("%s is not placed elsewhere any more", e.Slug)
 		}
 		keeps = append(keeps, k)
-		removed = append(removed, e.Slug)
 		return &lease.Saved{Slug: e.Slug, Ref: k.Ref, ObjectKey: "t1/database/db_1/left-20260301T130000Z-" + member + ".tar.gz", SizeBytes: 2048, Sha256: "feed", At: "2026-03-01T13:00:00Z"}, nil
+	}
+	g.purge = func(_ context.Context, e lease.Entry, _ lease.Keep, _ func() bool) error {
+		mu.Lock()
+		removed = append(removed, e.Slug)
+		mu.Unlock()
+		return nil
 	}
 	if _, err := a.SetClusterMember(context.Background(), &pb.SetClusterMemberRequest{Member: true, Relays: []string{"http://" + relayAddr}}); err != nil {
 		t.Fatal(err)

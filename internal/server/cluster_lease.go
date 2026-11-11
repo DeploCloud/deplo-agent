@@ -61,9 +61,11 @@ type leaseGuard struct {
 	resume func(ctx context.Context, slug string) error
 	// trim stops the copies of a stack beyond n, and says whether there were any.
 	trim func(ctx context.Context, slug string, n int) (bool, error)
-	// keep archives what a moved stack still holds here, then removes it with its volumes; already is the
-	// archive an earlier pass wrote, when only the removal is left. stop stops a stack and removes nothing.
-	keep func(ctx context.Context, e lease.Entry, k lease.Keep, member string, still func() bool, already *lease.Saved) (*lease.Saved, error)
+	// keep archives what a moved stack still holds here, and purge then removes the stack with its volumes.
+	// Each asks still under the stack's lock: a start of it here in between makes that volume the live one.
+	keep  func(ctx context.Context, e lease.Entry, k lease.Keep, member string, still func() bool) (*lease.Saved, error)
+	purge func(ctx context.Context, e lease.Entry, k lease.Keep, still func() bool) error
+	// stop stops a stack and removes nothing.
 	stop func(ctx context.Context, slug string) error
 	// keeps is where each cluster's moved stacks are saved, as the leader last said. Never written to disk:
 	// a keep carries the destination's credentials.
@@ -272,7 +274,7 @@ func (s *Service) leaseGuard() *leaseGuard {
 		s.lease = newLeaseGuard(s.leaseFile(), time.Now, s.fenceStacks)
 		s.lease.start = s.startFromBundle
 		s.lease.remove, s.lease.resume, s.lease.trim = s.removeMoved, s.resumeHeld, s.trimReplicas
-		s.lease.keep, s.lease.stop = s.keepLeftBehind, s.stopMoved
+		s.lease.keep, s.lease.purge, s.lease.stop = s.keepLeftBehind, s.purgeLeftBehind, s.stopMoved
 		s.lease.has = func(slug string) bool { return isFile(s.stackPath(slug)) }
 		s.lease.running = stackRuns
 	})

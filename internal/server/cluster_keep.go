@@ -95,16 +95,36 @@ func (g *leaseGuard) keepMoved(cluster, me string, e lease.Entry, k lease.Keep, 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), leftBehindTimeout)
 	defer cancel()
-	sv, err := g.keep(ctx, e, k, me, func() bool { return g.movedAway(cluster, e.Slug) }, already)
-	switch {
-	case err == nil:
-		return sv, nil, true, false
-	case sv != nil:
-		fmt.Fprintf(os.Stderr, "deplo-agent: cluster %s: %s is saved, but its copy could not be removed: %v\n", cluster, e.Slug, err)
-		return sv, nil, false, true
+	still := func() bool { return g.movedAway(cluster, e.Slug) }
+	if saved = already; saved == nil {
+		sv, err := g.keep(ctx, e, k, me, still)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "deplo-agent: cluster %s: could not save what %s still held here, so its volume stays: %v\n", cluster, e.Slug, err)
+			return nil, &lease.Kept{Slug: e.Slug, Ref: k.Ref, Reason: lease.KeptBackupFailed, Error: err.Error()}, false, false
+		}
+		// Written down before the volume goes: an agent that stops here still tells the leader where the data is.
+		g.noteSaved(cluster, *sv)
+		saved = sv
 	}
-	fmt.Fprintf(os.Stderr, "deplo-agent: cluster %s: could not save what %s still held here, so its volume stays: %v\n", cluster, e.Slug, err)
-	return nil, &lease.Kept{Slug: e.Slug, Ref: k.Ref, Reason: lease.KeptBackupFailed, Error: err.Error()}, false, false
+	if err := g.purge(ctx, e, k, still); err != nil {
+		fmt.Fprintf(os.Stderr, "deplo-agent: cluster %s: %s is saved, but its copy could not be removed: %v\n", cluster, e.Slug, err)
+		return saved, nil, false, true
+	}
+	return saved, nil, true, false
+}
+
+func (g *leaseGuard) noteSaved(cluster string, sv lease.Saved) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	c := g.clusters[cluster]
+	if c == nil {
+		return
+	}
+	if c.Returned == nil {
+		c.Returned = &lease.Returned{Removed: []string{}}
+	}
+	noteReturned(c.Returned, []lease.Saved{sv}, nil)
+	g.save()
 }
 
 // noteReturned adds what one pass saved and kept: a later word on a stack replaces an earlier one, and a
@@ -152,14 +172,14 @@ func backupLikeTheRPC(s *Service, ctx context.Context, req *pb.BackupRequest) (*
 	return res, nil
 }
 
-// leftBehindRequest reads a keep and names the archive: the stem the control plane gave, the time, this member.
-func leftBehindRequest(e lease.Entry, k lease.Keep, member string, at time.Time) (*pb.BackupRequest, error) {
+// readKeep reads a keep's request: an archive of this stack's own volumes and nothing else.
+func readKeep(e lease.Entry, k lease.Keep) (*pb.BackupRequest, error) {
 	req := &pb.BackupRequest{}
 	if err := bundleJSON.Unmarshal(k.Request, req); err != nil {
 		return nil, fmt.Errorf("the keep is unreadable: %w", err)
 	}
 	p := req.GetProject()
-	if req.GetKind() != pb.BackupKind_BACKUP_KIND_PROJECT || p == nil || p.GetSlug() != e.Slug || req.GetStreamOut() {
+	if validateSlug(e.Slug) != nil || req.GetKind() != pb.BackupKind_BACKUP_KIND_PROJECT || p == nil || p.GetSlug() != e.Slug || req.GetStreamOut() {
 		return nil, errors.New("the keep is not an archive of this stack's volumes")
 	}
 	if len(p.GetVolumeNames()) == 0 {
@@ -170,7 +190,23 @@ func leftBehindRequest(e lease.Entry, k lease.Keep, member string, at time.Time)
 			return nil, fmt.Errorf("%q is not a volume Deplo made", v)
 		}
 	}
-	name := "-" + at.UTC().Format("20060102T150405Z") + "-" + member + ".tar.gz"
+	return req, nil
+}
+
+// errRunsAgain is a stack that was placed here again, or is being started here, while its old data waited.
+var errRunsAgain = errors.New("this server runs it again")
+
+// keepLeftBehind archives the volumes of a stack that runs elsewhere now: the stem the control plane gave,
+// then the time and this member. Nothing is removed.
+func (s *Service) keepLeftBehind(ctx context.Context, e lease.Entry, k lease.Keep, member string, still func() bool) (*lease.Saved, error) {
+	req, err := readKeep(e, k)
+	if err != nil {
+		return nil, err
+	}
+	if !memberName.MatchString(member) {
+		return nil, errors.New("the keep names no usable member")
+	}
+	name := "-" + time.Now().UTC().Format("20060102T150405Z") + "-" + member + ".tar.gz"
 	if req.GetAgeRecipient() != "" {
 		name += ".age"
 	}
@@ -182,22 +218,8 @@ func leftBehindRequest(e lease.Entry, k lease.Keep, member string, at time.Time)
 	default:
 		return nil, errors.New("the keep names no destination")
 	}
-	return req, nil
-}
-
-// keepLeftBehind archives the volumes of a stack that runs elsewhere now, then takes the stack down with them.
-// The stack lock is held throughout, so a start of it here waits and then begins on an empty volume.
-func (s *Service) keepLeftBehind(ctx context.Context, e lease.Entry, k lease.Keep, member string, still func() bool, already *lease.Saved) (*lease.Saved, error) {
-	if validateSlug(e.Slug) != nil || !memberName.MatchString(member) {
-		return nil, errors.New("the keep names no usable stack or member")
-	}
-	req, err := leftBehindRequest(e, k, member, time.Now())
-	if err != nil {
-		return nil, err
-	}
-	again := errors.New("this server runs it again")
 	if !still() {
-		return nil, again
+		return nil, errRunsAgain
 	}
 	if _, err := s.StopStack(ctx, &pb.StackRef{Slug: e.Slug}); err != nil {
 		return nil, err
@@ -205,24 +227,30 @@ func (s *Service) keepLeftBehind(ctx context.Context, e lease.Entry, k lease.Kee
 	defer s.lockStack(e.Slug)()
 	// Asked again under the lock: a start that got in first made this volume the live one.
 	if !still() {
-		return nil, again
+		return nil, errRunsAgain
 	}
-	saved := already
-	for try := 0; saved == nil; try++ {
-		res, berr := runLeftBehindBackup(s, ctx, req)
-		if berr == nil {
-			key := req.GetS3().GetObjectKey() + req.GetStore().GetObjectKey()
-			saved = &lease.Saved{Slug: e.Slug, Ref: k.Ref, ObjectKey: key, SizeBytes: res.GetSizeBytes(),
-				DecryptedSizeBytes: res.GetDecryptedSizeBytes(), Sha256: res.GetSha256(), At: time.Now().UTC().Format(time.RFC3339)}
-			break
+	for try := 1; ; try++ {
+		res, err := runLeftBehindBackup(s, ctx, req)
+		if err == nil {
+			return &lease.Saved{Slug: e.Slug, Ref: k.Ref, ObjectKey: req.GetS3().GetObjectKey() + req.GetStore().GetObjectKey(), SizeBytes: res.GetSizeBytes(),
+				DecryptedSizeBytes: res.GetDecryptedSizeBytes(), Sha256: res.GetSha256(), At: time.Now().UTC().Format(time.RFC3339)}, nil
 		}
-		if try+1 >= leftBehindTries || ctx.Err() != nil {
-			return nil, berr
+		if try >= leftBehindTries || ctx.Err() != nil {
+			return nil, err
 		}
 		time.Sleep(leftBehindWait)
 	}
+}
+
+// purgeLeftBehind takes a saved stack down with the volumes its archive holds.
+func (s *Service) purgeLeftBehind(ctx context.Context, e lease.Entry, k lease.Keep, still func() bool) error {
+	req, err := readKeep(e, k)
+	if err != nil {
+		return err
+	}
+	defer s.lockStack(e.Slug)()
 	if !still() {
-		return saved, again
+		return errRunsAgain
 	}
 	res, err := s.destroyStack(ctx, &pb.StackRef{Slug: e.Slug, RemoveVolumes: true, ReclaimVolumes: req.GetProject().GetVolumeNames()})
 	if err == nil && !res.GetOk() {
@@ -232,7 +260,7 @@ func (s *Service) keepLeftBehind(ctx context.Context, e lease.Entry, k lease.Kee
 		// ponytail: a volume something else still mounts stays; nothing looks at it again.
 		fmt.Fprintf(os.Stderr, "deplo-agent: %s is saved and stopped, but %s\n", e.Slug, res.GetError())
 	}
-	return saved, err
+	return err
 }
 
 // stopMoved stops a stack that waits for the leader's word on its data.

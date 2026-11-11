@@ -21,8 +21,11 @@ import (
 type keepFixture struct {
 	*returnFixture
 	kept    []lease.Keep
+	purged  []string
 	stopped []string
 	keepErr error
+	// purgeErrs fail that many removals of a saved stack before one goes through.
+	purgeErrs int
 }
 
 func newKeep(t *testing.T) *keepFixture {
@@ -35,13 +38,21 @@ func newKeep(t *testing.T) *keepFixture {
 func (f *keepFixture) wireKeep() {
 	f.wire()
 	f.g.stop = func(_ context.Context, slug string) error { f.stopped = append(f.stopped, slug); return nil }
-	f.g.keep = func(_ context.Context, e lease.Entry, k lease.Keep, member string, _ func() bool, _ *lease.Saved) (*lease.Saved, error) {
+	f.g.keep = func(_ context.Context, e lease.Entry, k lease.Keep, member string, _ func() bool) (*lease.Saved, error) {
 		f.kept = append(f.kept, k)
 		if f.keepErr != nil {
 			return nil, f.keepErr
 		}
-		f.gone[e.Slug] = true
 		return &lease.Saved{Slug: e.Slug, Ref: k.Ref, ObjectKey: "deplo/t/app/prj_2/left-x-" + member + ".tar.gz", SizeBytes: 42, Sha256: "abc", At: "2026-03-01T12:05:00Z"}, nil
+	}
+	f.g.purge = func(_ context.Context, e lease.Entry, _ lease.Keep, _ func() bool) error {
+		if f.purgeErrs > 0 {
+			f.purgeErrs--
+			return errors.New("docker did not answer")
+		}
+		f.purged = append(f.purged, e.Slug)
+		f.gone[e.Slug] = true
+		return nil
 	}
 }
 
@@ -76,8 +87,8 @@ func back(t *testing.T) *keepFixture {
 func TestKeep_whatHoldsDataIsSavedBeforeItIsRemovedAndTheLeaderIsTold(t *testing.T) {
 	f := back(t)
 	f.renew(askedBack(filesKeep()))
-	if len(f.kept) != 1 || f.kept[0].Slug != "files" {
-		t.Fatalf("saved %+v, want the one moved stack that holds data", f.kept)
+	if len(f.kept) != 1 || f.kept[0].Slug != "files" || strings.Join(f.purged, ",") != "files" {
+		t.Fatalf("saved %+v, purged %v, want the one moved stack that holds data", f.kept, f.purged)
 	}
 	// web holds nothing: it is only removed. files went with its backup, not through the plain removal.
 	if got := f.removedSlugs(); got != "web" {
@@ -100,8 +111,8 @@ func TestKeep_aBackupThatFailsLeavesTheVolumeAndSaysWhy(t *testing.T) {
 	f.keepErr = errors.New("no space left on device")
 	f.renew(askedBack(filesKeep()))
 	// The copy still must not run: the stack goes, by the removal that never touches a volume.
-	if got := f.removedSlugs(); got != "files,web" {
-		t.Fatalf("removed %q", got)
+	if got := f.removedSlugs(); got != "files,web" || len(f.purged) != 0 {
+		t.Fatalf("removed %q, purged %v", got, f.purged)
 	}
 	r := f.renew(askedBack(filesKeep()))
 	if r.Returned == nil || len(r.Returned.Saved) != 0 || len(r.Returned.Kept) != 1 {
@@ -189,28 +200,24 @@ func TestKeep_theCredentialsNeverReachTheLeaseFile(t *testing.T) {
 	}
 }
 
-func TestKeep_aStackOnlyHalfRemovedIsNotBackedUpTwice(t *testing.T) {
+func TestKeep_anArchiveIsWrittenDownBeforeItsVolumeGoesAndNeverMadeTwice(t *testing.T) {
 	f := back(t)
-	backups, removals := 0, 0
-	f.g.keep = func(_ context.Context, e lease.Entry, _ lease.Keep, _ string, _ func() bool, already *lease.Saved) (*lease.Saved, error) {
-		if already == nil {
-			// The archive was written; taking the stack down failed.
-			backups++
-			return &lease.Saved{Slug: e.Slug, ObjectKey: "k1", At: "2026-03-01T12:05:00Z"}, errors.New("docker did not answer")
-		}
-		removals++
-		f.gone[e.Slug] = true
-		return already, nil
-	}
+	f.purgeErrs = 1
 	if r := f.renew(askedBack(filesKeep())); r.Returned != nil {
 		t.Fatalf("reported a return that is not done: %+v", r.Returned)
 	}
+	// The archive exists and its volume does not go yet: an agent that stopped here would still know where it is.
+	raw, _ := os.ReadFile(f.file)
+	if !strings.Contains(string(raw), "left-x-srv_a.tar.gz") || len(f.purged) != 0 {
+		t.Fatalf("the lease file after the archive: %s (purged %v)", raw, f.purged)
+	}
+	f.restart()
 	f.renew(askedBack(filesKeep()))
-	if backups != 1 || removals != 1 {
-		t.Fatalf("backed up %d times, removed %d times", backups, removals)
+	if len(f.kept) != 1 || strings.Join(f.purged, ",") != "files" {
+		t.Fatalf("archived %d times, purged %v", len(f.kept), f.purged)
 	}
 	r := f.renew(askedBack(filesKeep()))
-	if r.Returned == nil || len(r.Returned.Saved) != 1 || r.Returned.Saved[0].ObjectKey != "k1" || strings.Join(r.Returned.Removed, ",") != "files,web" {
+	if r.Returned == nil || len(r.Returned.Saved) != 1 || r.Returned.Saved[0].Slug != "files" || strings.Join(r.Returned.Removed, ",") != "files,web" {
 		t.Fatalf("report %+v", r.Returned)
 	}
 }
@@ -248,8 +255,15 @@ func TestKeepLeftBehind_archivesTheVolumeThenTakesTheStackDownWithIt(t *testing.
 		got = req
 		return &pb.BackupResult{Ok: true, ObjectKey: req.GetS3().GetObjectKey(), SizeBytes: 2048, DecryptedSizeBytes: 4096, Sha256: "feed"}, nil
 	})
-	saved, err := s.keepLeftBehind(context.Background(), lease.Entry{Kind: "database", ID: "db_1", Member: "srv_b", Slug: slug, SingleWriter: true}, serviceKeep(slug), "srv_a", func() bool { return true }, nil)
+	e, still := lease.Entry{Kind: "database", ID: "db_1", Member: "srv_b", Slug: slug, SingleWriter: true}, func() bool { return true }
+	saved, err := s.keepLeftBehind(context.Background(), e, serviceKeep(slug), "srv_a", still)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if all := strings.Join(argv(), "\n"); strings.Contains(all, "down") || strings.Contains(all, "volume rm") || !isFile(s.stackPath(slug)) {
+		t.Fatalf("the archive step removed something: %q", all)
+	}
+	if err := s.purgeLeftBehind(context.Background(), e, serviceKeep(slug), still); err != nil {
 		t.Fatal(err)
 	}
 	key := got.GetS3().GetObjectKey()
@@ -282,7 +296,7 @@ func TestKeepLeftBehind_aFailedBackupTouchesNothing(t *testing.T) {
 		tries++
 		return nil, errors.New("the bucket did not answer")
 	})
-	saved, err := s.keepLeftBehind(context.Background(), lease.Entry{Slug: slug, SingleWriter: true}, serviceKeep(slug), "srv_a", func() bool { return true }, nil)
+	saved, err := s.keepLeftBehind(context.Background(), lease.Entry{Slug: slug, SingleWriter: true}, serviceKeep(slug), "srv_a", func() bool { return true })
 	if err == nil || saved != nil || !strings.Contains(err.Error(), "the bucket did not answer") {
 		t.Fatalf("saved %+v, err %v", saved, err)
 	}
@@ -313,13 +327,19 @@ func TestKeepLeftBehind_refusesAKeepThatIsNotThisStacksVolumes(t *testing.T) {
 		"no destination":   {Slug: slug, Request: json.RawMessage(`{"kind":"BACKUP_KIND_PROJECT","project":{"slug":"` + slug + `","volumeNames":["deplo-x_data"]}}`)},
 		"unreadable":       {Slug: slug, Request: json.RawMessage(`{`)},
 	} {
-		if _, err := s.keepLeftBehind(context.Background(), e, k, "srv_a", func() bool { return true }, nil); err == nil {
-			t.Errorf("%s: accepted", name)
+		if _, err := s.keepLeftBehind(context.Background(), e, k, "srv_a", func() bool { return true }); err == nil {
+			t.Errorf("%s: archived", name)
+		}
+		if name != "no destination" && s.purgeLeftBehind(context.Background(), e, k, func() bool { return true }) == nil {
+			t.Errorf("%s: purged", name)
 		}
 	}
 	// Placed here again, or being started here: its volume is the live one now.
-	if _, err := s.keepLeftBehind(context.Background(), e, serviceKeep(slug), "srv_a", func() bool { return false }, nil); err == nil {
-		t.Error("a stack this member runs again was archived and removed")
+	if _, err := s.keepLeftBehind(context.Background(), e, serviceKeep(slug), "srv_a", func() bool { return false }); err == nil {
+		t.Error("a stack this member runs again was archived")
+	}
+	if s.purgeLeftBehind(context.Background(), e, serviceKeep(slug), func() bool { return false }) == nil {
+		t.Error("a stack this member runs again was removed with its volume")
 	}
 	if got := strings.Join(argv(), ""); got != "" {
 		t.Fatalf("docker ran: %q", got)
@@ -340,8 +360,12 @@ func TestKeepLeftBehind_writesAnArchiveThatHoldsTheVolume(t *testing.T) {
 	k := lease.Keep{Slug: slug, Ref: "dst_1", Request: json.RawMessage(`{"kind":"BACKUP_KIND_PROJECT","ageRecipient":"` + recipient + `",
 		"store":{"objectKey":"deplo/team_a/database/db_1/left"},"project":{"slug":"` + slug + `","volumeNames":["` + vol + `"]}}`)}
 
-	saved, err := s.keepLeftBehind(context.Background(), lease.Entry{Kind: "database", ID: "db_1", Member: "srv_b", Slug: slug, SingleWriter: true}, k, "srv_a", func() bool { return true }, nil)
+	e, still := lease.Entry{Kind: "database", ID: "db_1", Member: "srv_b", Slug: slug, SingleWriter: true}, func() bool { return true }
+	saved, err := s.keepLeftBehind(context.Background(), e, k, "srv_a", still)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.purgeLeftBehind(context.Background(), e, k, still); err != nil {
 		t.Fatal(err)
 	}
 	raw, err := os.ReadFile(filepath.Join(root, saved.ObjectKey))
