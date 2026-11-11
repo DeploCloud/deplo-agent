@@ -22,7 +22,12 @@ var runFailoverDeploy = func(s *Service, ctx context.Context, req *pb.DeployRequ
 }
 
 // runFailoverRestore restores one backup the way the Restore RPC does; a var so a test can answer without Docker.
-var runFailoverRestore = func(s *Service, ctx context.Context, req *pb.RestoreRequest) error {
+var runFailoverRestore func(s *Service, ctx context.Context, req *pb.RestoreRequest) error
+
+// Set here, not in the declaration: a restore reroutes, and Reroute reads the lease guard that starts this.
+func init() { runFailoverRestore = restoreLikeTheRPC }
+
+func restoreLikeTheRPC(s *Service, ctx context.Context, req *pb.RestoreRequest) error {
 	src, err := sourceFromRestore(s, req)
 	if err != nil {
 		return errors.New(statusMessage(err))
