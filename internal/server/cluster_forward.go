@@ -19,28 +19,29 @@ import (
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/clusterlink/wire"
-	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 	"github.com/DeploCloud/deplo-agent/internal/forwarder"
 )
 
-// Name forwarders (#200, ADR-0028 amendment). A workload keeps one public name in its Environment wherever it
-// runs: this member holds the name on the Environment's network with a small container, which relays to this agent;
-// the agent connects to the workload's container when it runs here and over the relay to its member otherwise.
-// The control plane renders which names go where; this file only runs them. The workload is addressed by id, and the
-// leader's placement (which rides each lease renewal) says where it is, so a failover needs no new entry.
+// Name forwarders (#200, ADR-0028 amendment): this member holds the name of a workload that runs on another
+// one, and carries each connection to it over the relay. The control plane renders the table; this only runs it.
 // Stream, member to member: "FWD <network> <kind>:<id>", answered OK or ERR, then raw bytes.
 const (
 	fwdVerb       = "FWD"
-	fwdImage      = "deplo/forwarder:1"
-	fwdLabel      = "deplo.forwarder=1"
 	maxFwdEntries = 512
 )
 
 var (
-	fwdName   = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
-	fwdOrigin = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,126}$`)
-	fwdID     = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+	// A public name is db-<slug> or the App's deplo-<slug>, and nothing else.
+	fwdName = regexp.MustCompile(`^(db|deplo)-[a-z0-9][a-z0-9-]{0,58}$`)
+	fwdID   = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+	// What the proxy still resolves by name on every tenant network: never held, whatever the table says.
+	fwdReserved = map[string]bool{"deplo-traefik": true, "deplo-socket-proxy": true}
 )
+
+// forwardableNetwork is an Environment's or a team's network; a preview's names stay on its one server.
+func forwardableNetwork(name string) bool {
+	return strings.HasPrefix(name, "deplo-env-") || strings.HasPrefix(name, "deplo-team-")
+}
 
 type heldName struct {
 	Network string `json:"network"`
@@ -48,7 +49,6 @@ type heldName struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
 	Port    uint32 `json:"port"`
-	Origin  string `json:"origin"`
 }
 
 func (h heldName) key() string { return h.Network + "|" + h.Name }
@@ -58,7 +58,6 @@ type servedName struct {
 	Kind    string   `json:"kind"`
 	ID      string   `json:"id"`
 	Port    uint32   `json:"port"`
-	Origin  string   `json:"origin"`
 	Sources []string `json:"sources"`
 }
 
@@ -67,7 +66,6 @@ type forwardState struct {
 	Members map[string]string `json:"members"` // server id -> certificate fingerprint
 	Hold    []heldName        `json:"hold"`
 	Serve   []servedName      `json:"serve"`
-	Ports   map[string]int    `json:"ports"` // key -> the port this agent answers that name's container on
 }
 
 // forwardSpec is one forwarder container.
@@ -76,28 +74,34 @@ type forwardSpec struct {
 	Network   string
 	Alias     string
 	Port      uint32
-	Target    string // host:port of this agent's listener on the network's gateway
+	// Dir holds the socket this agent answers that one container on; nothing else is handed it.
+	Dir string
 }
 
-// forwardOps is what name forwarders ask of docker and the network; tests replace it.
+// forwardOps is what name forwarders ask of docker and the host; tests replace it.
 type forwardOps struct {
-	network func(ctx context.Context, network string) (gateway string, subnet *net.IPNet, err error)
+	network func(ctx context.Context, network string) error
 	ensure  func(ctx context.Context, s forwardSpec) error
 	remove  func(ctx context.Context, container string) error
 	list    func(ctx context.Context) ([]string, error)
-	ip      func(ctx context.Context, container, network string) (string, error)
-	listen  func(addr string) (net.Listener, error)
+	// target is the address, on network, of a running container of the workload on this host.
+	target func(ctx context.Context, workloadID, network string) (string, error)
+	listen func(dir string) (net.Listener, error)
 }
+
+// `_` is in no slug, so no stack's container (deplo-<slug>..., db-<slug>) can hold a forwarder's name.
+const fwdContainerPrefix = "deplo_fwd_"
+
+var fwdContainer = regexp.MustCompile(`^deplo_fwd_[0-9a-f]{16}$`)
 
 func containerFor(h heldName) string {
 	sum := sha256.Sum256([]byte(h.key()))
-	return "deplo-fwd-" + hex.EncodeToString(sum[:8])
+	return fwdContainerPrefix + hex.EncodeToString(sum[:8])
 }
 
 type heldListener struct {
-	ln     net.Listener
-	subnet *net.IPNet
-	port   int
+	ln  net.Listener
+	dir string
 }
 
 type forwarders struct {
@@ -121,6 +125,11 @@ func (s *Service) forwarders() *forwarders {
 }
 
 func (f *forwarders) file() string { return filepath.Join(f.s.agentDir, "cluster-forwarders.json") }
+
+// dir is where one forwarder's socket lives; only that container is handed it.
+func (f *forwarders) dir(container string) string {
+	return filepath.Join(f.s.captureDir(), "forwarders", container)
+}
 
 func (f *forwarders) ops() forwardOps {
 	if f.s.fwdOps.ensure != nil {
@@ -146,7 +155,7 @@ func validFingerprint(fp string) bool {
 
 // validate refuses the whole request on one bad entry: a half-applied table is worse than the last good one.
 func validateForwarders(req *pb.SetClusterForwardersRequest) (forwardState, error) {
-	st := forwardState{Cluster: req.GetClusterId(), Members: map[string]string{}, Ports: map[string]int{}}
+	st := forwardState{Cluster: req.GetClusterId(), Members: map[string]string{}}
 	if st.Cluster == "" {
 		return st, fmt.Errorf("a cluster id is required")
 	}
@@ -162,9 +171,9 @@ func validateForwarders(req *pb.SetClusterForwardersRequest) (forwardState, erro
 	kind := func(k string) bool { return k == "app" || k == "database" }
 	seen := map[string]bool{}
 	for _, h := range req.GetHold() {
-		e := heldName{h.GetNetwork(), h.GetKind(), h.GetWorkloadId(), h.GetName(), h.GetPort(), h.GetOrigin()}
-		if !dockercli.IsTenantNetwork(e.Network) || !kind(e.Kind) || !fwdID.MatchString(e.ID) ||
-			!fwdName.MatchString(e.Name) || e.Port == 0 || e.Port > 65535 || !fwdOrigin.MatchString(e.Origin) {
+		e := heldName{h.GetNetwork(), h.GetKind(), h.GetWorkloadId(), h.GetName(), h.GetPort()}
+		if !forwardableNetwork(e.Network) || !kind(e.Kind) || !fwdID.MatchString(e.ID) ||
+			!fwdName.MatchString(e.Name) || fwdReserved[e.Name] || e.Port == 0 || e.Port > 65535 {
 			return st, fmt.Errorf("%q on %q is not a name this member can hold", e.Name, e.Network)
 		}
 		if seen[e.key()] {
@@ -174,9 +183,9 @@ func validateForwarders(req *pb.SetClusterForwardersRequest) (forwardState, erro
 		st.Hold = append(st.Hold, e)
 	}
 	for _, v := range req.GetServe() {
-		e := servedName{v.GetNetwork(), v.GetKind(), v.GetWorkloadId(), v.GetPort(), v.GetOrigin(), nil}
-		if !dockercli.IsTenantNetwork(e.Network) || !kind(e.Kind) || !fwdID.MatchString(e.ID) ||
-			e.Port == 0 || e.Port > 65535 || !fwdOrigin.MatchString(e.Origin) {
+		e := servedName{v.GetNetwork(), v.GetKind(), v.GetWorkloadId(), v.GetPort(), nil}
+		if !forwardableNetwork(e.Network) || !kind(e.Kind) || !fwdID.MatchString(e.ID) ||
+			e.Port == 0 || e.Port > 65535 {
 			return st, fmt.Errorf("%s:%s on %q is not a workload this member can serve", e.Kind, e.ID, e.Network)
 		}
 		for _, fp := range v.GetSourceFingerprints() {
@@ -206,7 +215,6 @@ func (s *Service) SetClusterForwarders(ctx context.Context, req *pb.SetClusterFo
 	f := s.forwarders()
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	st.Ports = f.st.Ports
 	f.st = st
 	if err := f.reconcile(ctx); err != nil {
 		f.save()
@@ -260,48 +268,29 @@ func (f *forwarders) reconcile(ctx context.Context) error {
 			first = err
 		}
 	}
-	if f.st.Ports == nil {
-		f.st.Ports = map[string]int{}
-	}
-	wanted := map[string]bool{}
+	wanted, networks := map[string]bool{}, map[string]error{}
 	for _, h := range f.st.Hold {
-		wanted[containerFor(h)] = true
-		key := h.key()
-		l := f.listeners[key]
+		name := containerFor(h)
+		wanted[name] = true
+		if _, seen := networks[h.Network]; !seen {
+			networks[h.Network] = ops.network(ctx, h.Network)
+		}
+		if err := networks[h.Network]; err != nil {
+			note(fmt.Errorf("%s: %w", h.Network, err))
+			continue
+		}
+		l := f.listeners[name]
 		if l == nil {
-			gw, subnet, err := ops.network(ctx, h.Network)
-			if err != nil {
-				note(fmt.Errorf("%s: %w", h.Network, err))
-				continue
-			}
-			ln, err := ops.listen(net.JoinHostPort(gw, fmt.Sprint(f.st.Ports[key])))
-			if err != nil {
-				ln, err = ops.listen(net.JoinHostPort(gw, "0"))
-			}
+			ln, err := ops.listen(f.dir(name))
 			if err != nil {
 				note(fmt.Errorf("%s: %w", h.Name, err))
 				continue
 			}
-			l = &heldListener{ln: ln, subnet: subnet, port: ln.Addr().(*net.TCPAddr).Port}
-			f.listeners[key] = l
-			f.st.Ports[key] = l.port
-			go f.acceptHeld(key, l)
+			l = &heldListener{ln: ln, dir: f.dir(name)}
+			f.listeners[name] = l
+			go f.acceptHeld(h.key(), l)
 		}
-		note(ops.ensure(ctx, forwardSpec{
-			Container: containerFor(h), Network: h.Network, Alias: h.Name, Port: h.Port,
-			Target: net.JoinHostPort(l.ln.Addr().(*net.TCPAddr).IP.String(), fmt.Sprint(l.port)),
-		}))
-	}
-	live := map[string]bool{}
-	for _, h := range f.st.Hold {
-		live[h.key()] = true
-	}
-	for key, l := range f.listeners {
-		if !live[key] {
-			l.ln.Close()
-			delete(f.listeners, key)
-			delete(f.st.Ports, key)
-		}
+		note(ops.ensure(ctx, forwardSpec{Container: name, Network: h.Network, Alias: h.Name, Port: h.Port, Dir: l.dir}))
 	}
 	if have, err := ops.list(ctx); err == nil {
 		for _, name := range have {
@@ -312,6 +301,14 @@ func (f *forwarders) reconcile(ctx context.Context) error {
 	} else {
 		note(err)
 	}
+	// The socket goes after its container, which is the only thing that can reach it.
+	for name, l := range f.listeners {
+		if !wanted[name] {
+			l.ln.Close()
+			_ = os.RemoveAll(l.dir)
+			delete(f.listeners, name)
+		}
+	}
 	return first
 }
 
@@ -321,17 +318,14 @@ func (f *forwarders) acceptHeld(key string, l *heldListener) {
 		if err != nil {
 			return
 		}
-		go f.serveHeld(key, l, c)
+		go f.serveHeld(key, c)
 	}
 }
 
 // serveHeld carries one connection that reached a held name: to the workload's container here, or to its member.
-func (f *forwarders) serveHeld(key string, l *heldListener, c net.Conn) {
+// Its caller is that name's own forwarder container, the only holder of the socket.
+func (f *forwarders) serveHeld(key string, c net.Conn) {
 	defer c.Close()
-	// Only a container of this Environment's network may use its names; another network's reaches the gateway too.
-	if tcp, ok := c.RemoteAddr().(*net.TCPAddr); !ok || !l.subnet.Contains(tcp.IP) {
-		return
-	}
 	f.mu.Lock()
 	var h heldName
 	found := false
@@ -354,7 +348,7 @@ func (f *forwarders) serveHeld(key string, l *heldListener, c net.Conn) {
 	var up net.Conn
 	var err error
 	if here {
-		up, err = f.dialLocal(ctx, h.Origin, h.Network, h.Port)
+		up, err = f.dialLocal(ctx, h.ID, h.Network, h.Port)
 	} else {
 		up, err = f.dialMember(ctx, members[memberID], h)
 	}
@@ -364,8 +358,9 @@ func (f *forwarders) serveHeld(key string, l *heldListener, c net.Conn) {
 	forwarder.Join(c, up)
 }
 
-func (f *forwarders) dialLocal(ctx context.Context, origin, network string, port uint32) (net.Conn, error) {
-	ip, err := f.ops().ip(ctx, origin, network)
+// dialLocal reaches the workload's own container: found by id on the entry's network, never by a name.
+func (f *forwarders) dialLocal(ctx context.Context, workloadID, network string, port uint32) (net.Conn, error) {
+	ip, err := f.ops().target(ctx, workloadID, network)
 	if err != nil {
 		return nil, err
 	}
@@ -444,7 +439,7 @@ func (s *Service) serveForward(from wire.Party, c net.Conn, arg string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	up, err := f.dialLocal(ctx, e.Origin, e.Network, e.Port)
+	up, err := f.dialLocal(ctx, e.ID, e.Network, e.Port)
 	if err != nil {
 		_ = wire.WriteHeader(c, wire.VerbErr, "not answering")
 		return
@@ -477,89 +472,4 @@ func (g *leaseGuard) locate(cluster, kind, id string) (member string, here, ok b
 		}
 	}
 	return member, false, ok
-}
-
-var dockerForwardOps = forwardOps{
-	network: func(ctx context.Context, network string) (string, *net.IPNet, error) {
-		if err := ensureTenantNetwork(ctx, network); err != nil {
-			return "", nil, err
-		}
-		res, err := dockercli.Run(ctx, 10*time.Second, "network", "inspect", network,
-			"--format", "{{range .IPAM.Config}}{{.Gateway}} {{.Subnet}}\n{{end}}")
-		if err != nil || res.Code != 0 {
-			return "", nil, fmt.Errorf("inspect network %s", network)
-		}
-		for _, line := range strings.Split(res.Stdout, "\n") {
-			gw, sub, ok := strings.Cut(strings.TrimSpace(line), " ")
-			if !ok {
-				continue
-			}
-			if ip := net.ParseIP(gw); ip != nil && ip.To4() != nil {
-				if _, n, err := net.ParseCIDR(sub); err == nil {
-					return gw, n, nil
-				}
-			}
-		}
-		return "", nil, fmt.Errorf("network %s has no IPv4 gateway", network)
-	},
-	ensure: ensureForwarderContainer,
-	remove: func(ctx context.Context, name string) error {
-		_, err := dockercli.Run(ctx, 30*time.Second, "rm", "-f", name)
-		return err
-	},
-	list: func(ctx context.Context) ([]string, error) {
-		res, err := dockercli.Run(ctx, 15*time.Second, "ps", "-a", "--filter", "label="+fwdLabel, "--format", "{{.Names}}")
-		if err != nil || res.Code != 0 {
-			return nil, fmt.Errorf("list the name forwarders")
-		}
-		return strings.Fields(res.Stdout), nil
-	},
-	ip: func(ctx context.Context, container, network string) (string, error) {
-		res, err := dockercli.Run(ctx, 10*time.Second, "inspect", "--format",
-			fmt.Sprintf(`{{(index .NetworkSettings.Networks %q).IPAddress}}`, network), container)
-		ip := strings.TrimSpace(res.Stdout)
-		if err != nil || res.Code != 0 || net.ParseIP(ip) == nil {
-			return "", fmt.Errorf("%s is not running on %s", container, network)
-		}
-		return ip, nil
-	},
-	listen: func(addr string) (net.Listener, error) { return net.Listen("tcp", addr) },
-}
-
-// ensureForwarderContainer starts the container that holds one name: the agent's own binary, mounted read-only
-// into an image with nothing else in it, dropped of every privilege.
-func ensureForwarderContainer(ctx context.Context, s forwardSpec) error {
-	spec := fmt.Sprintf("%s|%s|%d|%s", s.Network, s.Alias, s.Port, s.Target)
-	sum := sha256.Sum256([]byte(spec))
-	tag := hex.EncodeToString(sum[:6])
-	if res, err := dockercli.Run(ctx, 10*time.Second, "inspect", "--format", `{{index .Config.Labels "deplo.forwarder.spec"}} {{.State.Running}}`, s.Container); err == nil && res.Code == 0 {
-		if strings.TrimSpace(res.Stdout) == tag+" true" {
-			return nil
-		}
-		_, _ = dockercli.Run(ctx, 30*time.Second, "rm", "-f", s.Container)
-	}
-	if res, err := dockercli.Run(ctx, 10*time.Second, "image", "inspect", fwdImage); err != nil || res.Code != 0 {
-		empty := strings.NewReader(strings.Repeat("\x00", 1024))
-		if code, err := dockercli.PipeIn(ctx, time.Minute, empty, nil, "import", "-", fwdImage); err != nil || code != 0 {
-			return fmt.Errorf("prepare the forwarder image")
-		}
-	}
-	exe, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	res, err := dockercli.Run(ctx, time.Minute, "run", "-d", "--name", s.Container,
-		"--network", s.Network, "--network-alias", s.Alias, "--restart", "unless-stopped",
-		"--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
-		"--memory", "32m", "--pids-limit", "64",
-		"--label", fwdLabel, "--label", "deplo.forwarder.spec="+tag,
-		"-v", exe+":/deplo-agent:ro", fwdImage,
-		"/deplo-agent", "forward", "--listen", fmt.Sprintf(":%d", s.Port), "--to", s.Target)
-	if err != nil {
-		return err
-	}
-	if res.Code != 0 {
-		return fmt.Errorf("start the forwarder for %s: %s", s.Alias, oneLine(res.Stderr))
-	}
-	return nil
 }

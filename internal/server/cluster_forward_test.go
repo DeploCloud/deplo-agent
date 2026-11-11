@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -17,31 +19,23 @@ import (
 
 const envNet = "deplo-env-e1"
 
-// fakeFwdHost is one host's docker and network for name forwarders.
+// fakeFwdHost is one host's docker for name forwarders; the sockets are real.
 type fakeFwdHost struct {
 	mu      sync.Mutex
-	subnets map[string]string
 	specs   map[string]forwardSpec
 	removed []string
 	extra   []string
+	// running is the network each workload's container is on here; unset => the test's envNet.
+	running map[string]string
 }
 
 func newFakeFwdHost() *fakeFwdHost {
-	return &fakeFwdHost{subnets: map[string]string{}, specs: map[string]forwardSpec{}}
+	return &fakeFwdHost{specs: map[string]forwardSpec{}, running: map[string]string{}}
 }
 
 func (h *fakeFwdHost) ops() forwardOps {
 	return forwardOps{
-		network: func(_ context.Context, network string) (string, *net.IPNet, error) {
-			sub := "127.0.0.0/8"
-			h.mu.Lock()
-			if s := h.subnets[network]; s != "" {
-				sub = s
-			}
-			h.mu.Unlock()
-			_, n, _ := net.ParseCIDR(sub)
-			return "127.0.0.1", n, nil
-		},
+		network: func(context.Context, string) error { return nil },
 		ensure: func(_ context.Context, s forwardSpec) error {
 			h.mu.Lock()
 			defer h.mu.Unlock()
@@ -64,8 +58,20 @@ func (h *fakeFwdHost) ops() forwardOps {
 			}
 			return out, nil
 		},
-		ip:     func(context.Context, string, string) (string, error) { return "127.0.0.1", nil },
-		listen: func(addr string) (net.Listener, error) { return net.Listen("tcp", addr) },
+		// Like docker: a workload answers only on the network its container is on.
+		target: func(_ context.Context, id, network string) (string, error) {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			on := h.running[id]
+			if on == "" {
+				on = envNet
+			}
+			if on != network {
+				return "", fmt.Errorf("%s is not on %s", id, network)
+			}
+			return "127.0.0.1", nil
+		},
+		listen: listenForwarder,
 	}
 }
 
@@ -112,10 +118,10 @@ func backend(t *testing.T, name string) uint32 {
 	return uint32(ln.Addr().(*net.TCPAddr).Port)
 }
 
-// ask connects to a forwarder's own listener and returns what the workload answered.
-func ask(t *testing.T, target string) string {
+// ask connects the way a forwarder's container does, on its socket, and returns what the workload answered.
+func ask(t *testing.T, s forwardSpec) string {
 	t.Helper()
-	c, err := net.DialTimeout("tcp", target, 3*time.Second)
+	c, err := net.DialTimeout("unix", filepath.Join(s.Dir, fwdSocket), 3*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,8 +156,8 @@ func memberPair(t *testing.T) (a, b *Service, fa, fb *fakeFwdHost, fpA, fpB stri
 	return
 }
 
-func hold(origin string, port uint32) *pb.ClusterHeldName {
-	return &pb.ClusterHeldName{Network: envNet, Kind: "database", WorkloadId: "db1", Name: "db-shop", Port: port, Origin: origin}
+func hold(port uint32) *pb.ClusterHeldName {
+	return &pb.ClusterHeldName{Network: envNet, Kind: "database", WorkloadId: "db1", Name: "db-shop", Port: port}
 }
 
 func apply(t *testing.T, s *Service, req *pb.SetClusterForwardersRequest) {
@@ -165,16 +171,16 @@ func TestForwarders_reachAWorkloadOnAnotherMemberOverTheRelay(t *testing.T) {
 	a, b, fa, fb, fpA, fpB := memberPair(t)
 	port := backend(t, "on-b")
 	members := []*pb.ClusterForwarderMember{{ServerId: "srvA", Fingerprint: fpA}, {ServerId: "srvB", Fingerprint: fpB}}
-	apply(t, a, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members, Hold: []*pb.ClusterHeldName{hold("db-shop.origin", port)}})
-	apply(t, b, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members, Hold: []*pb.ClusterHeldName{hold("db-shop.origin", port)},
-		Serve: []*pb.ClusterServedName{{Network: envNet, Kind: "database", WorkloadId: "db1", Port: port, Origin: "db-shop.origin", SourceFingerprints: []string{fpA}}}})
+	apply(t, a, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members, Hold: []*pb.ClusterHeldName{hold(port)}})
+	apply(t, b, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members, Hold: []*pb.ClusterHeldName{hold(port)},
+		Serve: []*pb.ClusterServedName{{Network: envNet, Kind: "database", WorkloadId: "db1", Port: port, SourceFingerprints: []string{fpA}}}})
 	placeOn(t, a, "srvA", dbEntry("srvB"))
 	placeOn(t, b, "srvB", dbEntry("srvB"))
 
-	if got := ask(t, fa.spec(t, "db-shop").Target); got != "on-b:PING" {
+	if got := ask(t, fa.spec(t, "db-shop")); got != "on-b:PING" {
 		t.Fatalf("through the relay it answered %q", got)
 	}
-	if got := ask(t, fb.spec(t, "db-shop").Target); got != "on-b:PING" {
+	if got := ask(t, fb.spec(t, "db-shop")); got != "on-b:PING" {
 		t.Fatalf("on the same member it answered %q", got)
 	}
 }
@@ -185,12 +191,12 @@ func TestForwarders_followAFailoverWithoutANewTable(t *testing.T) {
 	_ = onA
 	members := []*pb.ClusterForwarderMember{{ServerId: "srvA", Fingerprint: fpA}, {ServerId: "srvB", Fingerprint: fpB}}
 	// The same port on both members is the workload's; a backend per member answers on it.
-	apply(t, a, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members, Hold: []*pb.ClusterHeldName{hold("db-shop.origin", onB)}})
+	apply(t, a, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members, Hold: []*pb.ClusterHeldName{hold(onB)}})
 	apply(t, b, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members,
-		Serve: []*pb.ClusterServedName{{Network: envNet, Kind: "database", WorkloadId: "db1", Port: onB, Origin: "db-shop.origin", SourceFingerprints: []string{fpA}}}})
+		Serve: []*pb.ClusterServedName{{Network: envNet, Kind: "database", WorkloadId: "db1", Port: onB, SourceFingerprints: []string{fpA}}}})
 	placeOn(t, a, "srvA", dbEntry("srvB"))
 	placeOn(t, b, "srvB", dbEntry("srvB"))
-	target := fa.spec(t, "db-shop").Target
+	target := fa.spec(t, "db-shop")
 	if got := ask(t, target); got != "on-b:PING" {
 		t.Fatalf("before the failover %q", got)
 	}
@@ -204,17 +210,23 @@ func TestForwarders_followAFailoverWithoutANewTable(t *testing.T) {
 	}
 }
 
+const teamBNet = "deplo-env-teamb"
+
 func TestForwarders_receiverRefusesWhatItWasNotHanded(t *testing.T) {
-	a, b, _, _, fpA, fpB := memberPair(t)
+	a, b, _, fb, fpA, fpB := memberPair(t)
 	port := backend(t, "on-b")
-	members := []*pb.ClusterForwarderMember{{ServerId: "srvA", Fingerprint: fpA}, {ServerId: "srvB", Fingerprint: fpB}}
-	other := strings.Repeat("ab", 32)
+	other, third := strings.Repeat("ab", 32), strings.Repeat("cd", 32)
+	// A and a third server are this cluster's members; `other` is a member of another cluster.
+	members := []*pb.ClusterForwarderMember{{ServerId: "srvA", Fingerprint: fpA}, {ServerId: "srvB", Fingerprint: fpB}, {ServerId: "srvC", Fingerprint: third}}
+	fb.running["dbB"] = teamBNet
 	apply(t, b, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members,
 		Serve: []*pb.ClusterServedName{
-			{Network: envNet, Kind: "database", WorkloadId: "db1", Port: port, Origin: "o1", SourceFingerprints: []string{fpA, other}},
-			{Network: envNet, Kind: "database", WorkloadId: "db2", Port: port, Origin: "o2", SourceFingerprints: []string{fpA}},
+			{Network: envNet, Kind: "database", WorkloadId: "db1", Port: port, SourceFingerprints: []string{fpA, other}},
+			{Network: envNet, Kind: "database", WorkloadId: "db2", Port: port, SourceFingerprints: []string{fpA}},
+			// Another team's database on the same member: only the third server runs that team's Apps.
+			{Network: teamBNet, Kind: "database", WorkloadId: "dbB", Port: port, SourceFingerprints: []string{third}},
 		}})
-	placeOn(t, b, "srvB", dbEntry("srvB"), lease.Entry{Kind: "database", ID: "db2", Member: "srvA"})
+	placeOn(t, b, "srvB", dbEntry("srvB"), lease.Entry{Kind: "database", ID: "db2", Member: "srvA"}, lease.Entry{Kind: "database", ID: "dbB", Member: "srvB"})
 	f := b.forwarders()
 	src := wire.Party{Fingerprint: fpA, Role: wire.RoleMember}
 	cases := []struct {
@@ -226,11 +238,15 @@ func TestForwarders_receiverRefusesWhatItWasNotHanded(t *testing.T) {
 		ok   bool
 	}{
 		{"a source it was handed", src, envNet, "database", "db1", true},
+		{"another team's database, by its own network", src, teamBNet, "database", "dbB", false},
+		{"another team's database, by a network the source may use", src, envNet, "database", "dbB", false},
+		{"its own database, by another team's network", src, teamBNet, "database", "db1", false},
 		{"another Environment's network", src, "deplo-env-e2", "database", "db1", false},
 		{"a workload it was not handed", src, envNet, "database", "db9", false},
 		{"a workload placed on another member", src, envNet, "database", "db2", false},
 		{"an app of the same id", src, envNet, "app", "db1", false},
-		// In the entry's sources, but not a member of this cluster's roster: another cluster's member.
+		{"a member of this cluster that is not the entry's source", wire.Party{Fingerprint: third, Role: wire.RoleMember}, envNet, "database", "db1", false},
+		// In the entry's sources, but not in this cluster's roster: another cluster's member.
 		{"another cluster's member", wire.Party{Fingerprint: other, Role: wire.RoleMember}, envNet, "database", "db1", false},
 		{"a leader", wire.Party{Fingerprint: fpA, Role: wire.RoleLeader}, envNet, "database", "db1", false},
 	}
@@ -240,31 +256,62 @@ func TestForwarders_receiverRefusesWhatItWasNotHanded(t *testing.T) {
 		}
 	}
 
-	// And on the wire: A is not in the sources of db2's entry once the table drops it.
-	apply(t, b, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members,
-		Serve: []*pb.ClusterServedName{{Network: envNet, Kind: "database", WorkloadId: "db1", Port: port, Origin: "o1", SourceFingerprints: []string{other}}}})
+	// And on the wire: A asks for the other team's database and is refused before anything is dialed.
 	party := a.clusterMember().party
-	conn, err := party.Dial(context.Background(), wire.Party{Fingerprint: fpB, Role: wire.RoleMember})
-	if err != nil {
-		t.Fatal(err)
+	for _, want := range []string{teamBNet + " database:dbB", envNet + " database:dbB"} {
+		conn, err := party.Dial(context.Background(), wire.Party{Fingerprint: fpB, Role: wire.RoleMember})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = wire.WriteHeader(conn, fwdVerb, want)
+		verb, _, err := wire.ReadHeader(conn)
+		conn.Close()
+		if err != nil || verb != wire.VerbErr {
+			t.Fatalf("%q was answered %q, %v", want, verb, err)
+		}
 	}
-	defer conn.Close()
-	_ = wire.WriteHeader(conn, fwdVerb, envNet+" database:db1")
-	verb, _, err := wire.ReadHeader(conn)
-	if err != nil || verb != wire.VerbErr {
-		t.Fatalf("the stream was answered %q, %v", verb, err)
+}
+
+// A served entry reaches the workload's container on the entry's own network and nowhere else.
+func TestForwarders_aServedWorkloadIsDialedOnItsOwnNetworkOnly(t *testing.T) {
+	_, b, _, fb, fpA, fpB := memberPair(t)
+	port := backend(t, "on-b")
+	fb.running["db1"] = teamBNet // the container is on another team's network, whatever the entry says
+	apply(t, b, &pb.SetClusterForwardersRequest{ClusterId: "cl1",
+		Members: []*pb.ClusterForwarderMember{{ServerId: "srvA", Fingerprint: fpA}, {ServerId: "srvB", Fingerprint: fpB}},
+		Serve:   []*pb.ClusterServedName{{Network: envNet, Kind: "database", WorkloadId: "db1", Port: port, SourceFingerprints: []string{fpA}}}})
+	placeOn(t, b, "srvB", dbEntry("srvB"))
+	if _, err := b.forwarders().dialLocal(context.Background(), "db1", envNet, port); err == nil {
+		t.Fatal("a container on another network was dialed")
 	}
 }
 
 func TestForwarders_refuseABadTable(t *testing.T) {
-	a, _, _, _, fpA, _ := memberPair(t)
+	a, _, fa, _, fpA, _ := memberPair(t)
 	members := []*pb.ClusterForwarderMember{{ServerId: "srvA", Fingerprint: fpA}}
+	held := func(network, name string, port uint32) *pb.SetClusterForwardersRequest {
+		return &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members,
+			Hold: []*pb.ClusterHeldName{{Network: network, Kind: "database", WorkloadId: "d", Name: name, Port: port}}}
+	}
 	bad := map[string]*pb.SetClusterForwardersRequest{
-		"a network Deplo does not own": {ClusterId: "cl1", Hold: []*pb.ClusterHeldName{{Network: "deplo", Kind: "database", WorkloadId: "d", Name: "db-x", Port: 5432, Origin: "o"}}},
-		"a name that is not a name":    {ClusterId: "cl1", Hold: []*pb.ClusterHeldName{{Network: envNet, Kind: "database", WorkloadId: "d", Name: "../x", Port: 5432, Origin: "o"}}},
-		"no port":                      {ClusterId: "cl1", Hold: []*pb.ClusterHeldName{{Network: envNet, Kind: "app", WorkloadId: "d", Name: "web", Origin: "o"}}},
+		"the platform's own network":    held("deplo", "db-x", 5432),
+		"the proxy's socket network":    held("deplo-socket", "db-x", 5432),
+		"a preview's network":           held("deplo-preview-web__pr-1", "db-x", 5432),
+		"a name that is not a name":     held(envNet, "../x", 5432),
+		"a name no workload has":        held(envNet, "web", 5432),
+		"the panel's name":              held(envNet, "deplo", 5432),
+		"the panel database's name":     held(envNet, "postgres", 5432),
+		"the proxy's name":              held(envNet, "traefik", 5432),
+		"the proxy's container":         held(envNet, "deplo-traefik", 5432),
+		"the socket proxy's name":       held(envNet, "docker-socket-proxy", 5432),
+		"the socket proxy's other name": held(envNet, "deplo-socket-proxy", 5432),
+		"a name with a dot":             held(envNet, "db-x.internal", 5432),
+		"no port":                       held(envNet, "db-x", 0),
+		"a port that is not one":        held(envNet, "db-x", 70000),
 		"a source that is not a fingerprint": {ClusterId: "cl1",
-			Serve: []*pb.ClusterServedName{{Network: envNet, Kind: "app", WorkloadId: "d", Port: 80, Origin: "o", SourceFingerprints: []string{"zz"}}}},
+			Serve: []*pb.ClusterServedName{{Network: envNet, Kind: "app", WorkloadId: "d", Port: 80, SourceFingerprints: []string{"zz"}}}},
+		"a served workload on the platform's network": {ClusterId: "cl1",
+			Serve: []*pb.ClusterServedName{{Network: "deplo", Kind: "app", WorkloadId: "d", Port: 80}}},
 		"no cluster": {Members: members},
 	}
 	for name, req := range bad {
@@ -272,35 +319,79 @@ func TestForwarders_refuseABadTable(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
+	fa.mu.Lock()
+	defer fa.mu.Unlock()
+	if len(fa.specs) != 0 {
+		t.Fatalf("a refused table started %v", fa.specs)
+	}
 }
 
-func TestForwarders_onlyAnotherNetworksContainerIsTurnedAway(t *testing.T) {
+// Each name has a socket of its own, so a forwarder reaches its own Environment's workload and no other.
+func TestForwarders_eachNameReachesOnlyItsOwnWorkload(t *testing.T) {
 	a, _, fa, _, fpA, _ := memberPair(t)
-	fa.subnets[envNet] = "10.9.0.0/16" // the caller below is 127.0.0.1: not on this network
-	port := backend(t, "on-a")
+	mine, theirs := backend(t, "team-a"), backend(t, "team-b")
+	fa.running["dbB"] = teamBNet
 	apply(t, a, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: []*pb.ClusterForwarderMember{{ServerId: "srvA", Fingerprint: fpA}},
-		Hold: []*pb.ClusterHeldName{hold("o", port)}})
-	placeOn(t, a, "srvA", dbEntry("srvA"))
-	if got := ask(t, fa.spec(t, "db-shop").Target); got != "" {
-		t.Fatalf("a caller outside the network was answered %q", got)
+		Hold: []*pb.ClusterHeldName{hold(mine), {Network: teamBNet, Kind: "database", WorkloadId: "dbB", Name: "db-shop", Port: theirs}}})
+	placeOn(t, a, "srvA", dbEntry("srvA"), lease.Entry{Kind: "database", ID: "dbB", Member: "srvA"})
+	var own, other forwardSpec
+	eventually(t, "both forwarders", func() bool {
+		fa.mu.Lock()
+		defer fa.mu.Unlock()
+		for _, s := range fa.specs {
+			if s.Network == envNet {
+				own = s
+			} else {
+				other = s
+			}
+		}
+		return own.Dir != "" && other.Dir != ""
+	})
+	if own.Dir == other.Dir || own.Container == other.Container {
+		t.Fatalf("two Environments share a forwarder: %+v %+v", own, other)
+	}
+	if got := ask(t, own); got != "team-a:PING" {
+		t.Fatalf("team A's name answered %q", got)
+	}
+	if got := ask(t, other); got != "team-b:PING" {
+		t.Fatalf("team B's name answered %q", got)
+	}
+	// Only that forwarder's container is handed the socket: nobody but this user reaches the directory above it.
+	parent, _ := os.Stat(filepath.Dir(own.Dir))
+	if parent.Mode().Perm() != 0o700 {
+		t.Fatalf("the sockets' directory is %v", parent.Mode().Perm())
+	}
+}
+
+// The placement may name a server this member was never handed: it is not dialed.
+func TestForwarders_neverDialAMemberOutsideTheRoster(t *testing.T) {
+	a, _, fa, _, fpA, _ := memberPair(t)
+	apply(t, a, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: []*pb.ClusterForwarderMember{{ServerId: "srvA", Fingerprint: fpA}},
+		Hold: []*pb.ClusterHeldName{hold(5432)}})
+	placeOn(t, a, "srvA", dbEntry("srvB"))
+	if got := ask(t, fa.spec(t, "db-shop")); got != "" {
+		t.Fatalf("a server outside the roster answered %q", got)
 	}
 }
 
 func TestForwarders_dropWhatTheTableNoLongerNames(t *testing.T) {
 	a, _, fa, _, fpA, _ := memberPair(t)
 	req := &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: []*pb.ClusterForwarderMember{{ServerId: "srvA", Fingerprint: fpA}},
-		Hold: []*pb.ClusterHeldName{hold("o", 5432)}}
+		Hold: []*pb.ClusterHeldName{hold(5432)}}
 	apply(t, a, req)
-	fa.spec(t, "db-shop")
+	was := fa.spec(t, "db-shop")
 	fa.mu.Lock()
-	fa.extra = []string{"deplo-fwd-leftover"}
+	fa.extra = []string{"deplo_fwd_0123456789abcdef"}
 	fa.mu.Unlock()
 	req.Hold = nil
 	apply(t, a, req)
 	fa.mu.Lock()
 	defer fa.mu.Unlock()
-	if len(fa.specs) != 0 || fmt.Sprint(fa.removed) == "[]" {
+	if len(fa.specs) != 0 || len(fa.removed) != 2 {
 		t.Fatalf("still running %v, removed %v", fa.specs, fa.removed)
+	}
+	if _, err := os.Stat(was.Dir); !os.IsNotExist(err) {
+		t.Fatalf("the dropped name's socket is still there: %v", err)
 	}
 }
 

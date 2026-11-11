@@ -2439,20 +2439,19 @@ message ClusterForwarderMember {
   string fingerprint = 2;
 }
 
-// A workload's public name, held on this member's network for the Environment. The forwarder
-// answers it and addresses the workload by id: the leader's placement says where it runs now.
+// The public name of a workload that runs on ANOTHER member, held on this member's network for
+// the Environment. The workload is addressed by id: the leader's placement says where it runs.
 message ClusterHeldName {
-  // The Environment's network, deplo-env-<id>.
+  // The Environment's network (deplo-env-<id>, or deplo-team-<id> for an App with none).
   string network = 1;
   // "app" | "database".
   string kind = 2;
+  // The workload's id, which is also the deplo.project label of its containers.
   string workload_id = 3;
   // The public name (db-<slug>, or the App's name).
   string name = 4;
   // The port the workload answers on.
   uint32 port = 5;
-  // The container that answers under the internal alias, for when the workload runs on this member.
-  string origin = 6;
 }
 
 // A workload placed on THIS member that other members of its Environment may reach over the relay.
@@ -2461,9 +2460,8 @@ message ClusterServedName {
   string kind = 2;
   string workload_id = 3;
   uint32 port = 4;
-  string origin = 5;
   // Certificate fingerprints of the other members of the same Environment, and no one else.
-  repeated string source_fingerprints = 6;
+  repeated string source_fingerprints = 5;
 }
 
 message SetClusterForwardersRequest {

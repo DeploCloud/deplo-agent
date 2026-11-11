@@ -1,5 +1,5 @@
 // Package forwarder is the process inside a name forwarder's container: it listens on the
-// workload's port and relays every connection to this host's agent, which decides where it goes (#200).
+// workload's port and hands every connection to this host's agent, which decides where it goes (#200).
 package forwarder
 
 import (
@@ -10,12 +10,12 @@ import (
 	"time"
 )
 
-// Main runs `deplo-agent forward --listen :port --to host:port`.
+// Main runs `deplo-agent forward --listen :port --to /path/to/the/agent's/socket`.
 func Main(args []string, stderr io.Writer) int {
 	fs := flag.NewFlagSet("forward", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	listen := fs.String("listen", "", "address to listen on inside the container")
-	to := fs.String("to", "", "the agent's address for this name")
+	to := fs.String("to", "", "the agent's socket for this name")
 	if err := fs.Parse(args); err != nil || *listen == "" || *to == "" {
 		fmt.Fprintln(stderr, "forward: --listen and --to are required")
 		return 2
@@ -34,9 +34,9 @@ func Main(args []string, stderr io.Writer) int {
 	}
 }
 
-// Relay joins c to a new connection to addr until either side closes.
-func Relay(c net.Conn, addr string) {
-	up, err := net.DialTimeout("tcp", addr, 10*time.Second)
+// Relay joins c to a new connection to the agent's socket until either side closes.
+func Relay(c net.Conn, socket string) {
+	up, err := net.DialTimeout("unix", socket, 10*time.Second)
 	if err != nil {
 		c.Close()
 		return

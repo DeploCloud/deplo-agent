@@ -3,13 +3,20 @@ package forwarder
 import (
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestRelay_carriesBothWays(t *testing.T) {
-	up, err := net.Listen("tcp", "127.0.0.1:0")
+	dir, err := os.MkdirTemp("", "fw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	up, err := net.Listen("unix", filepath.Join(dir, "s"))
 	if err != nil {
 		t.Fatal(err)
 	}
