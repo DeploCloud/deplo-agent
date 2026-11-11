@@ -61,7 +61,9 @@ func (s *Service) startStandIn(ctx context.Context, req *pb.DeployRequest, live 
 	if !same {
 		s.removeStandIn(slug, e)
 		if created {
-			e.log("info", "The app's domains changed, so it goes offline briefly while the new version starts.")
+			// ponytail: replicas restart together here too. Keeping them up needs a stand-in rendered with its own
+			// router names, which is the control plane's to do (the Traefik label grammar never moves into Go).
+			e.log("info", "How this app is reached changed (a domain, a header or sticky sessions), so it goes offline briefly while the new version starts.")
 		} else {
 			e.log("warn", "Could not start the new version beside the old one, so the app goes offline briefly.")
 		}
@@ -71,7 +73,7 @@ func (s *Service) startStandIn(ctx context.Context, req *pb.DeployRequest, live 
 	if stack {
 		e.log("info", "Starting the new version of the stack beside the one that is online…")
 	} else if replicas > 1 {
-		e.log("info", fmt.Sprintf("Starting %d copies of the new version beside the ones that are online…", replicas))
+		e.log("info", fmt.Sprintf("Starting %d replicas of the new version beside the ones that are online…", replicas))
 	} else {
 		e.log("info", "Starting the new version beside the one that is online…")
 	}

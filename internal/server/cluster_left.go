@@ -130,7 +130,7 @@ func (s *Service) receiveLeft(from wire.Party, c net.Conn, key string) {
 		_ = wire.WriteHeader(c, wire.VerbErr, oneLine(statusMessage(err)))
 		return
 	}
-	_ = c.SetDeadline(time.Now().Add(leftBehindTimeout))
+	_ = c.SetDeadline(time.Now().Add(leftTimeout))
 	if wire.WriteHeader(c, leftSend, "") != nil {
 		return
 	}
@@ -142,9 +142,9 @@ func (s *Service) receiveLeft(from wire.Party, c net.Conn, key string) {
 	_ = wire.WriteHeader(c, wire.VerbOK, fmt.Sprintf("%d %s", n, sum))
 }
 
-// sendLeftBehind streams one archive to the member whose disk its destination is on. It is saved only once
+// sendLeft streams one archive to the member whose disk its destination is on. It is saved only once
 // that member says it holds the very bytes this one produced.
-func (s *Service) sendLeftBehind(ctx context.Context, req *pb.BackupRequest, to string) (*pb.BackupResult, error) {
+func (s *Service) sendLeft(ctx context.Context, req *pb.BackupRequest, to string) (*pb.BackupResult, error) {
 	target := wire.Party{Fingerprint: strings.ToLower(to), Role: wire.RoleMember}
 	m := s.clusterMember()
 	m.mu.Lock()
@@ -158,7 +158,7 @@ func (s *Service) sendLeftBehind(ctx context.Context, req *pb.BackupRequest, to 
 		return nil, fmt.Errorf("reach the server that holds the backups: %w", err)
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(leftBehindTimeout))
+	_ = conn.SetDeadline(time.Now().Add(leftTimeout))
 	if err := wire.WriteHeader(conn, leftVerb, req.GetStore().GetObjectKey()); err != nil {
 		return nil, fmt.Errorf("reach the server that holds the backups: %w", err)
 	}
@@ -171,7 +171,7 @@ func (s *Service) sendLeftBehind(ctx context.Context, req *pb.BackupRequest, to 
 		return nil, fmt.Errorf("the server that holds the backups refused it: %s", arg)
 	}
 	req.StreamOut = true
-	res, err := runLeftBehindBackup(s, ctx, req, frameWriter{conn})
+	res, err := runLeftBackup(s, ctx, req, frameWriter{conn})
 	if err != nil {
 		return nil, err
 	}

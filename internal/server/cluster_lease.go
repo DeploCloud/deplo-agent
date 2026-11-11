@@ -457,7 +457,7 @@ func (s *Service) leaseGuard() *leaseGuard {
 		s.lease = newLeaseGuard(s.leaseFile(), time.Now, s.fenceStacks)
 		s.lease.start, s.lease.leader = s.startFromBundle, s.leaderPins
 		s.lease.remove, s.lease.resume, s.lease.trim = s.removeMoved, s.resumeHeld, s.trimReplicas
-		s.lease.keep, s.lease.purge, s.lease.stop = s.keepLeftBehind, s.purgeLeftBehind, s.stopMoved
+		s.lease.keep, s.lease.purge, s.lease.stop = s.keepLeft, s.purgeLeft, s.stopMoved
 		s.lease.has = func(slug string) bool { return isFile(s.stackPath(slug)) }
 		s.lease.running = stackRuns
 		if s.lease.unreadable && s.loadMember().Member {

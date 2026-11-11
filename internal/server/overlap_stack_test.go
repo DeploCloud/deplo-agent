@@ -193,7 +193,7 @@ func TestStackOverlap_swapsInPlaceWhenTheRoutesChanged(t *testing.T) {
 	if callAt(got, stackStandInUp, " up -d") >= 0 || callAt(got, stackLiveUp, " up -d") < 0 {
 		t.Fatalf("a stand-in with other routes must never start:\n%s", strings.Join(got, "\n"))
 	}
-	if !strings.Contains(strings.Join(logs, "\n"), "domains changed") {
+	if !strings.Contains(strings.Join(logs, "\n"), "How this app is reached changed") {
 		t.Fatalf("the log should say why it swapped in place:\n%s", strings.Join(logs, "\n"))
 	}
 }

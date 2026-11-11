@@ -380,7 +380,7 @@ func TestE2E_aMembersDeathMovesItsDatabaseAndAppWithNoControlPlaneInTheLoop(t *t
 		if !still() {
 			t.Errorf("%s is not placed elsewhere any more", e.Slug)
 		}
-		return a.keepLeftBehind(ctx, e, k, member, still)
+		return a.keepLeft(ctx, e, k, member, still)
 	}
 	g.purge = func(_ context.Context, e lease.Entry, _ lease.Keep, _ func() bool) error {
 		mu.Lock()
