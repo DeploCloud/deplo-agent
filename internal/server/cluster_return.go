@@ -49,6 +49,7 @@ func (g *leaseGuard) comeBack(o lease.Order, prev, next *clusterLease, r *lease.
 	if prev != nil {
 		next.Held, next.Returning, next.Returned = prev.Held, prev.Returning, prev.Returned
 		next.since, next.asked = prev.since, prev.asked
+		next.Keeping, next.Late = prev.Keeping, prev.Late
 		if prev.ranOut(g.now()) && !next.Returning {
 			next.Returning, next.Returned = true, nil
 		}
@@ -68,6 +69,7 @@ func (g *leaseGuard) comeBack(o lease.Order, prev, next *clusterLease, r *lease.
 		g.work.Add(1)
 		go g.settle(o.Cluster)
 	}
+	g.later(o, next, r)
 }
 
 // settle removes this member's copy of every stack placed elsewhere and starts what it stopped and still owns.
@@ -204,6 +206,7 @@ func (g *leaseGuard) settle(cluster string) {
 		if c.Returning = failed; !failed {
 			delete(g.keeps, cluster)
 			c.since, c.asked = time.Time{}, false
+			g.keepOn(cluster, c)
 		}
 	}
 	g.save()
