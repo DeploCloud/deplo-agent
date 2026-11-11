@@ -161,3 +161,52 @@ func TestStartStack_aLeaseThatRunsOutDuringTheStartStopsTheStackAgain(t *testing
 		t.Fatalf("the stack was left up after its lease ran out:\n%s", strings.Join(lines, "\n"))
 	}
 }
+
+// A lease file that will not open says nothing about what may run here. It is read as a lease that ran out, never
+// as no lease: every stack on this host stops until the leader speaks, and nothing of them starts meanwhile.
+func TestLease_aLeaseFileThatCannotBeReadIsADeadLeaseNotNoLease(t *testing.T) {
+	argv := dockerOnPath(t, "")
+	s := newTestService(t)
+	s.SetAgentDir(t.TempDir())
+	// The agent starts again as the cluster member it was.
+	if err := os.WriteFile(s.memberFile(), []byte(`{"member":true,"cluster":"clu_1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeStack(t, s, fenceA)
+	if err := os.WriteFile(s.leaseFile(), []byte(`{"clu_1": {"epoch": 7, "plac`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	g := s.leaseGuard()
+	if !g.Holds(fenceA) || !g.RanOut() {
+		t.Fatalf("an unreadable lease reads as none: holds %v, ran out %v", g.Holds(fenceA), g.RanOut())
+	}
+	g.Check(context.Background())
+	if count(argv(), "deplo-"+fenceA+" ") == 0 || count(argv(), " stop -t ") == 0 {
+		t.Fatalf("the stack on this host was not stopped:\n%s", strings.Join(argv(), "\n"))
+	}
+	// The leader speaks: the lease is its word again.
+	if r := g.Renew(lease.Order{Cluster: "clu_1", Member: "srv_a", Epoch: 7, Placement: fenceEntries(fenceA)}); !r.OK {
+		t.Fatalf("renewal after an unreadable lease: %+v", r)
+	}
+	if g.Holds(fenceA) {
+		t.Fatal("the stack is still held under a live lease")
+	}
+}
+
+func TestWriteFileAtomic_leavesTheOldFileWhenTheNewOneCannotBeWritten(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "state.json")
+	if err := writeFileAtomic(file, []byte("one"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A directory in the temporary file's place: the write fails, and says so.
+	if err := os.Mkdir(file+".tmp", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFileAtomic(file, []byte("two"), 0o600); err == nil {
+		t.Fatal("a write that could not happen reported nothing")
+	}
+	if raw, _ := os.ReadFile(file); string(raw) != "one" {
+		t.Fatalf("the file holds %q", raw)
+	}
+}

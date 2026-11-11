@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -92,15 +94,26 @@ type leaseGuard struct {
 	clusters map[string]*clusterLease
 	// runs are the start orders under way here: a newer epoch ends the ones an older leader sent.
 	runs []*startRun
+	// unreadable is a lease file that would not open: see presumeDead.
+	unreadable bool
 	// leader is the cluster this server is in and the certificates Deplo named as its leaders: the relay's
 	// word for who leads is never enough. nil (a guard under test) takes any leader.
 	leader func() (cluster string, fingerprints []string)
 }
 
+// unreadableLease names the lease a file that would not open stands for: one that ran out, of nobody knows what.
+const unreadableLease = "unreadable"
+
 func newLeaseGuard(file string, now func() time.Time, fence func(context.Context, []lease.Entry) error) *leaseGuard {
 	g := &leaseGuard{file: file, now: now, fence: fence, clusters: map[string]*clusterLease{}, settling: map[string]bool{}, starting: map[string]time.Time{}, keeps: map[string]map[string]lease.Keep{}, stores: map[string][]lease.Store{}, retryAt: map[string]time.Time{}, retryWait: map[string]time.Duration{}}
 	if raw, err := os.ReadFile(file); err == nil {
-		_ = json.Unmarshal(raw, &g.clusters)
+		if err := json.Unmarshal(raw, &g.clusters); err != nil {
+			fmt.Fprintf(os.Stderr, "deplo-agent: the cluster lease in %s cannot be read (%v): taken as a lease that ran out\n", file, err)
+			g.clusters, g.unreadable = map[string]*clusterLease{}, true
+		}
+	} else if !os.IsNotExist(err) && file != "" {
+		fmt.Fprintf(os.Stderr, "deplo-agent: the cluster lease in %s cannot be read (%v): taken as a lease that ran out\n", file, err)
+		g.unreadable = true
 	}
 	// Docker's restart policy brought these stacks back before this agent; a dead lease stops them all again.
 	for _, c := range g.clusters {
@@ -116,11 +129,28 @@ func (g *leaseGuard) save() {
 	if g.file == "" {
 		return
 	}
-	raw, _ := json.Marshal(g.clusters)
-	tmp := g.file + ".tmp"
-	if os.WriteFile(tmp, raw, 0o600) == nil {
-		_ = os.Rename(tmp, g.file)
+	// The stand-in for an unreadable file is never written back: only a leader's word replaces it.
+	out := maps.Clone(g.clusters)
+	delete(out, unreadableLease)
+	raw, err := json.Marshal(out)
+	if err == nil {
+		err = writeFileAtomic(g.file, raw, 0o600)
 	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "deplo-agent: could not keep the cluster lease in %s: %v\n", g.file, err)
+	}
+}
+
+// presumeDead stands in for a lease file that would not open: a cold lease that ran out long ago and places
+// every stack on this host here, so all of them stop and none starts until a leader's renewal says what is whose.
+func (g *leaseGuard) presumeDead(slugs []string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	c := &clusterLease{Member: unreadableLease, RenewedAt: time.Unix(1, 0), cold: true}
+	for _, slug := range slugs {
+		c.Placement = append(c.Placement, lease.Entry{Member: unreadableLease, Slug: slug, SingleWriter: true})
+	}
+	g.clusters[unreadableLease] = c
 }
 
 type startRun struct {
@@ -156,6 +186,11 @@ func (g *leaseGuard) Renew(o lease.Order) lease.Reply {
 		return lease.Reply{Error: lease.StaleEpoch, Epoch: c.Epoch}
 	}
 	g.endOlderStarts(o.Cluster, o.Epoch)
+	// The leader's word replaces the stand-in for an unreadable file: what that stopped comes back as held.
+	if u := g.clusters[unreadableLease]; u != nil && g.clusters[o.Cluster] == nil {
+		g.clusters[o.Cluster] = u
+	}
+	delete(g.clusters, unreadableLease)
 	next := &clusterLease{Epoch: o.Epoch, Member: o.Member, RenewedAt: g.now(), Placement: o.Placement, ExtraSeconds: min(max(o.ExtendSeconds, 0), int(lease.ExtendFor/time.Second))}
 	g.confirmStarts(o)
 	r := lease.Reply{OK: true, Epoch: o.Epoch}
@@ -403,8 +438,24 @@ func (s *Service) leaseGuard() *leaseGuard {
 		s.lease.keep, s.lease.purge, s.lease.stop = s.keepLeftBehind, s.purgeLeftBehind, s.stopMoved
 		s.lease.has = func(slug string) bool { return isFile(s.stackPath(slug)) }
 		s.lease.running = stackRuns
+		if s.lease.unreadable && s.loadMember().Member {
+			s.lease.presumeDead(s.stackSlugs())
+		}
 	})
 	return s.lease
+}
+
+// stackSlugs is every stack this host holds, a deploy's stand-in aside.
+func (s *Service) stackSlugs() []string {
+	files, _ := filepath.Glob(filepath.Join(s.stackDir, "*.yml"))
+	var out []string
+	for _, f := range files {
+		slug := strings.TrimSuffix(filepath.Base(f), ".yml")
+		if validateSlug(slug) == nil {
+			out = append(out, slug)
+		}
+	}
+	return out
 }
 
 // fenceGrace is what a fenced stack gets to stop cleanly before it is killed. With the kill and the 1 s check it
