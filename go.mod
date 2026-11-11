@@ -10,7 +10,7 @@ require (
 	github.com/creack/pty v1.1.24
 	github.com/hashicorp/yamux v0.1.2
 	github.com/minio/minio-go/v7 v7.4.1
-	go.yaml.in/yaml/v3 v3.0.5
+	go.yaml.in/yaml/v3 v3.0.6
 	google.golang.org/grpc v1.83.2
 	google.golang.org/protobuf v1.36.12
 )
