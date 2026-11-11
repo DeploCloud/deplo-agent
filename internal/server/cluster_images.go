@@ -29,7 +29,71 @@ const (
 	imagePruned = "PRUNED"
 	defaultKeep = 2
 	maxKeep     = 20
+	// maxExpected bounds the images this member waits for at once.
+	maxExpected = 256
 )
+
+// expectedImage is one image Deplo told this member to take: from that certificate, keeping that many releases.
+type expectedImage struct {
+	from  string
+	keep  int
+	until time.Time
+}
+
+// ExpectClusterImage notes one image another member is about to send; see the RPC's contract in proto/agent.proto.
+func (s *Service) ExpectClusterImage(_ context.Context, req *pb.ExpectClusterImageRequest) (*pb.ExpectClusterImageResponse, error) {
+	ref, from, keep := req.GetImageRef(), strings.ToLower(req.GetSourceFingerprint()), int(req.GetKeep())
+	if err := validateImageRef(ref); err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	if ref == fwdImage {
+		return nil, status.Error(codes.InvalidArgument, "that image is this server's own")
+	}
+	if !validFingerprint(from) {
+		return nil, status.Error(codes.InvalidArgument, "the source is not a certificate fingerprint")
+	}
+	if keep == 0 {
+		keep = defaultKeep
+	}
+	if keep < 1 || keep > maxKeep {
+		return nil, status.Errorf(codes.InvalidArgument, "keep must be between 1 and %d", maxKeep)
+	}
+	m := s.clusterMember()
+	m.mu.Lock()
+	member := m.st.Member
+	m.mu.Unlock()
+	if !member {
+		return nil, status.Error(codes.FailedPrecondition, "this server agent is not a cluster member")
+	}
+	now := time.Now()
+	s.expectedMu.Lock()
+	defer s.expectedMu.Unlock()
+	if s.expected == nil {
+		s.expected = map[string]expectedImage{}
+	}
+	for r, e := range s.expected {
+		if now.After(e.until) {
+			delete(s.expected, r)
+		}
+	}
+	if _, known := s.expected[ref]; !known && len(s.expected) >= maxExpected {
+		return nil, status.Error(codes.ResourceExhausted, "this server already waits for too many images")
+	}
+	s.expected[ref] = expectedImage{from: from, keep: keep, until: now.Add(imageCopyTimeout)}
+	return &pb.ExpectClusterImageResponse{}, nil
+}
+
+// takeExpected uses up the entry for ref when that member is the one Deplo named, and says how many releases stay.
+func (s *Service) takeExpected(from, ref string) (keep int, ok bool) {
+	s.expectedMu.Lock()
+	defer s.expectedMu.Unlock()
+	e, known := s.expected[ref]
+	if !known || e.from != from || time.Now().After(e.until) {
+		return 0, false
+	}
+	delete(s.expected, ref)
+	return e.keep, true
+}
 
 // clusterImageOps is what an image copy asks of docker.
 type clusterImageOps struct {
@@ -148,7 +212,7 @@ func (s *Service) acceptMemberStream(from wire.Party, c net.Conn) {
 	_ = c.SetReadDeadline(time.Time{})
 	switch verb {
 	case imageVerb:
-		s.receiveImage(c, arg)
+		s.receiveImage(from, c, arg)
 	case fwdVerb:
 		s.serveForward(from, c, arg)
 	case leftVerb:
@@ -156,11 +220,12 @@ func (s *Service) acceptMemberStream(from wire.Party, c net.Conn) {
 	}
 }
 
-func (s *Service) receiveImage(c net.Conn, arg string) {
-	refArg, keepArg, _ := strings.Cut(arg, " ")
-	keep, kerr := strconv.Atoi(keepArg)
-	if err := validateImageRef(refArg); err != nil || kerr != nil || keep < 1 || keep > maxKeep {
-		_ = wire.WriteHeader(c, wire.VerbErr, "not an image this member accepts")
+// receiveImage takes an image only for an entry Deplo handed this member: the sender's own keep is not read.
+func (s *Service) receiveImage(from wire.Party, c net.Conn, arg string) {
+	refArg, _, _ := strings.Cut(arg, " ")
+	keep, ok := s.takeExpected(from.Fingerprint, refArg)
+	if !ok || validateImageRef(refArg) != nil {
+		_ = wire.WriteHeader(c, wire.VerbErr, "this server was not told to expect that image")
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), imageCopyTimeout)

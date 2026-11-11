@@ -135,7 +135,20 @@ func twoMembers(t *testing.T, src, dst *imageHost) (*Service, *Service, string) 
 		}
 	}
 	eventually(t, "both members to reach the relay", func() bool { return relay.Connected() == 2 })
+	sourcePrint[a] = ida.Fingerprint
+	t.Cleanup(func() { delete(sourcePrint, a) })
 	return a, b, idb.Fingerprint
+}
+
+// sourcePrint is each sending agent's certificate, for the entry the target is handed.
+var sourcePrint = map[*Service]string{}
+
+// expect is Deplo telling the target which image the source is about to send.
+func expect(t *testing.T, target, source *Service, ref string, keep int32) {
+	t.Helper()
+	if _, err := target.ExpectClusterImage(context.Background(), &pb.ExpectClusterImageRequest{ImageRef: ref, SourceFingerprint: sourcePrint[source], Keep: keep}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func code(err error) codes.Code { return status.Code(err) }
@@ -148,7 +161,8 @@ func TestCluster_advertisesImageCopies(t *testing.T) {
 
 func TestCopyClusterImage_sendsTheArchiveToTheMemberOverTheRelay(t *testing.T) {
 	src, dst := newImageHost("deplo/web:dpl_aa"), newImageHost()
-	a, _, target := twoMembers(t, src, dst)
+	a, b, target := twoMembers(t, src, dst)
+	expect(t, b, a, "deplo/web:dpl_aa", 0)
 	resp, err := a.CopyClusterImage(context.Background(), &pb.CopyClusterImageRequest{ImageRef: "deplo/web:dpl_aa", TargetFingerprint: target})
 	if err != nil {
 		t.Fatal(err)
@@ -163,7 +177,8 @@ func TestCopyClusterImage_sendsTheArchiveToTheMemberOverTheRelay(t *testing.T) {
 
 func TestCopyClusterImage_aMemberThatHoldsItGetsNoTransfer(t *testing.T) {
 	src, dst := newImageHost("deplo/web:dpl_aa"), newImageHost("deplo/web:dpl_aa")
-	a, _, target := twoMembers(t, src, dst)
+	a, b, target := twoMembers(t, src, dst)
+	expect(t, b, a, "deplo/web:dpl_aa", 0)
 	resp, err := a.CopyClusterImage(context.Background(), &pb.CopyClusterImageRequest{ImageRef: "deplo/web:dpl_aa", TargetFingerprint: target})
 	if err != nil || !resp.GetAlreadyPresent() {
 		t.Fatalf("answer %+v %v", resp, err)
@@ -176,7 +191,8 @@ func TestCopyClusterImage_aMemberThatHoldsItGetsNoTransfer(t *testing.T) {
 func TestCopyClusterImage_theMemberKeepsTwoReleasesAndReportsWhatItPruned(t *testing.T) {
 	src := newImageHost("deplo/web:dpl_cc")
 	dst := newImageHost("deplo/web:dpl_bb", "deplo/web:dpl_aa", "deplo/other:dpl_zz", "postgres:16")
-	a, _, target := twoMembers(t, src, dst)
+	a, b, target := twoMembers(t, src, dst)
+	expect(t, b, a, "deplo/web:dpl_cc", 2)
 	resp, err := a.CopyClusterImage(context.Background(), &pb.CopyClusterImageRequest{ImageRef: "deplo/web:dpl_cc", TargetFingerprint: target, Keep: 2})
 	if err != nil {
 		t.Fatal(err)
@@ -194,7 +210,8 @@ func TestCopyClusterImage_aReleaseInUseStaysAndIsNotReported(t *testing.T) {
 	src := newImageHost("deplo/web:dpl_cc")
 	dst := newImageHost("deplo/web:dpl_bb", "deplo/web:dpl_aa")
 	dst.inUse["deplo/web:dpl_aa"] = true
-	a, _, target := twoMembers(t, src, dst)
+	a, b, target := twoMembers(t, src, dst)
+	expect(t, b, a, "deplo/web:dpl_cc", 1)
 	resp, err := a.CopyClusterImage(context.Background(), &pb.CopyClusterImageRequest{ImageRef: "deplo/web:dpl_cc", TargetFingerprint: target, Keep: 1})
 	if err != nil {
 		t.Fatal(err)
@@ -207,7 +224,8 @@ func TestCopyClusterImage_aReleaseInUseStaysAndIsNotReported(t *testing.T) {
 func TestCopyClusterImage_anOlderReleaseCopiedLateIsNotPruned(t *testing.T) {
 	src := newImageHost("deplo/web:dpl_aa")
 	dst := newImageHost("deplo/web:dpl_cc", "deplo/web:dpl_bb")
-	a, _, target := twoMembers(t, src, dst)
+	a, b, target := twoMembers(t, src, dst)
+	expect(t, b, a, "deplo/web:dpl_aa", 0)
 	resp, err := a.CopyClusterImage(context.Background(), &pb.CopyClusterImageRequest{ImageRef: "deplo/web:dpl_aa", TargetFingerprint: target})
 	if err != nil {
 		t.Fatal(err)
@@ -220,7 +238,8 @@ func TestCopyClusterImage_anOlderReleaseCopiedLateIsNotPruned(t *testing.T) {
 func TestCopyClusterImage_aFailedLoadIsAnError(t *testing.T) {
 	src, dst := newImageHost("deplo/web:dpl_aa"), newImageHost()
 	dst.loadErr = errors.New("no space left")
-	a, _, target := twoMembers(t, src, dst)
+	a, b, target := twoMembers(t, src, dst)
+	expect(t, b, a, "deplo/web:dpl_aa", 0)
 	_, err := a.CopyClusterImage(context.Background(), &pb.CopyClusterImageRequest{ImageRef: "deplo/web:dpl_aa", TargetFingerprint: target})
 	if code(err) != codes.Aborted || !strings.Contains(err.Error(), "no space left") {
 		t.Fatalf("got %v", err)
@@ -235,7 +254,8 @@ func TestCopyClusterImage_aMemberRefusesAnImageBuiltForAnotherArchitecture(t *te
 	src := newImageHost("deplo/web:dpl_cc")
 	dst := newImageHost("deplo/web:dpl_bb", "deplo/web:dpl_aa")
 	dst.arch["deplo/web:dpl_cc"] = other
-	a, _, target := twoMembers(t, src, dst)
+	a, b, target := twoMembers(t, src, dst)
+	expect(t, b, a, "deplo/web:dpl_cc", 2)
 	_, err := a.CopyClusterImage(context.Background(), &pb.CopyClusterImageRequest{ImageRef: "deplo/web:dpl_cc", TargetFingerprint: target, Keep: 2})
 	if code(err) != codes.Aborted || !strings.Contains(err.Error(), "built for "+other) {
 		t.Fatalf("got %v", err)
@@ -243,6 +263,64 @@ func TestCopyClusterImage_aMemberRefusesAnImageBuiltForAnotherArchitecture(t *te
 	// It is gone again, and the releases the member runs were not pruned to make room for it.
 	if want := []string{"deplo/web:dpl_bb", "deplo/web:dpl_aa"}; !slices.Equal(dst.tags, want) {
 		t.Fatalf("the member holds %v, want %v", dst.tags, want)
+	}
+}
+
+func TestCopyClusterImage_aMemberTakesNoImageItWasNotToldToExpect(t *testing.T) {
+	src := newImageHost("deplo/web:dpl_cc", "deplo/other:dpl_zz")
+	dst := newImageHost("deplo/web:dpl_bb", "deplo/web:dpl_aa")
+	a, b, target := twoMembers(t, src, dst)
+	ctx := context.Background()
+	copyOf := func(ref string, keep int32) error {
+		_, err := a.CopyClusterImage(ctx, &pb.CopyClusterImageRequest{ImageRef: ref, TargetFingerprint: target, Keep: keep})
+		return err
+	}
+	if err := copyOf("deplo/web:dpl_cc", 1); code(err) != codes.FailedPrecondition {
+		t.Fatalf("an image nobody announced: %v", err)
+	}
+	// Told of another image, and of this one from another certificate: neither opens the door.
+	expect(t, b, a, "deplo/other:dpl_zz", 0)
+	if _, err := b.ExpectClusterImage(ctx, &pb.ExpectClusterImageRequest{ImageRef: "deplo/web:dpl_cc", SourceFingerprint: strings.Repeat("9", 64)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyOf("deplo/web:dpl_cc", 1); code(err) != codes.FailedPrecondition {
+		t.Fatalf("an image announced from another member: %v", err)
+	}
+	if dst.loadCalls != 0 || len(dst.removed) != 0 {
+		t.Fatalf("a refused image still changed the member: %d loads, removed %v", dst.loadCalls, dst.removed)
+	}
+	// The entry says how many releases stay, not the sender; and it opens the door once.
+	expect(t, b, a, "deplo/web:dpl_cc", 3)
+	if err := copyOf("deplo/web:dpl_cc", 1); err != nil {
+		t.Fatal(err)
+	}
+	if len(dst.removed) != 0 {
+		t.Fatalf("the sender's keep of 1 pruned %v", dst.removed)
+	}
+	dst.mu.Lock()
+	dst.tags = slices.DeleteFunc(dst.tags, func(t string) bool { return t == "deplo/web:dpl_cc" })
+	dst.mu.Unlock()
+	if err := copyOf("deplo/web:dpl_cc", 1); code(err) != codes.FailedPrecondition {
+		t.Fatalf("the same entry was used twice: %v", err)
+	}
+}
+
+func TestExpectClusterImage_refusals(t *testing.T) {
+	_, b, _ := twoMembers(t, newImageHost(), newImageHost())
+	fp := strings.Repeat("a", 64)
+	for name, req := range map[string]*pb.ExpectClusterImageRequest{
+		"an image outside deplo/":   {ImageRef: "postgres:16", SourceFingerprint: fp},
+		"the forwarder's image":     {ImageRef: fwdImage, SourceFingerprint: fp},
+		"a source that is no print": {ImageRef: "deplo/web:dpl_aa", SourceFingerprint: "nope"},
+		"a keep beyond the limit":   {ImageRef: "deplo/web:dpl_aa", SourceFingerprint: fp, Keep: 99},
+	} {
+		if _, err := b.ExpectClusterImage(context.Background(), req); code(err) != codes.InvalidArgument {
+			t.Errorf("%s: got %v", name, err)
+		}
+	}
+	lone := New(t.TempDir(), t.TempDir(), "/", "")
+	if _, err := lone.ExpectClusterImage(context.Background(), &pb.ExpectClusterImageRequest{ImageRef: "deplo/web:dpl_aa", SourceFingerprint: fp}); code(err) != codes.FailedPrecondition {
+		t.Fatalf("an agent that is no member: %v", err)
 	}
 }
 
@@ -299,11 +377,11 @@ func asked(t *testing.T, from wire.Party, line string, dst *imageHost) string {
 	return strings.TrimSpace(verb + " " + arg)
 }
 
-func TestAcceptMemberStream_servesOnlyMembersAndOnlyDeploImages(t *testing.T) {
+func TestAcceptMemberStream_servesOnlyMembersAndOnlyAnnouncedImages(t *testing.T) {
 	member := wire.Party{Fingerprint: strings.Repeat("a", 64), Role: wire.RoleMember}
 	leader := wire.Party{Fingerprint: strings.Repeat("a", 64), Role: wire.RoleLeader}
-	if got := asked(t, member, "IMAGE deplo/web:dpl_aa 2", newImageHost()); got != "SEND" {
-		t.Fatalf("a member's image was answered %q", got)
+	if got := asked(t, member, "IMAGE deplo/web:dpl_aa 2", newImageHost()); !strings.HasPrefix(got, "ERR") {
+		t.Fatalf("an image nobody announced was answered %q", got)
 	}
 	if got := asked(t, leader, "IMAGE deplo/web:dpl_aa 2", newImageHost()); got != "" {
 		t.Fatalf("a leader was answered %q", got)

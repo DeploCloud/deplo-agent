@@ -175,6 +175,9 @@ type Service struct {
 	member     *clusterMember
 	// imageOps is the docker side of cluster image copies; tests replace it.
 	imageOps clusterImageOps
+	// expected is the images Deplo told this member to take from another one, by ref.
+	expectedMu sync.Mutex
+	expected   map[string]expectedImage
 
 	leaseOnce sync.Once
 	lease     *leaseGuard
