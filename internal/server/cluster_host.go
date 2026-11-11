@@ -77,7 +77,7 @@ func (p *clusterProc) setUp(v bool) {
 
 func (s *Service) clusterDir() (string, error) {
 	if s.agentDir == "" {
-		return "", status.Error(codes.FailedPrecondition, "this agent has no data directory to keep the cluster leader in")
+		return "", status.Error(codes.FailedPrecondition, "this server agent has no data directory to keep the cluster leader in")
 	}
 	return filepath.Join(s.agentDir, "cluster"), nil
 }

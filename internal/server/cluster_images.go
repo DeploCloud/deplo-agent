@@ -288,7 +288,7 @@ func (s *Service) CopyClusterImage(ctx context.Context, req *pb.CopyClusterImage
 	party := m.party
 	m.mu.Unlock()
 	if party == nil {
-		return nil, status.Error(codes.FailedPrecondition, "this agent is not a cluster member")
+		return nil, status.Error(codes.FailedPrecondition, "this server agent is not a cluster member")
 	}
 	if held, err := s.images().has(ctx, ref); err != nil || !held {
 		return nil, status.Errorf(codes.FailedPrecondition, "this server does not hold %s", ref)
@@ -339,7 +339,10 @@ func (s *Service) CopyClusterImage(ctx context.Context, req *pb.CopyClusterImage
 		}
 		switch verb {
 		case imagePruned:
-			resp.Pruned = append(resp.Pruned, arg)
+			// Bounded: the list is the target's to send.
+			if len(resp.Pruned) < 1024 {
+				resp.Pruned = append(resp.Pruned, arg)
+			}
 		case wire.VerbOK:
 			resp.Bytes, _ = strconv.ParseInt(arg, 10, 64)
 			return resp, nil

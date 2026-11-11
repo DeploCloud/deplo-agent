@@ -247,7 +247,7 @@ func (s *Service) startMember(m *clusterMember, st memberState) {
 // SetClusterMember makes this agent a cluster party, or stops it being one; see the RPC's contract in proto/agent.proto.
 func (s *Service) SetClusterMember(_ context.Context, req *pb.SetClusterMemberRequest) (*pb.SetClusterMemberResponse, error) {
 	if s.agentDir == "" || !bootstrap.Provisioned(s.agentDir) {
-		return nil, status.Error(codes.FailedPrecondition, "this agent has no certificate to join a cluster with")
+		return nil, status.Error(codes.FailedPrecondition, "this server agent has no certificate to join a cluster with")
 	}
 	st := memberState{Member: req.GetMember()}
 	if st.Member {

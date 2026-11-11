@@ -209,7 +209,7 @@ func (s *Service) SetClusterForwarders(ctx context.Context, req *pb.SetClusterFo
 	member := m.st.Member
 	m.mu.Unlock()
 	if !member {
-		return nil, status.Error(codes.FailedPrecondition, "this agent is not a cluster member")
+		return nil, status.Error(codes.FailedPrecondition, "this server agent is not a cluster member")
 	}
 	st, err := validateForwarders(req)
 	if err != nil {
