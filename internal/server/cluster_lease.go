@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -133,6 +134,24 @@ func (g *leaseGuard) Renew(o lease.Order) lease.Reply {
 	return r
 }
 
+// Probe answers a leader that is not sure it still leads: the epoch is taken and nothing else changes. The
+// lease is as old as it was, so a leader that hears too few members to lead never keeps this one alive.
+func (g *leaseGuard) Probe(o lease.Order) lease.Reply {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	c := g.clusters[o.Cluster]
+	switch {
+	case c == nil:
+		g.clusters[o.Cluster] = &clusterLease{Epoch: o.Epoch, Member: o.Member}
+	case o.Epoch < c.Epoch:
+		return lease.Reply{Error: lease.StaleEpoch, Epoch: c.Epoch}
+	default:
+		c.Epoch = o.Epoch
+	}
+	g.save()
+	return lease.Reply{OK: true, Epoch: o.Epoch}
+}
+
 // Check stops the single-writer workloads of every lease that has run out, once each. A stop that fails is tried again on the next check.
 func (g *leaseGuard) Check(ctx context.Context) {
 	g.mu.Lock()
@@ -148,7 +167,7 @@ func (g *leaseGuard) Check(ctx context.Context) {
 		}
 		var mine []lease.Entry
 		for _, e := range c.Placement {
-			if e.Member == c.Member && (e.SingleWriter || c.cold) && e.Slug != "" {
+			if e.Slug != "" && ((e.Member == c.Member && (e.SingleWriter || c.cold)) || (e.SingleWriter && g.hasUnplaced(c.Placement, e))) {
 				mine = append(mine, e)
 			}
 		}
@@ -172,6 +191,13 @@ func (g *leaseGuard) Check(ctx context.Context) {
 		}
 		g.mu.Unlock()
 	}
+}
+
+// hasUnplaced says a stack the order placed on no member is on this host: the leader takes it for this
+// member's once it hears so, so it stops with this member's lease.
+func (g *leaseGuard) hasUnplaced(placement []lease.Entry, e lease.Entry) bool {
+	placed := slices.ContainsFunc(placement, func(p lease.Entry) bool { return p.Slug == e.Slug && p.Member != "" })
+	return !placed && g.has != nil && g.has(e.Slug)
 }
 
 // RanOut reports a lease that has gone unrenewed past the fence: until a renewal, this member starts no scheduled job.
@@ -210,9 +236,16 @@ func (g *leaseGuard) Serve(from wire.Party, c net.Conn) {
 		_ = lease.WriteReply(c, lease.Reply{Error: "unreadable order"})
 		return
 	}
+	if o.Probe {
+		_ = lease.WriteReply(c, g.Probe(o))
+		return
+	}
 	r := g.Renew(o)
 	if o.Start != nil && r.OK {
 		r = g.startWorkload(c, o)
+	}
+	if r.OK {
+		r.Unplaced = g.unplaced(o)
 	}
 	_ = lease.WriteReply(c, r)
 }

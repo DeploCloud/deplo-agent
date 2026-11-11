@@ -44,6 +44,29 @@ func (g *leaseGuard) runningNow(ctx context.Context, entries []lease.Entry) []st
 	return out
 }
 
+// unplaced is the stacks an order places on no member that this member still has: running, or stopped by
+// itself when its lease ran out. A leader that took over hears from it who has what its picture calls waiting.
+func (g *leaseGuard) unplaced(o lease.Order) []string {
+	g.mu.Lock()
+	var held []string
+	if c := g.clusters[o.Cluster]; c != nil {
+		held = slices.Clone(c.Held)
+	}
+	g.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var out []string
+	for _, e := range o.Placement {
+		if e.Slug == "" || slices.Contains(out, e.Slug) || !g.hasUnplaced(o.Placement, e) {
+			continue
+		}
+		if slices.Contains(held, e.Slug) || (g.running != nil && g.running(ctx, e.Slug)) {
+			out = append(out, e.Slug)
+		}
+	}
+	return out
+}
+
 // comeBack carries a return across a renewal and starts settling it; the caller holds g.mu.
 func (g *leaseGuard) comeBack(o lease.Order, prev, next *clusterLease, r *lease.Reply) {
 	if prev != nil {
