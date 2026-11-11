@@ -71,11 +71,11 @@ func (s *Service) startStandIn(ctx context.Context, req *pb.DeployRequest, live 
 	}
 
 	if stack {
-		e.log("info", "Starting the new version of the stack beside the one that is online…")
+		e.log("info", "Starting the new version of the stack beside the one that is online.")
 	} else if replicas > 1 {
-		e.log("info", fmt.Sprintf("Starting %d replicas of the new version beside the ones that are online…", replicas))
+		e.log("info", fmt.Sprintf("Starting %d replicas of the new version beside the ones that are online.", replicas))
 	} else {
-		e.log("info", "Starting the new version beside the one that is online…")
+		e.log("info", "Starting the new version beside the one that is online.")
 	}
 	up := func() bool {
 		defer s.lockStack(slug)()

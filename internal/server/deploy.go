@@ -299,7 +299,7 @@ func (s *Service) awaitStarted(ctx context.Context, req *pb.DeployRequest, conta
 		return &pb.DeployResult{Error: "Stack did not reach a running state", CommitSha: commitSha}
 	}
 	if project {
-		e.log("info", fmt.Sprintf("Waiting for all %d replicas to become healthy…", replicas))
+		e.log("info", fmt.Sprintf("Waiting for all %d replicas to become healthy.", replicas))
 		if waitProjectRunning(ctx, container, replicas, timeout) {
 			return &pb.DeployResult{Ready: true, CommitSha: commitSha}
 		}

@@ -83,7 +83,7 @@ func (s *Service) startLate(ctx context.Context, req *pb.DeployRequest, res *pb.
 	}
 	defer s.lockStack(req.GetSlug())()
 	late := strings.Join(lateServices(req.GetComposeYaml(), req.GetStartAfterReady()), ", ")
-	e.log("info", "The app is ready. Starting "+late+"…")
+	e.log("info", "The app is ready. Starting "+late+".")
 	out, err := dockercli.RunEnv(ctx, 2*time.Minute, dockerConfigEnv(req), e.lateArgs...)
 	if err == nil && out.Code == 0 {
 		return res
