@@ -57,6 +57,7 @@ type clusterProc struct {
 	role    string
 	args    []string
 	pidFile string
+	cancel  context.CancelFunc
 	mu      sync.Mutex
 	up      bool
 	done    chan struct{}
@@ -114,7 +115,17 @@ func (h *clusterHost) start(dir string, st clusterState) {
 	ctx, cancel := context.WithCancel(context.Background())
 	h.state, h.cancel = st, cancel
 	h.procs = nil
-	for _, name := range []string{"leader", "relay"} {
+	bin := filepath.Join(dir, clusterBinaryName)
+	roles := []string{"leader", "relay"}
+	// What an earlier agent left behind (it re-execs on SelfUpdate) ends first, in the order of a stop, so two never run at once.
+	reaped := make(chan struct{})
+	go func() {
+		defer close(reaped)
+		for _, name := range roles {
+			reapStale(filepath.Join(dir, name+".pid"), bin)
+		}
+	}()
+	for _, name := range roles {
 		if name == "relay" && !st.Relay {
 			continue
 		}
@@ -122,19 +133,23 @@ func (h *clusterHost) start(dir string, st clusterState) {
 		if name == "relay" {
 			p.args = []string{"relay"}
 		}
+		pctx, stop := context.WithCancel(ctx)
+		p.cancel = stop
 		h.procs = append(h.procs, p)
-		go p.supervise(ctx, filepath.Join(dir, clusterBinaryName), func() []string { return h.svc.clusterEnv(dir, name) })
+		go p.supervise(pctx, bin, func() []string { return h.svc.clusterEnv(dir, name) }, reaped)
 	}
 	go h.svc.keepRelaysFile(ctx, dir, st)
 }
 
-// stop ends every supervised process and waits for them; the caller holds h.mu.
+// stop ends every supervised process and waits for it, the leader before the relay: a leader extends every
+// lease as it stops, through the relay beside it. The caller holds h.mu.
 func (h *clusterHost) stop() {
+	for _, p := range h.procs {
+		p.cancel()
+		<-p.done
+	}
 	if h.cancel != nil {
 		h.cancel()
-	}
-	for _, p := range h.procs {
-		<-p.done
 	}
 	h.cancel, h.procs, h.state = nil, nil, clusterState{}
 }
@@ -143,16 +158,23 @@ func clusterSocket(dir string) string { return filepath.Join(dir, "leader.sock")
 
 var clusterBackoff = time.Second
 
-// supervise keeps one process running until ctx ends, restarting it with a growing pause.
-func (p *clusterProc) supervise(ctx context.Context, bin string, env func() []string) {
+// clusterStopWait is how long a process gets to end after SIGTERM: longer than a leader takes to extend every lease.
+const clusterStopWait = 20 * time.Second
+
+// supervise keeps one process running until ctx ends, restarting it with a growing pause. It starts after `after`.
+func (p *clusterProc) supervise(ctx context.Context, bin string, env func() []string, after <-chan struct{}) {
 	defer close(p.done)
-	reapStale(p.pidFile, bin)
+	select {
+	case <-after:
+	case <-ctx.Done():
+		return
+	}
 	pause := clusterBackoff
 	for ctx.Err() == nil {
 		cmd := exec.CommandContext(ctx, bin, p.args...)
 		cmd.Env = env()
 		cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
-		cmd.WaitDelay = 5 * time.Second
+		cmd.WaitDelay = clusterStopWait
 		started := time.Now()
 		if err := cmd.Start(); err != nil {
 			log.Printf("deplo-agent: cluster %v: start: %v", p.args, err)
@@ -177,7 +199,7 @@ func (p *clusterProc) supervise(ctx context.Context, bin string, env func() []st
 	}
 }
 
-// reapStale ends a process an earlier agent left behind (it re-execs on SelfUpdate), so two never run at once.
+// reapStale ends the process a pid file names when it is our binary, and waits for it as a stop does.
 func reapStale(pidFile, bin string) {
 	raw, err := os.ReadFile(pidFile)
 	if err != nil {
@@ -188,13 +210,17 @@ func reapStale(pidFile, bin string) {
 	if err != nil || pid <= 1 {
 		return
 	}
-	exe, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
-	if err != nil || strings.TrimSuffix(exe, " (deleted)") != bin {
+	// A process that has ended has no exe, even while nobody has waited for it: a signal would still find it.
+	ours := func() bool {
+		exe, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
+		return err == nil && strings.TrimSuffix(exe, " (deleted)") == bin
+	}
+	if !ours() {
 		return
 	}
 	_ = syscall.Kill(pid, syscall.SIGTERM)
-	for i := 0; i < 50; i++ {
-		if syscall.Kill(pid, 0) != nil {
+	for end := time.Now().Add(clusterStopWait); time.Now().Before(end); {
+		if !ours() {
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
