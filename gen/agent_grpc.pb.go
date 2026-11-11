@@ -57,6 +57,7 @@ const (
 	Agent_SetClusterMember_FullMethodName     = "/deplo.agent.v1.Agent/SetClusterMember"
 	Agent_ClusterWatch_FullMethodName         = "/deplo.agent.v1.Agent/ClusterWatch"
 	Agent_CopyClusterImage_FullMethodName     = "/deplo.agent.v1.Agent/CopyClusterImage"
+	Agent_ExpectClusterImage_FullMethodName   = "/deplo.agent.v1.Agent/ExpectClusterImage"
 	Agent_SetClusterForwarders_FullMethodName = "/deplo.agent.v1.Agent/SetClusterForwarders"
 	Agent_Backup_FullMethodName               = "/deplo.agent.v1.Agent/Backup"
 	Agent_Restore_FullMethodName              = "/deplo.agent.v1.Agent/Restore"
@@ -221,6 +222,9 @@ type AgentClient interface {
 	// Send a locally built image to one member, which keeps the App's last releases and prunes
 	// older ones. A member that already holds the ref answers without a transfer.
 	CopyClusterImage(ctx context.Context, in *CopyClusterImageRequest, opts ...grpc.CallOption) (*CopyClusterImageResponse, error)
+	// Tell this member to accept one image from one member, once, within the copy's time limit.
+	// An image stream that matches no such entry is refused.
+	ExpectClusterImage(ctx context.Context, in *ExpectClusterImageRequest, opts ...grpc.CallOption) (*ExpectClusterImageResponse, error)
 	// Hand this member the names it holds on its Environments' networks and the streams it accepts
 	// for its own workloads. The full set each time; one not listed is removed. Never sent to a
 	// member that is not in a cluster.
@@ -783,6 +787,16 @@ func (c *agentClient) CopyClusterImage(ctx context.Context, in *CopyClusterImage
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CopyClusterImageResponse)
 	err := c.cc.Invoke(ctx, Agent_CopyClusterImage_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) ExpectClusterImage(ctx context.Context, in *ExpectClusterImageRequest, opts ...grpc.CallOption) (*ExpectClusterImageResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExpectClusterImageResponse)
+	err := c.cc.Invoke(ctx, Agent_ExpectClusterImage_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1437,6 +1451,9 @@ type AgentServer interface {
 	// Send a locally built image to one member, which keeps the App's last releases and prunes
 	// older ones. A member that already holds the ref answers without a transfer.
 	CopyClusterImage(context.Context, *CopyClusterImageRequest) (*CopyClusterImageResponse, error)
+	// Tell this member to accept one image from one member, once, within the copy's time limit.
+	// An image stream that matches no such entry is refused.
+	ExpectClusterImage(context.Context, *ExpectClusterImageRequest) (*ExpectClusterImageResponse, error)
 	// Hand this member the names it holds on its Environments' networks and the streams it accepts
 	// for its own workloads. The full set each time; one not listed is removed. Never sent to a
 	// member that is not in a cluster.
@@ -1679,6 +1696,9 @@ func (UnimplementedAgentServer) ClusterWatch(*ClusterWatchRequest, grpc.ServerSt
 }
 func (UnimplementedAgentServer) CopyClusterImage(context.Context, *CopyClusterImageRequest) (*CopyClusterImageResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CopyClusterImage not implemented")
+}
+func (UnimplementedAgentServer) ExpectClusterImage(context.Context, *ExpectClusterImageRequest) (*ExpectClusterImageResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ExpectClusterImage not implemented")
 }
 func (UnimplementedAgentServer) SetClusterForwarders(context.Context, *SetClusterForwardersRequest) (*SetClusterForwardersResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetClusterForwarders not implemented")
@@ -2339,6 +2359,24 @@ func _Agent_CopyClusterImage_Handler(srv interface{}, ctx context.Context, dec f
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(AgentServer).CopyClusterImage(ctx, req.(*CopyClusterImageRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_ExpectClusterImage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExpectClusterImageRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).ExpectClusterImage(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_ExpectClusterImage_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).ExpectClusterImage(ctx, req.(*ExpectClusterImageRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -3204,6 +3242,10 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CopyClusterImage",
 			Handler:    _Agent_CopyClusterImage_Handler,
+		},
+		{
+			MethodName: "ExpectClusterImage",
+			Handler:    _Agent_ExpectClusterImage_Handler,
 		},
 		{
 			MethodName: "SetClusterForwarders",

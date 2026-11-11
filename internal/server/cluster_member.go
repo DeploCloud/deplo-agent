@@ -35,6 +35,9 @@ var relaysRefresh = 5 * time.Second
 type memberState struct {
 	Member bool     `json:"member"`
 	Relays []string `json:"relays,omitempty"`
+	// Cluster is the one this server is in, and Leaders the certificates Deplo said may lead it.
+	Cluster string   `json:"cluster,omitempty"`
+	Leaders []string `json:"leaders,omitempty"`
 }
 
 type clusterMember struct {
@@ -246,6 +249,16 @@ func (s *Service) SetClusterMember(_ context.Context, req *pb.SetClusterMemberRe
 				st.Relays = append(st.Relays, base)
 			}
 		}
+		if len(req.GetLeaderFingerprints()) > maxMemberRelays || len(req.GetClusterId()) > 64 {
+			return nil, status.Errorf(codes.InvalidArgument, "at most %d leaders, and a cluster id of 64 characters", maxMemberRelays)
+		}
+		st.Cluster = req.GetClusterId()
+		for _, fp := range req.GetLeaderFingerprints() {
+			if !validFingerprint(fp) {
+				return nil, status.Errorf(codes.InvalidArgument, "%q is not a certificate fingerprint", fp)
+			}
+			st.Leaders = append(st.Leaders, fp)
+		}
 	}
 	raw, _ := json.Marshal(st)
 	tmp := s.memberFile() + ".tmp"
@@ -268,6 +281,14 @@ func (s *Service) relayLinks(m *clusterMember) int32 {
 		return 0
 	}
 	return int32(m.party.Connected())
+}
+
+// leaderPins is the cluster this server is in and the certificates Deplo handed it as that cluster's leaders.
+func (s *Service) leaderPins() (cluster string, fingerprints []string) {
+	m := s.clusterMember()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.st.Cluster, m.st.Leaders
 }
 
 // acceptClusterStream sends a stream to the handler for who opened it.

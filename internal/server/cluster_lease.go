@@ -89,6 +89,9 @@ type leaseGuard struct {
 	starting map[string]time.Time
 	work     sync.WaitGroup
 	clusters map[string]*clusterLease
+	// leader is the cluster this server is in and the certificates Deplo named as its leaders: the relay's
+	// word for who leads is never enough. nil (a guard under test) takes any leader.
+	leader func() (cluster string, fingerprints []string)
 }
 
 func newLeaseGuard(file string, now func() time.Time, fence func(context.Context, []lease.Entry) error) *leaseGuard {
@@ -238,16 +241,27 @@ func (g *leaseGuard) Forget() {
 	}
 }
 
-// Serve answers the leader's order on one stream; anyone but a leader is refused.
+// Serve answers an order on one stream, from a leader Deplo named for the cluster the order is about.
 func (g *leaseGuard) Serve(from wire.Party, c net.Conn) {
 	defer c.Close()
 	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
 	if from.Role != wire.RoleLeader {
 		return
 	}
+	cluster := ""
+	if g.leader != nil {
+		var leaders []string
+		if cluster, leaders = g.leader(); !slices.Contains(leaders, from.Fingerprint) {
+			return
+		}
+	}
 	o, err := lease.ReadOrder(c)
 	if err != nil || o.Cluster == "" || o.Member == "" {
 		_ = lease.WriteReply(c, lease.Reply{Error: "unreadable order"})
+		return
+	}
+	if g.leader != nil && o.Cluster != cluster {
+		_ = lease.WriteReply(c, lease.Reply{Error: "this server is not in that cluster"})
 		return
 	}
 	if o.Probe {
@@ -319,7 +333,7 @@ func (s *Service) leaseFile() string {
 func (s *Service) leaseGuard() *leaseGuard {
 	s.leaseOnce.Do(func() {
 		s.lease = newLeaseGuard(s.leaseFile(), time.Now, s.fenceStacks)
-		s.lease.start = s.startFromBundle
+		s.lease.start, s.lease.leader = s.startFromBundle, s.leaderPins
 		s.lease.remove, s.lease.resume, s.lease.trim = s.removeMoved, s.resumeHeld, s.trimReplicas
 		s.lease.keep, s.lease.purge, s.lease.stop = s.keepLeftBehind, s.purgeLeftBehind, s.stopMoved
 		s.lease.has = func(slug string) bool { return isFile(s.stackPath(slug)) }

@@ -223,7 +223,7 @@ func TestE2E_aMembersDeathMovesItsDatabaseAndAppWithNoControlPlaneInTheLoop(t *t
 	leaderSock := filepath.Join(leaderDir, "leader.sock")
 	runCluster(t, bin, with(certs(leaderDir), map[string]string{"DEPLO_CLUSTER_SOCKET": leaderSock, "DEPLO_CLUSTER_RELAYS_FILE": relaysFile, "DEPLO_CLUSTER_STATE": dir("leader/state")}))
 	for _, s := range []*Service{a, b, c} {
-		if _, err := s.SetClusterMember(context.Background(), &pb.SetClusterMemberRequest{Member: true, Relays: []string{"http://" + relayAddr}}); err != nil {
+		if _, err := s.SetClusterMember(context.Background(), &pb.SetClusterMemberRequest{Member: true, Relays: []string{"http://" + relayAddr}, ClusterId: "clu_1", LeaderFingerprints: []string{leaderID.Fingerprint}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -386,7 +386,7 @@ func TestE2E_aMembersDeathMovesItsDatabaseAndAppWithNoControlPlaneInTheLoop(t *t
 		mu.Unlock()
 		return nil
 	}
-	if _, err := a.SetClusterMember(context.Background(), &pb.SetClusterMemberRequest{Member: true, Relays: []string{"http://" + relayAddr}}); err != nil {
+	if _, err := a.SetClusterMember(context.Background(), &pb.SetClusterMemberRequest{Member: true, Relays: []string{"http://" + relayAddr}, ClusterId: "clu_1", LeaderFingerprints: []string{leaderID.Fingerprint}}); err != nil {
 		t.Fatal(err)
 	}
 	within(t, 60*time.Second, "the leader to report the return", func() bool {
