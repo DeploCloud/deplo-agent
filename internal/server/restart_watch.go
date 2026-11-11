@@ -99,6 +99,9 @@ func (w *restartWatcher) load() {
 			continue
 		}
 		w.states[slug] = newRestartState(rule)
+		// The pause was in the memory of the agent that ended: restarting is back on, and Deplo is told.
+		// ponytail: the buffer keeps the last 200 events, so a server with more Apps than that tells of the newest only.
+		w.emit(&pb.RestartEvent{Kind: pb.RestartEvent_KIND_RESUMED, Slug: slug, Reason: "agent"})
 	}
 }
 
@@ -272,6 +275,14 @@ func (w *restartWatcher) check(ctx context.Context, slug string, st *restartStat
 	}
 	ok := w.probe(ctx, st.rule, c)
 	w.mu.Lock()
+	// A container that is gone is never asked about again: its entry goes once its time has passed.
+	if len(w.due) > 1024 {
+		for id, at := range w.due {
+			if !now.Before(at) {
+				delete(w.due, id)
+			}
+		}
+	}
 	w.due[c.id] = now.Add(interval)
 	v := st.record(now, c.id, c.startedAt, ok)
 	st.note(now, c, ok, v.restart)

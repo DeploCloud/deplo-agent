@@ -86,7 +86,8 @@ func (st *restartState) record(now time.Time, id string, startedAt time.Time, ok
 		st.paused = true
 		return restartVerdict{pause: true, inWindowNow: len(st.restarts)}
 	}
-	unanswered := now.Sub(st.since[id])
+	// Since it last answered: the check before the first miss, one interval earlier.
+	unanswered := now.Sub(st.since[id]) + time.Duration(max(st.rule.GetIntervalS(), 0))*time.Second
 	st.restarts = append(st.restarts, now)
 	delete(st.fails, id)
 	delete(st.since, id)

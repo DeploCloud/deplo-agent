@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -59,7 +60,7 @@ func TestWatcherRestartsAHungApp(t *testing.T) {
 		t.Fatalf("restarted = %v", h.restarted)
 	}
 	evs := w.drain()
-	if len(evs) != 1 || evs[0].Kind != pb.RestartEvent_KIND_RESTARTED || evs[0].Slug != "web" || evs[0].UnansweredS != 60 {
+	if len(evs) != 1 || evs[0].Kind != pb.RestartEvent_KIND_RESTARTED || evs[0].Slug != "web" || evs[0].UnansweredS != 90 {
 		t.Fatalf("events = %v", evs)
 	}
 	h.alive = true
@@ -240,6 +241,41 @@ func TestWatcherKeepsItsRulesAcrossARestartOfTheAgent(t *testing.T) {
 	runTicks(again, h, 3)
 	if len(h.restarted) != 1 {
 		t.Fatal("the rule must survive an agent restart, with no control plane involved")
+	}
+}
+
+// The pause lives in the agent's memory. One that starts again restarts the App as before, so it says so:
+// Deplo would go on showing "restarts paused" for an App that is being restarted.
+func TestWatcherSaysRestartingIsBackOnWhenTheAgentStartsAgain(t *testing.T) {
+	h := &fakeHost{now: rt0.Add(10 * time.Minute), containers: []readySample{web(rt0)}}
+	w := newWatcherOn(t, h)
+	w.release("web", httpRule(), true)
+	w.drain()
+	again := newWatcherOn(t, h)
+	again.dir = w.dir
+	again.load()
+	evs := again.drain()
+	if len(evs) != 1 || evs[0].Kind != pb.RestartEvent_KIND_RESUMED || evs[0].Slug != "web" || evs[0].Reason != "agent" {
+		t.Fatalf("events after the agent started again = %v", evs)
+	}
+}
+
+// A container that is gone is never checked again: what the watcher remembers of it goes too.
+func TestWatcherForgetsContainersThatAreGone(t *testing.T) {
+	h := &fakeHost{now: rt0.Add(10 * time.Minute), alive: true}
+	w := newWatcherOn(t, h)
+	w.release("web", httpRule(), true)
+	for i := 0; i < 3000; i++ {
+		c := web(rt0)
+		c.id = fmt.Sprintf("c%d", i)
+		h.containers = []readySample{c}
+		runTicks(w, h, 1)
+	}
+	w.mu.Lock()
+	n := len(w.due)
+	w.mu.Unlock()
+	if n > 1100 {
+		t.Fatalf("the watcher remembers %d containers after 3000 came and went", n)
 	}
 }
 
