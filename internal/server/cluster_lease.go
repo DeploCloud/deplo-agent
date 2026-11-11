@@ -342,6 +342,11 @@ func (g *leaseGuard) Serve(from wire.Party, c net.Conn) {
 		_ = lease.WriteReply(c, lease.Reply{Error: "this server is not in that cluster"})
 		return
 	}
+	// A slug ends up in a file path: an order naming anything else is refused whole.
+	if !slugsOK(o) {
+		_ = lease.WriteReply(c, lease.Reply{Error: "the order names something that is not a stack"})
+		return
+	}
 	if o.Probe {
 		_ = lease.WriteReply(c, g.Probe(o))
 		return
@@ -354,6 +359,23 @@ func (g *leaseGuard) Serve(from wire.Party, c net.Conn) {
 		r.Unplaced = g.unplaced(o)
 	}
 	_ = lease.WriteReply(c, r)
+}
+
+func slugsOK(o lease.Order) bool {
+	if o.Start != nil && validateSlug(o.Start.Slug) != nil {
+		return false
+	}
+	for _, e := range o.Placement {
+		if e.Slug != "" && validateSlug(e.Slug) != nil {
+			return false
+		}
+	}
+	for _, k := range o.Keep {
+		if validateSlug(k.Slug) != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // startWorkload brings one moved workload up. The order must place that stack on this member, so a leader cannot

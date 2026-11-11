@@ -76,8 +76,18 @@ func failoverRestore(st *lease.Start) (*pb.RestoreRequest, error) {
 	if err := bundleJSON.Unmarshal(st.Restore.Request, req); err != nil {
 		return nil, fmt.Errorf("the bundle's restore is unreadable: %w", err)
 	}
+	// The bundle is for one stack: its restore writes into that stack's data and nobody else's.
+	other := errors.New("the bundle's restore is aimed at another stack")
 	switch req.GetKind() {
-	case pb.BackupKind_BACKUP_KIND_DATABASE, pb.BackupKind_BACKUP_KIND_PROJECT:
+	case pb.BackupKind_BACKUP_KIND_DATABASE:
+		if id := req.GetDatabase().GetProjectId(); id != "" && st.ProjectID != "" && id != st.ProjectID {
+			return nil, other
+		}
+		return req, nil
+	case pb.BackupKind_BACKUP_KIND_PROJECT:
+		if req.GetProject().GetSlug() != st.Slug {
+			return nil, other
+		}
 		return req, nil
 	}
 	return nil, errors.New("this server cannot restore that kind of backup on a failover")
