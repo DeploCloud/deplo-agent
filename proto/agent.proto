@@ -1317,6 +1317,16 @@ message BackupRequest {
   // BackupResult still reports the size this host produced - the durable number is the
   // destination's StoreResult.bytes_written.
   bool stream_out = 7;
+  // Postgres only. BASE writes a physical base backup instead of a dump; LOG writes the change-log
+  // segments Postgres archived into <PGDATA>/deplo-wal since the last LOG, then removes them there.
+  // A LOG with nothing waiting succeeds with an empty object_key and writes no artifact.
+  PostgresArchive archive = 8;
+}
+
+enum PostgresArchive {
+  POSTGRES_ARCHIVE_NONE = 0;
+  POSTGRES_ARCHIVE_BASE = 1;
+  POSTGRES_ARCHIVE_LOG = 2;
 }
 
 // One event in the backup stream. Exactly one arm is set; the terminal arm is
@@ -1364,6 +1374,9 @@ message RestoreRequest {
   // The hex sha256 the control plane recorded when it WROTE this artifact, so the agent
   // can prove the bytes it is about to act on are that artifact.
   string expected_sha256 = 7;
+  // Postgres base backups only: the folder, at the same destination, of the change-log artifacts
+  // (BackupRequest.archive LOG) to replay after the base backup, in name order.
+  string log_prefix = 8;
 }
 
 message RestoreEvent {

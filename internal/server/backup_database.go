@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -182,6 +183,14 @@ func (s *Service) restoreDatabase(ctx context.Context, d *pb.DatabaseDescriptor,
 		return
 	}
 	defer closeSrc()
+	if isPostgres(d) {
+		head := bufio.NewReader(rd)
+		if isBaseBackup(head) {
+			s.restorePostgresBase(ctx, d, head, src, e)
+			return
+		}
+		rd = head
+	}
 
 	code, rerr := dockercli.PipeIn(ctx, backupStepTimeout, rd, env, argv...)
 	if rerr != nil {

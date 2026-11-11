@@ -97,10 +97,12 @@ func (s *Service) Backup(req *pb.BackupRequest, stream pb.Agent_BackupServer) er
 		e.result(false, statusMessage(err), "", 0)
 		return nil
 	}
-	switch req.GetKind() {
-	case pb.BackupKind_BACKUP_KIND_DATABASE:
+	switch {
+	case req.GetKind() == pb.BackupKind_BACKUP_KIND_DATABASE && req.GetArchive() != pb.PostgresArchive_POSTGRES_ARCHIVE_NONE:
+		s.backupPostgresArchive(ctx, req.GetArchive(), req.GetDatabase(), dest, e)
+	case req.GetKind() == pb.BackupKind_BACKUP_KIND_DATABASE:
 		s.backupDatabase(ctx, req.GetDatabase(), dest, e)
-	case pb.BackupKind_BACKUP_KIND_PROJECT:
+	case req.GetKind() == pb.BackupKind_BACKUP_KIND_PROJECT:
 		s.backupProject(ctx, req.GetProject(), dest, e)
 	default:
 		e.result(false, "unknown backup kind", "", 0)
