@@ -261,7 +261,12 @@ func TestE2E_aMembersDeathMovesItsDatabaseAndAppWithNoControlPlaneInTheLoop(t *t
 			"kind":        "BACKUP_KIND_DATABASE",
 			"s3":          map[string]any{"bucket": "backups", "accessKey": "AKIA", "secretKey": "s3cr3t", "objectKey": "t1/db_1/brun_1.dump.gz.age"},
 			"database":    map[string]any{"container": dbSlug, "dbType": "postgres", "dbName": "main", "user": "app", "password": "pgpass", "projectId": "db_1"},
-			"ageIdentity": "AGE-SECRET-KEY-1TEST", "expectedSha256": "abc123"}}}
+			"ageIdentity": "AGE-SECRET-KEY-1TEST", "expectedSha256": "abc123"}},
+		// Where the member that comes back saves what it still held: the same bucket, as the volume.
+		"keep": map[string]any{"ref": "dst_1", "request": map[string]any{
+			"kind":    "BACKUP_KIND_PROJECT",
+			"s3":      map[string]any{"bucket": "backups", "accessKey": "AKIA", "secretKey": "s3cr3t", "objectKey": "t1/database/db_1/left"},
+			"project": map[string]any{"slug": dbSlug, "volumeNames": []string{"deplo-" + dbSlug + "_" + dbSlug + "-data"}}}}}
 	deplo.call(t, "leader.bundle.put", map[string]any{"cluster": "clu_1", "kind": "database", "id": "db_1", "deploymentId": "rev_1",
 		"sealed": seal(dbBundle), "meta": map[string]any{"name": "main", "createdAt": "2026-06-01T00:00:00Z"}}, nil)
 
@@ -342,11 +347,29 @@ func TestE2E_aMembersDeathMovesItsDatabaseAndAppWithNoControlPlaneInTheLoop(t *t
 		t.Fatalf("the buffered events: %s", types)
 	}
 
-	// The member comes back: on the leader's word it removes its copies, and the leader says so once.
+	// The member comes back: on the leader's word it saves what its database still held, removes its copies,
+	// and the leader says so once.
 	var removed []string
+	var keeps []lease.Keep
 	g := a.leaseGuard()
 	g.has = func(string) bool { return true }
 	g.remove = func(_ context.Context, e lease.Entry) error {
+		mu.Lock()
+		removed = append(removed, e.Slug)
+		mu.Unlock()
+		return nil
+	}
+	g.stop = func(context.Context, string) error { return nil }
+	g.keep = func(_ context.Context, e lease.Entry, k lease.Keep, member string, still func() bool) (*lease.Saved, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if !still() {
+			t.Errorf("%s is not placed elsewhere any more", e.Slug)
+		}
+		keeps = append(keeps, k)
+		return &lease.Saved{Slug: e.Slug, Ref: k.Ref, ObjectKey: "t1/database/db_1/left-20260301T130000Z-" + member + ".tar.gz", SizeBytes: 2048, Sha256: "feed", At: "2026-03-01T13:00:00Z"}, nil
+	}
+	g.purge = func(_ context.Context, e lease.Entry, _ lease.Keep, _ func() bool) error {
 		mu.Lock()
 		removed = append(removed, e.Slug)
 		mu.Unlock()
@@ -368,6 +391,65 @@ func TestE2E_aMembersDeathMovesItsDatabaseAndAppWithNoControlPlaneInTheLoop(t *t
 	if n := strings.Count(watchTypes(t, deplo, 5), "member_returned"); n != 1 {
 		t.Fatalf("%d return events for one return", n)
 	}
+	// The keep crossed the leader and the relay as Deplo sealed it, credentials included, once.
+	if len(keeps) != 1 || keeps[0].Slug != dbSlug || keeps[0].Ref != "dst_1" || !strings.Contains(string(keeps[0].Request), `"secretKey":"s3cr3t"`) ||
+		!strings.Contains(string(keeps[0].Request), `"objectKey":"t1/database/db_1/left"`) {
+		t.Fatalf("the returning member was handed %+v", keeps)
+	}
+	back := watchEvent(t, deplo, "member_returned")
+	for _, want := range []string{`"saved":[{"kind":"database","workloadId":"db_1","ref":"dst_1","objectKey":"t1/database/db_1/left-20260301T130000Z-srv_a.tar.gz"`, `"sizeBytes":2048`, `"sha256":"feed"`, `"failedOverAt":"20`} {
+		if !strings.Contains(back, want) {
+			t.Fatalf("the return event lacks %s: %s", want, back)
+		}
+	}
+	if strings.Contains(back, "s3cr3t") || strings.Contains(back, `"kept"`) {
+		t.Fatalf("the return event: %s", back)
+	}
+	// Neither the member nor the leader kept the destination's credentials on disk.
+	leaseFile, _ := os.ReadFile(a.leaseFile())
+	if len(leaseFile) == 0 || strings.Contains(string(leaseFile), "s3cr3t") {
+		t.Fatalf("the returning member's lease file: %s", leaseFile)
+	}
+}
+
+// watchEvent replays the leader's buffer and returns the data of the last event of one type.
+func watchEvent(t *testing.T, c *unixCaller, kind string) string {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://cluster/watch?since=0", nil)
+	res, err := c.http.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	var head uint64
+	out := ""
+	sc := bufio.NewScanner(res.Body)
+	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
+	for sc.Scan() {
+		var line struct {
+			Hello bool            `json:"hello"`
+			Head  uint64          `json:"head"`
+			Seq   uint64          `json:"seq"`
+			Type  string          `json:"type"`
+			Data  json.RawMessage `json:"data"`
+		}
+		if json.Unmarshal(sc.Bytes(), &line) != nil {
+			continue
+		}
+		if line.Hello {
+			head = line.Head
+			continue
+		}
+		if line.Type == kind {
+			out = string(line.Data)
+		}
+		if line.Seq >= head {
+			break
+		}
+	}
+	return out
 }
 
 // dbSlug is a stack name no real host has.
