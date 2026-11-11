@@ -68,6 +68,28 @@ func TestStreamHandshakePinsThePeerAndAcceptsServerStyleClientCertificates(t *te
 	}
 }
 
+// A dialing party checks who answers even with no pin: the instance's CA, and a certificate issued to answer.
+func TestClientChecksTheAnsweringCertificateWithoutAPin(t *testing.T) {
+	ca := testpki.New(t)
+	a, b := ca.Leaf(t, "a"), ca.Leaf(t, "b")
+	if cerr, serr := handshake(t, a.ClientConfig(""), b.ServerConfig()); cerr != nil || serr != nil {
+		t.Fatalf("handshake without a pin failed: %v / %v", cerr, serr)
+	}
+	if cfg := a.ClientConfig(""); cfg.InsecureSkipVerify {
+		t.Fatal("the dialing side skips the certificate check")
+	}
+	if cerr, _ := handshake(t, a.ClientConfig(""), testpki.Foreign(t, ca).ServerConfig()); cerr == nil {
+		t.Fatal("a certificate from another CA answered")
+	}
+	if cerr, _ := handshake(t, a.ClientConfig(""), ca.Expired(t, "old").ServerConfig()); cerr == nil {
+		t.Fatal("an expired certificate answered")
+	}
+	// The control plane's own certificate is the instance's, but it was never issued to answer.
+	if cerr, _ := handshake(t, a.ClientConfig(""), ca.ClientOnly(t, "panel").ServerConfig()); cerr == nil {
+		t.Fatal("a certificate that may only dial answered")
+	}
+}
+
 func TestPartyNames(t *testing.T) {
 	fp := strings.Repeat("ab", 32)
 	p, err := wire.ParseParty(fp + "/leader")

@@ -172,12 +172,16 @@ func (id *Identity) verify(pin string) func([][]byte, [][]*x509.Certificate) err
 	}
 }
 
+// ServerName is a name every certificate of the instance carries: the CA says who may answer, the pin says which one.
+const ServerName = "localhost"
+
 // ClientConfig dials a peer; with a pin, only that exact certificate passes.
 func (id *Identity) ClientConfig(pin string) *tls.Config {
 	return &tls.Config{
 		MinVersion:            tls.VersionTLS13,
 		Certificates:          []tls.Certificate{id.Cert},
-		InsecureSkipVerify:    true, // the chain and the pin are checked in VerifyPeerCertificate
+		RootCAs:               id.Roots,
+		ServerName:            ServerName,
 		VerifyPeerCertificate: id.verify(pin),
 	}
 }

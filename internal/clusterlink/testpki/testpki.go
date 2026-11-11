@@ -54,16 +54,22 @@ func New(t testing.TB) *CA {
 // Leaf issues an identity with the server-auth use only, which is what an agent certificate has.
 func (ca *CA) Leaf(t testing.TB, name string) *wire.Identity {
 	t.Helper()
-	return ca.leaf(t, name, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	return ca.leaf(t, name, time.Now().Add(-time.Hour), time.Now().Add(time.Hour), x509.ExtKeyUsageServerAuth)
+}
+
+// ClientOnly issues what the control plane holds: a certificate of the instance that may dial and never answer.
+func (ca *CA) ClientOnly(t testing.TB, name string) *wire.Identity {
+	t.Helper()
+	return ca.leaf(t, name, time.Now().Add(-time.Hour), time.Now().Add(time.Hour), x509.ExtKeyUsageClientAuth)
 }
 
 // Expired issues an identity that is already past its end.
 func (ca *CA) Expired(t testing.TB, name string) *wire.Identity {
 	t.Helper()
-	return ca.leaf(t, name, time.Now().Add(-3*time.Hour), time.Now().Add(-time.Hour))
+	return ca.leaf(t, name, time.Now().Add(-3*time.Hour), time.Now().Add(-time.Hour), x509.ExtKeyUsageServerAuth)
 }
 
-func (ca *CA) leaf(t testing.TB, name string, from, to time.Time) *wire.Identity {
+func (ca *CA) leaf(t testing.TB, name string, from, to time.Time, use x509.ExtKeyUsage) *wire.Identity {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
@@ -75,8 +81,8 @@ func (ca *CA) leaf(t testing.TB, name string, from, to time.Time) *wire.Identity
 		NotBefore:    from,
 		NotAfter:     to,
 		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		DNSNames:     []string{name},
+		ExtKeyUsage:  []x509.ExtKeyUsage{use},
+		DNSNames:     []string{name, wire.ServerName},
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca.cert, &key.PublicKey, ca.key)
 	if err != nil {
