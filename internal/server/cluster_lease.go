@@ -90,6 +90,8 @@ type leaseGuard struct {
 	starting map[string]time.Time
 	work     sync.WaitGroup
 	clusters map[string]*clusterLease
+	// runs are the start orders under way here: a newer epoch ends the ones an older leader sent.
+	runs []*startRun
 	// leader is the cluster this server is in and the certificates Deplo named as its leaders: the relay's
 	// word for who leads is never enough. nil (a guard under test) takes any leader.
 	leader func() (cluster string, fingerprints []string)
@@ -121,7 +123,22 @@ func (g *leaseGuard) save() {
 	}
 }
 
-// Admit refuses an epoch older than the newest this member has seen: every order from a leader goes through it.
+type startRun struct {
+	cluster string
+	epoch   uint64
+	cancel  context.CancelFunc
+}
+
+// endOlderStarts cancels every start an older epoch's leader ordered for this cluster; the caller holds g.mu.
+func (g *leaseGuard) endOlderStarts(cluster string, epoch uint64) {
+	for _, r := range g.runs {
+		if r.cluster == cluster && r.epoch < epoch {
+			r.cancel()
+		}
+	}
+}
+
+// Admit refuses an epoch older than the newest this member has seen.
 func (g *leaseGuard) Admit(cluster string, epoch uint64) (held uint64, ok bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -138,6 +155,7 @@ func (g *leaseGuard) Renew(o lease.Order) lease.Reply {
 	if c := g.clusters[o.Cluster]; c != nil && o.Epoch < c.Epoch {
 		return lease.Reply{Error: lease.StaleEpoch, Epoch: c.Epoch}
 	}
+	g.endOlderStarts(o.Cluster, o.Epoch)
 	next := &clusterLease{Epoch: o.Epoch, Member: o.Member, RenewedAt: g.now(), Placement: o.Placement, ExtraSeconds: min(max(o.ExtendSeconds, 0), int(lease.ExtendFor/time.Second))}
 	g.confirmStarts(o)
 	r := lease.Reply{OK: true, Epoch: o.Epoch}
@@ -165,6 +183,7 @@ func (g *leaseGuard) Probe(o lease.Order) lease.Reply {
 	default:
 		c.Epoch = o.Epoch
 	}
+	g.endOlderStarts(o.Cluster, o.Epoch)
 	g.save()
 	return lease.Reply{OK: true, Epoch: o.Epoch}
 }
@@ -305,10 +324,10 @@ func (g *leaseGuard) Serve(from wire.Party, c net.Conn) {
 // startWorkload brings one moved workload up. The order must place that stack on this member, so a leader cannot
 // start a stack the placement does not give it; Started is only true once the stack is ready.
 func (g *leaseGuard) startWorkload(c net.Conn, o lease.Order) lease.Reply {
-	mine := false
+	mine, single := false, false
 	for _, e := range o.Placement {
 		if e.Member == o.Member && e.Slug == o.Start.Slug && e.Slug != "" {
-			mine = true
+			mine, single = true, e.SingleWriter
 		}
 	}
 	if !mine || g.start == nil {
@@ -321,9 +340,31 @@ func (g *leaseGuard) startWorkload(c net.Conn, o lease.Order) lease.Reply {
 	_ = c.SetDeadline(time.Now().Add(limit + time.Minute))
 	ctx, cancel := context.WithTimeout(context.Background(), limit)
 	defer cancel()
+	run := &startRun{o.Cluster, o.Epoch, cancel}
+	g.mu.Lock()
+	g.runs = append(g.runs, run)
+	g.mu.Unlock()
+	defer func() {
+		g.mu.Lock()
+		g.runs = slices.DeleteFunc(g.runs, func(r *startRun) bool { return r == run })
+		g.mu.Unlock()
+	}()
 	// The leader's renewals still place this stack on its old member until this has answered.
 	g.markStart(o.Start.Slug, false)
-	if err := g.start(ctx, o.Start); err != nil {
+	err := g.start(ctx, o.Start)
+	// A restore takes minutes: a leader with a newer epoch spoke meanwhile, so this order is nobody's any more.
+	if held, ok := g.Admit(o.Cluster, o.Epoch); !ok {
+		g.markStart(o.Start.Slug, true)
+		if single && g.stop != nil {
+			sctx, done := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer done()
+			if serr := g.stop(sctx, o.Start.Slug); serr != nil {
+				fmt.Fprintf(os.Stderr, "deplo-agent: cluster %s: could not stop %s, started for a leader that was replaced: %v\n", o.Cluster, o.Start.Slug, serr)
+			}
+		}
+		return lease.Reply{Error: lease.StaleEpoch, Epoch: held}
+	}
+	if err != nil {
 		g.markStart(o.Start.Slug, true)
 		return lease.Reply{Error: err.Error()}
 	}

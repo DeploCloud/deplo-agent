@@ -125,6 +125,10 @@ func (s *Service) startFromBundle(ctx context.Context, st *lease.Start) error {
 			return err
 		}
 	}
+	// Ended meanwhile (a newer leader spoke during the restore): nothing is brought up.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := promoteStandby(ctx, st); err != nil {
 		return err
 	}
