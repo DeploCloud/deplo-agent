@@ -26,6 +26,8 @@ type emitter struct {
 	send func(*pb.DeployEvent) error
 	// What auto detection chose to build with, reported on every result after it.
 	builtWith string
+	// The command that starts the services held back until the deploy is ready (see startLate).
+	lateArgs []string
 }
 
 func (e *emitter) log(level, text string) {
@@ -267,6 +269,7 @@ func (s *Service) runDeployBody(ctx context.Context, req *pb.DeployRequest, cont
 
 	e.phase(pb.DeployPhase_DEPLOY_PHASE_WAITING)
 	res := s.awaitStarted(ctx, req, name, isCompose, replicaCount(req.GetComposeYaml()), started, commitSha, e)
+	res = s.startLate(ctx, req, res, e)
 	if standIn {
 		s.removeStandIn(slug, e)
 	}
@@ -320,6 +323,10 @@ func (s *Service) startStack(ctx context.Context, req *pb.DeployRequest, e *emit
 	}
 	composeArgs := composeUpArgs("deplo-"+req.GetSlug(), s.stackPath(req.GetSlug()), envFile, projectDir,
 		req.GetForceRecreate(), req.GetComposeUpArgs())
+	if late := lateServices(req.GetComposeYaml(), req.GetStartAfterReady()); len(late) > 0 {
+		composeArgs = withoutLate(composeArgs, heldBack(ctx, "deplo-"+req.GetSlug(), late))
+		e.lateArgs = lateUp(composeBaseArgs("deplo-"+req.GetSlug(), s.stackPath(req.GetSlug()), envFile, projectDir), late)
+	}
 	upLog := "docker compose up -d"
 	if req.GetForceRecreate() {
 		upLog += " --force-recreate"

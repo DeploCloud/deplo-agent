@@ -56,8 +56,11 @@ func (s *Service) startStandIn(ctx context.Context, req *pb.DeployRequest, live 
 	}
 	up := func() bool {
 		defer s.lockStack(slug)()
+		// The stand-in never runs a late service: the live stack's own serves, or starts once it is ready.
+		args := withoutLate(append(base, "up", "-d", "--remove-orphans"),
+			lateServices(req.GetStandInComposeYaml(), req.GetStartAfterReady()))
 		code, err := dockercli.StreamEnv(ctx, 15*time.Minute, func(l string) { e.log("info", l) },
-			dockerConfigEnv(req), append(base, "up", "-d", "--remove-orphans")...)
+			dockerConfigEnv(req), args...)
 		return err == nil && code == 0
 	}()
 	res := &pb.DeployResult{Error: "compose up of the new version failed", CommitSha: commitSha}
