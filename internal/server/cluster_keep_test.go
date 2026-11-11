@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -230,10 +231,12 @@ func keepService(t *testing.T, slug string) (*Service, func() []string) {
 	return s, argv
 }
 
-func stubLeftBehind(t *testing.T, fn func(*pb.BackupRequest) (*pb.BackupResult, error)) {
+func stubLeftBehind(t *testing.T, fn func(*pb.BackupRequest, io.Writer) (*pb.BackupResult, error)) {
 	t.Helper()
 	old, tries, wait := runLeftBehindBackup, leftBehindTries, leftBehindWait
-	runLeftBehindBackup = func(_ *Service, _ context.Context, req *pb.BackupRequest) (*pb.BackupResult, error) { return fn(req) }
+	runLeftBehindBackup = func(_ *Service, _ context.Context, req *pb.BackupRequest, out io.Writer) (*pb.BackupResult, error) {
+		return fn(req, out)
+	}
 	leftBehindTries, leftBehindWait = 2, time.Millisecond
 	t.Cleanup(func() { runLeftBehindBackup, leftBehindTries, leftBehindWait = old, tries, wait })
 }
@@ -248,7 +251,7 @@ func TestKeepLeftBehind_archivesTheVolumeThenTakesTheStackDownWithIt(t *testing.
 	const slug = "deplo-agent-test-keep"
 	s, argv := keepService(t, slug)
 	var got *pb.BackupRequest
-	stubLeftBehind(t, func(req *pb.BackupRequest) (*pb.BackupResult, error) {
+	stubLeftBehind(t, func(req *pb.BackupRequest, _ io.Writer) (*pb.BackupResult, error) {
 		if all := strings.Join(argv(), "\n"); strings.Contains(all, "down") {
 			t.Fatalf("the stack went before its backup: %q", all)
 		}
@@ -288,11 +291,33 @@ func TestKeepLeftBehind_archivesTheVolumeThenTakesTheStackDownWithIt(t *testing.
 	}
 }
 
+func TestKeepLeftBehind_namesTheArchiveAfterTheFailoverSoARepeatWritesOverIt(t *testing.T) {
+	const slug = "deplo-agent-test-keep"
+	s, _ := keepService(t, slug)
+	var keys []string
+	stubLeftBehind(t, func(req *pb.BackupRequest, _ io.Writer) (*pb.BackupResult, error) {
+		keys = append(keys, req.GetS3().GetObjectKey())
+		return &pb.BackupResult{Ok: true, SizeBytes: 1}, nil
+	})
+	k := serviceKeep(slug)
+	k.FailedOverAt = "2026-03-01T14:32:05+01:00"
+	e := lease.Entry{Kind: "database", ID: "db_1", Member: "srv_b", Slug: slug, SingleWriter: true}
+	for range 2 {
+		saved, err := s.keepLeftBehind(context.Background(), e, k, "srv_a", func() bool { return true })
+		if err != nil || saved.ObjectKey != "deplo/team_a/database/db_1/left-20260301T133205Z-srv_a.tar.gz.age" {
+			t.Fatalf("saved %+v (%v)", saved, err)
+		}
+	}
+	if len(keys) != 2 || keys[0] != keys[1] {
+		t.Fatalf("an agent that stopped mid-archive writes a second file: %v", keys)
+	}
+}
+
 func TestKeepLeftBehind_aFailedBackupTouchesNothing(t *testing.T) {
 	const slug = "deplo-agent-test-keep"
 	s, argv := keepService(t, slug)
 	tries := 0
-	stubLeftBehind(t, func(*pb.BackupRequest) (*pb.BackupResult, error) {
+	stubLeftBehind(t, func(*pb.BackupRequest, io.Writer) (*pb.BackupResult, error) {
 		tries++
 		return nil, errors.New("the bucket did not answer")
 	})
@@ -314,7 +339,7 @@ func TestKeepLeftBehind_aFailedBackupTouchesNothing(t *testing.T) {
 func TestKeepLeftBehind_refusesAKeepThatIsNotThisStacksVolumes(t *testing.T) {
 	const slug = "deplo-agent-test-keep"
 	s, argv := keepService(t, slug)
-	stubLeftBehind(t, func(*pb.BackupRequest) (*pb.BackupResult, error) {
+	stubLeftBehind(t, func(*pb.BackupRequest, io.Writer) (*pb.BackupResult, error) {
 		t.Fatal("a backup ran")
 		return nil, nil
 	})

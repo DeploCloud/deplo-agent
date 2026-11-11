@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"slices"
@@ -12,6 +13,7 @@ import (
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/clusterlink/lease"
+	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
 // What a member that comes back still holds of a database or a Volume App that moved is archived to the
@@ -23,24 +25,27 @@ const keepGrace = 30 * time.Second
 // leftBehindTimeout bounds one archive and removal: a volume can take far longer than the rest of a return.
 const leftBehindTimeout = 2 * time.Hour
 
-// ponytail: three tries, then the volume stays for good; a later sweep could try a kept one again.
+// Three tries in a row; what still fails stays on this member and is tried again later (retryKept).
 var (
 	leftBehindTries = 3
 	leftBehindWait  = 10 * time.Second
 )
 
-// noteKeeps takes what an order says about a return under way; the caller holds g.mu.
+// noteKeeps takes what an order says about a return under way, and about what stayed here past one; the
+// caller holds g.mu.
 func (g *leaseGuard) noteKeeps(o lease.Order, next *clusterLease) {
-	if !next.Returning {
+	if next.Returning {
+		if next.since.IsZero() {
+			next.since = g.now()
+		}
+		next.asked = next.asked || o.Return
+	} else {
 		next.since, next.asked = time.Time{}, false
-		delete(g.keeps, o.Cluster)
-		return
 	}
-	if next.since.IsZero() {
-		next.since = g.now()
-	}
-	next.asked = next.asked || o.Return
 	if len(o.Keep) == 0 {
+		if !next.Returning && o.Start == nil {
+			delete(g.keeps, o.Cluster)
+		}
 		return
 	}
 	by := map[string]lease.Keep{}
@@ -90,7 +95,7 @@ func (g *leaseGuard) keepMoved(cluster, me string, e lease.Entry, k lease.Keep, 
 		return nil, nil, false, false
 	case len(k.Request) == 0:
 		return nil, &lease.Kept{Slug: e.Slug, Ref: k.Ref, Reason: lease.KeptNoDestination}, false, false
-	case k.StoreMember != "" && k.StoreMember != me:
+	case storeOutOfReach(k, me):
 		return nil, &lease.Kept{Slug: e.Slug, Ref: k.Ref, Reason: lease.KeptStoreElsewhere}, false, false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), leftBehindTimeout)
@@ -98,6 +103,13 @@ func (g *leaseGuard) keepMoved(cluster, me string, e lease.Entry, k lease.Keep, 
 	still := func() bool { return g.movedAway(cluster, e.Slug) }
 	if saved = already; saved == nil {
 		sv, err := g.keep(ctx, e, k, me, still)
+		switch {
+		case errors.Is(err, errRunsAgain):
+			// Placed here again meanwhile: the next pass reads the placement anew and leaves it alone.
+			return nil, nil, false, true
+		case errors.Is(err, errNothingHeld):
+			return nil, nil, false, false
+		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "deplo-agent: cluster %s: could not save what %s still held here, so its volume stays: %v\n", cluster, e.Slug, err)
 			return nil, &lease.Kept{Slug: e.Slug, Ref: k.Ref, Reason: lease.KeptBackupFailed, Error: err.Error()}, false, false
@@ -144,17 +156,27 @@ func noteReturned(r *lease.Returned, saved []lease.Saved, kept []lease.Kept) {
 // memberName is a member's id as it goes into an archive's name.
 var memberName = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
-// runLeftBehindBackup writes one archive the way the Backup RPC does; a var so a test can answer without Docker.
-var runLeftBehindBackup func(s *Service, ctx context.Context, req *pb.BackupRequest) (*pb.BackupResult, error)
+// storeOutOfReach is a destination on the disk of a server this member was given no certificate for.
+func storeOutOfReach(k lease.Keep, me string) bool {
+	return k.StoreMember != "" && k.StoreMember != me && k.StoreFingerprint == ""
+}
+
+// runLeftBehindBackup writes one archive the way the Backup RPC does, a streamed one into out; a var so a
+// test can answer without Docker.
+var runLeftBehindBackup func(s *Service, ctx context.Context, req *pb.BackupRequest, out io.Writer) (*pb.BackupResult, error)
 
 // Set here, not in the declaration, like the failover restore: the backup path reaches the lease guard.
 func init() { runLeftBehindBackup = backupLikeTheRPC }
 
-func backupLikeTheRPC(s *Service, ctx context.Context, req *pb.BackupRequest) (*pb.BackupResult, error) {
+func backupLikeTheRPC(s *Service, ctx context.Context, req *pb.BackupRequest, out io.Writer) (*pb.BackupResult, error) {
 	var res *pb.BackupResult
 	e := &bkEmitter{send: func(ev *pb.BackupEvent) error {
 		if r := ev.GetResult(); r != nil {
 			res = r
+		}
+		if d := ev.GetData(); len(d) > 0 && out != nil {
+			_, err := out.Write(d)
+			return err
 		}
 		return nil
 	}}
@@ -196,8 +218,23 @@ func readKeep(e lease.Entry, k lease.Keep) (*pb.BackupRequest, error) {
 // errRunsAgain is a stack that was placed here again, or is being started here, while its old data waited.
 var errRunsAgain = errors.New("this server runs it again")
 
-// keepLeftBehind archives the volumes of a stack that runs elsewhere now: the stem the control plane gave,
-// then the time and this member. Nothing is removed.
+// errNothingHeld is a keep whose volumes are not on this server any more.
+var errNothingHeld = errors.New("this server holds none of its volumes")
+
+// holdsVolume says whether one of the volumes is on this host. Only docker's own "no such volume" counts as
+// absent: reading a name it does not know would make an empty volume, and an archive of nothing.
+var holdsVolume = func(ctx context.Context, names []string) bool {
+	for _, name := range names {
+		res, err := dockercli.Run(ctx, 20*time.Second, "volume", "inspect", "--format", "{{.Name}}", name)
+		if err != nil || res.Code == 0 || !strings.Contains(strings.ToLower(res.Stderr), "no such volume") {
+			return true
+		}
+	}
+	return false
+}
+
+// keepLeftBehind archives the volumes of a stack that runs elsewhere now, under the stem the control plane
+// gave, then the failover's time and this member: a repeat writes over the first. Nothing is removed.
 func (s *Service) keepLeftBehind(ctx context.Context, e lease.Entry, k lease.Keep, member string, still func() bool) (*lease.Saved, error) {
 	req, err := readKeep(e, k)
 	if err != nil {
@@ -206,20 +243,28 @@ func (s *Service) keepLeftBehind(ctx context.Context, e lease.Entry, k lease.Kee
 	if !memberName.MatchString(member) {
 		return nil, errors.New("the keep names no usable member")
 	}
-	name := "-" + time.Now().UTC().Format("20060102T150405Z") + "-" + member + ".tar.gz"
-	if req.GetAgeRecipient() != "" {
-		name += ".age"
+	at, perr := time.Parse(time.RFC3339, k.FailedOverAt)
+	if perr != nil {
+		// A leader that does not say when: the old name, by the clock.
+		at = time.Now()
 	}
+	name := lease.LeftName(at, member, req.GetAgeRecipient() != "")
+	// Elsewhere is the disk of another member of this cluster: the archive goes to it over the relay.
+	elsewhere := k.StoreMember != "" && k.StoreMember != member
 	switch {
 	case req.GetS3() != nil && req.GetS3().GetObjectKey() != "":
 		req.S3.ObjectKey += name
-	case req.GetStore() != nil && req.GetStore().GetObjectKey() != "":
+		elsewhere = false
+	case req.GetStore() != nil && req.GetStore().GetObjectKey() != "" && !storeOutOfReach(k, member):
 		req.Store.ObjectKey += name
 	default:
-		return nil, errors.New("the keep names no destination")
+		return nil, errors.New("the keep names no destination this server can write to")
 	}
 	if !still() {
 		return nil, errRunsAgain
+	}
+	if !holdsVolume(ctx, req.GetProject().GetVolumeNames()) {
+		return nil, errNothingHeld
 	}
 	if _, err := s.StopStack(ctx, &pb.StackRef{Slug: e.Slug}); err != nil {
 		return nil, err
@@ -230,7 +275,12 @@ func (s *Service) keepLeftBehind(ctx context.Context, e lease.Entry, k lease.Kee
 		return nil, errRunsAgain
 	}
 	for try := 1; ; try++ {
-		res, err := runLeftBehindBackup(s, ctx, req)
+		var res *pb.BackupResult
+		if elsewhere {
+			res, err = s.sendLeftBehind(ctx, req, k.StoreFingerprint)
+		} else {
+			res, err = runLeftBehindBackup(s, ctx, req, nil)
+		}
 		if err == nil {
 			return &lease.Saved{Slug: e.Slug, Ref: k.Ref, ObjectKey: req.GetS3().GetObjectKey() + req.GetStore().GetObjectKey(), SizeBytes: res.GetSizeBytes(),
 				DecryptedSizeBytes: res.GetDecryptedSizeBytes(), Sha256: res.GetSha256(), At: time.Now().UTC().Format(time.RFC3339)}, nil

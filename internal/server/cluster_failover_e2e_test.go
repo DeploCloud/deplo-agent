@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -122,6 +123,11 @@ func TestE2E_aMembersDeathMovesItsDatabaseAndAppWithNoControlPlaneInTheLoop(t *t
 	}
 	bin := clusterBinary(t)
 	stubBridge(t, "")
+	// docker as a script: the returning member's archive reads this instead of a volume.
+	volume := t.TempDir()
+	mustWrite(t, filepath.Join(volume, "PG_VERSION"), "17\n")
+	dockerOnPath(t, `case "$*" in *"tar -C /v"*) exec tar -C `+volume+` -cf - . ;; esac`)
+	recipient, identity := testKeypair(t)
 	ca := testpki.New(t)
 	root, err := os.MkdirTemp("", "fo")
 	if err != nil {
@@ -188,7 +194,7 @@ func TestE2E_aMembersDeathMovesItsDatabaseAndAppWithNoControlPlaneInTheLoop(t *t
 	member := func(name string) (*Service, *wire.Identity) {
 		d := dir(name)
 		id := ca.Provision(t, d, name)
-		s := New(t.TempDir(), t.TempDir(), "/", "")
+		s := New(t.TempDir(), t.TempDir(), "/", dir(name+"-data"))
 		s.SetAgentDir(d)
 		// A lease that runs out in this test stops nothing for real.
 		s.leaseGuard().fence = func(context.Context, []lease.Entry) error { return nil }
@@ -262,10 +268,10 @@ func TestE2E_aMembersDeathMovesItsDatabaseAndAppWithNoControlPlaneInTheLoop(t *t
 			"s3":          map[string]any{"bucket": "backups", "accessKey": "AKIA", "secretKey": "s3cr3t", "objectKey": "t1/db_1/brun_1.dump.gz.age"},
 			"database":    map[string]any{"container": dbSlug, "dbType": "postgres", "dbName": "main", "user": "app", "password": "pgpass", "projectId": "db_1"},
 			"ageIdentity": "AGE-SECRET-KEY-1TEST", "expectedSha256": "abc123"}},
-		// Where the member that comes back saves what it still held: the same bucket, as the volume.
-		"keep": map[string]any{"ref": "dst_1", "request": map[string]any{
-			"kind":    "BACKUP_KIND_PROJECT",
-			"s3":      map[string]any{"bucket": "backups", "accessKey": "AKIA", "secretKey": "s3cr3t", "objectKey": "t1/database/db_1/left"},
+		// Where the member that comes back saves what it still held: the team's backups are on srv_b's disk.
+		"keep": map[string]any{"ref": "dst_1", "storeMember": "srv_b", "storeStem": "t1/database/db_1/left", "request": map[string]any{
+			"kind": "BACKUP_KIND_PROJECT", "ageRecipient": recipient,
+			"store":   map[string]any{"objectKey": "t1/database/db_1/left"},
 			"project": map[string]any{"slug": dbSlug, "volumeNames": []string{"deplo-" + dbSlug + "_" + dbSlug + "-data"}}}}}
 	deplo.call(t, "leader.bundle.put", map[string]any{"cluster": "clu_1", "kind": "database", "id": "db_1", "deploymentId": "rev_1",
 		"sealed": seal(dbBundle), "meta": map[string]any{"name": "main", "createdAt": "2026-06-01T00:00:00Z"}}, nil)
@@ -360,14 +366,15 @@ func TestE2E_aMembersDeathMovesItsDatabaseAndAppWithNoControlPlaneInTheLoop(t *t
 		return nil
 	}
 	g.stop = func(context.Context, string) error { return nil }
-	g.keep = func(_ context.Context, e lease.Entry, k lease.Keep, member string, still func() bool) (*lease.Saved, error) {
+	// The archive itself is the real one: a reads its volume and sends it to b through the relay.
+	g.keep = func(ctx context.Context, e lease.Entry, k lease.Keep, member string, still func() bool) (*lease.Saved, error) {
 		mu.Lock()
-		defer mu.Unlock()
+		keeps = append(keeps, k)
+		mu.Unlock()
 		if !still() {
 			t.Errorf("%s is not placed elsewhere any more", e.Slug)
 		}
-		keeps = append(keeps, k)
-		return &lease.Saved{Slug: e.Slug, Ref: k.Ref, ObjectKey: "t1/database/db_1/left-20260301T130000Z-" + member + ".tar.gz", SizeBytes: 2048, Sha256: "feed", At: "2026-03-01T13:00:00Z"}, nil
+		return a.keepLeftBehind(ctx, e, k, member, still)
 	}
 	g.purge = func(_ context.Context, e lease.Entry, _ lease.Keep, _ func() bool) error {
 		mu.Lock()
@@ -391,13 +398,26 @@ func TestE2E_aMembersDeathMovesItsDatabaseAndAppWithNoControlPlaneInTheLoop(t *t
 	if n := strings.Count(watchTypes(t, deplo, 5), "member_returned"); n != 1 {
 		t.Fatalf("%d return events for one return", n)
 	}
-	// The keep crossed the leader and the relay as Deplo sealed it, credentials included, once.
-	if len(keeps) != 1 || keeps[0].Slug != dbSlug || keeps[0].Ref != "dst_1" || !strings.Contains(string(keeps[0].Request), `"secretKey":"s3cr3t"`) ||
+	// The keep crossed the leader and the relay as Deplo sealed it, once, with the way to the member that holds the store.
+	if len(keeps) != 1 || keeps[0].Slug != dbSlug || keeps[0].Ref != "dst_1" || keeps[0].StoreMember != "srv_b" || keeps[0].StoreFingerprint != bID.Fingerprint ||
 		!strings.Contains(string(keeps[0].Request), `"objectKey":"t1/database/db_1/left"`) {
 		t.Fatalf("the returning member was handed %+v", keeps)
 	}
+	moved, err := time.Parse(time.RFC3339, keeps[0].FailedOverAt)
+	if err != nil || moved.Before(died) || moved.After(died.Add(3*time.Minute)) {
+		t.Fatalf("the keep says the database failed over at %q", keeps[0].FailedOverAt)
+	}
+	// With Deplo away, what a still held is on b's disk, named after the failover and readable only with the team's key.
+	leftKey := "t1/database/db_1/left-" + moved.UTC().Format("20060102T150405Z") + "-srv_a.tar.gz.age"
+	raw, err := os.ReadFile(filepath.Join(b.managedStoreRoot(), leftKey))
+	if err != nil || bytes.Contains(raw, []byte("PG_VERSION")) {
+		t.Fatalf("b's disk: %v (%d bytes)", err, len(raw))
+	}
+	if _, err := openArtifactReader(bytes.NewReader(raw), identity); err != nil {
+		t.Fatalf("the archive on b does not open with the team's key: %v", err)
+	}
 	back := watchEvent(t, deplo, "member_returned")
-	for _, want := range []string{`"saved":[{"kind":"database","workloadId":"db_1","ref":"dst_1","objectKey":"t1/database/db_1/left-20260301T130000Z-srv_a.tar.gz"`, `"sizeBytes":2048`, `"sha256":"feed"`, `"failedOverAt":"20`} {
+	for _, want := range []string{`"saved":[{"kind":"database","workloadId":"db_1","ref":"dst_1","objectKey":"` + leftKey + `"`, fmt.Sprintf(`"sizeBytes":%d`, len(raw)), `"failedOverAt":"` + keeps[0].FailedOverAt + `"`} {
 		if !strings.Contains(back, want) {
 			t.Fatalf("the return event lacks %s: %s", want, back)
 		}

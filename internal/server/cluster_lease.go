@@ -38,6 +38,10 @@ type clusterLease struct {
 	Returning bool `json:"returning,omitempty"`
 	// Returned is what that return removed, kept until the leader has it.
 	Returned *lease.Returned `json:"returned,omitempty"`
+	// Keeping is the stacks whose data stayed here past a return: tried again until saved or live here again.
+	Keeping []lease.Kept `json:"keeping,omitempty"`
+	// Late is what such a try wrote, kept until the leader no longer names its stack.
+	Late []lease.Saved `json:"late,omitempty"`
 	// cold is a lease that was dead when this agent started: nothing of it runs until the leader speaks.
 	cold bool
 	// since is when the return under way began, and asked whether the leader has said it moved this member's work.
@@ -70,6 +74,11 @@ type leaseGuard struct {
 	// keeps is where each cluster's moved stacks are saved, as the leader last said. Never written to disk:
 	// a keep carries the destination's credentials.
 	keeps map[string]map[string]lease.Keep
+	// retryAt is when what a cluster's return left here is tried again, retryWait the wait that led to it.
+	retryAt   map[string]time.Time
+	retryWait map[string]time.Duration
+	// stores is the archives each cluster's leader last told this member to accept from other members.
+	stores map[string][]lease.Store
 	// has says whether a stack is on this host, running whether it runs now; nil reads as yes.
 	has      func(slug string) bool
 	running  func(ctx context.Context, slug string) bool
@@ -82,7 +91,7 @@ type leaseGuard struct {
 }
 
 func newLeaseGuard(file string, now func() time.Time, fence func(context.Context, []lease.Entry) error) *leaseGuard {
-	g := &leaseGuard{file: file, now: now, fence: fence, clusters: map[string]*clusterLease{}, settling: map[string]bool{}, starting: map[string]time.Time{}, keeps: map[string]map[string]lease.Keep{}}
+	g := &leaseGuard{file: file, now: now, fence: fence, clusters: map[string]*clusterLease{}, settling: map[string]bool{}, starting: map[string]time.Time{}, keeps: map[string]map[string]lease.Keep{}, stores: map[string][]lease.Store{}, retryAt: map[string]time.Time{}, retryWait: map[string]time.Duration{}}
 	if raw, err := os.ReadFile(file); err == nil {
 		_ = json.Unmarshal(raw, &g.clusters)
 	}
@@ -129,6 +138,10 @@ func (g *leaseGuard) Renew(o lease.Order) lease.Reply {
 	r := lease.Reply{OK: true, Epoch: o.Epoch}
 	g.comeBack(o, g.clusters[o.Cluster], next, &r)
 	g.clusters[o.Cluster] = next
+	// A start order carries neither keeps nor stores: it says nothing about them.
+	if o.Start == nil {
+		g.stores[o.Cluster] = o.Stores
+	}
 	g.save()
 	return r
 }
@@ -193,6 +206,7 @@ func (g *leaseGuard) Forget() {
 	defer g.mu.Unlock()
 	g.clusters = map[string]*clusterLease{}
 	g.keeps = map[string]map[string]lease.Keep{}
+	g.stores = map[string][]lease.Store{}
 	if g.file != "" {
 		_ = os.Remove(g.file)
 	}

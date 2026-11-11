@@ -151,6 +151,8 @@ func (s *Service) acceptMemberStream(from wire.Party, c net.Conn) {
 		s.receiveImage(c, arg)
 	case fwdVerb:
 		s.serveForward(from, c, arg)
+	case leftVerb:
+		s.receiveLeft(from, c, arg)
 	}
 }
 
