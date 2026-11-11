@@ -142,10 +142,12 @@ func (f *forwarders) save() {
 	if f.s.agentDir == "" {
 		return
 	}
-	raw, _ := json.Marshal(f.st)
-	tmp := f.file() + ".tmp"
-	if os.WriteFile(tmp, raw, 0o600) == nil {
-		_ = os.Rename(tmp, f.file())
+	raw, err := json.Marshal(f.st)
+	if err == nil {
+		err = writeFileAtomic(f.file(), raw, 0o600)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "deplo-agent: could not keep the name forwarders in %s: %v\n", f.file(), err)
 	}
 }
 

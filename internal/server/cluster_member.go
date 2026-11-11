@@ -158,8 +158,7 @@ func (s *Service) keepRelaysFile(ctx context.Context, dir string, st clusterStat
 		m.mu.Unlock()
 		body := strings.Join(s.relayURLs(st.Relay, extra), "\n") + "\n"
 		if body != last {
-			tmp := relaysFile(dir) + ".tmp"
-			if os.WriteFile(tmp, []byte(body), 0o600) == nil && os.Rename(tmp, relaysFile(dir)) == nil {
+			if writeFileAtomic(relaysFile(dir), []byte(body), 0o600) == nil {
 				last = body
 			}
 		}
@@ -261,11 +260,7 @@ func (s *Service) SetClusterMember(_ context.Context, req *pb.SetClusterMemberRe
 		}
 	}
 	raw, _ := json.Marshal(st)
-	tmp := s.memberFile() + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return nil, status.Errorf(codes.Internal, "remember the cluster membership: %v", err)
-	}
-	if err := os.Rename(tmp, s.memberFile()); err != nil {
+	if err := writeFileAtomic(s.memberFile(), raw, 0o600); err != nil {
 		return nil, status.Errorf(codes.Internal, "remember the cluster membership: %v", err)
 	}
 	m := s.clusterMember()
