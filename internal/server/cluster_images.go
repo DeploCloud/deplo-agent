@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -37,9 +38,11 @@ type clusterImageOps struct {
 	load   func(ctx context.Context, ref string, feed func(w io.Writer) error) (int64, string, error)
 	tags   func(ctx context.Context, repo string) ([]string, error)
 	remove func(ctx context.Context, ref string) error
+	// arch is the architecture an image was built for, as docker names it; empty when it does not say.
+	arch func(ctx context.Context, ref string) (string, error)
 }
 
-var dockerImageOps = clusterImageOps{imageHeld, saveImage, loadImageArchive, imageTagsOf, removeImage}
+var dockerImageOps = clusterImageOps{imageHeld, saveImage, loadImageArchive, imageTagsOf, removeImage, imageArch}
 
 func (s *Service) images() clusterImageOps {
 	if s.imageOps.has != nil {
@@ -54,6 +57,17 @@ func imageHeld(ctx context.Context, ref string) (bool, error) {
 		return false, err
 	}
 	return res.Code == 0, nil
+}
+
+func imageArch(ctx context.Context, ref string) (string, error) {
+	res, err := dockercli.Run(ctx, imageRemoveTimeout, "image", "inspect", "--format", "{{.Architecture}}", ref)
+	if err != nil {
+		return "", err
+	}
+	if res.Code != 0 {
+		return "", fmt.Errorf("docker image inspect exited %d", res.Code)
+	}
+	return strings.TrimSpace(res.Stdout), nil
 }
 
 func saveImage(ctx context.Context, ref string, w io.Writer) error {
@@ -163,6 +177,12 @@ func (s *Service) receiveImage(c net.Conn, arg string) {
 	})
 	if err != nil {
 		_ = wire.WriteHeader(c, wire.VerbErr, oneLine(err.Error()))
+		return
+	}
+	// The control plane only sends a member images of its own architecture; one that slipped through never stays.
+	if arch, _ := s.images().arch(ctx, refArg); arch != "" && arch != runtime.GOARCH {
+		_ = s.images().remove(ctx, refArg)
+		_ = wire.WriteHeader(c, wire.VerbErr, fmt.Sprintf("it was built for %s and this server is %s", arch, runtime.GOARCH))
 		return
 	}
 	for _, p := range s.pruneReleases(ctx, refArg, keep) {
