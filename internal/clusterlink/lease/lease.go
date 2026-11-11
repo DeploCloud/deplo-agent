@@ -12,6 +12,10 @@ import (
 // FenceAfter is how long a member lives without a renewal before it stops its single-writer workloads.
 const FenceAfter = 60 * time.Second
 
+// ExtendFor is the longest a leader may extend a lease. A leader that takes over waits exactly this out before
+// it moves a silent member's single-writer workloads, so raise it in deplo-cluster first, never here alone.
+const ExtendFor = 5 * time.Minute
+
 // MaxLine bounds one order or reply.
 const MaxLine = 16 << 20
 

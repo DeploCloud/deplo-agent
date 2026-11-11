@@ -124,7 +124,7 @@ func (g *leaseGuard) Renew(o lease.Order) lease.Reply {
 	if c := g.clusters[o.Cluster]; c != nil && o.Epoch < c.Epoch {
 		return lease.Reply{Error: lease.StaleEpoch, Epoch: c.Epoch}
 	}
-	next := &clusterLease{Epoch: o.Epoch, Member: o.Member, RenewedAt: g.now(), Placement: o.Placement, ExtraSeconds: min(max(o.ExtendSeconds, 0), 3600)}
+	next := &clusterLease{Epoch: o.Epoch, Member: o.Member, RenewedAt: g.now(), Placement: o.Placement, ExtraSeconds: min(max(o.ExtendSeconds, 0), int(lease.ExtendFor/time.Second))}
 	g.confirmStarts(o)
 	r := lease.Reply{OK: true, Epoch: o.Epoch}
 	g.comeBack(o, g.clusters[o.Cluster], next, &r)

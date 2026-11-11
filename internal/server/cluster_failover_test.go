@@ -119,6 +119,24 @@ func TestFailover_anExtendedLeaseSurvivesPastSixtySeconds(t *testing.T) {
 	}
 }
 
+// A leader that takes over waits 5 minutes for a lease it cannot read: no order buys a member more than that.
+func TestFailover_noLeaderExtendsALeasePastFiveMinutes(t *testing.T) {
+	f := newGuard(t)
+	o := orderFor(3)
+	o.ExtendSeconds = 3600
+	f.g.Renew(o)
+	f.clk.Add(lease.FenceAfter + lease.ExtendFor - time.Second)
+	f.g.Check(context.Background())
+	if len(f.fenced) != 0 {
+		t.Fatalf("fenced before the extension was over: %v", f.fenced)
+	}
+	f.clk.Add(time.Second)
+	f.g.Check(context.Background())
+	if len(f.fenced) == 0 {
+		t.Fatal("a lease lived past the longest extension a leader may grant")
+	}
+}
+
 func TestFailover_helloNamesTheCapability(t *testing.T) {
 	found := false
 	for _, c := range Capabilities {
