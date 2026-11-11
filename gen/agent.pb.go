@@ -1922,6 +1922,8 @@ type DeployRequest struct {
 	// removes it. A stand-in that never gets ready is removed and the live container is never
 	// touched, unless the live container mounts storage (which may refuse a second copy): then
 	// the agent swaps in place instead. Empty => the in-place swap. Advertised as `deploy.overlap`.
+	// A compose stack (`deploy.overlap.stack`) is copied whole, each service `<name>_next`: the
+	// deploy's `ready` check judges the copy, and one that never gets ready always fails the deploy.
 	StandInComposeYaml string `protobuf:"bytes,28,opt,name=stand_in_compose_yaml,json=standInComposeYaml,proto3" json:"stand_in_compose_yaml,omitempty"`
 	// When the app stops answering, restart it. The agent keeps the rule on disk and probes on its
 	// own, so it works while the control plane is down. Unset => none, and a stored rule is removed.

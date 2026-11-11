@@ -118,6 +118,7 @@ var Capabilities = []string{
 	"deploy.pull-base",
 	"deploy.reuse-image",
 	"deploy.overlap",
+	"deploy.overlap.stack",
 	"deploy.replicas",
 	"deploy.spread",
 	"reroute.pull",
