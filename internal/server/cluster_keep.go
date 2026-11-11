@@ -303,9 +303,7 @@ func (s *Service) purgeLeft(ctx context.Context, e lease.Entry, k lease.Keep, st
 		return errRunsAgain
 	}
 	res, err := s.destroyStack(ctx, &pb.StackRef{Slug: e.Slug, RemoveVolumes: true, ReclaimVolumes: req.GetProject().GetVolumeNames()})
-	if err == nil && !res.GetOk() {
-		err = errors.New(res.GetError())
-	}
+	err = stackErr(res, err)
 	if err == nil && res.GetError() != "" {
 		// ponytail: a volume something else still mounts stays; nothing looks at it again.
 		fmt.Fprintf(os.Stderr, "deplo-agent: %s is saved and stopped, but %s\n", e.Slug, res.GetError())
@@ -315,9 +313,5 @@ func (s *Service) purgeLeft(ctx context.Context, e lease.Entry, k lease.Keep, st
 
 // stopMoved stops a stack that waits for the leader's word on its data.
 func (s *Service) stopMoved(ctx context.Context, slug string) error {
-	res, err := s.StopStack(ctx, &pb.StackRef{Slug: slug})
-	if err == nil && !res.GetOk() {
-		err = errors.New(res.GetError())
-	}
-	return err
+	return stackErr(s.StopStack(ctx, &pb.StackRef{Slug: slug}))
 }
