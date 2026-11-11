@@ -40,6 +40,9 @@ type clusterLease struct {
 	Returned *lease.Returned `json:"returned,omitempty"`
 	// cold is a lease that was dead when this agent started: nothing of it runs until the leader speaks.
 	cold bool
+	// since is when the return under way began, and asked whether the leader has said it moved this member's work.
+	since time.Time
+	asked bool
 }
 
 func (c *clusterLease) ranOut(now time.Time) bool {
@@ -58,6 +61,13 @@ type leaseGuard struct {
 	resume func(ctx context.Context, slug string) error
 	// trim stops the copies of a stack beyond n, and says whether there were any.
 	trim func(ctx context.Context, slug string, n int) (bool, error)
+	// keep archives what a moved stack still holds here, then removes it with its volumes; already is the
+	// archive an earlier pass wrote, when only the removal is left. stop stops a stack and removes nothing.
+	keep func(ctx context.Context, e lease.Entry, k lease.Keep, member string, still func() bool, already *lease.Saved) (*lease.Saved, error)
+	stop func(ctx context.Context, slug string) error
+	// keeps is where each cluster's moved stacks are saved, as the leader last said. Never written to disk:
+	// a keep carries the destination's credentials.
+	keeps map[string]map[string]lease.Keep
 	// has says whether a stack is on this host, running whether it runs now; nil reads as yes.
 	has      func(slug string) bool
 	running  func(ctx context.Context, slug string) bool
@@ -70,7 +80,7 @@ type leaseGuard struct {
 }
 
 func newLeaseGuard(file string, now func() time.Time, fence func(context.Context, []lease.Entry) error) *leaseGuard {
-	g := &leaseGuard{file: file, now: now, fence: fence, clusters: map[string]*clusterLease{}, settling: map[string]bool{}, starting: map[string]time.Time{}}
+	g := &leaseGuard{file: file, now: now, fence: fence, clusters: map[string]*clusterLease{}, settling: map[string]bool{}, starting: map[string]time.Time{}, keeps: map[string]map[string]lease.Keep{}}
 	if raw, err := os.ReadFile(file); err == nil {
 		_ = json.Unmarshal(raw, &g.clusters)
 	}
@@ -180,6 +190,7 @@ func (g *leaseGuard) Forget() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.clusters = map[string]*clusterLease{}
+	g.keeps = map[string]map[string]lease.Keep{}
 	if g.file != "" {
 		_ = os.Remove(g.file)
 	}
@@ -261,6 +272,7 @@ func (s *Service) leaseGuard() *leaseGuard {
 		s.lease = newLeaseGuard(s.leaseFile(), time.Now, s.fenceStacks)
 		s.lease.start = s.startFromBundle
 		s.lease.remove, s.lease.resume, s.lease.trim = s.removeMoved, s.resumeHeld, s.trimReplicas
+		s.lease.keep, s.lease.stop = s.keepLeftBehind, s.stopMoved
 		s.lease.has = func(slug string) bool { return isFile(s.stackPath(slug)) }
 		s.lease.running = stackRuns
 	})

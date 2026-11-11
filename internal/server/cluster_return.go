@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"slices"
 	"strconv"
@@ -47,6 +48,7 @@ func (g *leaseGuard) runningNow(ctx context.Context, entries []lease.Entry) []st
 func (g *leaseGuard) comeBack(o lease.Order, prev, next *clusterLease, r *lease.Reply) {
 	if prev != nil {
 		next.Held, next.Returning, next.Returned = prev.Held, prev.Returning, prev.Returned
+		next.since, next.asked = prev.since, prev.asked
 		if prev.ranOut(g.now()) && !next.Returning {
 			next.Returning, next.Returned = true, nil
 		}
@@ -60,6 +62,7 @@ func (g *leaseGuard) comeBack(o lease.Order, prev, next *clusterLease, r *lease.
 	case !next.Returning:
 		next.Returned = nil
 	}
+	g.noteKeeps(o, next)
 	if (next.Returning || len(next.Held) > 0) && g.remove != nil && !g.settling[o.Cluster] {
 		g.settling[o.Cluster] = true
 		g.work.Add(1)
@@ -82,6 +85,7 @@ func (g *leaseGuard) settle(cluster string) {
 	}
 	me, returning, held := c.Member, c.Returning, slices.Clone(c.Held)
 	placement := slices.Clone(c.Placement)
+	keeps, before, waits := maps.Clone(g.keeps[cluster]), c.savedBefore(), !c.asked && g.now().Sub(c.since) < keepGrace
 	g.mu.Unlock()
 
 	mine, moved, named := map[string]bool{}, map[string]lease.Entry{}, map[string]bool{}
@@ -98,6 +102,8 @@ func (g *leaseGuard) settle(cluster string) {
 	}
 	failed := false
 	var removed, trimmed, done []string
+	var saved []lease.Saved
+	var kept []lease.Kept
 	if returning && g.trim != nil {
 		here, all := map[string]int{}, map[string]int{}
 		for _, e := range placement {
@@ -128,6 +134,32 @@ func (g *leaseGuard) settle(cluster string) {
 			if g.isStarting(slug) {
 				failed = true
 				continue
+			}
+			if e.SingleWriter && g.keep != nil {
+				k, told := keeps[slug]
+				if !told && waits {
+					// The leader has not said yet where this data goes: the copy stops and waits for its next order.
+					if err := g.stop(ctx, slug); err != nil {
+						fmt.Fprintf(os.Stderr, "deplo-agent: cluster %s: could not stop %s, which runs on another server now: %v\n", cluster, slug, err)
+					}
+					failed = true
+					continue
+				}
+				sv, why, gone, retry := g.keepMoved(cluster, me, e, k, before[slug])
+				if sv != nil {
+					saved = append(saved, *sv)
+				}
+				if why != nil {
+					kept = append(kept, *why)
+				}
+				if retry {
+					failed = true
+					continue
+				}
+				if gone {
+					removed = append(removed, slug)
+					continue
+				}
 			}
 			if err := g.remove(ctx, e); err != nil {
 				fmt.Fprintf(os.Stderr, "deplo-agent: cluster %s: could not remove %s, which runs on another server now: %v\n", cluster, slug, err)
@@ -167,7 +199,12 @@ func (g *leaseGuard) settle(cluster string) {
 			c.Returned = &lease.Returned{Removed: []string{}}
 		}
 		c.Returned.Removed = union(c.Returned.Removed, removed)
-		c.Returning = failed
+		slices.Sort(c.Returned.Removed)
+		noteReturned(c.Returned, saved, kept)
+		if c.Returning = failed; !failed {
+			delete(g.keeps, cluster)
+			c.since, c.asked = time.Time{}, false
+		}
 	}
 	g.save()
 }
@@ -237,7 +274,6 @@ func stackRuns(ctx context.Context, slug string) bool {
 
 // removeMoved stops and removes this member's copy of a stack that now runs elsewhere, its connector with it.
 func (s *Service) removeMoved(ctx context.Context, e lease.Entry) error {
-	// ponytail: the volume stays behind. Ticket #206 backs it up and removes it here, before the stack goes.
 	res, err := s.DestroyStack(ctx, &pb.StackRef{Slug: e.Slug})
 	if err == nil && !res.GetOk() {
 		err = errors.New(res.GetError())

@@ -500,6 +500,12 @@ func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.Stack
 		return nil, err
 	}
 	defer s.lockStack(slug)()
+	return s.destroyStack(ctx, ref)
+}
+
+// destroyStack is DestroyStack for a caller that already holds the stack's lock.
+func (s *Service) destroyStack(ctx context.Context, ref *pb.StackRef) (*pb.StackResult, error) {
+	slug := ref.GetSlug()
 	previewNets := stackPreviewNetworks(ctx, slug)
 	if !isFile(s.stackPath(slug)) {
 		r2, err := removeStackContainers(ctx, slug)

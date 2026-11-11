@@ -48,11 +48,53 @@ type Order struct {
 	Start *Start `json:"start,omitempty"`
 	// Return asks a member that was presumed dead what it removed; sent until it answers with Returned.
 	Return bool `json:"return,omitempty"`
+	// Keep says, to a member whose work moved, where to save what it still holds of each before it removes it.
+	Keep []Keep `json:"keep,omitempty"`
 }
 
 // Returned is the stacks a member that came back stopped and removed, because they run elsewhere now.
 type Returned struct {
 	Removed []string `json:"removed"`
+	// Saved is what was written as a backup before its volume went; Kept is what stays on the member, and why.
+	Saved []Saved `json:"saved,omitempty"`
+	Kept  []Kept  `json:"kept,omitempty"`
+}
+
+// Keep is where the data a member still holds of one moved workload goes; credentials travel in Request only.
+type Keep struct {
+	Slug string `json:"slug"`
+	// Ref is the control plane's name for the destination, said back with what was saved.
+	Ref string `json:"ref,omitempty"`
+	// StoreMember is the member whose disk the destination is on; empty is a bucket every member reaches.
+	StoreMember string `json:"storeMember,omitempty"`
+	// Request is this agent's own backup request as JSON; empty is a workload the leader holds no destination for.
+	Request json.RawMessage `json:"request,omitempty"`
+}
+
+// Saved is one volume archive a returning member wrote, as its backup result reported it.
+type Saved struct {
+	Slug               string `json:"slug"`
+	Ref                string `json:"ref,omitempty"`
+	ObjectKey          string `json:"objectKey"`
+	SizeBytes          int64  `json:"sizeBytes"`
+	DecryptedSizeBytes int64  `json:"decryptedSizeBytes,omitempty"`
+	Sha256             string `json:"sha256,omitempty"`
+	At                 string `json:"at"`
+}
+
+// Why a member kept the data of a moved workload on its own disk.
+const (
+	KeptStoreElsewhere = "store_elsewhere"
+	KeptNoDestination  = "no_destination"
+	KeptBackupFailed   = "backup_failed"
+)
+
+// Kept is data that was not saved and so was not removed.
+type Kept struct {
+	Slug   string `json:"slug"`
+	Ref    string `json:"ref,omitempty"`
+	Reason string `json:"reason"`
+	Error  string `json:"error,omitempty"`
 }
 
 // RegistryAuth is a registry login a pulled image needs.
