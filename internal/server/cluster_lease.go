@@ -30,13 +30,17 @@ type clusterLease struct {
 	Placement []lease.Entry `json:"placement"`
 	// Fenced is set once this lease ran out and its single-writer workloads were stopped.
 	Fenced bool `json:"fenced"`
+	// ExtraSeconds is the time a leader about to restart asked this lease to live on without a renewal.
+	ExtraSeconds int `json:"extraSeconds,omitempty"`
 }
 
 type leaseGuard struct {
-	mu       sync.Mutex
-	file     string
-	now      func() time.Time
-	fence    func(ctx context.Context, entries []lease.Entry) error
+	mu    sync.Mutex
+	file  string
+	now   func() time.Time
+	fence func(ctx context.Context, entries []lease.Entry) error
+	// start brings a moved workload up from its failover bundle.
+	start    func(ctx context.Context, s *lease.Start) error
 	clusters map[string]*clusterLease
 }
 
@@ -77,7 +81,7 @@ func (g *leaseGuard) Renew(o lease.Order) lease.Reply {
 	if c := g.clusters[o.Cluster]; c != nil && o.Epoch < c.Epoch {
 		return lease.Reply{Error: lease.StaleEpoch, Epoch: c.Epoch}
 	}
-	g.clusters[o.Cluster] = &clusterLease{Epoch: o.Epoch, Member: o.Member, RenewedAt: g.now(), Placement: o.Placement}
+	g.clusters[o.Cluster] = &clusterLease{Epoch: o.Epoch, Member: o.Member, RenewedAt: g.now(), Placement: o.Placement, ExtraSeconds: min(max(o.ExtendSeconds, 0), 3600)}
 	g.save()
 	return lease.Reply{OK: true, Epoch: o.Epoch}
 }
@@ -92,7 +96,7 @@ func (g *leaseGuard) Check(ctx context.Context) {
 	var todo []due
 	now := g.now()
 	for id, c := range g.clusters {
-		if c.Fenced || c.RenewedAt.IsZero() || now.Sub(c.RenewedAt) < lease.FenceAfter {
+		if c.Fenced || c.RenewedAt.IsZero() || now.Sub(c.RenewedAt) < lease.FenceAfter+time.Duration(c.ExtraSeconds)*time.Second {
 			continue
 		}
 		var mine []lease.Entry
@@ -113,7 +117,7 @@ func (g *leaseGuard) Check(ctx context.Context) {
 		}
 		g.mu.Lock()
 		// A renewal that landed while stopping wins: the lease is alive again.
-		if c := g.clusters[d.cluster]; c != nil && g.now().Sub(c.RenewedAt) >= lease.FenceAfter {
+		if c := g.clusters[d.cluster]; c != nil && g.now().Sub(c.RenewedAt) >= lease.FenceAfter+time.Duration(c.ExtraSeconds)*time.Second {
 			c.Fenced = true
 			g.save()
 		}
@@ -143,7 +147,32 @@ func (g *leaseGuard) Serve(from wire.Party, c net.Conn) {
 		_ = lease.WriteReply(c, lease.Reply{Error: "unreadable order"})
 		return
 	}
-	_ = lease.WriteReply(c, g.Renew(o))
+	r := g.Renew(o)
+	if o.Start != nil && r.OK {
+		r = g.startWorkload(c, o)
+	}
+	_ = lease.WriteReply(c, r)
+}
+
+// startWorkload brings one moved workload up. The order must place that stack on this member, so a leader cannot
+// start a stack the placement does not give it; Started is only true once the stack is ready.
+func (g *leaseGuard) startWorkload(c net.Conn, o lease.Order) lease.Reply {
+	mine := false
+	for _, e := range o.Placement {
+		if e.Member == o.Member && e.Slug == o.Start.Slug && e.Slug != "" {
+			mine = true
+		}
+	}
+	if !mine || g.start == nil {
+		return lease.Reply{Error: "this stack is not placed on this member"}
+	}
+	_ = c.SetDeadline(time.Now().Add(lease.StartTimeout + time.Minute))
+	ctx, cancel := context.WithTimeout(context.Background(), lease.StartTimeout)
+	defer cancel()
+	if err := g.start(ctx, o.Start); err != nil {
+		return lease.Reply{Error: err.Error()}
+	}
+	return lease.Reply{OK: true, Started: true, Epoch: o.Epoch}
 }
 
 // Run checks the lease until ctx ends.
@@ -166,6 +195,7 @@ func (s *Service) leaseFile() string { return filepath.Join(s.agentDir, "cluster
 func (s *Service) leaseGuard() *leaseGuard {
 	s.leaseOnce.Do(func() {
 		s.lease = newLeaseGuard(s.leaseFile(), time.Now, s.fenceStacks)
+		s.lease.start = s.startFromBundle
 	})
 	return s.lease
 }
