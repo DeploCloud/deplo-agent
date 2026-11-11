@@ -411,6 +411,10 @@ func (s *Service) driveDeploy(ctx context.Context, id string, req *pb.DeployRequ
 				e.result(false, fmt.Sprintf("deploy panicked: %v", r), "")
 			}
 		}()
+		if !req.GetBuildOnly() && s.leaseGuard().Holds(req.GetSlug()) {
+			e.result(false, awaitingLeader, "")
+			return
+		}
 		s.runDeployFrom(ctx, req, contextFile, e)
 	}()
 	s.trimFinished()
@@ -457,6 +461,9 @@ func (s *Service) StartStack(ctx context.Context, ref *pb.StackRef) (*pb.StackRe
 	slug := ref.GetSlug()
 	if err := validateSlug(slug); err != nil {
 		return nil, err
+	}
+	if s.leaseGuard().Holds(slug) {
+		return nil, status.Error(codes.FailedPrecondition, awaitingLeader)
 	}
 	defer s.lockStack(slug)()
 	s.restartWatch().resume(slug, "restart")
@@ -576,6 +583,9 @@ func (s *Service) Reroute(ctx context.Context, req *pb.RerouteRequest) (*pb.Stac
 	slug := req.GetSlug()
 	if err := validateSlug(slug); err != nil {
 		return nil, err
+	}
+	if s.leaseGuard().Holds(slug) {
+		return nil, status.Error(codes.FailedPrecondition, awaitingLeader)
 	}
 	defer s.lockStack(slug)()
 	name := "deplo-" + slug

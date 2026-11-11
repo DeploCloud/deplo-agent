@@ -32,6 +32,18 @@ type clusterLease struct {
 	Fenced bool `json:"fenced"`
 	// ExtraSeconds is the time a leader about to restart asked this lease to live on without a renewal.
 	ExtraSeconds int `json:"extraSeconds,omitempty"`
+	// Held are the stacks this member stopped itself, started again once the leader says they are still its own.
+	Held []string `json:"held,omitempty"`
+	// Returning is set by the first renewal after a dead lease, until what moved away is removed.
+	Returning bool `json:"returning,omitempty"`
+	// Returned is what that return removed, kept until the leader has it.
+	Returned *lease.Returned `json:"returned,omitempty"`
+	// cold is a lease that was dead when this agent started: nothing of it runs until the leader speaks.
+	cold bool
+}
+
+func (c *clusterLease) ranOut(now time.Time) bool {
+	return !c.RenewedAt.IsZero() && now.Sub(c.RenewedAt) >= lease.FenceAfter+time.Duration(c.ExtraSeconds)*time.Second
 }
 
 type leaseGuard struct {
@@ -40,14 +52,28 @@ type leaseGuard struct {
 	now   func() time.Time
 	fence func(ctx context.Context, entries []lease.Entry) error
 	// start brings a moved workload up from its failover bundle.
-	start    func(ctx context.Context, s *lease.Start) error
+	start func(ctx context.Context, s *lease.Start) error
+	// remove takes down this member's copy of a stack placed elsewhere; resume starts one it stopped itself.
+	remove func(ctx context.Context, e lease.Entry) error
+	resume func(ctx context.Context, slug string) error
+	// has says whether a stack is on this host, running whether it runs now; nil reads as yes.
+	has      func(slug string) bool
+	running  func(ctx context.Context, slug string) bool
+	settling map[string]bool
+	work     sync.WaitGroup
 	clusters map[string]*clusterLease
 }
 
 func newLeaseGuard(file string, now func() time.Time, fence func(context.Context, []lease.Entry) error) *leaseGuard {
-	g := &leaseGuard{file: file, now: now, fence: fence, clusters: map[string]*clusterLease{}}
+	g := &leaseGuard{file: file, now: now, fence: fence, clusters: map[string]*clusterLease{}, settling: map[string]bool{}}
 	if raw, err := os.ReadFile(file); err == nil {
 		_ = json.Unmarshal(raw, &g.clusters)
+	}
+	// Docker's restart policy brought these stacks back before this agent; a dead lease stops them all again.
+	for _, c := range g.clusters {
+		if c != nil && c.ranOut(now()) {
+			c.cold, c.Fenced = true, false
+		}
 	}
 	return g
 }
@@ -81,9 +107,12 @@ func (g *leaseGuard) Renew(o lease.Order) lease.Reply {
 	if c := g.clusters[o.Cluster]; c != nil && o.Epoch < c.Epoch {
 		return lease.Reply{Error: lease.StaleEpoch, Epoch: c.Epoch}
 	}
-	g.clusters[o.Cluster] = &clusterLease{Epoch: o.Epoch, Member: o.Member, RenewedAt: g.now(), Placement: o.Placement, ExtraSeconds: min(max(o.ExtendSeconds, 0), 3600)}
+	next := &clusterLease{Epoch: o.Epoch, Member: o.Member, RenewedAt: g.now(), Placement: o.Placement, ExtraSeconds: min(max(o.ExtendSeconds, 0), 3600)}
+	r := lease.Reply{OK: true, Epoch: o.Epoch}
+	g.comeBack(o, g.clusters[o.Cluster], next, &r)
+	g.clusters[o.Cluster] = next
 	g.save()
-	return lease.Reply{OK: true, Epoch: o.Epoch}
+	return r
 }
 
 // Check stops the single-writer workloads of every lease that has run out, once each. A stop that fails is tried again on the next check.
@@ -96,12 +125,12 @@ func (g *leaseGuard) Check(ctx context.Context) {
 	var todo []due
 	now := g.now()
 	for id, c := range g.clusters {
-		if c.Fenced || c.RenewedAt.IsZero() || now.Sub(c.RenewedAt) < lease.FenceAfter+time.Duration(c.ExtraSeconds)*time.Second {
+		if c.Fenced || !c.ranOut(now) {
 			continue
 		}
 		var mine []lease.Entry
 		for _, e := range c.Placement {
-			if e.Member == c.Member && e.SingleWriter && e.Slug != "" {
+			if e.Member == c.Member && (e.SingleWriter || c.cold) && e.Slug != "" {
 				mine = append(mine, e)
 			}
 		}
@@ -110,6 +139,7 @@ func (g *leaseGuard) Check(ctx context.Context) {
 	g.mu.Unlock()
 	sort.Slice(todo, func(i, j int) bool { return todo[i].cluster < todo[j].cluster })
 	for _, d := range todo {
+		held := g.runningNow(ctx, d.entries)
 		err := g.fence(ctx, d.entries)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "deplo-agent: cluster %s: lease ran out, could not stop its workloads: %v\n", d.cluster, err)
@@ -117,8 +147,9 @@ func (g *leaseGuard) Check(ctx context.Context) {
 		}
 		g.mu.Lock()
 		// A renewal that landed while stopping wins: the lease is alive again.
-		if c := g.clusters[d.cluster]; c != nil && g.now().Sub(c.RenewedAt) >= lease.FenceAfter+time.Duration(c.ExtraSeconds)*time.Second {
+		if c := g.clusters[d.cluster]; c != nil && c.ranOut(g.now()) {
 			c.Fenced = true
+			c.Held = union(c.Held, held)
 			g.save()
 		}
 		g.mu.Unlock()
@@ -177,6 +208,7 @@ func (g *leaseGuard) startWorkload(c net.Conn, o lease.Order) lease.Reply {
 
 // Run checks the lease until ctx ends.
 func (g *leaseGuard) Run(ctx context.Context) {
+	g.Check(ctx)
 	t := time.NewTicker(leaseCheckEvery)
 	defer t.Stop()
 	for {
@@ -189,13 +221,21 @@ func (g *leaseGuard) Run(ctx context.Context) {
 	}
 }
 
-func (s *Service) leaseFile() string { return filepath.Join(s.agentDir, "cluster-lease.json") }
+func (s *Service) leaseFile() string {
+	if s.agentDir == "" {
+		return ""
+	}
+	return filepath.Join(s.agentDir, "cluster-lease.json")
+}
 
 // leaseGuard is created with the member, so a lease that ran out while the agent was down is still honoured.
 func (s *Service) leaseGuard() *leaseGuard {
 	s.leaseOnce.Do(func() {
 		s.lease = newLeaseGuard(s.leaseFile(), time.Now, s.fenceStacks)
 		s.lease.start = s.startFromBundle
+		s.lease.remove, s.lease.resume = s.removeMoved, s.resumeHeld
+		s.lease.has = func(slug string) bool { return isFile(s.stackPath(slug)) }
+		s.lease.running = stackRuns
 	})
 	return s.lease
 }
