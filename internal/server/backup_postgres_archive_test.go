@@ -6,6 +6,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -31,7 +32,7 @@ func called(argv []string, sub string) int {
 	return slices.IndexFunc(argv, func(a string) bool { return strings.Contains(a, sub) })
 }
 
-// helperSteps is the last word of every run of the unpacking container, in order: base, log, replay.
+// helperSteps is the last word of every run of the unpacking container, in order: base, swap, log, replay.
 func helperSteps(argv []string) string {
 	var steps []string
 	for _, line := range argv {
@@ -180,7 +181,7 @@ func TestPostgresArchive_aBaseBackupIsRestoredByReplacingTheDataDirectory(t *tes
 	if !strings.Contains(a[swap], "-e D=/var/lib/postgresql/data") || !strings.Contains(a[swap], "postgres:17-alpine") || !strings.Contains(a[swap], "--network none") {
 		t.Fatalf("helper %q", a[swap])
 	}
-	if called(a, "pg_restore") >= 0 || helperSteps(a) != "base" {
+	if called(a, "pg_restore") >= 0 || helperSteps(a) != "base,swap" {
 		t.Fatalf("argv %v", a)
 	}
 }
@@ -225,7 +226,7 @@ func TestPostgresArchive_aFailoverRestoreReplaysTheChangeLogAfterTheBase(t *test
 		t.Fatal(err)
 	}
 	a := argv()
-	if got := helperSteps(a); got != "base,log,log,replay" {
+	if got := helperSteps(a); got != "base,swap,log,log,replay" {
 		t.Fatalf("helper steps %q, argv %v", got, a)
 	}
 	if called(a, "--volumes-from") > called(a, "start deplo-agent-test-pg") {
@@ -250,5 +251,58 @@ func TestPostgresArchive_aChangeLogOutsideTheStoreIsRefusedBeforeAnythingStops(t
 	}
 	if called(argv(), "stop ") >= 0 {
 		t.Fatalf("the database was stopped: %v", argv())
+	}
+}
+
+// The helper is a shell script nothing else covers: run it for real against a directory.
+func TestPostgresArchive_theDataDirectoryIsReplacedOnlyOnceTheBackupIsUnpacked(t *testing.T) {
+	run := func(dir, step string, in []byte) {
+		t.Helper()
+		cmd := exec.Command("sh", "-c", pgHelperScript, "sh", step)
+		cmd.Env = append(os.Environ(), "D="+dir)
+		cmd.Stdin = bytes.NewReader(in)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%s: %v: %s", step, err, out)
+		}
+	}
+	names := func(dir string) string {
+		entries, _ := os.ReadDir(dir)
+		var out []string
+		for _, e := range entries {
+			out = append(out, e.Name())
+		}
+		return strings.Join(out, ",")
+	}
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "base", "old"), "old")
+	mustWrite(t, filepath.Join(dir, ".hidden"), "old")
+	run(dir, "base", baseTar(t, "PG_VERSION", ".dot"))
+	if got := names(dir); got != ".deplo-restore,.hidden,base" {
+		t.Fatalf("unpacking touched the data: %s", got)
+	}
+	run(dir, "drop", nil)
+	if got := names(dir); got != ".hidden,base" {
+		t.Fatalf("a backup that was dropped left: %s", got)
+	}
+	run(dir, "base", baseTar(t, "PG_VERSION", ".dot"))
+	run(dir, "swap", nil)
+	if got := names(dir); got != ".dot,PG_VERSION,backup_label" {
+		t.Fatalf("after the swap: %s", got)
+	}
+}
+
+func TestPostgresArchive_aBackupThatDoesNotUnpackLeavesTheDatabaseAsItWas(t *testing.T) {
+	argv := dockerOnPath(t, strings.Replace(pgDocker, `*"tar -xf"*) cat > /dev/null;;`, `*" base") cat > /dev/null; exit 2;;`+"\n"+`*"tar -xf"*) cat > /dev/null;;`, 1))
+	s, _ := newStoreService(t)
+	recipient, identity := testKeypair(t)
+	e, result := collectRestore()
+	s.restoreDatabase(context.Background(), pgArchived,
+		&artifactSource{stream: bytes.NewReader(encryptedArtifact(t, recipient, baseTar(t, "PG_VERSION"))), identity: identity}, e)
+	if r := result(); r == nil || r.GetOk() || !strings.Contains(r.GetError(), "keeps the data it had") {
+		t.Fatalf("result: %+v", r)
+	}
+	a := argv()
+	if got := helperSteps(a); got != "base,drop" || called(a, "start deplo-agent-test-pg") < 0 {
+		t.Fatalf("helper steps %q, argv %v", got, a)
 	}
 }

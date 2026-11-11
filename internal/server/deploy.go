@@ -299,11 +299,11 @@ func (s *Service) awaitStarted(ctx context.Context, req *pb.DeployRequest, conta
 		return &pb.DeployResult{Error: "Stack did not reach a running state", CommitSha: commitSha}
 	}
 	if project {
-		e.log("info", fmt.Sprintf("Waiting for all %d copies to become healthy…", replicas))
+		e.log("info", fmt.Sprintf("Waiting for all %d replicas to become healthy.", replicas))
 		if waitProjectRunning(ctx, container, replicas, timeout) {
 			return &pb.DeployResult{Ready: true, CommitSha: commitSha}
 		}
-		return &pb.DeployResult{Error: "Not every copy reached a running state", CommitSha: commitSha}
+		return &pb.DeployResult{Error: "Not every replica reached a running state", CommitSha: commitSha}
 	}
 	e.log("info", "Waiting for the container to become healthy…")
 	if waitRunning(ctx, container, timeout) {
@@ -315,7 +315,23 @@ func (s *Service) awaitStarted(ctx context.Context, req *pb.DeployRequest, conta
 // startStack writes the admitted stack and brings it up under the stack lock, so a Reroute, Stop
 // or Destroy of the same app cannot interleave with it. Builds stay outside the lock.
 func (s *Service) startStack(ctx context.Context, req *pb.DeployRequest, e *emitter) bool {
-	defer s.lockStack(req.GetSlug())()
+	done, ok := s.lockToStart(req.GetSlug())
+	if !ok {
+		e.result(false, awaitingLeader, "")
+		return false
+	}
+	up := s.upLocked(ctx, req, e)
+	if done() {
+		if up {
+			e.result(false, awaitingLeader, "")
+		}
+		return false
+	}
+	return up
+}
+
+// upLocked writes the stack and runs compose up; the caller holds the stack's lock.
+func (s *Service) upLocked(ctx context.Context, req *pb.DeployRequest, e *emitter) bool {
 	envFile, projectDir, ok := s.writeStackFiles(req, e)
 	if !ok {
 		return false

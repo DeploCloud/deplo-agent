@@ -35,6 +35,9 @@ var relaysRefresh = 5 * time.Second
 type memberState struct {
 	Member bool     `json:"member"`
 	Relays []string `json:"relays,omitempty"`
+	// Cluster is the one this server is in, and Leaders the certificates Deplo said may lead it.
+	Cluster string   `json:"cluster,omitempty"`
+	Leaders []string `json:"leaders,omitempty"`
 }
 
 type clusterMember struct {
@@ -75,9 +78,19 @@ func relayListen(ctx context.Context) []string {
 	return out
 }
 
+// clusterKeeps is the part of the agent's environment a cluster process runs with: where programs and
+// certificates are, and how to dial out. Nothing an operator exported for the agent goes along.
+var clusterKeeps = []string{"PATH", "HOME", "TZ", "LANG", "SSL_CERT_FILE", "SSL_CERT_DIR",
+	"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"}
+
 // clusterEnv is what a supervised cluster process is started with.
 func (s *Service) clusterEnv(dir, role string) []string {
-	env := os.Environ()
+	var env []string
+	for _, k := range clusterKeeps {
+		if v, ok := os.LookupEnv(k); ok {
+			env = append(env, k+"="+v)
+		}
+	}
 	if s.agentDir != "" {
 		m := bootstrap.Paths(s.agentDir)
 		env = append(env, "DEPLO_CLUSTER_CERT="+m.CertPath, "DEPLO_CLUSTER_KEY="+m.KeyPath, "DEPLO_CLUSTER_CA="+m.CAPath)
@@ -155,8 +168,7 @@ func (s *Service) keepRelaysFile(ctx context.Context, dir string, st clusterStat
 		m.mu.Unlock()
 		body := strings.Join(s.relayURLs(st.Relay, extra), "\n") + "\n"
 		if body != last {
-			tmp := relaysFile(dir) + ".tmp"
-			if os.WriteFile(tmp, []byte(body), 0o600) == nil && os.Rename(tmp, relaysFile(dir)) == nil {
+			if writeFileAtomic(relaysFile(dir), []byte(body), 0o600) == nil {
 				last = body
 			}
 		}
@@ -196,6 +208,11 @@ func (s *Service) StartClusterMember() {
 
 // startMember (re)starts the party for st; the caller holds m.mu.
 func (s *Service) startMember(m *clusterMember, st memberState) {
+	// Deplo pushes the same membership often: the connections stay unless the relays to dial changed.
+	if st.Member && m.party != nil && slices.Equal(m.st.Relays, st.Relays) {
+		m.st = st
+		return
+	}
 	if m.cancel != nil {
 		m.cancel()
 		m.cancel, m.party = nil, nil
@@ -230,7 +247,7 @@ func (s *Service) startMember(m *clusterMember, st memberState) {
 // SetClusterMember makes this agent a cluster party, or stops it being one; see the RPC's contract in proto/agent.proto.
 func (s *Service) SetClusterMember(_ context.Context, req *pb.SetClusterMemberRequest) (*pb.SetClusterMemberResponse, error) {
 	if s.agentDir == "" || !bootstrap.Provisioned(s.agentDir) {
-		return nil, status.Error(codes.FailedPrecondition, "this agent has no certificate to join a cluster with")
+		return nil, status.Error(codes.FailedPrecondition, "this server agent has no certificate to join a cluster with")
 	}
 	st := memberState{Member: req.GetMember()}
 	if st.Member {
@@ -246,13 +263,19 @@ func (s *Service) SetClusterMember(_ context.Context, req *pb.SetClusterMemberRe
 				st.Relays = append(st.Relays, base)
 			}
 		}
+		if len(req.GetLeaderFingerprints()) > maxMemberRelays || len(req.GetClusterId()) > 64 {
+			return nil, status.Errorf(codes.InvalidArgument, "at most %d leaders, and a cluster id of 64 characters", maxMemberRelays)
+		}
+		st.Cluster = req.GetClusterId()
+		for _, fp := range req.GetLeaderFingerprints() {
+			if !validFingerprint(fp) {
+				return nil, status.Errorf(codes.InvalidArgument, "%q is not a certificate fingerprint", fp)
+			}
+			st.Leaders = append(st.Leaders, fp)
+		}
 	}
 	raw, _ := json.Marshal(st)
-	tmp := s.memberFile() + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		return nil, status.Errorf(codes.Internal, "remember the cluster membership: %v", err)
-	}
-	if err := os.Rename(tmp, s.memberFile()); err != nil {
+	if err := writeFileAtomic(s.memberFile(), raw, 0o600); err != nil {
 		return nil, status.Errorf(codes.Internal, "remember the cluster membership: %v", err)
 	}
 	m := s.clusterMember()
@@ -268,6 +291,14 @@ func (s *Service) relayLinks(m *clusterMember) int32 {
 		return 0
 	}
 	return int32(m.party.Connected())
+}
+
+// leaderPins is the cluster this server is in and the certificates Deplo handed it as that cluster's leaders.
+func (s *Service) leaderPins() (cluster string, fingerprints []string) {
+	m := s.clusterMember()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.st.Cluster, m.st.Leaders
 }
 
 // acceptClusterStream sends a stream to the handler for who opened it.

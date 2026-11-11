@@ -26,8 +26,9 @@ import (
 // one, and carries each connection to it over the relay. The control plane renders the table; this only runs it.
 // Stream, member to member: "FWD <network> <kind>:<id>", answered OK or ERR, then raw bytes.
 const (
-	fwdVerb       = "FWD"
-	maxFwdEntries = 512
+	fwdVerb = "FWD"
+	// Every member of an Environment is handed an entry for each of its workloads, held or served.
+	maxFwdEntries = 1024
 )
 
 var (
@@ -142,10 +143,12 @@ func (f *forwarders) save() {
 	if f.s.agentDir == "" {
 		return
 	}
-	raw, _ := json.Marshal(f.st)
-	tmp := f.file() + ".tmp"
-	if os.WriteFile(tmp, raw, 0o600) == nil {
-		_ = os.Rename(tmp, f.file())
+	raw, err := json.Marshal(f.st)
+	if err == nil {
+		err = writeFileAtomic(f.file(), raw, 0o600)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "deplo-agent: could not keep the name forwarders in %s: %v\n", f.file(), err)
 	}
 }
 
@@ -206,7 +209,7 @@ func (s *Service) SetClusterForwarders(ctx context.Context, req *pb.SetClusterFo
 	member := m.st.Member
 	m.mu.Unlock()
 	if !member {
-		return nil, status.Error(codes.FailedPrecondition, "this agent is not a cluster member")
+		return nil, status.Error(codes.FailedPrecondition, "this server agent is not a cluster member")
 	}
 	st, err := validateForwarders(req)
 	if err != nil {

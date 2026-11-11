@@ -11,8 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"go.yaml.in/yaml/v3"
-
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/clusterlink/lease"
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
@@ -300,7 +298,11 @@ func stackRuns(ctx context.Context, slug string) bool {
 
 // removeMoved stops and removes this member's copy of a stack that now runs elsewhere, its connector with it.
 func (s *Service) removeMoved(ctx context.Context, e lease.Entry) error {
-	res, err := s.DestroyStack(ctx, &pb.StackRef{Slug: e.Slug})
+	return stackErr(s.DestroyStack(ctx, &pb.StackRef{Slug: e.Slug}))
+}
+
+// stackErr folds a stack RPC's two ways of failing into one error.
+func stackErr(res *pb.StackResult, err error) error {
 	if err == nil && !res.GetOk() {
 		err = errors.New(res.GetError())
 	}
@@ -308,11 +310,7 @@ func (s *Service) removeMoved(ctx context.Context, e lease.Entry) error {
 }
 
 func (s *Service) resumeHeld(ctx context.Context, slug string) error {
-	res, err := s.StartStack(ctx, &pb.StackRef{Slug: slug})
-	if err == nil && !res.GetOk() {
-		err = errors.New(res.GetError())
-	}
-	return err
+	return stackErr(s.StartStack(ctx, &pb.StackRef{Slug: slug}))
 }
 
 // trimReplicas removes the newest copies of every service that declares replicas until n are left of each.
@@ -321,14 +319,8 @@ func (s *Service) trimReplicas(ctx context.Context, slug string, n int) (bool, e
 	if err != nil {
 		return false, nil
 	}
-	var doc struct {
-		Services map[string]struct {
-			Deploy struct {
-				Replicas *int `yaml:"replicas"`
-			} `yaml:"deploy"`
-		} `yaml:"services"`
-	}
-	if yaml.Unmarshal(raw, &doc) != nil {
+	declared := stackReplicas(string(raw))
+	if declared == nil {
 		return false, nil
 	}
 	defer s.lockStack(slug)()
@@ -347,7 +339,10 @@ func (s *Service) trimReplicas(ctx context.Context, slug string, n int) (bool, e
 	by := map[string][]copyOf{}
 	for _, line := range splitLines(res.Stdout) {
 		f := strings.Fields(line)
-		if len(f) != 3 || doc.Services[f[1]].Deploy.Replicas == nil {
+		if len(f) != 3 {
+			continue
+		}
+		if _, ok := declared[f[1]]; !ok {
 			continue
 		}
 		num, _ := strconv.Atoi(f[2])

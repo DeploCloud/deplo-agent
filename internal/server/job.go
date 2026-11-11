@@ -76,12 +76,13 @@ func (s *Service) StartJob(ctx context.Context, req *pb.StartJobRequest) (*pb.St
 		}
 	}
 
+	s.mu.Lock()
+	// Asked under the lock the fence takes: a job is either refused here or stopped there, never missed by both.
 	if s.leaseGuard().RanOut() {
+		s.mu.Unlock()
 		return nil, status.Error(codes.FailedPrecondition,
 			"This server lost touch with its cluster, so it runs no cron jobs until it is back.")
 	}
-
-	s.mu.Lock()
 	live := 0
 	for _, j := range s.jobs {
 		if !j.done {

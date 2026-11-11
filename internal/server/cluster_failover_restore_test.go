@@ -259,3 +259,22 @@ func TestFailover_anAppThatDoesNotComeUpOnItsRestoredVolumeIsStopped(t *testing.
 		t.Fatalf("steps %q", got)
 	}
 }
+
+// The restore rides in the bundle, and the bundle is for one stack: a restore aimed at another one starts nothing.
+func TestFailover_aRestoreAimedAtAnotherStackIsRefused(t *testing.T) {
+	st := stubFailover(t)
+	f := newGuard(t)
+	f.g.start = (&Service{}).startFromBundle
+	db := dbStartOrder(3)
+	db.Start.Restore.Request = json.RawMessage(strings.Replace(dbRestoreJSON, `"projectId":"db_1"`, `"projectId":"db_other"`, 1))
+	app := startOrder(3)
+	app.Start.Restore = &lease.Restore{BackupID: "brun_2", Request: json.RawMessage(`{"kind":"BACKUP_KIND_PROJECT","project":{"slug":"another-app","volumeNames":["deplo-another-app-data"]}}`)}
+	for name, o := range map[string]lease.Order{"a database": db, "an App": app} {
+		if r := serve(t, f.g, o); r.Started || r.OK || !strings.Contains(r.Error, "another stack") {
+			t.Errorf("%s: answered %+v", name, r)
+		}
+	}
+	if len(st.steps) != 0 {
+		t.Fatalf("a refused restore still ran %v", st.steps)
+	}
+}

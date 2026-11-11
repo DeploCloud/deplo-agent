@@ -22,13 +22,13 @@ import (
 // keepGrace is how long a moved stack that holds data waits, stopped, for the leader to say where it goes.
 const keepGrace = 30 * time.Second
 
-// leftBehindTimeout bounds one archive and removal: a volume can take far longer than the rest of a return.
-const leftBehindTimeout = 2 * time.Hour
+// leftTimeout bounds one archive and removal: a volume can take far longer than the rest of a return.
+const leftTimeout = 2 * time.Hour
 
 // Three tries in a row; what still fails stays on this member and is tried again later (retryKept).
 var (
-	leftBehindTries = 3
-	leftBehindWait  = 10 * time.Second
+	leftTries = 3
+	leftWait  = 10 * time.Second
 )
 
 // noteKeeps takes what an order says about a return under way, and about what stayed here past one; the
@@ -98,7 +98,7 @@ func (g *leaseGuard) keepMoved(cluster, me string, e lease.Entry, k lease.Keep, 
 	case storeOutOfReach(k, me):
 		return nil, &lease.Kept{Slug: e.Slug, Ref: k.Ref, Reason: lease.KeptStoreElsewhere}, false, false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), leftBehindTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), leftTimeout)
 	defer cancel()
 	still := func() bool { return g.movedAway(cluster, e.Slug) }
 	if saved = already; saved == nil {
@@ -161,12 +161,12 @@ func storeOutOfReach(k lease.Keep, me string) bool {
 	return k.StoreMember != "" && k.StoreMember != me && k.StoreFingerprint == ""
 }
 
-// runLeftBehindBackup writes one archive the way the Backup RPC does, a streamed one into out; a var so a
+// runLeftBackup writes one archive the way the Backup RPC does, a streamed one into out; a var so a
 // test can answer without Docker.
-var runLeftBehindBackup func(s *Service, ctx context.Context, req *pb.BackupRequest, out io.Writer) (*pb.BackupResult, error)
+var runLeftBackup func(s *Service, ctx context.Context, req *pb.BackupRequest, out io.Writer) (*pb.BackupResult, error)
 
 // Set here, not in the declaration, like the failover restore: the backup path reaches the lease guard.
-func init() { runLeftBehindBackup = backupLikeTheRPC }
+func init() { runLeftBackup = backupLikeTheRPC }
 
 func backupLikeTheRPC(s *Service, ctx context.Context, req *pb.BackupRequest, out io.Writer) (*pb.BackupResult, error) {
 	var res *pb.BackupResult
@@ -233,9 +233,9 @@ var holdsVolume = func(ctx context.Context, names []string) bool {
 	return false
 }
 
-// keepLeftBehind archives the volumes of a stack that runs elsewhere now, under the stem the control plane
+// keepLeft archives the volumes of a stack that runs elsewhere now, under the stem the control plane
 // gave, then the failover's time and this member: a repeat writes over the first. Nothing is removed.
-func (s *Service) keepLeftBehind(ctx context.Context, e lease.Entry, k lease.Keep, member string, still func() bool) (*lease.Saved, error) {
+func (s *Service) keepLeft(ctx context.Context, e lease.Entry, k lease.Keep, member string, still func() bool) (*lease.Saved, error) {
 	req, err := readKeep(e, k)
 	if err != nil {
 		return nil, err
@@ -277,23 +277,23 @@ func (s *Service) keepLeftBehind(ctx context.Context, e lease.Entry, k lease.Kee
 	for try := 1; ; try++ {
 		var res *pb.BackupResult
 		if elsewhere {
-			res, err = s.sendLeftBehind(ctx, req, k.StoreFingerprint)
+			res, err = s.sendLeft(ctx, req, k.StoreFingerprint)
 		} else {
-			res, err = runLeftBehindBackup(s, ctx, req, nil)
+			res, err = runLeftBackup(s, ctx, req, nil)
 		}
 		if err == nil {
 			return &lease.Saved{Slug: e.Slug, Ref: k.Ref, ObjectKey: req.GetS3().GetObjectKey() + req.GetStore().GetObjectKey(), SizeBytes: res.GetSizeBytes(),
 				DecryptedSizeBytes: res.GetDecryptedSizeBytes(), Sha256: res.GetSha256(), At: time.Now().UTC().Format(time.RFC3339)}, nil
 		}
-		if try >= leftBehindTries || ctx.Err() != nil {
+		if try >= leftTries || ctx.Err() != nil {
 			return nil, err
 		}
-		time.Sleep(leftBehindWait)
+		time.Sleep(leftWait)
 	}
 }
 
-// purgeLeftBehind takes a saved stack down with the volumes its archive holds.
-func (s *Service) purgeLeftBehind(ctx context.Context, e lease.Entry, k lease.Keep, still func() bool) error {
+// purgeLeft takes a saved stack down with the volumes its archive holds.
+func (s *Service) purgeLeft(ctx context.Context, e lease.Entry, k lease.Keep, still func() bool) error {
 	req, err := readKeep(e, k)
 	if err != nil {
 		return err
@@ -303,9 +303,7 @@ func (s *Service) purgeLeftBehind(ctx context.Context, e lease.Entry, k lease.Ke
 		return errRunsAgain
 	}
 	res, err := s.destroyStack(ctx, &pb.StackRef{Slug: e.Slug, RemoveVolumes: true, ReclaimVolumes: req.GetProject().GetVolumeNames()})
-	if err == nil && !res.GetOk() {
-		err = errors.New(res.GetError())
-	}
+	err = stackErr(res, err)
 	if err == nil && res.GetError() != "" {
 		// ponytail: a volume something else still mounts stays; nothing looks at it again.
 		fmt.Fprintf(os.Stderr, "deplo-agent: %s is saved and stopped, but %s\n", e.Slug, res.GetError())
@@ -315,9 +313,5 @@ func (s *Service) purgeLeftBehind(ctx context.Context, e lease.Entry, k lease.Ke
 
 // stopMoved stops a stack that waits for the leader's word on its data.
 func (s *Service) stopMoved(ctx context.Context, slug string) error {
-	res, err := s.StopStack(ctx, &pb.StackRef{Slug: slug})
-	if err == nil && !res.GetOk() {
-		err = errors.New(res.GetError())
-	}
-	return err
+	return stackErr(s.StopStack(ctx, &pb.StackRef{Slug: slug}))
 }

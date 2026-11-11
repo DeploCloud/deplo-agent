@@ -28,6 +28,10 @@ const fakeCluster = "#!/bin/sh\nd=\"$(dirname \"$0\")\"\necho \"$DEPLO_CLUSTER_S
 
 func clusterHostFor(t *testing.T) (*Service, string) {
 	t.Helper()
+	// A relay asks Docker for the bridge gateway: no test of this host ever asks the real one.
+	if !bridgeStubbed {
+		stubBridge(t, "")
+	}
 	agentDir, err := os.MkdirTemp("", "ag")
 	if err != nil {
 		t.Fatal(err)
@@ -44,6 +48,18 @@ func installReq(version, script string, relay bool) *pb.InstallClusterRequest {
 		Version:  version,
 		Binaries: binariesFor("https://example/deplo-cluster-linux-"+runtime.GOARCH, sha256Hex([]byte(script))),
 		Relay:    relay,
+	}
+}
+
+// A version that does not read as one cannot be compared, so the downgrade guard would let anything through.
+func TestInstallCluster_refusesAVersionItCannotCompare(t *testing.T) {
+	stubBridge(t, "")
+	s, _ := clusterHostFor(t)
+	stubDownload(t, []byte(fakeCluster), nil)
+	for _, v := range []string{"", "latest", "main", "v1"} {
+		if _, err := s.InstallCluster(context.Background(), installReq(v, fakeCluster, false)); status.Code(err) != codes.InvalidArgument {
+			t.Errorf("version %q: got %v, want InvalidArgument", v, err)
+		}
 	}
 }
 

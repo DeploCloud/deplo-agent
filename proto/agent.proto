@@ -173,6 +173,10 @@ service Agent {
   // older ones. A member that already holds the ref answers without a transfer.
   rpc CopyClusterImage(CopyClusterImageRequest) returns (CopyClusterImageResponse);
 
+  // Tell this member to accept one image from one member, once, within the copy's time limit.
+  // An image stream that matches no such entry is refused.
+  rpc ExpectClusterImage(ExpectClusterImageRequest) returns (ExpectClusterImageResponse);
+
   // ---- CLUSTER NAME FORWARDERS (#200, Hello capability "cluster.forwarders") ----
 
   // Hand this member the names it holds on its Environments' networks and the streams it accepts
@@ -756,7 +760,7 @@ message DeployRequest {
 message RestartRule {
   enum Probe {
     PROBE_UNSPECIFIED = 0;
-    // GET port+path from the host; any HTTP status counts as alive.
+    // GET port+path from the host; see fail_on_error_status.
     PROBE_HTTP = 1;
     // Docker's own health verdict (the app's command check); `unhealthy` is a failure.
     PROBE_DOCKER_HEALTH = 2;
@@ -772,6 +776,9 @@ message RestartRule {
   int32 start_period_s = 7;
   // Compose stacks: the service to watch. Empty => the app's single container.
   string service = 8;
+  // The App's own http check: a status of 400 or more is a failure. Unset (the default GET /)
+  // counts any HTTP status as alive.
+  bool fail_on_error_status = 9;
 }
 
 // Something the restart rule did, reported on the metrics stream (buffered while none is open).
@@ -2084,6 +2091,9 @@ message ContainerStat {
   // for running out of memory, counted from docker's `oom` events since the agent
   // started. Keyed by container_id, so it never goes down for the same id.
   int32 oom_kills = 19;
+  // ADDITIVE. What the restart rule's last check said about this container: "starting",
+  // "answering" or "not_answering", as InstanceInfo.answer. Empty when no rule watches it.
+  string answer = 20;
 }
 
 message ContainerStatsResponse {
@@ -2402,6 +2412,11 @@ message SetClusterMemberRequest {
   // Relay addresses (http or https origin, no path) to dial in addition to the one on this
   // host and the panel's own. Only read when member is true.
   repeated string relays = 2;
+  // The cluster this server is a member of.
+  string cluster_id = 3;
+  // Certificates (sha256 hex of the DER) that may lead that cluster. An order from any other
+  // certificate, or naming another cluster, is refused whatever the relay says.
+  repeated string leader_fingerprints = 4;
 }
 
 message SetClusterMemberResponse {
@@ -2451,6 +2466,17 @@ message CopyClusterImageResponse {
   // Releases the target removed to stay within keep.
   repeated string pruned = 3;
 }
+
+message ExpectClusterImageRequest {
+  // The deplo/<key>:<tag> image the source is about to send.
+  string image_ref = 1;
+  // The sending member's certificate fingerprint (sha256 hex of its DER).
+  string source_fingerprint = 2;
+  // How many releases of the App this member keeps, this one included. 0 means 2.
+  int32 keep = 3;
+}
+
+message ExpectClusterImageResponse {}
 
 // ---- CLUSTER NAME FORWARDERS (#200) ----
 

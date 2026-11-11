@@ -61,7 +61,9 @@ func (s *Service) startStandIn(ctx context.Context, req *pb.DeployRequest, live 
 	if !same {
 		s.removeStandIn(slug, e)
 		if created {
-			e.log("info", "The app's domains changed, so it goes offline briefly while the new version starts.")
+			// ponytail: replicas restart together here too. Keeping them up needs a stand-in rendered with its own
+			// router names, which is the control plane's to do (the Traefik label grammar never moves into Go).
+			e.log("info", "How this app is reached changed (a domain, a header or sticky sessions), so it goes offline briefly while the new version starts.")
 		} else {
 			e.log("warn", "Could not start the new version beside the old one, so the app goes offline briefly.")
 		}
@@ -69,11 +71,11 @@ func (s *Service) startStandIn(ctx context.Context, req *pb.DeployRequest, live 
 	}
 
 	if stack {
-		e.log("info", "Starting the new version of the stack beside the one that is online…")
+		e.log("info", "Starting the new version of the stack beside the one that is online.")
 	} else if replicas > 1 {
-		e.log("info", fmt.Sprintf("Starting %d copies of the new version beside the ones that are online…", replicas))
+		e.log("info", fmt.Sprintf("Starting %d replicas of the new version beside the ones that are online.", replicas))
 	} else {
-		e.log("info", "Starting the new version beside the one that is online…")
+		e.log("info", "Starting the new version beside the one that is online.")
 	}
 	up := func() bool {
 		defer s.lockStack(slug)()
@@ -206,9 +208,8 @@ func traefikLabels(ctx context.Context, container string) (map[string]string, bo
 	return out, true
 }
 
-// runsAsProject: a stack that declares deploy.replicas has no container of its own name, even with one copy
-// (a member of a cluster holding one replica of an App spread over several).
-func runsAsProject(composeYaml string) bool {
+// stackReplicas is what each service of a stack declares through deploy.replicas; one that declares none is absent.
+func stackReplicas(composeYaml string) map[string]int {
 	var doc struct {
 		Services map[string]struct {
 			Deploy struct {
@@ -217,31 +218,26 @@ func runsAsProject(composeYaml string) bool {
 		} `yaml:"services"`
 	}
 	if yaml.Unmarshal([]byte(composeYaml), &doc) != nil {
-		return false
+		return nil
 	}
-	for _, svc := range doc.Services {
+	out := map[string]int{}
+	for name, svc := range doc.Services {
 		if svc.Deploy.Replicas != nil {
-			return true
+			out[name] = *svc.Deploy.Replicas
 		}
 	}
-	return false
+	return out
 }
+
+// runsAsProject: a stack that declares deploy.replicas has no container of its own name, even with one copy
+// (a member of a cluster holding one replica of an App spread over several).
+func runsAsProject(composeYaml string) bool { return len(stackReplicas(composeYaml)) > 0 }
 
 // replicaCount is the most copies a service of the stack asks for through deploy.replicas (1 when none).
 func replicaCount(composeYaml string) int {
-	var doc struct {
-		Services map[string]struct {
-			Deploy struct {
-				Replicas int `yaml:"replicas"`
-			} `yaml:"deploy"`
-		} `yaml:"services"`
-	}
-	if yaml.Unmarshal([]byte(composeYaml), &doc) != nil {
-		return 1
-	}
 	most := 1
-	for _, svc := range doc.Services {
-		most = max(most, svc.Deploy.Replicas)
+	for _, n := range stackReplicas(composeYaml) {
+		most = max(most, n)
 	}
 	return most
 }

@@ -35,7 +35,8 @@ func TestRestartAfterThreeFailuresInARow(t *testing.T) {
 	}
 	st.record(at.Add(5*time.Minute), "c1", rt0, true)
 	v := fail(st, at.Add(10*time.Minute), 3)
-	if !v.restart || v.unanswered != time.Minute || v.inWindowNow != 1 {
+	// Three checks 30 s apart went unanswered: 90 s since it last answered, not the 60 s between the misses.
+	if !v.restart || v.unanswered != 90*time.Second || v.inWindowNow != 1 {
 		t.Fatalf("verdict = %+v", v)
 	}
 	if v := st.record(at.Add(12*time.Minute), "c1", rt0, true); !v.recovered {

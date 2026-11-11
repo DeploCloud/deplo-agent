@@ -223,7 +223,7 @@ func TestE2E_aMembersDeathMovesItsDatabaseAndAppWithNoControlPlaneInTheLoop(t *t
 	leaderSock := filepath.Join(leaderDir, "leader.sock")
 	runCluster(t, bin, with(certs(leaderDir), map[string]string{"DEPLO_CLUSTER_SOCKET": leaderSock, "DEPLO_CLUSTER_RELAYS_FILE": relaysFile, "DEPLO_CLUSTER_STATE": dir("leader/state")}))
 	for _, s := range []*Service{a, b, c} {
-		if _, err := s.SetClusterMember(context.Background(), &pb.SetClusterMemberRequest{Member: true, Relays: []string{"http://" + relayAddr}}); err != nil {
+		if _, err := s.SetClusterMember(context.Background(), &pb.SetClusterMemberRequest{Member: true, Relays: []string{"http://" + relayAddr}, ClusterId: "clu_1", LeaderFingerprints: []string{leaderID.Fingerprint}}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -288,6 +288,8 @@ func TestE2E_aMembersDeathMovesItsDatabaseAndAppWithNoControlPlaneInTheLoop(t *t
 	m := a.clusterMember()
 	m.mu.Lock()
 	m.cancel()
+	// Gone for good, as after a power cut: coming back dials the relays afresh.
+	m.cancel, m.party = nil, nil
 	m.mu.Unlock()
 	died := time.Now()
 
@@ -378,7 +380,7 @@ func TestE2E_aMembersDeathMovesItsDatabaseAndAppWithNoControlPlaneInTheLoop(t *t
 		if !still() {
 			t.Errorf("%s is not placed elsewhere any more", e.Slug)
 		}
-		return a.keepLeftBehind(ctx, e, k, member, still)
+		return a.keepLeft(ctx, e, k, member, still)
 	}
 	g.purge = func(_ context.Context, e lease.Entry, _ lease.Keep, _ func() bool) error {
 		mu.Lock()
@@ -386,7 +388,7 @@ func TestE2E_aMembersDeathMovesItsDatabaseAndAppWithNoControlPlaneInTheLoop(t *t
 		mu.Unlock()
 		return nil
 	}
-	if _, err := a.SetClusterMember(context.Background(), &pb.SetClusterMemberRequest{Member: true, Relays: []string{"http://" + relayAddr}}); err != nil {
+	if _, err := a.SetClusterMember(context.Background(), &pb.SetClusterMemberRequest{Member: true, Relays: []string{"http://" + relayAddr}, ClusterId: "clu_1", LeaderFingerprints: []string{leaderID.Fingerprint}}); err != nil {
 		t.Fatal(err)
 	}
 	within(t, 60*time.Second, "the leader to report the return", func() bool {

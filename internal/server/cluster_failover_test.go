@@ -227,3 +227,45 @@ func TestFailover_aStartIsGivenUpAfterTheStartTimeout(t *testing.T) {
 		t.Fatalf("the start ran with %s left, want at most %s", left, lease.StartTimeout)
 	}
 }
+
+// A restore takes minutes. A leader with a newer epoch that speaks meanwhile ends the older leader's start, and
+// what must never run twice does not stay up for an order nobody leads any more.
+func TestFailover_aNewerEpochEndsAnOlderLeadersStart(t *testing.T) {
+	for name, obeysCancel := range map[string]bool{"the start stops when told": true, "the start finishes anyway": false} {
+		t.Run(name, func(t *testing.T) {
+			f := newGuard(t)
+			running, cancelled := make(chan struct{}), make(chan struct{})
+			f.g.start = func(ctx context.Context, _ *lease.Start) error {
+				close(running)
+				<-ctx.Done()
+				close(cancelled)
+				if obeysCancel {
+					return ctx.Err()
+				}
+				return nil
+			}
+			var stopped []string
+			f.g.stop = func(_ context.Context, slug string) error { stopped = append(stopped, slug); return nil }
+			o := startOrder(5)
+			o.Placement[0].SingleWriter = true
+			reply := make(chan lease.Reply, 1)
+			go func() { reply <- serve(t, f.g, o) }()
+			<-running
+			if r := f.g.Probe(lease.Order{Cluster: "clu_1", Member: "srv_a", Epoch: 6, Probe: true}); !r.OK {
+				t.Fatalf("the newer leader's probe: %+v", r)
+			}
+			select {
+			case <-cancelled:
+			case <-time.After(3 * time.Second):
+				t.Fatal("the older leader's start went on after a newer epoch arrived")
+			}
+			r := <-reply
+			if r.Started || r.OK || r.Error != lease.StaleEpoch || r.Epoch != 6 {
+				t.Fatalf("the older leader was answered %+v", r)
+			}
+			if len(stopped) != 1 || stopped[0] != "web" {
+				t.Fatalf("stopped %v: what the stale order started must not stay up", stopped)
+			}
+		})
+	}
+}

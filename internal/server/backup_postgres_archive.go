@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -29,8 +30,15 @@ const (
 	pgRecoveryWait  = 30 * time.Minute
 	pgInSpool       = `cd "${PGDATA:-` + pgDefaultDataDir + `}/deplo-wal" 2>/dev/null || exit 0; `
 	pgRestoreLogDir = "deplo-wal-restore"
-	pgHelperScript  = `set -e; o=$(stat -c %u:%g "$D"); r="$D/` + pgRestoreLogDir + `"; case "$1" in ` +
-		`base) find "$D" -mindepth 1 -delete; tar -xf - -C "$D"; rm -rf "$D/deplo-wal"; chown -R "$o" "$D";; ` +
+	pgStaged        = ".deplo-restore"
+	// base unpacks beside the data, swap replaces it once the artifact is proven, drop leaves it as it was.
+	// ponytail: the old data stays until the swap, so a restore over a full database needs room for both.
+	pgHelperScript = `set -e; o=$(stat -c %u:%g "$D"); r="$D/` + pgRestoreLogDir + `"; s="$D/` + pgStaged + `"; case "$1" in ` +
+		`base) rm -rf "$s"; mkdir "$s"; tar -xf - -C "$s";; ` +
+		`swap) find "$D" -mindepth 1 -maxdepth 1 ! -name ` + pgStaged + ` -exec rm -rf {} +; ` +
+		`for f in "$s"/* "$s"/.[!.]* "$s"/..?*; do if [ -e "$f" ]; then mv "$f" "$D"/; fi; done; ` +
+		`rmdir "$s"; rm -rf "$D/deplo-wal"; chown -R "$o" "$D";; ` +
+		`drop) rm -rf "$s";; ` +
 		`log) mkdir -p "$r"; tar -xf - -C "$r"; chown -R "$o" "$r";; ` +
 		`replay) touch "$D/recovery.signal"; echo "restore_command = 'cp $r/%f %p'" >> "$D/postgresql.auto.conf"; ` +
 		`chown "$o" "$D/recovery.signal" "$D/postgresql.auto.conf";; esac`
@@ -185,12 +193,21 @@ func (s *Service) restorePostgresBase(ctx context.Context, d *pb.DatabaseDescrip
 		e.result(false, "stop the database: "+combineErr(serr, r.Stderr))
 		return
 	}
-	if err := helper("base", base); err != nil {
-		e.result(false, "unpack the base backup: "+err.Error())
+	// Nothing the database holds is removed until the whole artifact is unpacked and proven.
+	uerr := helper("base", base)
+	if uerr != nil {
+		uerr = errors.New("unpack the base backup: " + uerr.Error())
+	} else if verr := src.verify(); verr != nil {
+		uerr = errors.New(statusMessage(verr))
+	}
+	if uerr != nil {
+		_ = helper("drop", nil)
+		_, _ = dockercli.Run(ctx, 2*time.Minute, "start", c)
+		e.result(false, uerr.Error()+" (the database keeps the data it had)")
 		return
 	}
-	if verr := src.verify(); verr != nil {
-		e.result(false, statusMessage(verr))
+	if err := helper("swap", nil); err != nil {
+		e.result(false, "replace the data directory: "+err.Error())
 		return
 	}
 	for _, l := range logs {

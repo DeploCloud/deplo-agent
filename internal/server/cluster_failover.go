@@ -16,16 +16,18 @@ import (
 // bundleJSON reads a message a newer control plane wrote: a field this agent does not know is skipped.
 var bundleJSON = protojson.UnmarshalOptions{DiscardUnknown: true}
 
-// runFailoverDeploy runs one deploy request to its result; a var so a test can answer without Docker.
-var runFailoverDeploy = func(s *Service, ctx context.Context, req *pb.DeployRequest, e *emitter) {
-	s.runDeploy(ctx, req, e)
+// runFailoverDeploy runs one deploy request to its result, and runFailoverRestore restores one backup the way
+// the Restore RPC does; vars so a test can answer without Docker.
+var (
+	runFailoverDeploy  func(s *Service, ctx context.Context, req *pb.DeployRequest, e *emitter)
+	runFailoverRestore func(s *Service, ctx context.Context, req *pb.RestoreRequest) error
+)
+
+// Set here, not in the declarations: a deploy and a restore both read the lease guard that starts them.
+func init() {
+	runFailoverDeploy = func(s *Service, ctx context.Context, req *pb.DeployRequest, e *emitter) { s.runDeploy(ctx, req, e) }
+	runFailoverRestore = restoreLikeTheRPC
 }
-
-// runFailoverRestore restores one backup the way the Restore RPC does; a var so a test can answer without Docker.
-var runFailoverRestore func(s *Service, ctx context.Context, req *pb.RestoreRequest) error
-
-// Set here, not in the declaration: a restore reroutes, and Reroute reads the lease guard that starts this.
-func init() { runFailoverRestore = restoreLikeTheRPC }
 
 func restoreLikeTheRPC(s *Service, ctx context.Context, req *pb.RestoreRequest) error {
 	src, err := sourceFromRestore(s, req)
@@ -74,8 +76,18 @@ func failoverRestore(st *lease.Start) (*pb.RestoreRequest, error) {
 	if err := bundleJSON.Unmarshal(st.Restore.Request, req); err != nil {
 		return nil, fmt.Errorf("the bundle's restore is unreadable: %w", err)
 	}
+	// The bundle is for one stack: its restore writes into that stack's data and nobody else's.
+	other := errors.New("the bundle's restore is aimed at another stack")
 	switch req.GetKind() {
-	case pb.BackupKind_BACKUP_KIND_DATABASE, pb.BackupKind_BACKUP_KIND_PROJECT:
+	case pb.BackupKind_BACKUP_KIND_DATABASE:
+		if id := req.GetDatabase().GetProjectId(); id != "" && st.ProjectID != "" && id != st.ProjectID {
+			return nil, other
+		}
+		return req, nil
+	case pb.BackupKind_BACKUP_KIND_PROJECT:
+		if req.GetProject().GetSlug() != st.Slug {
+			return nil, other
+		}
 		return req, nil
 	}
 	return nil, errors.New("this server cannot restore that kind of backup on a failover")
@@ -122,6 +134,10 @@ func (s *Service) startFromBundle(ctx context.Context, st *lease.Start) error {
 			fmt.Fprintf(os.Stderr, "deplo-agent: failover restore of %s failed: %v\n", st.Slug, err)
 			return err
 		}
+	}
+	// Ended meanwhile (a newer leader spoke during the restore): nothing is brought up.
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	if err := promoteStandby(ctx, st); err != nil {
 		return err

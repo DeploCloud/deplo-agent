@@ -91,7 +91,7 @@ func (p *leftPair) told(stores ...lease.Store) {
 }
 
 func (p *leftPair) save() (*lease.Saved, error) {
-	return p.a.keepLeftBehind(context.Background(), p.entry, p.keep, "srv_a", func() bool { return true })
+	return p.a.keepLeft(context.Background(), p.entry, p.keep, "srv_a", func() bool { return true })
 }
 
 // stored is every file under b's store but its own marker.
@@ -211,9 +211,9 @@ func TestLeft_isRefusedUnlessThisMembersLeaderNamedThatSenderAndThatFile(t *test
 
 func stubTries(t *testing.T) {
 	t.Helper()
-	tries, wait := leftBehindTries, leftBehindWait
-	leftBehindTries, leftBehindWait = 1, time.Millisecond
-	t.Cleanup(func() { leftBehindTries, leftBehindWait = tries, wait })
+	tries, wait := leftTries, leftWait
+	leftTries, leftWait = 1, time.Millisecond
+	t.Cleanup(func() { leftTries, leftWait = tries, wait })
 }
 
 func TestLeft_aMemberNeverSendsToAServerItsLeaderGaveNoCertificateFor(t *testing.T) {
@@ -254,7 +254,7 @@ func TestLeft_anArchiveCutShortOrSentInTheClearIsNotKept(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			p := newLeftPair(t)
 			p.told(lease.Store{From: p.fpA, ObjectKey: leftKey})
-			stubLeftBehind(t, func(_ *pb.BackupRequest, out io.Writer) (*pb.BackupResult, error) { return write(out) })
+			stubLeft(t, func(_ *pb.BackupRequest, out io.Writer) (*pb.BackupResult, error) { return write(out) })
 			if saved, err := p.save(); err == nil || saved != nil {
 				t.Fatalf("saved %+v", saved)
 			}

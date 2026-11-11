@@ -21,11 +21,14 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/link"
 )
 
+// bridgeStubbed says a test already answers for Docker's bridge.
+var bridgeStubbed bool
+
 func stubBridge(t *testing.T, gw string) {
 	t.Helper()
-	old := bridgeGateway
-	bridgeGateway = func(context.Context) string { return gw }
-	t.Cleanup(func() { bridgeGateway = old })
+	old, was := bridgeGateway, bridgeStubbed
+	bridgeGateway, bridgeStubbed = func(context.Context) string { return gw }, true
+	t.Cleanup(func() { bridgeGateway, bridgeStubbed = old, was })
 }
 
 func envOf(t *testing.T, dir, role string) map[string]string {
@@ -75,6 +78,32 @@ func TestInstallCluster_relayAnswersOnlyLoopbackAndTheProxysGateway(t *testing.T
 	for _, e := range []map[string]string{relay, leader} {
 		if !strings.HasSuffix(e["DEPLO_CLUSTER_CERT"], "agent.crt") || !strings.HasSuffix(e["DEPLO_CLUSTER_CA"], "ca.crt") {
 			t.Fatalf("a cluster process was not given the agent's certificate: %v", e)
+		}
+	}
+}
+
+// The agent's own environment may hold what an operator exported for it; a cluster process is handed none of it.
+func TestInstallCluster_aClusterProcessIsNotHandedTheAgentsEnvironment(t *testing.T) {
+	stubBridge(t, "")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "not for the leader")
+	t.Setenv("DEPLO_AGENT_BOOTSTRAP_TOKEN", "not for the leader either")
+	t.Setenv("HTTPS_PROXY", "http://proxy.example:3128")
+	s, dir := clusterHostFor(t)
+	// Like the stand-in binary of the other tests, but it writes down everything it was started with.
+	tells := strings.Replace(fakeCluster, "env | grep -E '^DEPLO_(CLUSTER|RELAY)_' | sort", "env | sort", 1)
+	stubDownload(t, []byte(tells), nil)
+	if _, err := s.InstallCluster(context.Background(), installReq("0.1.0", tells, true)); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "both to start", func() bool { return startsOf(dir) == 2 })
+	for _, role := range []string{"leader", "relay"} {
+		env := envOf(t, dir, role)
+		if env["AWS_SECRET_ACCESS_KEY"] != "" || env["DEPLO_AGENT_BOOTSTRAP_TOKEN"] != "" {
+			t.Fatalf("the %s was handed the agent's environment: %v", role, env)
+		}
+		// What it needs to run and to dial out stays.
+		if env["PATH"] == "" || env["HTTPS_PROXY"] != "http://proxy.example:3128" || env["DEPLO_CLUSTER_CERT"] == "" {
+			t.Fatalf("the %s lacks what it runs with: %v", role, env)
 		}
 	}
 }

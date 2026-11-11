@@ -23,6 +23,8 @@ const (
 	restartTick      = 5 * time.Second
 	restartEventsCap = 200
 	restartRuleExt   = ".restart.json"
+	// Not a rule: the name must not end in restartRuleExt.
+	restartEventsFile = "restart-events.jsonl"
 )
 
 // restartWatcher probes every app that carries a restart rule, with or without the control plane.
@@ -88,6 +90,15 @@ func (w *restartWatcher) load() {
 	matches, _ := filepath.Glob(filepath.Join(w.dir, "*"+restartRuleExt))
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	defer w.keepEvents()
+	if raw, err := os.ReadFile(w.eventsPath()); err == nil {
+		for _, line := range strings.Split(string(raw), "\n") {
+			ev := &pb.RestartEvent{}
+			if line != "" && protojson.Unmarshal([]byte(line), ev) == nil {
+				w.events = append(w.events, ev)
+			}
+		}
+	}
 	for _, m := range matches {
 		slug := strings.TrimSuffix(filepath.Base(m), restartRuleExt)
 		raw, err := os.ReadFile(m)
@@ -99,6 +110,9 @@ func (w *restartWatcher) load() {
 			continue
 		}
 		w.states[slug] = newRestartState(rule)
+		// The pause was in the memory of the agent that ended: restarting is back on, and Deplo is told.
+		// ponytail: the buffer keeps the last 200 events, so a server with more Apps than that tells of the newest only.
+		w.emit(&pb.RestartEvent{Kind: pb.RestartEvent_KIND_RESUMED, Slug: slug, Reason: "agent"})
 	}
 }
 
@@ -168,6 +182,26 @@ func (w *restartWatcher) emit(ev *pb.RestartEvent) {
 	if len(w.events) > restartEventsCap {
 		w.events = w.events[len(w.events)-restartEventsCap:]
 	}
+	w.keepEvents()
+}
+
+func (w *restartWatcher) eventsPath() string { return filepath.Join(w.dir, restartEventsFile) }
+
+// keepEvents writes what no frame has taken yet, so it outlives this process. It needs w.mu held.
+func (w *restartWatcher) keepEvents() {
+	if len(w.events) == 0 {
+		_ = os.Remove(w.eventsPath())
+		return
+	}
+	var buf []byte
+	for _, ev := range w.events {
+		if raw, err := protojson.Marshal(ev); err == nil {
+			buf = append(append(buf, raw...), '\n')
+		}
+	}
+	if err := writeFileAtomic(w.eventsPath(), buf, 0o600); err != nil {
+		log.Printf("deplo-agent: could not keep %d restart events for Deplo: %v", len(w.events), err)
+	}
 }
 
 // drain hands the buffered events to a metrics frame; give puts them back when the frame did not go out.
@@ -176,6 +210,9 @@ func (w *restartWatcher) drain() []*pb.RestartEvent {
 	defer w.mu.Unlock()
 	out := w.events
 	w.events = nil
+	if len(out) > 0 {
+		w.keepEvents()
+	}
 	return out
 }
 
@@ -189,6 +226,7 @@ func (w *restartWatcher) give(evs []*pb.RestartEvent) {
 	if len(w.events) > restartEventsCap {
 		w.events = w.events[len(w.events)-restartEventsCap:]
 	}
+	w.keepEvents()
 }
 
 // answerFor is what the last probe said about one container: "starting", "answering" or
@@ -201,6 +239,22 @@ func (w *restartWatcher) answerFor(slug, container string) string {
 		return ""
 	}
 	return st.answer[container]
+}
+
+// stampAnswers puts answerFor on a metrics frame, whose containers carry a name and no slug.
+func (w *restartWatcher) stampAnswers(stats []*pb.ContainerStat) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for slug, st := range w.states {
+		if w.hold[slug] > 0 {
+			continue
+		}
+		for _, c := range stats {
+			if a := st.answer[c.GetName()]; a != "" {
+				c.Answer = a
+			}
+		}
+	}
 }
 
 func (w *restartWatcher) slugs() []string {
@@ -272,6 +326,14 @@ func (w *restartWatcher) check(ctx context.Context, slug string, st *restartStat
 	}
 	ok := w.probe(ctx, st.rule, c)
 	w.mu.Lock()
+	// A container that is gone is never asked about again: its entry goes once its time has passed.
+	if len(w.due) > 1024 {
+		for id, at := range w.due {
+			if !now.Before(at) {
+				delete(w.due, id)
+			}
+		}
+	}
 	w.due[c.id] = now.Add(interval)
 	v := st.record(now, c.id, c.startedAt, ok)
 	st.note(now, c, ok, v.restart)
@@ -303,15 +365,16 @@ func probeContainer(ctx context.Context, rule *pb.RestartRule, c readySample) bo
 		return true
 	}
 	return httpAnswers(ctx, net.JoinHostPort(c.ip, strconv.Itoa(int(rule.GetPort()))), rule.GetPath(),
-		time.Duration(max(rule.GetTimeoutS(), 1))*time.Second)
+		time.Duration(max(rule.GetTimeoutS(), 1))*time.Second, rule.GetFailOnErrorStatus())
 }
 
 var aliveClient = &http.Client{
 	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 }
 
-// httpAnswers: any HTTP status is an answer; a refused connection or a timeout is not.
-func httpAnswers(ctx context.Context, addr, path string, timeout time.Duration) bool {
+// httpAnswers: a refused connection or a timeout is no answer. Any HTTP status is one, unless strict: the App's
+// own check fails from 400 up.
+func httpAnswers(ctx context.Context, addr, path string, timeout time.Duration, strict bool) bool {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(cctx, http.MethodGet, "http://"+addr+path, nil)
@@ -324,7 +387,7 @@ func httpAnswers(ctx context.Context, addr, path string, timeout time.Duration) 
 		return false
 	}
 	_ = resp.Body.Close()
-	return true
+	return !strict || resp.StatusCode < 400
 }
 
 func restartContainer(ctx context.Context, id string) error {

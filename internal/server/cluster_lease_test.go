@@ -305,3 +305,30 @@ func TestLease_aProbeToAMemberWithNoLeaseStartsNone(t *testing.T) {
 		t.Fatalf("an older epoch was taken after the probe: %+v", r)
 	}
 }
+
+// A slug from the leader ends up in a file path. An order naming one that is not a slug is refused whole,
+// before any of it is looked at.
+func TestLease_anOrderNamingSomethingThatIsNoSlugIsRefused(t *testing.T) {
+	f := newGuard(t)
+	var looked []string
+	f.g.has = func(slug string) bool { looked = append(looked, slug); return true }
+	f.g.start = func(context.Context, *lease.Start) error { t.Error("a stack was started"); return nil }
+	for name, o := range map[string]lease.Order{
+		"a placement entry": {Cluster: "clu_1", Member: "srv_a", Epoch: 2, Placement: []lease.Entry{{Kind: "app", ID: "p", Member: "srv_a", Slug: "../../etc", SingleWriter: true}}},
+		"a start": {Cluster: "clu_1", Member: "srv_a", Epoch: 2, Placement: []lease.Entry{{Kind: "app", ID: "p", Member: "srv_a", Slug: "web"}},
+			Start: &lease.Start{Slug: "web/../../x", ComposeYAML: "services: {}"}},
+	} {
+		raw, _ := json.Marshal(o)
+		if got := serveOrder(t, f.g, wire.RoleLeader, string(raw)); !strings.Contains(got, "not a stack") || strings.Contains(got, `"ok":true`) {
+			t.Errorf("%s: answered %q", name, got)
+		}
+	}
+	if _, ok := f.g.Admit("clu_1", 1); !ok || len(looked) != 0 {
+		t.Fatalf("a refused order was applied: its epoch was taken (%v), looked at %v", !ok, looked)
+	}
+	f.clk.Add(2 * time.Minute)
+	f.g.Check(context.Background())
+	if len(f.fenced) != 0 || len(looked) != 0 {
+		t.Fatalf("a refused order reached the disk: fenced %v, looked at %v", f.fenced, looked)
+	}
+}

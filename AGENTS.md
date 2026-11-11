@@ -17,8 +17,10 @@ control plane never touches a Docker socket; everything host-coupled arrives her
 - `internal/dockercli/`, `internal/hostmetrics/`, `internal/hostinfo/`, `internal/s3client/`,
   `internal/safepath/`, `internal/bootstrap/`, `internal/netguard/` - leaf helpers.
 - `internal/link/` - the agent link: the WebSocket the agent opens to its panel and serves gRPC on.
-- `internal/clusterlink/` - a cluster party's side of the relay (ADR-0044): dials out, never listens. Its
-  `wire/` is a contract with `deplo-cluster` `internal/wire`; keep the two in step.
+- `internal/clusterlink/` - a cluster party's side of the relay (ADR-0044): dials out, never listens.
+  **Three hand-kept copies** live here and in `deplo-cluster`: `party.go` (`internal/party`), `wire/`
+  (`internal/wire`) and `lease/` (`internal/lease`). Change both sides in one go, new fields with
+  `omitempty`; `copies_test.go` fails when they drift and a `deplo-cluster` checkout sits beside this repo.
 - `internal/capture/` - the deployment screenshot browser (see below).
 - `proto/agent.proto` - the wire contract, owned here.
 - `gen/` - generated. Never hand-edit; `make proto` owns it.
@@ -82,9 +84,13 @@ make vet         # go vet ./...
 make fmt-check   # gofmt + Prettier, what CI runs
 ```
 
-**`go test ./...` drives real Docker on this host** - it pulls images, creates volumes and
-containers, and the `TestE2E_*` tests stand up real databases. Do not run it casually on a machine
-that also serves production. For a change that cannot alter behaviour, the verification is:
+**`go test ./...` reaches no Docker daemon unless you ask.** `internal/server` aims every docker call
+of its tests at a socket that does not exist, so the `TestE2E_*` tests skip and a test that forgot its
+fake fails instead of touching a container. `DEPLO_AGENT_TEST_REAL_DOCKER=1` (CI sets it) turns the real
+daemon on: it pulls images, creates volumes and containers and stands up real databases. Never set it
+on a machine that also serves production. A new test that needs the daemon starts with
+`needsRealDocker(t)` and names what it creates `deplo-agent-test-*`, unique per run. For a change that
+cannot alter behaviour, the verification is:
 
 ```sh
 gofmt -l $(git ls-files '*.go')

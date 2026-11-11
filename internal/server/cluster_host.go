@@ -77,7 +77,7 @@ func (p *clusterProc) setUp(v bool) {
 
 func (s *Service) clusterDir() (string, error) {
 	if s.agentDir == "" {
-		return "", status.Error(codes.FailedPrecondition, "this agent has no data directory to keep the cluster leader in")
+		return "", status.Error(codes.FailedPrecondition, "this server agent has no data directory to keep the cluster leader in")
 	}
 	return filepath.Join(s.agentDir, "cluster"), nil
 }
@@ -234,6 +234,10 @@ func (s *Service) InstallCluster(ctx context.Context, req *pb.InstallClusterRequ
 	if err != nil {
 		return nil, err
 	}
+	// One that does not read as a version cannot be compared, and the downgrade guard would let it through.
+	if !semverPattern.MatchString(strings.TrimSpace(req.GetVersion())) {
+		return nil, status.Errorf(codes.InvalidArgument, "%q is not a version", req.GetVersion())
+	}
 	bin := req.GetBinaries()[runtime.GOARCH]
 	if bin == nil || bin.GetUrl() == "" || bin.GetSha256() == "" {
 		return nil, status.Errorf(codes.FailedPrecondition,
@@ -264,10 +268,16 @@ func (s *Service) InstallCluster(ctx context.Context, req *pb.InstallClusterRequ
 	h.stop()
 	if err := os.Rename(staged, exe); err != nil {
 		os.Remove(staged)
+		// The old binary is still there: a failed install never leaves the cluster without its leader.
+		if installed.Version != "" && statErr == nil {
+			h.start(dir, installed)
+		}
 		return nil, status.Errorf(codes.FailedPrecondition, "cannot install the cluster binary at %s: %v", exe, err)
 	}
 	raw, _ := json.Marshal(want)
-	if err := os.WriteFile(filepath.Join(dir, "state.json"), raw, 0o600); err != nil {
+	if err := writeFileAtomic(filepath.Join(dir, "state.json"), raw, 0o600); err != nil {
+		// The new binary is what is on disk now, so that is what runs.
+		h.start(dir, want)
 		return nil, status.Errorf(codes.Internal, "remember the cluster install: %v", err)
 	}
 	h.start(dir, want)

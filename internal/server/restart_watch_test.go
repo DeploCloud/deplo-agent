@@ -2,10 +2,12 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -58,7 +60,7 @@ func TestWatcherRestartsAHungApp(t *testing.T) {
 		t.Fatalf("restarted = %v", h.restarted)
 	}
 	evs := w.drain()
-	if len(evs) != 1 || evs[0].Kind != pb.RestartEvent_KIND_RESTARTED || evs[0].Slug != "web" || evs[0].UnansweredS != 60 {
+	if len(evs) != 1 || evs[0].Kind != pb.RestartEvent_KIND_RESTARTED || evs[0].Slug != "web" || evs[0].UnansweredS != 90 {
 		t.Fatalf("events = %v", evs)
 	}
 	h.alive = true
@@ -242,6 +244,41 @@ func TestWatcherKeepsItsRulesAcrossARestartOfTheAgent(t *testing.T) {
 	}
 }
 
+// The pause lives in the agent's memory. One that starts again restarts the App as before, so it says so:
+// Deplo would go on showing "restarts paused" for an App that is being restarted.
+func TestWatcherSaysRestartingIsBackOnWhenTheAgentStartsAgain(t *testing.T) {
+	h := &fakeHost{now: rt0.Add(10 * time.Minute), containers: []readySample{web(rt0)}}
+	w := newWatcherOn(t, h)
+	w.release("web", httpRule(), true)
+	w.drain()
+	again := newWatcherOn(t, h)
+	again.dir = w.dir
+	again.load()
+	evs := again.drain()
+	if len(evs) != 1 || evs[0].Kind != pb.RestartEvent_KIND_RESUMED || evs[0].Slug != "web" || evs[0].Reason != "agent" {
+		t.Fatalf("events after the agent started again = %v", evs)
+	}
+}
+
+// A container that is gone is never checked again: what the watcher remembers of it goes too.
+func TestWatcherForgetsContainersThatAreGone(t *testing.T) {
+	h := &fakeHost{now: rt0.Add(10 * time.Minute), alive: true}
+	w := newWatcherOn(t, h)
+	w.release("web", httpRule(), true)
+	for i := 0; i < 3000; i++ {
+		c := web(rt0)
+		c.id = fmt.Sprintf("c%d", i)
+		h.containers = []readySample{c}
+		runTicks(w, h, 1)
+	}
+	w.mu.Lock()
+	n := len(w.due)
+	w.mu.Unlock()
+	if n > 1100 {
+		t.Fatalf("the watcher remembers %d containers after 3000 came and went", n)
+	}
+}
+
 func TestWatcherForgetsADestroyedApp(t *testing.T) {
 	h := &fakeHost{now: rt0, containers: nil}
 	w := newWatcherOn(t, h)
@@ -272,8 +309,27 @@ func TestEventBufferIsBoundedAndKeptWhenAFrameFails(t *testing.T) {
 func TestHttpAnswersCountsAnyStatus(t *testing.T) {
 	for _, code := range []int{200, 404, 500} {
 		srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) { rw.WriteHeader(code) }))
-		if !httpAnswers(context.Background(), strings.TrimPrefix(srv.URL, "http://"), "/", time.Second) {
+		if !httpAnswers(context.Background(), strings.TrimPrefix(srv.URL, "http://"), "/", time.Second, false) {
 			t.Errorf("status %d should count as alive", code)
+		}
+		srv.Close()
+	}
+}
+
+// The default GET / takes any status; a check the App's owner set means what it says.
+func TestProbe_anAppsOwnHttpCheckFailsFromStatus400(t *testing.T) {
+	for code, alive := range map[int]bool{200: true, 302: true, 404: false, 503: false} {
+		srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) { rw.WriteHeader(code) }))
+		host, port, _ := net.SplitHostPort(strings.TrimPrefix(srv.URL, "http://"))
+		n, _ := strconv.Atoi(port)
+		rule := &pb.RestartRule{Probe: pb.RestartRule_PROBE_HTTP, Port: int32(n), Path: "/health", TimeoutS: 1}
+		c := readySample{ip: host}
+		if !probeContainer(context.Background(), rule, c) {
+			t.Errorf("the default check took status %d for dead", code)
+		}
+		rule.FailOnErrorStatus = true
+		if got := probeContainer(context.Background(), rule, c); got != alive {
+			t.Errorf("the App's own check on status %d: alive = %v, want %v", code, got, alive)
 		}
 		srv.Close()
 	}
@@ -283,7 +339,7 @@ func TestHttpAnswersFailsOnRefusedAndOnTimeout(t *testing.T) {
 	l, _ := net.Listen("tcp", "127.0.0.1:0")
 	addr := l.Addr().String()
 	l.Close()
-	if httpAnswers(context.Background(), addr, "/", time.Second) {
+	if httpAnswers(context.Background(), addr, "/", time.Second, false) {
 		t.Fatal("a refused connection is not an answer")
 	}
 	var hit atomic.Bool
@@ -293,7 +349,7 @@ func TestHttpAnswersFailsOnRefusedAndOnTimeout(t *testing.T) {
 	}))
 	defer slow.Close()
 	start := time.Now()
-	if httpAnswers(context.Background(), strings.TrimPrefix(slow.URL, "http://"), "/", 200*time.Millisecond) {
+	if httpAnswers(context.Background(), strings.TrimPrefix(slow.URL, "http://"), "/", 200*time.Millisecond, false) {
 		t.Fatal("a hang is not an answer")
 	}
 	if !hit.Load() || time.Since(start) > 2*time.Second {
@@ -317,5 +373,27 @@ func TestUsableRule(t *testing.T) {
 	}
 	if !usableRule(httpRule()) {
 		t.Fatal("a full http rule is usable")
+	}
+}
+
+// Deplo may be away for a night: what the agent restarted meanwhile must outlive a restart of the agent itself.
+func TestWatcherKeepsUnsentEventsAcrossARestartOfTheAgent(t *testing.T) {
+	h := &fakeHost{now: rt0.Add(10 * time.Minute), containers: []readySample{web(rt0)}}
+	w := newWatcherOn(t, h)
+	w.release("web", httpRule(), true)
+	runTicks(w, h, 3)
+	again := newWatcherOn(t, h)
+	again.dir = w.dir
+	again.load()
+	evs := again.drain()
+	if len(evs) != 2 || evs[0].Kind != pb.RestartEvent_KIND_RESTARTED || evs[0].Slug != "web" || evs[1].Kind != pb.RestartEvent_KIND_RESUMED {
+		t.Fatalf("events after the agent started again = %v", evs)
+	}
+	// What a frame took is not told twice.
+	third := newWatcherOn(t, h)
+	third.dir = w.dir
+	third.load()
+	if evs := third.drain(); len(evs) != 1 || evs[0].Kind != pb.RestartEvent_KIND_RESUMED {
+		t.Fatalf("events a frame already took came back: %v", evs)
 	}
 }

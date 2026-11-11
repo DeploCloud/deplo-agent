@@ -141,7 +141,7 @@ func (g *leaseGuard) retryKept(cluster string) {
 // saveKept archives one kept stack, unless an earlier try already did, then removes it with its volumes. It
 // says whether nothing of it is kept any more; a failure is written on `was`.
 func (g *leaseGuard) saveKept(cluster, me string, e lease.Entry, k lease.Keep, late map[string]lease.Saved, was *lease.Kept) bool {
-	ctx, cancel := context.WithTimeout(context.Background(), leftBehindTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), leftTimeout)
 	defer cancel()
 	still := func() bool { return g.movedAway(cluster, e.Slug) }
 	if _, written := late[e.Slug]; !written {
