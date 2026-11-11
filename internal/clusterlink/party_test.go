@@ -6,6 +6,10 @@ import (
 	"go/parser"
 	"go/token"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +18,7 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/clusterlink/testpki"
 	"github.com/DeploCloud/deplo-agent/internal/clusterlink/testrelay"
 	"github.com/DeploCloud/deplo-agent/internal/clusterlink/wire"
+	"github.com/DeploCloud/deplo-agent/internal/link"
 )
 
 func runParty(t *testing.T, relay string, id *wire.Identity, role wire.Role, accept func(wire.Party, net.Conn)) *Party {
@@ -142,5 +147,42 @@ func TestClusterLinkNeverListens(t *testing.T) {
 				return true
 			})
 		}
+	}
+}
+
+// A relay answers behind a proxy whose certificate nobody issued. A party checks that certificate unless it
+// was handed the agent's way of reaching such an address, where the mutual TLS inside is the proof (ADR-0040).
+func TestPartyChecksTheRelaysCertificateUnlessGivenATransport(t *testing.T) {
+	ca := testpki.New(t)
+	a := ca.Leaf(t, "a")
+	relay := testrelay.New(t, ca.Leaf(t, "relay"), wire.Party{Fingerprint: a.Fingerprint, Role: wire.RoleMember})
+	back, err := url.Parse(relay.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := httptest.NewTLSServer(httputil.NewSingleHostReverseProxy(back))
+	t.Cleanup(front.Close)
+	run := func(tr func() *http.Transport) *Party {
+		p := New(Config{
+			Role:      wire.RoleMember,
+			Identity:  func() (*wire.Identity, error) { return a, nil },
+			Relays:    func() []string { return []string{front.URL} },
+			Transport: tr,
+		})
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		go p.Run(ctx)
+		return p
+	}
+	strict, told := run(nil), run(link.Transport)
+	deadline := time.Now().Add(5 * time.Second)
+	for told.Connected() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if told.Connected() != 1 {
+		t.Fatal("the party did not reach the relay through the proxy")
+	}
+	if strict.Connected() != 0 {
+		t.Fatal("a party with no transport accepted a certificate nobody issued")
 	}
 }

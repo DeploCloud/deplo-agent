@@ -225,8 +225,9 @@ func (s *Service) startMember(m *clusterMember, st memberState) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	p := clusterlink.New(clusterlink.Config{
-		Role:     wire.RoleMember,
-		Identity: s.clusterIdentity,
+		Role:      wire.RoleMember,
+		Identity:  s.clusterIdentity,
+		Transport: link.Transport,
 		Relays: func() []string {
 			m.mu.Lock()
 			extra := m.st.Relays

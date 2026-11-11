@@ -37,7 +37,9 @@ type Config struct {
 	Relays func() []string
 	// Accept receives each stream a peer opened to this party, after mutual TLS pinned to that peer.
 	Accept func(from wire.Party, c net.Conn)
-	Logf   func(format string, args ...any)
+	// Transport reaches a relay's address; without one the certificate it answers with is checked.
+	Transport func() *http.Transport
+	Logf      func(format string, args ...any)
 }
 
 // Party keeps one connection to every relay it knows.
@@ -126,13 +128,12 @@ func (p *Party) hold(ctx context.Context, relay string) error {
 	}
 	dctx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
+	var hc *http.Client
+	if p.cfg.Transport != nil {
+		hc = &http.Client{Transport: p.cfg.Transport()}
+	}
 	ws, _, err := websocket.Dial(dctx, relay+wire.Path, &websocket.DialOptions{
-		HTTPClient: &http.Client{Transport: &http.Transport{
-			Proxy: http.ProxyFromEnvironment,
-			// Trust is the mutual TLS inside, never the outer certificate (ADR-0040).
-			TLSClientConfig:   &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12},
-			DisableKeepAlives: true,
-		}},
+		HTTPClient:   hc,
 		HTTPHeader:   http.Header{wire.CertHeader: {id.Fingerprint}, wire.RoleHeader: {string(p.cfg.Role)}},
 		Subprotocols: []string{wire.Subprotocol},
 	})

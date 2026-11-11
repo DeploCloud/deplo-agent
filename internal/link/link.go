@@ -291,6 +291,9 @@ func boundedRedirects(_ *http.Request, via []*http.Request) error {
 	return nil
 }
 
+// Transport reaches an address through proxies the agent does not trust: what runs inside proves itself (ADR-0040).
+func Transport() *http.Transport { return transport() }
+
 func transport() *http.Transport {
 	return &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
