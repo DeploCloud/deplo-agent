@@ -44,3 +44,52 @@ func TestMain_needsBothAddresses(t *testing.T) {
 		t.Fatalf("exit %d", code)
 	}
 }
+
+// A client that sends its request and closes its sending side still gets the answer.
+func TestJoin_aHalfClosedClientStillGetsItsAnswer(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	// The workload: reads the whole request, takes a moment, answers.
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		req, _ := io.ReadAll(c)
+		time.Sleep(100 * time.Millisecond)
+		c.Write([]byte("answer to " + string(req)))
+	}()
+	front, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer front.Close()
+	go func() {
+		c, err := front.Accept()
+		if err != nil {
+			return
+		}
+		up, err := net.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			c.Close()
+			return
+		}
+		Join(c, up)
+	}()
+	client, err := net.Dial("tcp", front.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	client.Write([]byte("ping"))
+	client.(*net.TCPConn).CloseWrite()
+	client.SetReadDeadline(time.Now().Add(3 * time.Second))
+	got, _ := io.ReadAll(client)
+	if string(got) != "answer to ping" {
+		t.Fatalf("the client read %q", got)
+	}
+}

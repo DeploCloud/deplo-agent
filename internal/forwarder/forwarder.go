@@ -44,20 +44,22 @@ func Relay(c net.Conn, socket string) {
 	Join(c, up)
 }
 
-// Join copies both ways and closes both ends when one direction finishes.
+// Join copies both ways until both directions are done. A side that only stopped sending still gets its answer:
+// the end of one direction closes the other end's sending side, and both ends only when that cannot be done.
 func Join(a, b net.Conn) {
-	done := make(chan struct{}, 2)
+	done := make(chan bool, 2)
 	cp := func(dst, src net.Conn) {
 		_, _ = io.Copy(dst, src)
-		if cw, ok := dst.(interface{ CloseWrite() error }); ok {
-			_ = cw.CloseWrite()
-		}
-		done <- struct{}{}
+		cw, ok := dst.(interface{ CloseWrite() error })
+		done <- ok && cw.CloseWrite() == nil
 	}
 	go cp(a, b)
 	go cp(b, a)
+	if !<-done {
+		a.Close()
+		b.Close()
+	}
 	<-done
 	a.Close()
 	b.Close()
-	<-done
 }
