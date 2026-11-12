@@ -83,7 +83,7 @@ func TestValidateHostPath_refusesTheSystem(t *testing.T) {
 // Another panel's apps keep data under a home folder; the copy carries that, never the owner's keys.
 func TestValidateHostPath_homeFoldersButNotCredentials(t *testing.T) {
 	svc := &Service{stackDir: "/data/stacks", dataBase: "/data"}
-	for _, good := range []string{"/home/ubuntu/app-data", "/home/deploy/apps/web/uploads", "/home/ubuntu/.local/share/app"} {
+	for _, good := range []string{"/home/acme/app-data", "/home/deploy/apps/web/uploads", "/home/acme/.local/share/app"} {
 		if _, err := svc.validateHostPath(good); err != nil {
 			t.Errorf("validateHostPath(%q) should be allowed: %v", good, err)
 		}
