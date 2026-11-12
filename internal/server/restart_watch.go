@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
@@ -399,4 +400,14 @@ func restartContainer(ctx context.Context, id string) error {
 		return fmt.Errorf("%s", firstLine(res.Stderr))
 	}
 	return nil
+}
+
+// ruleOnObservedPort: an App seen listening elsewhere is routed there by Deplo, so a check on its routed port follows.
+func ruleOnObservedPort(rule *pb.RestartRule, readyPort, observed int32) *pb.RestartRule {
+	if rule.GetProbe() != pb.RestartRule_PROBE_HTTP || observed <= 0 || rule.GetPort() != readyPort {
+		return rule
+	}
+	moved := proto.Clone(rule).(*pb.RestartRule)
+	moved.Port = observed
+	return moved
 }

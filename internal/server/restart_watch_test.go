@@ -397,3 +397,22 @@ func TestWatcherKeepsUnsentEventsAcrossARestartOfTheAgent(t *testing.T) {
 		t.Fatalf("events a frame already took came back: %v", evs)
 	}
 }
+
+// Deplo moves the App's traffic to the port it was seen on, so the default check follows it there too.
+func TestRuleFollowsTheObservedPort(t *testing.T) {
+	rule := &pb.RestartRule{Probe: pb.RestartRule_PROBE_HTTP, Port: 4173, Path: "/"}
+	if got := ruleOnObservedPort(rule, 4173, 80); got.GetPort() != 80 || rule.GetPort() != 4173 {
+		t.Fatalf("got port %d, the request's rule %d", got.GetPort(), rule.GetPort())
+	}
+	own := &pb.RestartRule{Probe: pb.RestartRule_PROBE_HTTP, Port: 9000, Path: "/health"}
+	if ruleOnObservedPort(own, 4173, 80).GetPort() != 9000 {
+		t.Fatal("a check on its own port stays there")
+	}
+	if ruleOnObservedPort(rule, 4173, 0) != rule || ruleOnObservedPort(nil, 4173, 80) != nil {
+		t.Fatal("nothing observed, nothing changes")
+	}
+	docker := &pb.RestartRule{Probe: pb.RestartRule_PROBE_DOCKER_HEALTH}
+	if ruleOnObservedPort(docker, 4173, 80) != docker {
+		t.Fatal("a command check has no port")
+	}
+}

@@ -61,16 +61,16 @@ func (s *Service) runDeployFrom(ctx context.Context, req *pb.DeployRequest, cont
 	if slug := req.GetSlug(); validateSlug(slug) == nil && !req.GetBuildOnly() {
 		w := s.restartWatch()
 		w.holdFor(slug)
-		send, deployed := e.send, false
+		send, deployed, observed := e.send, false, int32(0)
 		e.send = func(ev *pb.DeployEvent) error {
 			if r := ev.GetResult(); r != nil {
-				deployed = r.GetReady()
+				deployed, observed = r.GetReady(), r.GetObservedPort()
 			}
 			return send(ev)
 		}
 		defer func() {
 			e.send = send
-			w.release(slug, req.GetRestartRule(), deployed)
+			w.release(slug, ruleOnObservedPort(req.GetRestartRule(), req.GetReady().GetPort(), observed), deployed)
 		}()
 	}
 	s.runDeployBody(ctx, req, contextFile, e)
