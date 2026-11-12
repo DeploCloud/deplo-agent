@@ -116,10 +116,11 @@ func within(t *testing.T, limit time.Duration, what string, ok func() bool) {
 
 // The real leader and relay, two real members, and nobody playing Deplo once the cluster is set up: a member
 // that dies has its database restored from its backup and then its App started on the other one, and removes its
-// own copies when it returns. Takes about 2 min of real time, the 81 s floor being the point.
+// own copies when it returns. The App is in the database's Environment, so it waits for the member's own fence
+// to be over (stoppedWithin) and goes after it. Takes about a minute of real time.
 func TestE2E_aMembersDeathMovesItsDatabaseAndAppWithNoControlPlaneInTheLoop(t *testing.T) {
 	if testing.Short() {
-		t.Skip("waits out the real 81 s failover floor")
+		t.Skip("waits out the real fence of a member")
 	}
 	bin := clusterBinary(t)
 	stubBridge(t, "")
@@ -262,7 +263,7 @@ func TestE2E_aMembersDeathMovesItsDatabaseAndAppWithNoControlPlaneInTheLoop(t *t
 	}
 	deplo.call(t, "leader.bundle.put", map[string]any{"cluster": "clu_1", "kind": "app", "id": "prj_1", "deploymentId": "dep_1",
 		"sealed": seal(bundle),
-		"meta":   map[string]any{"name": "web", "hasDomain": true, "createdAt": "2026-01-01T00:00:00Z"}}, nil)
+		"meta":   map[string]any{"name": "web", "hasDomain": true, "environment": "environ_1", "createdAt": "2026-01-01T00:00:00Z"}}, nil)
 	// The database is younger than the App and has no domain: it still goes first, restored from its bundle's backup.
 	dbBundle := map[string]any{"v": 1, "kind": "database", "workload": "db_1", "deploymentId": "rev_1",
 		"stack": map[string]any{"slug": dbSlug, "projectId": "db_1", "imageRef": "", "composeYaml": "services: {db: {image: postgres:17}}",
@@ -278,7 +279,7 @@ func TestE2E_aMembersDeathMovesItsDatabaseAndAppWithNoControlPlaneInTheLoop(t *t
 			"store":   map[string]any{"objectKey": "t1/database/db_1/left"},
 			"project": map[string]any{"slug": dbSlug, "volumeNames": []string{"deplo-" + dbSlug + "_" + dbSlug + "-data"}}}}}
 	deplo.call(t, "leader.bundle.put", map[string]any{"cluster": "clu_1", "kind": "database", "id": "db_1", "deploymentId": "rev_1",
-		"sealed": seal(dbBundle), "meta": map[string]any{"name": "main", "createdAt": "2026-06-01T00:00:00Z"}}, nil)
+		"sealed": seal(dbBundle), "meta": map[string]any{"name": "main", "environment": "environ_1", "createdAt": "2026-06-01T00:00:00Z"}}, nil)
 
 	held := func(s *Service) bool { _, ok := s.leaseGuard().Admit("clu_1", 1); return ok && leaseHeld(s, "clu_1") }
 	within(t, 30*time.Second, "every member to hold a lease", func() bool { return held(a) && held(b) && held(c) })
@@ -293,18 +294,20 @@ func TestE2E_aMembersDeathMovesItsDatabaseAndAppWithNoControlPlaneInTheLoop(t *t
 	m.mu.Unlock()
 	died := time.Now()
 
-	time.Sleep(70 * time.Second)
+	// The member said its fence is done this long after its last renewal, which came at most a second before.
+	floor := 5*time.Second + fenceTakes() - time.Second
+	time.Sleep(floor - time.Second)
 	stepsOn := func(s *Service) string {
 		mu.Lock()
 		defer mu.Unlock()
 		return strings.Join(steps[s], ", ")
 	}
 	if got := stepsOn(b); got != "" {
-		t.Fatalf("%q ran %s after the member died, before the 81 s floor", got, time.Since(died).Round(time.Second))
+		t.Fatalf("%q ran %s after the member died, before its fence was over", got, time.Since(died).Round(time.Second))
 	}
-	within(t, 60*time.Second, "the database and the App to start on the other member", func() bool { return len(startsOn(b)) == 2 })
-	if took := time.Since(died); took < 80*time.Second {
-		t.Fatalf("the work moved after %s, under the 81 s floor", took.Round(time.Second))
+	within(t, 30*time.Second, "the database and the App to start on the other member", func() bool { return len(startsOn(b)) == 2 })
+	if took := time.Since(died); took < floor {
+		t.Fatalf("the work moved after %s, before the member's fence was over", took.Round(time.Second))
 	}
 	// The database comes up, takes its backup, and only then does the App start.
 	if got := stepsOn(b); got != "deploy "+dbSlug+", restore "+dbSlug+", deploy web" {

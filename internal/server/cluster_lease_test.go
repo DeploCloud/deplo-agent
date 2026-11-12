@@ -96,6 +96,32 @@ func TestLease_fencesOnlyItsOwnSingleWriterWorkloadsAtSixtySeconds(t *testing.T)
 	}
 }
 
+// A leader that renews every second says how long its lease lives, and hears when this member's fence is done.
+func TestLease_fencesWhenTheLeaderSaysAndSaysWhenItHasStopped(t *testing.T) {
+	f := newGuard(t)
+	o := orderFor(3)
+	o.FenceSeconds = 5
+	r := f.g.Renew(o)
+	if want := int((5*time.Second + fenceTakes()).Seconds()); !r.OK || r.StoppedWithin != want {
+		t.Fatalf("renew: %+v, want stoppedWithin %d", r, want)
+	}
+	f.clk.Add(4*time.Second + 900*time.Millisecond)
+	f.g.Check(context.Background())
+	if len(f.fenced) != 0 || f.g.RanOut() {
+		t.Fatalf("fenced before 5 s: %v", f.fenced)
+	}
+	f.clk.Add(100 * time.Millisecond)
+	f.g.Check(context.Background())
+	if len(f.fenced) != 2 || !f.g.RanOut() {
+		t.Fatalf("fenced %v at 5 s", f.fenced)
+	}
+	// Never longer than an older leader's: a lease that would outlive the 60 s keeps those 60 s.
+	o.FenceSeconds = 3600
+	if r := f.g.Renew(o); r.StoppedWithin != int((lease.FenceAfter + fenceTakes()).Seconds()) {
+		t.Fatalf("stoppedWithin %d", r.StoppedWithin)
+	}
+}
+
 func TestLease_aRenewalStartsTheClockOverAndRearmsTheFence(t *testing.T) {
 	f := newGuard(t)
 	f.g.Renew(orderFor(1))
@@ -185,7 +211,7 @@ func serveOrder(t *testing.T, g *leaseGuard, from wire.Role, line string) string
 func TestLease_onlyTheLeaderSOrderIsAnswered(t *testing.T) {
 	f := newGuard(t)
 	raw, _ := json.Marshal(orderFor(2))
-	if got := serveOrder(t, f.g, wire.RoleLeader, string(raw)); got != `{"ok":true,"epoch":2}` {
+	if got := serveOrder(t, f.g, wire.RoleLeader, string(raw)); !strings.HasPrefix(got, `{"ok":true,"epoch":2,`) {
 		t.Fatalf("leader got %q", got)
 	}
 	if got := serveOrder(t, f.g, wire.RoleMember, string(raw)); got != "" {

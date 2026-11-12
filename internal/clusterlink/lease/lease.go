@@ -9,7 +9,8 @@ import (
 	"time"
 )
 
-// FenceAfter is how long a member lives without a renewal before it stops its single-writer workloads.
+// FenceAfter is how long a member lives without a renewal before it stops its single-writer workloads, when
+// the leader does not say (Order.FenceSeconds): an older one renews every 5 s.
 const FenceAfter = 60 * time.Second
 
 // ExtendFor is the longest a leader may extend a lease. A leader that takes over waits exactly this out before
@@ -48,6 +49,8 @@ type Order struct {
 	Placement []Entry `json:"placement"`
 	// ExtendSeconds adds to the time this lease lives without a renewal: a leader about to restart sends it.
 	ExtendSeconds int `json:"extendSeconds,omitempty"`
+	// FenceSeconds is how long the lease lives without the next renewal, at most FenceAfter; zero is FenceAfter.
+	FenceSeconds int `json:"fenceSeconds,omitempty"`
 	// Probe only asks whether this member takes the epoch. It renews nothing and changes nothing else, and a
 	// member that answers refuses every older epoch from then on.
 	Probe bool `json:"probe,omitempty"`
@@ -192,6 +195,9 @@ type Reply struct {
 	OK       bool   `json:"ok"`
 	Error    string `json:"error,omitempty"`
 	Epoch    uint64 `json:"epoch,omitempty"`
+	// StoppedWithin is how many seconds after this renewal the member has surely stopped its single-writer
+	// workloads, should it hear nothing more.
+	StoppedWithin int `json:"stoppedWithin,omitempty"`
 	// Returned answers an order's Return once this member is done removing what moved away.
 	Returned *Returned `json:"returned,omitempty"`
 	// Unplaced is the stacks the order placed on no member that this member still has, running or stopped by

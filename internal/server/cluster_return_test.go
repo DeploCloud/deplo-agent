@@ -501,7 +501,7 @@ func TestReturn_aMemberNamesWhatItStillHasOfTheStacksItsOrderPlacesNowhere(t *te
 	waiting.Placement[3].Member = ""
 	f.stopped["web"] = true
 	raw, _ := json.Marshal(waiting)
-	if got := serveOrder(t, f.g, wire.RoleLeader, string(raw)); got != `{"ok":true,"epoch":2,"unplaced":["db-main"]}` {
+	if got := serveOrder(t, f.g, wire.RoleLeader, string(raw)); got != `{"ok":true,"epoch":2,"stoppedWithin":79,"unplaced":["db-main"]}` {
 		t.Fatalf("the member answered %q", got)
 	}
 	f.g.work.Wait()
@@ -510,7 +510,7 @@ func TestReturn_aMemberNamesWhatItStillHasOfTheStacksItsOrderPlacesNowhere(t *te
 	f.clk.Add(61 * time.Second)
 	f.g.Check(context.Background())
 	f.stopped["db-main"] = true
-	if got := serveOrder(t, f.g, wire.RoleLeader, string(raw)); got != `{"ok":true,"epoch":2,"unplaced":["db-main"]}` {
+	if got := serveOrder(t, f.g, wire.RoleLeader, string(raw)); got != `{"ok":true,"epoch":2,"stoppedWithin":79,"unplaced":["db-main"]}` {
 		t.Fatalf("a member that stopped the stack itself answered %q", got)
 	}
 	f.g.work.Wait()
@@ -520,7 +520,7 @@ func TestReturn_aMemberNamesWhatItStillHasOfTheStacksItsOrderPlacesNowhere(t *te
 	spread.Placement = append(spread.Placement, lease.Entry{Kind: "app", ID: "prj_1", Replica: 1, Slug: "web"})
 	f.stopped["web"] = false
 	raw, _ = json.Marshal(spread)
-	if got := serveOrder(t, f.g, wire.RoleLeader, string(raw)); got != `{"ok":true,"epoch":2}` {
+	if got := serveOrder(t, f.g, wire.RoleLeader, string(raw)); got != `{"ok":true,"epoch":2,"stoppedWithin":79}` {
 		t.Fatalf("an order that places everything got %q", got)
 	}
 	f.g.work.Wait()

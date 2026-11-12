@@ -59,3 +59,14 @@ func TestAKeepAndAStoreAreTheLeadersWireShape(t *testing.T) {
 		t.Fatalf("%q %v", b.String(), err)
 	}
 }
+
+func TestFenceSecondsAndStoppedWithinAreTheLeadersWireNames(t *testing.T) {
+	o, err := ReadOrder(strings.NewReader(`{"cluster":"clu_1","epoch":4,"placement":[],"fenceSeconds":5}` + "\n"))
+	if err != nil || o.FenceSeconds != 5 {
+		t.Fatalf("%+v %v", o, err)
+	}
+	var b bytes.Buffer
+	if err := WriteReply(&b, Reply{OK: true, StoppedWithin: 21}); err != nil || b.String() != `{"ok":true,"stoppedWithin":21}`+"\n" {
+		t.Fatalf("%q %v", b.String(), err)
+	}
+}

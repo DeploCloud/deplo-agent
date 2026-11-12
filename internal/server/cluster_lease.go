@@ -21,7 +21,7 @@ import (
 )
 
 // A member lives on the leader's lease: each renewal carries the leader's epoch and the placement. Without one
-// for lease.FenceAfter it stops its single-writer workloads, so one never runs twice when it is only cut off.
+// for the lease's fence it stops its single-writer workloads, so one never runs twice when it is only cut off.
 // An order from an older epoch is refused (spec #176).
 
 // leaseCheckEvery is how often the lease is looked at; a var so tests can hurry it.
@@ -36,6 +36,8 @@ type clusterLease struct {
 	Fenced bool `json:"fenced"`
 	// ExtraSeconds is the time a leader about to restart asked this lease to live on without a renewal.
 	ExtraSeconds int `json:"extraSeconds,omitempty"`
+	// FenceSeconds is how long the leader said this lease lives without a renewal; zero is lease.FenceAfter.
+	FenceSeconds int `json:"fenceSeconds,omitempty"`
 	// Held are the stacks this member stopped itself, started again once the leader says they are still its own.
 	Held []string `json:"held,omitempty"`
 	// Returning is set by the first renewal after a dead lease, until what moved away is removed.
@@ -57,7 +59,14 @@ type clusterLease struct {
 }
 
 func (c *clusterLease) ranOut(now time.Time) bool {
-	return !c.RenewedAt.IsZero() && now.Sub(c.RenewedAt) >= lease.FenceAfter+time.Duration(c.ExtraSeconds)*time.Second
+	return !c.RenewedAt.IsZero() && now.Sub(c.RenewedAt) >= c.fence()+time.Duration(c.ExtraSeconds)*time.Second
+}
+
+func (c *clusterLease) fence() time.Duration {
+	if c.FenceSeconds > 0 {
+		return time.Duration(c.FenceSeconds) * time.Second
+	}
+	return lease.FenceAfter
 }
 
 type leaseGuard struct {
@@ -200,9 +209,10 @@ func (g *leaseGuard) Renew(o lease.Order) lease.Reply {
 		g.clusters[o.Cluster] = u
 	}
 	delete(g.clusters, unreadableLease)
-	next := &clusterLease{Epoch: o.Epoch, Member: o.Member, RenewedAt: g.now(), Boot: bootID(), Placement: o.Placement, ExtraSeconds: min(max(o.ExtendSeconds, 0), int(lease.ExtendFor/time.Second))}
+	next := &clusterLease{Epoch: o.Epoch, Member: o.Member, RenewedAt: g.now(), Boot: bootID(), Placement: o.Placement, ExtraSeconds: min(max(o.ExtendSeconds, 0), int(lease.ExtendFor/time.Second)),
+		FenceSeconds: min(max(o.FenceSeconds, 0), int(lease.FenceAfter/time.Second))}
 	g.confirmStarts(o)
-	r := lease.Reply{OK: true, Epoch: o.Epoch}
+	r := lease.Reply{OK: true, Epoch: o.Epoch, StoppedWithin: int((next.fence() + fenceTakes()).Seconds())}
 	g.comeBack(o, g.clusters[o.Cluster], next, &r)
 	g.clusters[o.Cluster] = next
 	// A start order carries neither keeps nor stores: it says nothing about them.
@@ -309,7 +319,7 @@ func (g *leaseGuard) RanOut() bool {
 	defer g.mu.Unlock()
 	now := g.now()
 	for _, c := range g.clusters {
-		if !c.RenewedAt.IsZero() && now.Sub(c.RenewedAt) >= lease.FenceAfter+time.Duration(c.ExtraSeconds)*time.Second {
+		if c.ranOut(now) {
 			return true
 		}
 	}
@@ -489,9 +499,14 @@ func (s *Service) stackSlugs() []string {
 	return out
 }
 
-// fenceGrace is what a fenced stack gets to stop cleanly before it is killed. With the kill and the 1 s check it
-// stays well under the 21 s between the fence and the leader starting the work elsewhere; a var so tests can hurry it.
-var fenceGrace = 8 * time.Second
+// fenceGrace is what a fenced stack gets to stop cleanly before it is killed; a var so tests can hurry it.
+var fenceGrace = 5 * time.Second
+
+// fenceTakes is the longest from a lease running out to its stacks being down: the check, the stop and the three
+// kills in fenceStack, plus a second. Under the 21 s an older leader waits after the 60 s fence.
+func fenceTakes() time.Duration {
+	return leaseCheckEvery + fenceGrace + 3*time.Second + 3*3*time.Second + time.Second
+}
 
 // fenceStacks stops every stack at once, and every running scheduled job. It never waits for a stack's lock: a
 // deploy that holds one is cancelled, and whatever it started is stopped by the deploy itself on its way out.
