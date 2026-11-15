@@ -155,6 +155,33 @@ func TestReturn_nothingStartsBeforeTheLeadersOrderThenWhatMovedIsRemovedAndTheRe
 	}
 }
 
+// The server came back so fast that the leader's word landed while its stacks were still stopping: what that
+// stopped starts again, as it would had the word come a moment later.
+func TestReturn_aRenewalThatLandsWhileTheFenceStopsStartsWhatItStopped(t *testing.T) {
+	f := newReturn(t)
+	f.renew(orderFor(3))
+	f.clk.Add(5 * time.Minute)
+	rebooted(t)
+	f.reopen()
+	f.wire()
+	fence := f.g.fence
+	f.g.fence = func(ctx context.Context, es []lease.Entry) error {
+		err := fence(ctx, es)
+		f.g.Renew(orderFor(3))
+		return err
+	}
+	f.g.Check(context.Background())
+	f.g.work.Wait()
+	if got := f.startedSlugs(); got != "db-main,files,web" {
+		t.Fatalf("started %q, want every stack the fence stopped that the leader still places here", got)
+	}
+	f.started = nil
+	f.renew(orderFor(3))
+	if len(f.started) != 0 {
+		t.Fatalf("the next renewal started %v again", f.started)
+	}
+}
+
 func TestReturn_anOlderEpochIsRefusedAndStartsNothing(t *testing.T) {
 	f := newReturn(t)
 	f.renew(orderFor(3))

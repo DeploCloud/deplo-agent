@@ -85,12 +85,17 @@ func (g *leaseGuard) comeBack(o lease.Order, prev, next *clusterLease, r *lease.
 		next.Returned = nil
 	}
 	g.noteKeeps(o, next)
-	if (next.Returning || len(next.Held) > 0) && g.remove != nil && !g.settling[o.Cluster] {
-		g.settling[o.Cluster] = true
-		g.work.Add(1)
-		go g.settle(o.Cluster)
-	}
+	g.settleLocked(o.Cluster, next)
 	g.later(o, next, r)
+}
+
+// settleLocked settles what a cluster's lease left here, unless that is under way; the caller holds g.mu.
+func (g *leaseGuard) settleLocked(cluster string, c *clusterLease) {
+	if (c.Returning || len(c.Held) > 0) && g.remove != nil && !g.settling[cluster] {
+		g.settling[cluster] = true
+		g.work.Add(1)
+		go g.settle(cluster)
+	}
 }
 
 // settle removes this member's copy of every stack placed elsewhere and starts what it stopped and still owns.
@@ -213,6 +218,12 @@ func (g *leaseGuard) settle(cluster string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	delete(g.settling, cluster)
+	defer func() {
+		// The fence held more while this ran: that is settled now, not at the next renewal.
+		if c := g.clusters[cluster]; c != nil && slices.ContainsFunc(c.Held, func(s string) bool { return !slices.Contains(held, s) }) {
+			g.settleLocked(cluster, c)
+		}
+	}()
 	if c = g.clusters[cluster]; c == nil || (!returning && len(done) == 0) {
 		return
 	}

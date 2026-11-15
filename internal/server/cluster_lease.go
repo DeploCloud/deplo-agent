@@ -273,10 +273,14 @@ func (g *leaseGuard) Check(ctx context.Context) {
 			continue
 		}
 		g.mu.Lock()
-		// A renewal that landed while stopping wins: the lease is alive again.
-		if c := g.clusters[d.cluster]; c != nil && c.ranOut(g.now()) {
-			c.Fenced = true
+		// What stopped is held either way; a renewal that landed while stopping wins, and starts it again at once.
+		if c := g.clusters[d.cluster]; c != nil {
 			c.Held = union(c.Held, held)
+			if c.ranOut(g.now()) {
+				c.Fenced = true
+			} else {
+				g.settleLocked(d.cluster, c)
+			}
 			g.save()
 		}
 		g.mu.Unlock()
