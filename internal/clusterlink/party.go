@@ -26,6 +26,8 @@ const (
 	maxBackoff  = 30 * time.Second
 	// refresh is how often the relay list is read again.
 	refresh = 5 * time.Second
+	// directHead is how long a stream through the tunnel has before a relay is tried beside it.
+	directHead = time.Second
 )
 
 // Config says who this party is and which relays it knows.
@@ -39,7 +41,9 @@ type Config struct {
 	Accept func(from wire.Party, c net.Conn)
 	// Transport reaches a relay's address; without one the certificate it answers with is checked.
 	Transport func() *http.Transport
-	Logf      func(format string, args ...any)
+	// Direct reaches a party through the cluster's network instead of a relay; the peer's Answer takes it.
+	Direct func(ctx context.Context, to wire.Party) (net.Conn, error)
+	Logf   func(format string, args ...any)
 }
 
 // Party keeps one connection to every relay it knows.
@@ -171,7 +175,7 @@ func (p *Party) hold(ctx context.Context, relay string) error {
 			}
 			return fmt.Errorf("connection ended: %w", err)
 		}
-		go p.accepted(st)
+		go p.Answer(st)
 	}
 }
 
@@ -189,8 +193,9 @@ func (p *Party) unset(relay string, m *yamux.Session) {
 	p.mu.Unlock()
 }
 
-// accepted runs the end-to-end handshake on a stream the relay opened, and hands it over only for the peer it named.
-func (p *Party) accepted(st *yamux.Stream) {
+// Answer runs the end-to-end handshake on a stream a relay or the cluster's network carried, and hands it over only
+// for the peer it named.
+func (p *Party) Answer(st net.Conn) {
 	fail := func() { st.Close() }
 	st.SetReadDeadline(time.Now().Add(wire.HeaderTimeout))
 	verb, arg, err := wire.ReadHeader(st)
@@ -213,8 +218,90 @@ func (p *Party) accepted(st *yamux.Stream) {
 	p.cfg.Accept(from, tc)
 }
 
-// Dial opens a stream to another party through whichever relay answers, mutual TLS end to end and pinned to `to`.
+// Dial opens a stream to another party, mutual TLS end to end and pinned to `to`: through the cluster's network when
+// it answers, and through a relay beside it once that has had its head start.
 func (p *Party) Dial(ctx context.Context, to wire.Party) (net.Conn, error) {
+	if p.cfg.Direct == nil {
+		return p.DialRelay(ctx, to)
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type result struct {
+		c   net.Conn
+		err error
+	}
+	results := make(chan result, 2)
+	go func() {
+		c, err := p.dialDirect(ctx, to)
+		results <- result{c, err}
+	}()
+	head := time.NewTimer(directHead)
+	defer head.Stop()
+	pending, relayed := 1, false
+	relay := func() {
+		if !relayed {
+			relayed, pending = true, pending+1
+			go func() {
+				c, err := p.DialRelay(ctx, to)
+				results <- result{c, err}
+			}()
+		}
+	}
+	var last error
+	for pending > 0 {
+		select {
+		case <-head.C:
+			relay()
+		case r := <-results:
+			pending--
+			if r.err == nil {
+				// The slower one may still connect: close it then.
+				go func(n int) {
+					for ; n > 0; n-- {
+						if late := <-results; late.c != nil {
+							late.c.Close()
+						}
+					}
+				}(pending)
+				return r.c, nil
+			}
+			last = r.err
+			relay()
+		}
+	}
+	return nil, last
+}
+
+func (p *Party) dialDirect(ctx context.Context, to wire.Party) (net.Conn, error) {
+	id, err := p.cfg.Identity()
+	if err != nil {
+		return nil, err
+	}
+	c, err := p.cfg.Direct(ctx, to)
+	if err != nil {
+		return nil, err
+	}
+	dl := time.Now().Add(wire.HeaderTimeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(dl) {
+		dl = d
+	}
+	c.SetDeadline(dl)
+	self := wire.Party{Fingerprint: id.Fingerprint, Role: p.cfg.Role}
+	if err := wire.WriteHeader(c, wire.VerbFrom, self.Key()); err != nil {
+		c.Close()
+		return nil, err
+	}
+	tc := tls.Client(c, id.ClientConfig(to.Fingerprint))
+	if err := tc.HandshakeContext(ctx); err != nil {
+		c.Close()
+		return nil, err
+	}
+	c.SetDeadline(time.Time{})
+	return tc, nil
+}
+
+// DialRelay opens a stream to another party through whichever relay answers, mutual TLS end to end and pinned to `to`.
+func (p *Party) DialRelay(ctx context.Context, to wire.Party) (net.Conn, error) {
 	id, err := p.cfg.Identity()
 	if err != nil {
 		return nil, err

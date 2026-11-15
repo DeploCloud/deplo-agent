@@ -134,6 +134,7 @@ var Capabilities = []string{
 	"backup.postgres-archive",
 	"cluster.standby",
 	"cluster.replicas",
+	"cluster.network",
 }
 
 // AgentVersion is the version this agent reports over Hello.
@@ -197,6 +198,10 @@ type Service struct {
 	// Replication of App data; see cluster_replicas.go.
 	replOnce sync.Once
 	repl     *replicas
+
+	// The cluster's private network; see cluster_mesh.go.
+	netOnce sync.Once
+	cnet    *clusterNetwork
 }
 
 type stackLock struct {

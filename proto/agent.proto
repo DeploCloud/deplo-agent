@@ -195,6 +195,12 @@ service Agent {
   // How each copy on this member stands.
   rpc ClusterReplicaStatus(ClusterReplicaStatusRequest) returns (ClusterReplicaStatusResponse);
 
+  // ---- THE CLUSTER'S NETWORK (ADR-0047, Hello capability "cluster.network") ----
+
+  // Put this server on a cluster's private network with every other server of the cluster, or take
+  // it off with no peers. The full set each time; it answers with its key and how each peer is reached.
+  rpc SetClusterNetwork(SetClusterNetworkRequest) returns (SetClusterNetworkResponse);
+
   // ---- BACKUPS: dump/restore a database or project to/from a DESTINATION, plus the
   // affordances the control plane needs (connectivity check + object delete).
   // StoreTarget - a directory on THIS host's filesystem.
@@ -2536,6 +2542,43 @@ message SetClusterForwardersRequest {
 message SetClusterForwardersResponse {
   int32 held = 1;
   int32 served = 2;
+}
+
+// ---- THE CLUSTER'S NETWORK ----
+
+message SetClusterNetworkRequest {
+  string cluster_id = 1;
+  // This server's own address inside the tunnel.
+  string address = 2;
+  repeated ClusterNetworkPeer peers = 3;
+}
+
+message ClusterNetworkPeer {
+  // The peer's agent certificate: how its streams are pinned.
+  string fingerprint = 1;
+  // Its WireGuard public key, base64.
+  string public_key = 2;
+  string address = 3;
+  // host:port pairs it may answer on directly; with none, a relay carries its packets.
+  repeated string endpoints = 4;
+}
+
+message SetClusterNetworkResponse {
+  // This server's WireGuard public key, base64, and the UDP port it answers on.
+  string public_key = 1;
+  uint32 port = 2;
+  // This host's own addresses, for its peers to try.
+  repeated string addresses = 3;
+  repeated ClusterNetworkPeerState peers = 4;
+}
+
+message ClusterNetworkPeerState {
+  string fingerprint = 1;
+  // "direct", "relay" (no direct path answers) or "none".
+  string path = 2;
+  // The host:port a direct path uses.
+  string endpoint = 3;
+  int64 last_handshake_unix = 4;
 }
 
 // ---- REPLICATION OF APP DATA ----

@@ -219,6 +219,8 @@ func (s *Service) acceptMemberStream(from wire.Party, c net.Conn) {
 		s.receiveLeft(from, c, arg)
 	case replVerb:
 		s.serveReplica(from, c, arg)
+	case meshVerb:
+		s.serveMesh(from, c)
 	}
 }
 

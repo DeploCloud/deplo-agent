@@ -113,6 +113,7 @@ func main() {
 	svc.StartRestartWatch(context.Background())
 	svc.StartCluster()
 	svc.StartClusterMember()
+	svc.StartClusterNetwork()
 	if certMgr != nil {
 		svc.EnableCertRenewal(certMgr)
 	}

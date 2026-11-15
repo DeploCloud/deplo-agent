@@ -24,6 +24,9 @@ type Relay struct {
 	// URL is where parties dial.
 	URL string
 	srv *httptest.Server
+	// refuse answers every stream with ERR: a relay that carries nothing.
+	refuse  bool
+	streams int
 }
 
 func New(t testing.TB, id *wire.Identity, parties ...wire.Party) *Relay {
@@ -79,7 +82,10 @@ func (f *Relay) forward(from string, st *yamux.Stream) {
 	}
 	f.mu.Lock()
 	target := f.live[arg]
-	ok := f.allow[arg]
+	ok := f.allow[arg] && !f.refuse
+	if ok {
+		f.streams++
+	}
 	f.mu.Unlock()
 	if target == nil || !ok {
 		_ = wire.WriteHeader(st, wire.VerbErr, "not connected")
@@ -112,6 +118,20 @@ func (f *Relay) Misdirect(name, to wire.Party) {
 	f.allow[name.Key()] = true
 	f.live[name.Key()] = f.live[to.Key()]
 	f.mu.Unlock()
+}
+
+// Refuse makes the relay carry no stream, or carry them again.
+func (f *Relay) Refuse(on bool) {
+	f.mu.Lock()
+	f.refuse = on
+	f.mu.Unlock()
+}
+
+// Streams is how many streams the relay has carried.
+func (f *Relay) Streams() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.streams
 }
 
 // Connected is how many parties hold a connection.

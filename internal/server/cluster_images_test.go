@@ -136,12 +136,19 @@ func twoMembers(t *testing.T, src, dst *imageHost) (*Service, *Service, string) 
 	}
 	eventually(t, "both members to reach the relay", func() bool { return relay.Connected() == 2 })
 	sourcePrint[a] = ida.Fingerprint
-	t.Cleanup(func() { delete(sourcePrint, a) })
+	relayOf[a], relayOf[b], caOf[a] = relay, relay, ca
+	t.Cleanup(func() { delete(sourcePrint, a); delete(relayOf, a); delete(relayOf, b); delete(caOf, a) })
 	return a, b, idb.Fingerprint
 }
 
 // sourcePrint is each sending agent's certificate, for the entry the target is handed.
 var sourcePrint = map[*Service]string{}
+
+// relayOf is the relay a pair of members dials, and caOf the CA that signed them.
+var (
+	relayOf = map[*Service]*testrelay.Relay{}
+	caOf    = map[*Service]*testpki.CA{}
+)
 
 // expect is Deplo telling the target which image the source is about to send.
 func expect(t *testing.T, target, source *Service, ref string, keep int32) {

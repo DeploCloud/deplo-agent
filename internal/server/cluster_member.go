@@ -45,6 +45,8 @@ type clusterMember struct {
 	st     memberState
 	cancel context.CancelFunc
 	party  *clusterlink.Party
+	// forMember is false for the party of a server that is only on a cluster's network, to lead it.
+	forMember bool
 }
 
 func (s *Service) clusterMember() *clusterMember {
@@ -99,7 +101,8 @@ func (s *Service) clusterEnv(dir, role string) []string {
 	case "leader":
 		state := filepath.Join(dir, "leader")
 		_ = os.MkdirAll(state, 0o700)
-		env = append(env, clusterSocketEnv+"="+clusterSocket(dir), "DEPLO_CLUSTER_RELAYS_FILE="+relaysFile(dir), "DEPLO_CLUSTER_STATE="+state)
+		env = append(env, clusterSocketEnv+"="+clusterSocket(dir), "DEPLO_CLUSTER_RELAYS_FILE="+relaysFile(dir), "DEPLO_CLUSTER_STATE="+state,
+			"DEPLO_CLUSTER_MESH_SOCKET="+meshDoor(dir))
 	case "relay":
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -209,7 +212,12 @@ func (s *Service) StartClusterMember() {
 // startMember (re)starts the party for st; the caller holds m.mu.
 func (s *Service) startMember(m *clusterMember, st memberState) {
 	// Deplo pushes the same membership often: the connections stay unless the relays to dial changed.
-	if st.Member && m.party != nil && slices.Equal(m.st.Relays, st.Relays) {
+	if st.Member && m.party != nil && m.forMember && slices.Equal(m.st.Relays, st.Relays) {
+		m.st = st
+		return
+	}
+	onNetwork := s.network().on.Load()
+	if !st.Member && m.party != nil && !m.forMember && onNetwork {
 		m.st = st
 		return
 	}
@@ -217,12 +225,24 @@ func (s *Service) startMember(m *clusterMember, st memberState) {
 		m.cancel()
 		m.cancel, m.party = nil, nil
 	}
+	wasMember := m.st.Member
 	m.st = st
 	if !st.Member {
-		s.leaseGuard().Forget()
-		go s.forwarders().Clear()
+		if wasMember {
+			s.leaseGuard().Forget()
+			go s.forwarders().Clear()
+		}
+		// A server that only leads stays a party for its network's packets, which a relay may have to carry.
+		if onNetwork {
+			s.runParty(m, false)
+		}
 		return
 	}
+	s.runParty(m, true)
+}
+
+// runParty dials the relays as this server; a member also renews its lease, names and copies. The caller holds m.mu.
+func (s *Service) runParty(m *clusterMember, member bool) {
 	ctx, cancel := context.WithCancel(context.Background())
 	p := clusterlink.New(clusterlink.Config{
 		Role:      wire.RoleMember,
@@ -237,13 +257,40 @@ func (s *Service) startMember(m *clusterMember, st memberState) {
 		},
 		// The leader's lease order, or another member's image copy; any other stream is closed unanswered.
 		Accept: s.acceptClusterStream,
+		Direct: s.networkDial,
 		Logf:   func(f string, a ...any) { fmt.Fprintf(os.Stderr, "deplo-agent: "+f+"\n", a...) },
 	})
-	m.cancel, m.party = cancel, p
+	m.cancel, m.party, m.forMember = cancel, p, member
 	go p.Run(ctx)
-	go s.leaseGuard().Run(ctx)
-	go s.forwarders().Resume()
-	go s.replicas().Run(ctx)
+	if member {
+		go s.leaseGuard().Run(ctx)
+		go s.forwarders().Resume()
+		go s.replicas().Run(ctx)
+	}
+}
+
+// clusterParty is this agent's party, or nil when it is in no cluster and on no network.
+func (s *Service) clusterParty() *clusterlink.Party {
+	m := s.clusterMember()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.party
+}
+
+// syncNetworkParty starts or stops the party a server that only leads needs for its network.
+func (s *Service) syncNetworkParty() {
+	m := s.clusterMember()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	on := s.network().on.Load()
+	switch {
+	case m.st.Member:
+	case on && m.party == nil:
+		s.runParty(m, false)
+	case !on && m.party != nil:
+		m.cancel()
+		m.cancel, m.party = nil, nil
+	}
 }
 
 // SetClusterMember makes this agent a cluster party, or stops it being one; see the RPC's contract in proto/agent.proto.
