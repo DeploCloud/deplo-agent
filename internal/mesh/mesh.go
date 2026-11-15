@@ -93,6 +93,16 @@ type Mesh struct {
 	closed bool
 	// blockUDP drops every datagram this end sends: a test's way to cut the direct path.
 	blockUDP atomic.Bool
+
+	// incarnation names this run of the network; peers close what they hold of an earlier one (alive.go).
+	incarnation uint64
+	started     time.Time
+	alive       net.PacketConn
+	aliveAt     time.Time
+	aliveMu     sync.Mutex
+	lives       map[string]liveness
+	connsMu     sync.Mutex
+	conns       map[string]map[*tracked]bool
 }
 
 type pathInfo struct {
@@ -180,7 +190,11 @@ func Start(cfg Config) (*Mesh, error) {
 	m := &Mesh{
 		cfg: cfg, pub: pub, tnet: tnet,
 		peers: map[string]*peer{}, byKey: map[Key]*peer{}, byAddr: map[netip.AddrPort]*peer{},
-		stop: make(chan struct{}),
+		stop:        make(chan struct{}),
+		incarnation: newIncarnation(),
+		started:     time.Now(),
+		lives:       map[string]liveness{},
+		conns:       map[string]map[*tracked]bool{},
 	}
 	m.bind = newBind(m)
 	logger := &device.Logger{
@@ -195,6 +209,9 @@ func Start(cfg Config) (*Mesh, error) {
 	if err := m.dev.Up(); err != nil {
 		m.dev.Close()
 		return nil, err
+	}
+	if err := m.listenAlive(); err != nil {
+		cfg.Logf("cluster network: no liveness inside the tunnel: %v", err)
 	}
 	go m.run()
 	return m, nil
@@ -247,20 +264,30 @@ func (m *Mesh) SetPeers(peers []Peer) error {
 		fmt.Fprintf(&ipc, "public_key=%s\nreplace_allowed_ips=true\nallowed_ip=%s\nendpoint=%s\npersistent_keepalive_interval=%d\n",
 			np.PublicKey.hex(), netip.PrefixFrom(np.Address, np.Address.BitLen()), endpointPrefix+np.Fingerprint, keepalive)
 	}
+	var gone []string
 	for fp, p := range m.peers {
 		if !seen[fp] {
 			fmt.Fprintf(&ipc, "public_key=%s\nremove=true\n", p.PublicKey.hex())
 			m.dropLocked(p)
+			gone = append(gone, fp)
 		}
 	}
 	m.reindexLocked()
 	m.mu.Unlock()
+	// A server taken off the network takes its connections with it.
+	for _, fp := range gone {
+		m.reap(fp)
+	}
 	if ipc.Len() == 0 {
 		return nil
 	}
 	err := m.dev.IpcSet(ipc.String())
-	// Look for direct paths now rather than at the next tick.
-	go m.tick(time.Now())
+	// Look for direct paths, and say this run is alive, now rather than at the next tick.
+	go func() {
+		now := time.Now()
+		m.tick(now)
+		m.sayAlive(now)
+	}()
 	return err
 }
 
@@ -304,7 +331,7 @@ func (m *Mesh) Dial(ctx context.Context, fingerprint string, port uint16) (net.C
 	if err != nil {
 		return nil, err
 	}
-	return c, nil
+	return m.track(fingerprint, c), nil
 }
 
 // Has says whether a peer is on the network.
@@ -320,7 +347,7 @@ func (m *Mesh) Listen(port uint16) (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	return ln, nil
+	return &trackedListener{Listener: ln, m: m}, nil
 }
 
 // ServeRelay carries the tunnel's packets over a relay stream a peer opened, until it ends.
@@ -395,6 +422,9 @@ func (m *Mesh) Close() error {
 		}
 	}
 	m.mu.Unlock()
+	if m.alive != nil {
+		m.alive.Close()
+	}
 	m.dev.Close()
 	return nil
 }
@@ -416,6 +446,10 @@ func (m *Mesh) run() {
 			return
 		case now := <-t.C:
 			m.tick(now)
+			if now.Sub(m.aliveAt) >= aliveEvery {
+				m.aliveAt = now
+				m.sayAlive(now)
+			}
 		}
 	}
 }
