@@ -95,9 +95,9 @@ func TestMesh_aServerTakenOffTheNetworkTakesItsConnections(t *testing.T) {
 	readEnds(t, c, 5*time.Second)
 }
 
-// A run that ends before it is ever heard, a second after the connection to it was made: its connections end when
-// the next run is first heard.
-func TestMesh_aPeerFirstHeardAfterARestartEndsTheConnectionsToARunNeverHeard(t *testing.T) {
+// A run that ends before it ever said it was alive, a second after the stream to it opened: the stream said which run
+// it was, so it ends when the next run is heard.
+func TestMesh_aStreamToARunThatNeverSaidItIsAliveEndsWhenTheNextRunIsHeard(t *testing.T) {
 	a, b := start(t, nil, fpA, "fdde:9100::a"), start(t, nil, fpB, "fdde:9100::b")
 	b.m.alive.Close()
 	connect(t, a, b, true)
@@ -146,6 +146,23 @@ func TestMesh_aPeerThatNeverSaysItIsAliveLosesItsConnections(t *testing.T) {
 	readEnds(t, c, 8*time.Second)
 }
 
+// A stream opened to a run not heard yet, while the run before is the one last heard, is the new run's.
+func TestMesh_aStreamBelongsToTheRunThatAnsweredIt(t *testing.T) {
+	a, b := start(t, nil, fpA, "fdde:9100::a"), start(t, nil, fpB, "fdde:9100::b")
+	connect(t, a, b, true)
+	echo(t, b)
+	a.m.aliveMu.Lock()
+	a.m.lives[fpB] = liveness{incarnation: b.m.incarnation + 1, at: time.Now()}
+	a.m.aliveMu.Unlock()
+	c := dial(t, a, b)
+	if tc, ok := c.(*tracked); !ok || tc.inc != b.m.incarnation {
+		t.Fatalf("the stream was filed as %#v", c)
+	}
+	waitHeard(t, a, b)
+	time.Sleep(2 * aliveEvery)
+	roundTrip(t, c, "the run that answered it")
+}
+
 func TestMesh_anAcceptedConnectionIsFiledUnderItsPeer(t *testing.T) {
 	a, b := start(t, nil, fpA, "fdde:9100::a"), start(t, nil, fpB, "fdde:9100::b")
 	connect(t, a, b, true)
@@ -163,7 +180,7 @@ func TestMesh_anAcceptedConnectionIsFiledUnderItsPeer(t *testing.T) {
 	dial(t, a, b)
 	select {
 	case c := <-got:
-		if tc, ok := c.(*tracked); !ok || tc.fp != fpA {
+		if tc, ok := c.(*tracked); !ok || tc.fp != fpA || tc.inc != a.m.incarnation {
 			t.Fatalf("the accepted connection was filed as %#v", c)
 		}
 		c.Close()

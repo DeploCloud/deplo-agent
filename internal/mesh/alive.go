@@ -1,31 +1,36 @@
 package mesh
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
+	"io"
 	"net"
 	"net/netip"
 	"sync"
 	"time"
 )
 
-// Every end tells each peer, inside the tunnel, that it is alive, which run of it this is and how long that run has
-// been up. A connection to a peer that restarted, or that went quiet, would otherwise wait forever on a read: the
-// peer's new network stack never heard of it and a reader sends nothing that could be refused.
+// Each run of the network says which run it is, to every peer every aliveEvery and at the start of every stream, so a
+// stream belongs to one run of each end. A stream to a run that ended, or fell quiet, is closed: a dead run refuses
+// nothing, so a reader would otherwise wait on it forever.
 const (
 	alivePort = 7001
-	aliveLen  = 4 + 8 + 8
-	// aliveSlack is how much earlier than a run's start, as its peer reckons it, a connection may be and still be
-	// that run's: the difference between two trips through the tunnel, never the time a restart takes.
-	aliveSlack = 250 * time.Millisecond
+	aliveLen  = 4 + 8
+	greetLen  = 4 + 8
 )
 
 var (
 	aliveEvery     = 2 * time.Second
 	aliveDeadAfter = 15 * time.Second
+	greetWithin    = 10 * time.Second
 )
 
-var aliveMagic = [4]byte{'D', 'P', 'L', 'A'}
+var (
+	aliveMagic = [4]byte{'D', 'P', 'L', 'A'}
+	greetMagic = [4]byte{'D', 'P', 'L', 'G'}
+)
 
 func newIncarnation() uint64 {
 	var b [8]byte
@@ -39,12 +44,12 @@ type liveness struct {
 	at          time.Time
 }
 
-// tracked is a connection inside the tunnel, kept so it can be closed when its peer's run ends.
+// tracked is a stream inside the tunnel, filed under the peer's run that answered it.
 type tracked struct {
 	net.Conn
 	m    *Mesh
 	fp   string
-	at   time.Time
+	inc  uint64
 	once sync.Once
 }
 
@@ -62,15 +67,49 @@ func (c *tracked) CloseWrite() error {
 	return c.Close()
 }
 
-func (m *Mesh) track(fp string, c net.Conn) net.Conn {
-	t := &tracked{Conn: c, m: m, fp: fp, at: time.Now()}
+// greet opens a stream: each end says which run it is before anything else is sent.
+func (m *Mesh) greet(ctx context.Context, c net.Conn) (uint64, error) {
+	deadline := time.Now().Add(greetWithin)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	_ = c.SetDeadline(deadline)
+	defer c.SetDeadline(time.Time{})
+	var out [greetLen]byte
+	copy(out[:], greetMagic[:])
+	binary.BigEndian.PutUint64(out[4:], m.incarnation)
+	if _, err := c.Write(out[:]); err != nil {
+		return 0, err
+	}
+	var in [greetLen]byte
+	if _, err := io.ReadFull(c, in[:]); err != nil {
+		return 0, err
+	}
+	if [4]byte(in[:4]) != greetMagic {
+		return 0, errors.New("the other end is not on this cluster's network")
+	}
+	return binary.BigEndian.Uint64(in[4:]), nil
+}
+
+// open greets a new stream and files it under the peer's run that answered it.
+func (m *Mesh) open(ctx context.Context, fp string, c net.Conn) (net.Conn, error) {
+	inc, err := m.greet(ctx, c)
+	if err != nil {
+		c.Close()
+		return nil, err
+	}
+	if fp == "" {
+		return c, nil
+	}
+	t := &tracked{Conn: c, m: m, fp: fp, inc: inc}
 	m.connsMu.Lock()
 	if m.conns[fp] == nil {
 		m.conns[fp] = map[*tracked]bool{}
 	}
 	m.conns[fp][t] = true
 	m.connsMu.Unlock()
-	return t
+	m.heard(fp, inc)
+	return t, nil
 }
 
 func (m *Mesh) untrack(t *tracked) {
@@ -82,15 +121,12 @@ func (m *Mesh) untrack(t *tracked) {
 	m.connsMu.Unlock()
 }
 
-// reap closes every connection to a peer's run that is over.
-func (m *Mesh) reap(fp string) { m.reapBefore(fp, time.Time{}) }
-
-// reapBefore closes a peer's connections made before `before`, or all of them for a zero time; it says how many.
-func (m *Mesh) reapBefore(fp string, before time.Time) int {
+// reap closes a peer's streams, every one or those of runs but `keep`; it says how many.
+func (m *Mesh) reap(fp string, keep ...uint64) int {
 	m.connsMu.Lock()
 	list := make([]*tracked, 0, len(m.conns[fp]))
 	for t := range m.conns[fp] {
-		if before.IsZero() || t.at.Before(before) {
+		if len(keep) == 0 || t.inc != keep[0] {
 			list = append(list, t)
 		}
 	}
@@ -101,21 +137,50 @@ func (m *Mesh) reapBefore(fp string, before time.Time) int {
 	return len(list)
 }
 
-// trackedListener files each accepted connection under the peer whose tunnel address it came from.
+// trackedListener greets each stream it accepts, apart from the others, and files it under the peer's run.
 type trackedListener struct {
 	net.Listener
-	m *Mesh
+	m      *Mesh
+	ready  chan net.Conn
+	failed chan struct{}
+	err    error
+}
+
+func (m *Mesh) trackListener(ln net.Listener) *trackedListener {
+	l := &trackedListener{Listener: ln, m: m, ready: make(chan net.Conn), failed: make(chan struct{})}
+	go l.loop()
+	return l
+}
+
+func (l *trackedListener) loop() {
+	for {
+		c, err := l.Listener.Accept()
+		if err != nil {
+			l.err = err
+			close(l.failed)
+			return
+		}
+		go func() {
+			t, err := l.m.open(context.Background(), l.m.peerByAddr(c.RemoteAddr()), c)
+			if err != nil {
+				return
+			}
+			select {
+			case l.ready <- t:
+			case <-l.failed:
+				t.Close()
+			}
+		}()
+	}
 }
 
 func (l *trackedListener) Accept() (net.Conn, error) {
-	c, err := l.Listener.Accept()
-	if err != nil {
-		return nil, err
+	select {
+	case c := <-l.ready:
+		return c, nil
+	case <-l.failed:
+		return nil, l.err
 	}
-	if p := l.m.peerByAddr(c.RemoteAddr()); p != "" {
-		return l.m.track(p, c), nil
-	}
-	return c, nil
 }
 
 func (m *Mesh) peerByAddr(a net.Addr) string {
@@ -133,7 +198,7 @@ func (m *Mesh) peerByAddr(a net.Addr) string {
 	return ""
 }
 
-// listenAlive answers the peers' liveness inside the tunnel; a peer is known by the address only it can send from.
+// listenAlive hears the peers say they are alive inside the tunnel; a peer is known by the address only it sends from.
 func (m *Mesh) listenAlive() error {
 	c, err := m.tnet.ListenUDPAddrPort(netip.AddrPortFrom(m.cfg.Address, alivePort))
 	if err != nil {
@@ -151,40 +216,35 @@ func (m *Mesh) listenAlive() error {
 				continue
 			}
 			if fp := m.peerByAddr(from); fp != "" {
-				up := time.Duration(binary.BigEndian.Uint64(buf[12:aliveLen])) * time.Millisecond
-				m.heard(fp, binary.BigEndian.Uint64(buf[4:12]), up)
+				m.heard(fp, binary.BigEndian.Uint64(buf[4:aliveLen]))
 			}
 		}
 	}()
 	return nil
 }
 
-// heard records a peer's run. A run heard for the first time ends every connection made before it started, which
-// can only belong to a run that is over, heard from or not.
-func (m *Mesh) heard(fp string, incarnation uint64, up time.Duration) {
-	now := time.Now()
+// heard records a peer's run. A run heard for the first time ends every stream another run answered.
+func (m *Mesh) heard(fp string, incarnation uint64) {
 	m.aliveMu.Lock()
 	was, known := m.lives[fp]
-	m.lives[fp] = liveness{incarnation: incarnation, at: now}
+	m.lives[fp] = liveness{incarnation: incarnation, at: time.Now()}
 	m.aliveMu.Unlock()
 	if known && was.incarnation == incarnation {
 		return
 	}
-	if n := m.reapBefore(fp, now.Add(-up-aliveSlack)); n > 0 {
+	if n := m.reap(fp, incarnation); n > 0 {
 		m.cfg.Logf("cluster network: %s restarted, %d connections to its earlier run are closed", short(fp), n)
 	}
 }
 
-// sayAlive tells every peer this run is alive, and closes the connections of a peer that stopped saying it, or that
-// has not said it since they were made.
+// sayAlive tells every peer this run is alive, and closes the streams of a peer that stopped saying it.
 func (m *Mesh) sayAlive(now time.Time) {
 	if m.alive == nil {
 		return
 	}
 	msg := make([]byte, aliveLen)
 	copy(msg, aliveMagic[:])
-	binary.BigEndian.PutUint64(msg[4:12], m.incarnation)
-	binary.BigEndian.PutUint64(msg[12:], uint64(time.Since(m.started).Milliseconds()))
+	binary.BigEndian.PutUint64(msg[4:], m.incarnation)
 	m.mu.RLock()
 	addrs := map[string]netip.Addr{}
 	for fp, p := range m.peers {
@@ -195,43 +255,23 @@ func (m *Mesh) sayAlive(now time.Time) {
 		_, _ = m.alive.WriteTo(msg, net.UDPAddrFromAddrPort(netip.AddrPortFrom(a, alivePort)))
 	}
 	var quiet []string
-	heard := map[string]bool{}
 	m.aliveMu.Lock()
 	for fp, l := range m.lives {
 		if _, still := addrs[fp]; !still {
 			delete(m.lives, fp)
 			continue
 		}
+		// Every stream's peer is heard as it opens, so a stream outlives its peer's silence by aliveDeadAfter at most.
 		if now.Sub(l.at) >= aliveDeadAfter {
 			quiet = append(quiet, fp)
 			delete(m.lives, fp)
-			continue
 		}
-		heard[fp] = true
 	}
 	m.aliveMu.Unlock()
 	for _, fp := range quiet {
 		m.cfg.Logf("cluster network: %s fell quiet, its connections are closed", short(fp))
 		m.reap(fp)
 	}
-	for _, fp := range m.unheard(heard) {
-		if n := m.reapBefore(fp, now.Add(-aliveDeadAfter)); n > 0 {
-			m.cfg.Logf("cluster network: %s has not said it is alive, %d connections to it are closed", short(fp), n)
-		}
-	}
-}
-
-// unheard names the peers holding connections that no run of theirs has been heard for.
-func (m *Mesh) unheard(heard map[string]bool) []string {
-	m.connsMu.Lock()
-	defer m.connsMu.Unlock()
-	var out []string
-	for fp := range m.conns {
-		if !heard[fp] {
-			out = append(out, fp)
-		}
-	}
-	return out
 }
 
 func short(fp string) string {

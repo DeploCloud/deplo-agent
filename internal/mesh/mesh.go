@@ -96,7 +96,6 @@ type Mesh struct {
 
 	// incarnation names this run of the network; peers close what they hold of an earlier one (alive.go).
 	incarnation uint64
-	started     time.Time
 	alive       net.PacketConn
 	aliveAt     time.Time
 	aliveMu     sync.Mutex
@@ -192,7 +191,6 @@ func Start(cfg Config) (*Mesh, error) {
 		peers: map[string]*peer{}, byKey: map[Key]*peer{}, byAddr: map[netip.AddrPort]*peer{},
 		stop:        make(chan struct{}),
 		incarnation: newIncarnation(),
-		started:     time.Now(),
 		lives:       map[string]liveness{},
 		conns:       map[string]map[*tracked]bool{},
 	}
@@ -319,7 +317,7 @@ func (m *Mesh) reindexLocked() {
 
 func norm(a netip.AddrPort) netip.AddrPort { return netip.AddrPortFrom(a.Addr().Unmap(), a.Port()) }
 
-// Dial opens a TCP connection inside the tunnel to a peer's port.
+// Dial opens a TCP connection inside the tunnel to a peer's port, filed under the run of the peer that answered it.
 func (m *Mesh) Dial(ctx context.Context, fingerprint string, port uint16) (net.Conn, error) {
 	m.mu.RLock()
 	p := m.peers[fingerprint]
@@ -331,7 +329,7 @@ func (m *Mesh) Dial(ctx context.Context, fingerprint string, port uint16) (net.C
 	if err != nil {
 		return nil, err
 	}
-	return m.track(fingerprint, c), nil
+	return m.open(ctx, fingerprint, c)
 }
 
 // Has says whether a peer is on the network.
@@ -347,7 +345,7 @@ func (m *Mesh) Listen(port uint16) (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &trackedListener{Listener: ln, m: m}, nil
+	return m.trackListener(ln), nil
 }
 
 // ServeRelay carries the tunnel's packets over a relay stream a peer opened, until it ends.
