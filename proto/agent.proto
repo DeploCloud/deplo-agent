@@ -177,7 +177,8 @@ service Agent {
   // An image stream that matches no such entry is refused.
   rpc ExpectClusterImage(ExpectClusterImageRequest) returns (ExpectClusterImageResponse);
 
-  // ---- CLUSTER NAME FORWARDERS (#200, Hello capability "cluster.forwarders") ----
+  // ---- CLUSTER NAME FORWARDERS (#200, Hello capability "cluster.forwarders"; a compose service's
+  // names, and every port of a name, need "cluster.forwarders.services") ----
 
   // Hand this member the names it holds on its Environments' networks and the streams it accepts
   // for its own workloads. The full set each time; one not listed is removed. Never sent to a
@@ -2516,10 +2517,12 @@ message ClusterHeldName {
   string kind = 2;
   // The workload's id, which is also the deplo.project label of its containers.
   string workload_id = 3;
-  // The public name (db-<slug>, or the App's name).
+  // The public name (db-<slug>, the App's name, or a compose service's name or hostname).
   string name = 4;
-  // The port the workload answers on.
+  // The port the forwarder listens on; the name answers on every other port too.
   uint32 port = 5;
+  // The compose service the name belongs to; empty for a single-image App or a database.
+  string service = 6;
 }
 
 // A workload placed on THIS member that other members of its Environment may reach over the relay.
@@ -2530,6 +2533,8 @@ message ClusterServedName {
   uint32 port = 4;
   // Certificate fingerprints of the other members of the same Environment, and no one else.
   repeated string source_fingerprints = 5;
+  // The compose service, as in ClusterHeldName.
+  string service = 6;
 }
 
 message SetClusterForwardersRequest {

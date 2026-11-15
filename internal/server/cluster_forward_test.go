@@ -27,10 +27,16 @@ type fakeFwdHost struct {
 	extra   []string
 	// running is the network each workload's container is on here; unset => the test's envNet.
 	running map[string]string
+	// services is the one compose service each stack runs here; a workload named here answers for no other.
+	services map[string]string
+	// pid is each forwarder container's process (1 unless set), and redirects every redirect set up.
+	pid       map[string]int
+	redirects []string
 }
 
 func newFakeFwdHost() *fakeFwdHost {
-	return &fakeFwdHost{specs: map[string]forwardSpec{}, running: map[string]string{}}
+	return &fakeFwdHost{specs: map[string]forwardSpec{}, running: map[string]string{}, services: map[string]string{},
+		pid: map[string]int{}}
 }
 
 func (h *fakeFwdHost) ops() forwardOps {
@@ -59,7 +65,7 @@ func (h *fakeFwdHost) ops() forwardOps {
 			return out, nil
 		},
 		// Like docker: a workload answers only on the network its container is on.
-		target: func(_ context.Context, id, network string) (string, error) {
+		target: func(_ context.Context, id, network, service string) (string, error) {
 			h.mu.Lock()
 			defer h.mu.Unlock()
 			on := h.running[id]
@@ -69,9 +75,29 @@ func (h *fakeFwdHost) ops() forwardOps {
 			if on != network {
 				return "", fmt.Errorf("%s is not on %s", id, network)
 			}
+			if want, stack := h.services[id]; stack && want != service {
+				return "", fmt.Errorf("%s runs no service %q", id, service)
+			}
 			return "127.0.0.1", nil
 		},
 		listen: listenForwarder,
+		pids: func(_ context.Context, names []string) (map[string]int, error) {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			out := map[string]int{}
+			for _, n := range names {
+				if _, ok := h.specs[n]; ok {
+					out[n] = max(h.pid[n], 1)
+				}
+			}
+			return out, nil
+		},
+		redirect: func(pid int, port uint32) error {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			h.redirects = append(h.redirects, fmt.Sprintf("%d:%d", pid, port))
+			return nil
+		},
 	}
 }
 
@@ -251,7 +277,7 @@ func TestForwarders_receiverRefusesWhatItWasNotHanded(t *testing.T) {
 		{"a leader", wire.Party{Fingerprint: fpA, Role: wire.RoleLeader}, envNet, "database", "db1", false},
 	}
 	for _, c := range cases {
-		if _, ok := f.authorize(c.from, c.net, c.kind, c.id); ok != c.ok {
+		if _, ok := f.authorize(c.from, c.net, c.kind, c.id, ""); ok != c.ok {
 			t.Errorf("%s: served=%v, want %v", c.name, ok, c.ok)
 		}
 	}
@@ -281,7 +307,7 @@ func TestForwarders_aServedWorkloadIsDialedOnItsOwnNetworkOnly(t *testing.T) {
 		Members: []*pb.ClusterForwarderMember{{ServerId: "srvA", Fingerprint: fpA}, {ServerId: "srvB", Fingerprint: fpB}},
 		Serve:   []*pb.ClusterServedName{{Network: envNet, Kind: "database", WorkloadId: "db1", Port: port, SourceFingerprints: []string{fpA}}}})
 	placeOn(t, b, "srvB", dbEntry("srvB"))
-	if _, err := b.forwarders().dialLocal(context.Background(), "db1", envNet, port); err == nil {
+	if _, err := b.forwarders().dialLocal(context.Background(), "db1", envNet, "", port); err == nil {
 		t.Fatal("a container on another network was dialed")
 	}
 }

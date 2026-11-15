@@ -265,6 +265,7 @@ func (s *Service) runParty(m *clusterMember, member bool) {
 	if member {
 		go s.leaseGuard().Run(ctx)
 		go s.forwarders().Resume()
+		go s.forwarders().Watch(ctx)
 		go s.replicas().Run(ctx)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,13 +25,18 @@ const (
 )
 
 var dockerForwardOps = forwardOps{
-	network: ensureTenantNetwork,
-	ensure:  ensureForwarderContainer,
-	remove:  removeForwarderContainer,
-	list:    listForwarderContainers,
-	target:  workloadAddress,
-	listen:  listenForwarder,
+	network:  ensureTenantNetwork,
+	ensure:   ensureForwarderContainer,
+	remove:   removeForwarderContainer,
+	list:     listForwarderContainers,
+	target:   workloadAddress,
+	listen:   listenForwarder,
+	pids:     forwarderPids,
+	redirect: redirectAllPorts,
 }
+
+// fwdProto names what a forwarder container speaks to this agent: a container of another one is replaced.
+const fwdProto = "2"
 
 // listenForwarder opens the socket one forwarder container reaches this agent on. The directory is what gets
 // mounted, so the container still finds the socket after this agent restarts and makes it again.
@@ -53,7 +59,7 @@ func listenForwarder(dir string) (net.Listener, error) {
 }
 
 func forwarderSpecTag(s forwardSpec) string {
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%d|%s", s.Network, s.Alias, s.Port, s.Dir)))
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%s|%d|%s", fwdProto, s.Network, s.Alias, s.Port, s.Dir)))
 	return hex.EncodeToString(sum[:6])
 }
 
@@ -137,13 +143,18 @@ func listForwarderContainers(ctx context.Context) ([]string, error) {
 	return out, nil
 }
 
-// workloadAddress finds a running container of the workload by the id Deplo stamps on it, on that network only.
-func workloadAddress(ctx context.Context, workloadID, network string) (string, error) {
-	if !fwdID.MatchString(workloadID) || !forwardableNetwork(network) {
+// workloadAddress finds a running container of the workload by the id Deplo stamps on it, on that network only;
+// for a compose service, the container compose labels with that service.
+func workloadAddress(ctx context.Context, workloadID, network, service string) (string, error) {
+	if !fwdID.MatchString(workloadID) || !forwardableNetwork(network) || (service != "" && !fwdService.MatchString(service)) {
 		return "", fmt.Errorf("not a workload on a tenant network")
 	}
-	res, err := dockercli.Run(ctx, 10*time.Second, "ps", "-q",
-		"--filter", "label=deplo.project="+workloadID, "--filter", "network="+network, "--filter", "status=running")
+	args := []string{"ps", "-q", "--filter", "label=deplo.project=" + workloadID, "--filter", "network=" + network,
+		"--filter", "status=running"}
+	if service != "" {
+		args = append(args, "--filter", "label=com.docker.compose.service="+service)
+	}
+	res, err := dockercli.Run(ctx, 10*time.Second, args...)
 	if err != nil || res.Code != 0 {
 		return "", fmt.Errorf("list the workload's containers")
 	}
@@ -158,4 +169,29 @@ func workloadAddress(ctx context.Context, workloadID, network string) (string, e
 		return "", fmt.Errorf("the workload has no address on %s", network)
 	}
 	return ip, nil
+}
+
+// forwarderPids is the process of each running forwarder container, read in one call.
+func forwarderPids(ctx context.Context, containers []string) (map[string]int, error) {
+	if len(containers) == 0 {
+		return map[string]int{}, nil
+	}
+	args := append([]string{"inspect", "--format", "{{.Name}} {{.State.Pid}}"}, containers...)
+	res, err := dockercli.Run(ctx, 15*time.Second, args...)
+	if err != nil {
+		return nil, err
+	}
+	// A missing container fails the call but the others are still printed.
+	out := map[string]int{}
+	for _, line := range strings.Split(res.Stdout, "\n") {
+		f := strings.Fields(line)
+		if len(f) != 2 {
+			continue
+		}
+		name := strings.TrimPrefix(f[0], "/")
+		if pid, err := strconv.Atoi(f[1]); err == nil && fwdContainer.MatchString(name) {
+			out[name] = pid
+		}
+	}
+	return out, nil
 }

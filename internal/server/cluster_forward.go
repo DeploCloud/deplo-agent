@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,20 +25,28 @@ import (
 )
 
 // Name forwarders (#200, ADR-0028 amendment): this member holds the name of a workload that runs on another
-// one, and carries each connection to it over the relay. The control plane renders the table; this only runs it.
-// Stream, member to member: "FWD <network> <kind>:<id>", answered OK or ERR, then raw bytes.
+// one, and carries each connection to it over the cluster's network. The control plane renders the table; this
+// only runs it. Stream, member to member: "FWD <network> <kind>:<id>[ <port>[ <service>]]", answered OK or ERR,
+// then raw bytes; the port is the one the caller dialed, sent only when it is not the entry's own.
 const (
 	fwdVerb = "FWD"
 	// Every member of an Environment is handed an entry for each of its workloads, held or served.
 	maxFwdEntries = 1024
+	// fwdWatchEvery is how often a restarted forwarder container gets its redirect back.
+	fwdWatchEvery = 15 * time.Second
 )
 
 var (
-	// A public name is db-<slug> or the App's deplo-<slug>, and nothing else.
-	fwdName = regexp.MustCompile(`^(db|deplo)-[a-z0-9][a-z0-9-]{0,58}$`)
-	fwdID   = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+	// A whole workload's public name is db-<slug> or the App's deplo-<slug>; a compose service's is its own
+	// name or hostname, which the entry then names the service of.
+	fwdName        = regexp.MustCompile(`^(db|deplo)-[a-z0-9][a-z0-9-]{0,58}$`)
+	fwdServiceName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
+	fwdID          = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+	// A compose service, as its stack names it.
+	fwdService = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$`)
 	// What the proxy still resolves by name on every tenant network: never held, whatever the table says.
-	fwdReserved = map[string]bool{"deplo-traefik": true, "deplo-socket-proxy": true}
+	fwdReserved = map[string]bool{"deplo": true, "postgres": true, "traefik": true, "deplo-traefik": true,
+		"deplo-socket-proxy": true, "docker-socket-proxy": true}
 )
 
 // forwardableNetwork is an Environment's or a team's network; a preview's names stay on its one server.
@@ -50,6 +60,8 @@ type heldName struct {
 	ID      string `json:"id"`
 	Name    string `json:"name"`
 	Port    uint32 `json:"port"`
+	// Service is the compose service the name belongs to; empty for a whole App or a database.
+	Service string `json:"service,omitempty"`
 }
 
 func (h heldName) key() string { return h.Network + "|" + h.Name }
@@ -60,6 +72,7 @@ type servedName struct {
 	ID      string   `json:"id"`
 	Port    uint32   `json:"port"`
 	Sources []string `json:"sources"`
+	Service string   `json:"service,omitempty"`
 }
 
 type forwardState struct {
@@ -85,9 +98,12 @@ type forwardOps struct {
 	ensure  func(ctx context.Context, s forwardSpec) error
 	remove  func(ctx context.Context, container string) error
 	list    func(ctx context.Context) ([]string, error)
-	// target is the address, on network, of a running container of the workload on this host.
-	target func(ctx context.Context, workloadID, network string) (string, error)
+	// target is the address, on network, of a running container of the workload (or of its service) on this host.
+	target func(ctx context.Context, workloadID, network, service string) (string, error)
 	listen func(dir string) (net.Listener, error)
+	// pids is each forwarder container's process, and redirect sends every TCP port of its network to one.
+	pids     func(ctx context.Context, containers []string) (map[string]int, error)
+	redirect func(pid int, port uint32) error
 }
 
 // `_` is in no slug, so no stack's container (deplo-<slug>..., db-<slug>) can hold a forwarder's name.
@@ -110,11 +126,13 @@ type forwarders struct {
 	mu        sync.Mutex
 	st        forwardState
 	listeners map[string]*heldListener
+	// redirected is the process each container's redirect was set up in: a restarted container needs it again.
+	redirected map[string]int
 }
 
 func (s *Service) forwarders() *forwarders {
 	s.fwdOnce.Do(func() {
-		f := &forwarders{s: s, listeners: map[string]*heldListener{}}
+		f := &forwarders{s: s, listeners: map[string]*heldListener{}, redirected: map[string]int{}}
 		if s.agentDir != "" {
 			if raw, err := os.ReadFile(f.file()); err == nil {
 				_ = json.Unmarshal(raw, &f.st)
@@ -172,11 +190,14 @@ func validateForwarders(req *pb.SetClusterForwardersRequest) (forwardState, erro
 		st.Members[m.GetServerId()] = m.GetFingerprint()
 	}
 	kind := func(k string) bool { return k == "app" || k == "database" }
+	// A service belongs to a compose stack, which is an App.
+	service := func(k, s string) bool { return s == "" || (k == "app" && fwdService.MatchString(s)) }
 	seen := map[string]bool{}
 	for _, h := range req.GetHold() {
-		e := heldName{h.GetNetwork(), h.GetKind(), h.GetWorkloadId(), h.GetName(), h.GetPort()}
-		if !forwardableNetwork(e.Network) || !kind(e.Kind) || !fwdID.MatchString(e.ID) ||
-			!fwdName.MatchString(e.Name) || fwdReserved[e.Name] || e.Port == 0 || e.Port > 65535 {
+		e := heldName{h.GetNetwork(), h.GetKind(), h.GetWorkloadId(), h.GetName(), h.GetPort(), h.GetService()}
+		named := fwdName.MatchString(e.Name) || (e.Service != "" && fwdServiceName.MatchString(e.Name))
+		if !forwardableNetwork(e.Network) || !kind(e.Kind) || !fwdID.MatchString(e.ID) || !service(e.Kind, e.Service) ||
+			!named || fwdReserved[e.Name] || e.Port == 0 || e.Port > 65535 {
 			return st, fmt.Errorf("%q on %q is not a name this member can hold", e.Name, e.Network)
 		}
 		if seen[e.key()] {
@@ -186,8 +207,8 @@ func validateForwarders(req *pb.SetClusterForwardersRequest) (forwardState, erro
 		st.Hold = append(st.Hold, e)
 	}
 	for _, v := range req.GetServe() {
-		e := servedName{v.GetNetwork(), v.GetKind(), v.GetWorkloadId(), v.GetPort(), nil}
-		if !forwardableNetwork(e.Network) || !kind(e.Kind) || !fwdID.MatchString(e.ID) ||
+		e := servedName{v.GetNetwork(), v.GetKind(), v.GetWorkloadId(), v.GetPort(), nil, v.GetService()}
+		if !forwardableNetwork(e.Network) || !kind(e.Kind) || !fwdID.MatchString(e.ID) || !service(e.Kind, e.Service) ||
 			e.Port == 0 || e.Port > 65535 {
 			return st, fmt.Errorf("%s:%s on %q is not a workload this member can serve", e.Kind, e.ID, e.Network)
 		}
@@ -295,6 +316,7 @@ func (f *forwarders) reconcile(ctx context.Context) error {
 		}
 		note(ops.ensure(ctx, forwardSpec{Container: name, Network: h.Network, Alias: h.Name, Port: h.Port, Dir: l.dir}))
 	}
+	f.redirectLocked(ctx)
 	if have, err := ops.list(ctx); err == nil {
 		for _, name := range have {
 			if !wanted[name] {
@@ -310,9 +332,57 @@ func (f *forwarders) reconcile(ctx context.Context) error {
 			l.ln.Close()
 			_ = os.RemoveAll(l.dir)
 			delete(f.listeners, name)
+			delete(f.redirected, name)
 		}
 	}
 	return first
+}
+
+// redirectLocked sends every TCP port of each forwarder container to its one listener, once per container
+// process: a container that restarted lost it with its network. A name whose redirect fails still answers on
+// its own port. The caller holds f.mu.
+func (f *forwarders) redirectLocked(ctx context.Context) {
+	ops := f.ops()
+	if ops.pids == nil || ops.redirect == nil || len(f.st.Hold) == 0 {
+		return
+	}
+	ports := map[string]uint32{}
+	names := make([]string, 0, len(f.st.Hold))
+	for _, h := range f.st.Hold {
+		c := containerFor(h)
+		ports[c] = h.Port
+		names = append(names, c)
+	}
+	pids, err := ops.pids(ctx, names)
+	if err != nil {
+		return
+	}
+	for c, pid := range pids {
+		if pid <= 0 || f.redirected[c] == pid {
+			continue
+		}
+		if err := ops.redirect(pid, ports[c]); err != nil {
+			fmt.Fprintf(os.Stderr, "deplo-agent: name forwarder %s answers on its own port only: %v\n", c, err)
+			continue
+		}
+		f.redirected[c] = pid
+	}
+}
+
+// Watch puts a redirect back after a forwarder container restarted, until ctx ends.
+func (f *forwarders) Watch(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(fwdWatchEvery):
+		}
+		f.mu.Lock()
+		wctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		f.redirectLocked(wctx)
+		cancel()
+		f.mu.Unlock()
+	}
 }
 
 func (f *forwarders) acceptHeld(key string, l *heldListener) {
@@ -342,6 +412,7 @@ func (f *forwarders) serveHeld(key string, c net.Conn) {
 	if !found {
 		return
 	}
+	in, port := readDialedPort(c, h.Port)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	memberID, here, ok := f.s.leaseGuard().locate(cluster, h.Kind, h.ID)
@@ -351,19 +422,61 @@ func (f *forwarders) serveHeld(key string, c net.Conn) {
 	var up net.Conn
 	var err error
 	if here {
-		up, err = f.dialLocal(ctx, h.ID, h.Network, h.Port)
+		up, err = f.dialLocal(ctx, h.ID, h.Network, h.Service, port)
 	} else {
-		up, err = f.dialMember(ctx, members[memberID], h)
+		up, err = f.dialMember(ctx, members[memberID], h, port)
 	}
 	if err != nil {
 		return
 	}
-	forwarder.Join(c, up)
+	forwarder.Join(in, up)
 }
 
-// dialLocal reaches the workload's own container: found by id on the entry's network, never by a name.
-func (f *forwarders) dialLocal(ctx context.Context, workloadID, network string, port uint32) (net.Conn, error) {
-	ip, err := f.ops().target(ctx, workloadID, network)
+// bufferedConn is a connection whose first bytes were read ahead.
+type bufferedConn struct {
+	net.Conn
+	r *bufio.Reader
+}
+
+func (b *bufferedConn) Read(p []byte) (int, error) { return b.r.Read(p) }
+
+// CloseWrite lets a half-close reach the forwarder's side as it would without the read-ahead.
+func (b *bufferedConn) CloseWrite() error {
+	if cw, ok := b.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return b.Conn.Close()
+}
+
+// readDialedPort reads the port line a forwarder opens with: the port its caller dialed. A forwarder from before
+// the line sends the caller's bytes at once, so whatever is not the line is kept and the name's own port used.
+func readDialedPort(c net.Conn, own uint32) (net.Conn, uint32) {
+	r := bufio.NewReaderSize(c, 64)
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+	defer c.SetReadDeadline(time.Time{})
+	in := &bufferedConn{Conn: c, r: r}
+	// A caller's own bytes rarely start with the verb's letter: those pass without waiting for more.
+	if first, err := r.Peek(1); err != nil || first[0] != forwarder.HeaderVerb[0] {
+		return in, own
+	}
+	head, err := r.Peek(len(forwarder.HeaderVerb) + 1)
+	if err != nil || string(head) != forwarder.HeaderVerb+" " {
+		return in, own
+	}
+	line, err := r.ReadString('\n')
+	if err != nil {
+		return in, own
+	}
+	n, err := strconv.ParseUint(strings.TrimSpace(strings.TrimPrefix(line, forwarder.HeaderVerb+" ")), 10, 16)
+	if err != nil || n == 0 {
+		return in, own
+	}
+	return in, uint32(n)
+}
+
+// dialLocal reaches the workload's own container, or its service's: found by id on the entry's network, never by a name.
+func (f *forwarders) dialLocal(ctx context.Context, workloadID, network, service string, port uint32) (net.Conn, error) {
+	ip, err := f.ops().target(ctx, workloadID, network, service)
 	if err != nil {
 		return nil, err
 	}
@@ -371,7 +484,19 @@ func (f *forwarders) dialLocal(ctx context.Context, workloadID, network string, 
 	return d.DialContext(ctx, "tcp", net.JoinHostPort(ip, fmt.Sprint(port)))
 }
 
-func (f *forwarders) dialMember(ctx context.Context, fingerprint string, h heldName) (net.Conn, error) {
+// fwdArg is a FWD stream's header: the old form for a name's own port with no service, so an older agent still takes it.
+func fwdArg(h heldName, port uint32) string {
+	arg := fmt.Sprintf("%s %s:%s", h.Network, h.Kind, h.ID)
+	if port != h.Port || h.Service != "" {
+		arg += fmt.Sprintf(" %d", port)
+	}
+	if h.Service != "" {
+		arg += " " + h.Service
+	}
+	return arg
+}
+
+func (f *forwarders) dialMember(ctx context.Context, fingerprint string, h heldName, port uint32) (net.Conn, error) {
 	m := f.s.clusterMember()
 	m.mu.Lock()
 	party := m.party
@@ -384,7 +509,7 @@ func (f *forwarders) dialMember(ctx context.Context, fingerprint string, h heldN
 		return nil, err
 	}
 	_ = conn.SetDeadline(time.Now().Add(wire.HeaderTimeout))
-	if err := wire.WriteHeader(conn, fwdVerb, fmt.Sprintf("%s %s:%s", h.Network, h.Kind, h.ID)); err != nil {
+	if err := wire.WriteHeader(conn, fwdVerb, fwdArg(h, port)); err != nil {
 		conn.Close()
 		return nil, err
 	}
@@ -399,7 +524,7 @@ func (f *forwarders) dialMember(ctx context.Context, fingerprint string, h heldN
 
 // authorize is the receiving side's whole decision: a stream is served only when it matches an entry this agent was
 // handed for a workload the leader placed here, from a member of this agent's own cluster.
-func (f *forwarders) authorize(from wire.Party, network, kind, id string) (servedName, bool) {
+func (f *forwarders) authorize(from wire.Party, network, kind, id, service string) (servedName, bool) {
 	f.mu.Lock()
 	st := f.st
 	f.mu.Unlock()
@@ -419,7 +544,7 @@ func (f *forwarders) authorize(from wire.Party, network, kind, id string) (serve
 		return servedName{}, false
 	}
 	for _, e := range st.Serve {
-		if e.Network == network && e.Kind == kind && e.ID == id {
+		if e.Network == network && e.Kind == kind && e.ID == id && e.Service == service {
 			for _, fp := range e.Sources {
 				if fp == from.Fingerprint {
 					return e, true
@@ -430,19 +555,48 @@ func (f *forwarders) authorize(from wire.Party, network, kind, id string) (serve
 	return servedName{}, false
 }
 
-// serveForward answers another member's FWD stream.
+// parseFwdArg reads "<network> <kind>:<id>[ <port>[ <service>]]"; a missing port is the entry's own.
+func parseFwdArg(arg string) (network, kind, id, service string, port uint32, ok bool) {
+	f := strings.Fields(arg)
+	if len(f) < 2 || len(f) > 4 {
+		return "", "", "", "", 0, false
+	}
+	network = f[0]
+	kind, id, ok = strings.Cut(f[1], ":")
+	if !ok {
+		return "", "", "", "", 0, false
+	}
+	if len(f) >= 3 {
+		n, err := strconv.ParseUint(f[2], 10, 16)
+		if err != nil || n == 0 {
+			return "", "", "", "", 0, false
+		}
+		port = uint32(n)
+	}
+	if len(f) == 4 {
+		service = f[3]
+	}
+	return network, kind, id, service, port, true
+}
+
+// serveForward answers another member's FWD stream: on any port of the workload, as on one server.
 func (s *Service) serveForward(from wire.Party, c net.Conn, arg string) {
-	network, ref, _ := strings.Cut(arg, " ")
-	kind, id, _ := strings.Cut(ref, ":")
+	network, kind, id, service, port, ok := parseFwdArg(arg)
 	f := s.forwarders()
-	e, ok := f.authorize(from, network, kind, id)
+	var e servedName
+	if ok {
+		e, ok = f.authorize(from, network, kind, id, service)
+	}
 	if !ok {
 		_ = wire.WriteHeader(c, wire.VerbErr, "not served")
 		return
 	}
+	if port == 0 {
+		port = e.Port
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	up, err := f.dialLocal(ctx, e.ID, e.Network, e.Port)
+	up, err := f.dialLocal(ctx, e.ID, e.Network, e.Service, port)
 	if err != nil {
 		_ = wire.WriteHeader(c, wire.VerbErr, "not answering")
 		return

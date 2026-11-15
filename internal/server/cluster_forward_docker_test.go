@@ -141,7 +141,7 @@ func TestForwarderContainer_listsOnlyForwarders(t *testing.T) {
 
 func TestForwarderTarget_isTheWorkloadsContainerOnThatNetwork(t *testing.T) {
 	argv := dockerOnPath(t, `case "$1" in ps) echo abc123;; inspect) echo 172.20.0.5;; esac; exit 0`)
-	ip, err := workloadAddress(context.Background(), "db1", envNet)
+	ip, err := workloadAddress(context.Background(), "db1", envNet, "")
 	if err != nil || ip != "172.20.0.5" {
 		t.Fatalf("got %q, %v", ip, err)
 	}
@@ -153,7 +153,7 @@ func TestForwarderTarget_isTheWorkloadsContainerOnThatNetwork(t *testing.T) {
 	// Nothing of the platform's, and nothing that is not an id, is ever looked up.
 	argv = dockerOnPath(t, "exit 0")
 	for _, c := range [][2]string{{"db1", "deplo"}, {"db1", "deplo-socket"}, {"db1", "deplo-preview-web__pr-1"}, {"db1 --filter x", envNet}, {"", envNet}} {
-		if _, err := workloadAddress(context.Background(), c[0], c[1]); err == nil {
+		if _, err := workloadAddress(context.Background(), c[0], c[1], ""); err == nil {
 			t.Errorf("%q on %q was looked up", c[0], c[1])
 		}
 	}
@@ -162,7 +162,7 @@ func TestForwarderTarget_isTheWorkloadsContainerOnThatNetwork(t *testing.T) {
 	}
 	// A workload that is not running here on that network has no address.
 	dockerOnPath(t, "exit 0")
-	if _, err := workloadAddress(context.Background(), "db1", envNet); err == nil {
+	if _, err := workloadAddress(context.Background(), "db1", envNet, ""); err == nil {
 		t.Fatal("a workload with no container was given an address")
 	}
 }

@@ -1,5 +1,6 @@
 // Package forwarder is the process inside a name forwarder's container: it listens on the
 // workload's port and hands every connection to this host's agent, which decides where it goes (#200).
+// The agent redirects every TCP port of the container to that one listener, so the name answers on all of them.
 package forwarder
 
 import (
@@ -34,11 +35,19 @@ func Main(args []string, stderr io.Writer) int {
 	}
 }
 
+// HeaderVerb opens what a forwarder sends the agent: the port its caller dialed, 0 when it cannot tell.
+const HeaderVerb = "PORT"
+
 // Relay joins c to a new connection to the agent's socket until either side closes.
 func Relay(c net.Conn, socket string) {
 	up, err := net.DialTimeout("unix", socket, 10*time.Second)
 	if err != nil {
 		c.Close()
+		return
+	}
+	if _, err := fmt.Fprintf(up, "%s %d\n", HeaderVerb, OriginalPort(c)); err != nil {
+		c.Close()
+		up.Close()
 		return
 	}
 	Join(c, up)
