@@ -134,7 +134,7 @@ const (
 	maxPending = 32
 	// crossWindow is how close two initiations must be to cross: then only the lower key's goes on.
 	crossWindow = time.Second
-	pendingFor = 3 * time.Second
+	pendingFor  = 3 * time.Second
 )
 
 // queue keeps a packet until a path answers; the caller holds m.mu.
