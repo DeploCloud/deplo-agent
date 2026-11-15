@@ -160,3 +160,16 @@ func TestReplicas_aPromotionWithoutAWholeCopyStartsNothing(t *testing.T) {
 		t.Fatalf("promoted: %v", err)
 	}
 }
+
+func TestReplica_aWholeCopyThatHearsNothingDialsAgain(t *testing.T) {
+	now := time.Now()
+	if replStalled(false, now.Add(-time.Hour), now) {
+		t.Fatal("a copy still being made was cut off: its first pass may say nothing for long")
+	}
+	if replStalled(true, now.Add(-time.Minute), now) {
+		t.Fatal("a whole copy was cut off within the wait")
+	}
+	if !replStalled(true, now.Add(-replStallAfter-time.Second), now) {
+		t.Fatal("a whole copy that heard nothing past the wait kept waiting")
+	}
+}

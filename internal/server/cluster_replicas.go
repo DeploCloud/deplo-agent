@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -368,7 +369,53 @@ func (r *replicas) receiveOnce(ctx context.Context, cluster string, e replicaEnt
 		return fmt.Errorf("the server the App runs on refused: %s", arg)
 	}
 	_ = conn.SetDeadline(time.Time{})
-	return replica.Receive(ctx, conn, r.dir(e.AppID), e.roots(), run.status, run.index)
+	in := &activityConn{Conn: conn}
+	in.last.Store(time.Now().UnixNano())
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		t := time.NewTicker(replStallCheck)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case now := <-t.C:
+				_, synced, _, _, _ := run.status.Snapshot()
+				if replStalled(synced, time.Unix(0, in.last.Load()), now) {
+					fmt.Fprintf(os.Stderr, "deplo-agent: replica of %s heard nothing for %v: dialing again\n", e.Slug, replStallAfter)
+					conn.Close()
+					return
+				}
+			}
+		}
+	}()
+	return replica.Receive(ctx, in, r.dir(e.AppID), e.roots(), run.status, run.index)
+}
+
+// A whole copy whose sender says nothing at all, not even the beat it sends every 2 s, dials again: a stream that
+// died without closing must never hold a copy behind. Generous, because a sender rescanning big files is quiet.
+var (
+	replStallAfter = 3 * time.Minute
+	replStallCheck = 5 * time.Second
+)
+
+func replStalled(synced bool, last, now time.Time) bool {
+	return synced && now.Sub(last) > replStallAfter
+}
+
+// activityConn notes when anything last arrived.
+type activityConn struct {
+	net.Conn
+	last atomic.Int64
+}
+
+func (a *activityConn) Read(p []byte) (int, error) {
+	n, err := a.Conn.Read(p)
+	if n > 0 {
+		a.last.Store(time.Now().UnixNano())
+	}
+	return n, err
 }
 
 func (r *replicas) dialMember(ctx context.Context, fingerprint string) (net.Conn, error) {
