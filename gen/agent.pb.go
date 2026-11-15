@@ -12677,8 +12677,8 @@ type ClusterReplicaState struct {
 	// RFC 3339, when the last change or beat arrived; empty before one did.
 	AppliedAt string `protobuf:"bytes,6,opt,name=applied_at,json=appliedAt,proto3" json:"applied_at,omitempty"`
 	// Bytes of file data this copy received since the agent started; a range it already held is not counted.
-	Bytes     int64  `protobuf:"varint,7,opt,name=bytes,proto3" json:"bytes,omitempty"`
-	Error     string `protobuf:"bytes,8,opt,name=error,proto3" json:"error,omitempty"`
+	Bytes int64  `protobuf:"varint,7,opt,name=bytes,proto3" json:"bytes,omitempty"`
+	Error string `protobuf:"bytes,8,opt,name=error,proto3" json:"error,omitempty"`
 	// The member it receives from.
 	FromServerId  string `protobuf:"bytes,9,opt,name=from_server_id,json=fromServerId,proto3" json:"from_server_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
