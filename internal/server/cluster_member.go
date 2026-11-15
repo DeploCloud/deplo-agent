@@ -243,6 +243,7 @@ func (s *Service) startMember(m *clusterMember, st memberState) {
 	go p.Run(ctx)
 	go s.leaseGuard().Run(ctx)
 	go s.forwarders().Resume()
+	go s.replicas().Run(ctx)
 }
 
 // SetClusterMember makes this agent a cluster party, or stops it being one; see the RPC's contract in proto/agent.proto.

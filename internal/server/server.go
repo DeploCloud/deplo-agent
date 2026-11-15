@@ -133,6 +133,7 @@ var Capabilities = []string{
 	"cluster.forwarders",
 	"backup.postgres-archive",
 	"cluster.standby",
+	"cluster.replicas",
 }
 
 // AgentVersion is the version this agent reports over Hello.
@@ -192,6 +193,10 @@ type Service struct {
 
 	restartOnce sync.Once
 	rw          *restartWatcher
+
+	// Replication of App data; see cluster_replicas.go.
+	replOnce sync.Once
+	repl     *replicas
 }
 
 type stackLock struct {

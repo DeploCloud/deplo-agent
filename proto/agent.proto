@@ -184,6 +184,17 @@ service Agent {
   // member that is not in a cluster.
   rpc SetClusterForwarders(SetClusterForwardersRequest) returns (SetClusterForwardersResponse);
 
+  // ---- REPLICATION OF APP DATA (Hello capability "cluster.replicas") ----
+
+  // Hand this member the cluster's replicated Apps. The member that runs one sends its Volumes and
+  // Files to every other member as they change; each other member keeps a copy of its own, which a
+  // failover restore marked from_replica puts in place. The full set each time; one not listed
+  // loses its copy here.
+  rpc SetClusterReplicas(SetClusterReplicasRequest) returns (SetClusterReplicasResponse);
+
+  // How each copy on this member stands.
+  rpc ClusterReplicaStatus(ClusterReplicaStatusRequest) returns (ClusterReplicaStatusResponse);
+
   // ---- BACKUPS: dump/restore a database or project to/from a DESTINATION, plus the
   // affordances the control plane needs (connectivity check + object delete).
   // StoreTarget - a directory on THIS host's filesystem.
@@ -1386,6 +1397,9 @@ message RestoreRequest {
   // Postgres base backups only: the folder, at the same destination, of the change-log artifacts
   // (BackupRequest.archive LOG) to replay after the base backup, in name order.
   string log_prefix = 8;
+  // PROJECT only: put the copy replication keeps on this member in place of the App's Volumes and
+  // Files, instead of reading an artifact. Needs `cluster.replicas`; s3 and store are ignored.
+  bool from_replica = 9;
 }
 
 message RestoreEvent {
@@ -2522,4 +2536,51 @@ message SetClusterForwardersRequest {
 message SetClusterForwardersResponse {
   int32 held = 1;
   int32 served = 2;
+}
+
+// ---- REPLICATION OF APP DATA ----
+
+message SetClusterReplicasRequest {
+  string cluster_id = 1;
+  // Every member of the cluster, by the server id the leader's placement names it with.
+  repeated ClusterForwarderMember members = 2;
+  repeated ClusterReplicaEntry entries = 3;
+}
+
+// One replicated App: what it keeps, under the names its stack uses.
+message ClusterReplicaEntry {
+  string app_id = 1;
+  string slug = 2;
+  // Its Docker volumes, as the stack names them (deplo-<slug>-<name>, or a compose stack's own).
+  repeated string volume_names = 3;
+  // Whether its Files (<stack-dir>/files/<slug>) are part of it.
+  bool include_files = 4;
+}
+
+message SetClusterReplicasResponse {
+  int32 entries = 1;
+}
+
+message ClusterReplicaStatusRequest {}
+
+message ClusterReplicaStatusResponse {
+  repeated ClusterReplicaState replicas = 1;
+}
+
+message ClusterReplicaState {
+  string app_id = 1;
+  // "sending": the App runs here. "receiving": this member keeps a copy. "idle": neither, see error.
+  string role = 2;
+  // A stream to or from another member is open now; for a sender, how many.
+  bool connected = 3;
+  int32 streams = 4;
+  // This member's copy once held all of the App's data: a failover may put it in place.
+  bool synced = 5;
+  // RFC 3339, when the last change or beat arrived; empty before one did.
+  string applied_at = 6;
+  // Bytes of file data this copy received since the agent started; a range it already held is not counted.
+  int64 bytes = 7;
+  string error = 8;
+  // The member it receives from.
+  string from_server_id = 9;
 }

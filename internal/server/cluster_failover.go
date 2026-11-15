@@ -129,7 +129,17 @@ func (s *Service) startFromBundle(ctx context.Context, st *lease.Start) error {
 		return err
 	}
 	first := restore != nil && restoresBeforeStart(restore)
-	if first {
+	if first && restore.GetFromReplica() {
+		// The copy replication kept here becomes the App's data; nothing receives for it while it starts.
+		release, err := s.promoteReplica(ctx, st.Slug)
+		if release != nil {
+			defer release()
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "deplo-agent: failover of %s from its replica failed: %v\n", st.Slug, err)
+			return err
+		}
+	} else if first {
 		if err := runFailoverRestore(s, ctx, restore); err != nil {
 			fmt.Fprintf(os.Stderr, "deplo-agent: failover restore of %s failed: %v\n", st.Slug, err)
 			return err

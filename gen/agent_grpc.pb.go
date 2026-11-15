@@ -59,6 +59,8 @@ const (
 	Agent_CopyClusterImage_FullMethodName     = "/deplo.agent.v1.Agent/CopyClusterImage"
 	Agent_ExpectClusterImage_FullMethodName   = "/deplo.agent.v1.Agent/ExpectClusterImage"
 	Agent_SetClusterForwarders_FullMethodName = "/deplo.agent.v1.Agent/SetClusterForwarders"
+	Agent_SetClusterReplicas_FullMethodName   = "/deplo.agent.v1.Agent/SetClusterReplicas"
+	Agent_ClusterReplicaStatus_FullMethodName = "/deplo.agent.v1.Agent/ClusterReplicaStatus"
 	Agent_Backup_FullMethodName               = "/deplo.agent.v1.Agent/Backup"
 	Agent_Restore_FullMethodName              = "/deplo.agent.v1.Agent/Restore"
 	Agent_S3Check_FullMethodName              = "/deplo.agent.v1.Agent/S3Check"
@@ -229,6 +231,13 @@ type AgentClient interface {
 	// for its own workloads. The full set each time; one not listed is removed. Never sent to a
 	// member that is not in a cluster.
 	SetClusterForwarders(ctx context.Context, in *SetClusterForwardersRequest, opts ...grpc.CallOption) (*SetClusterForwardersResponse, error)
+	// Hand this member the cluster's replicated Apps. The member that runs one sends its Volumes and
+	// Files to every other member as they change; each other member keeps a copy of its own, which a
+	// failover restore marked from_replica puts in place. The full set each time; one not listed
+	// loses its copy here.
+	SetClusterReplicas(ctx context.Context, in *SetClusterReplicasRequest, opts ...grpc.CallOption) (*SetClusterReplicasResponse, error)
+	// How each copy on this member stands.
+	ClusterReplicaStatus(ctx context.Context, in *ClusterReplicaStatusRequest, opts ...grpc.CallOption) (*ClusterReplicaStatusResponse, error)
 	// Back up a database or a project to a destination, streaming progress.
 	Backup(ctx context.Context, in *BackupRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[BackupEvent], error)
 	// Restore a database or project from a previously-written artifact, IN PLACE,
@@ -807,6 +816,26 @@ func (c *agentClient) SetClusterForwarders(ctx context.Context, in *SetClusterFo
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SetClusterForwardersResponse)
 	err := c.cc.Invoke(ctx, Agent_SetClusterForwarders_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) SetClusterReplicas(ctx context.Context, in *SetClusterReplicasRequest, opts ...grpc.CallOption) (*SetClusterReplicasResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetClusterReplicasResponse)
+	err := c.cc.Invoke(ctx, Agent_SetClusterReplicas_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) ClusterReplicaStatus(ctx context.Context, in *ClusterReplicaStatusRequest, opts ...grpc.CallOption) (*ClusterReplicaStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ClusterReplicaStatusResponse)
+	err := c.cc.Invoke(ctx, Agent_ClusterReplicaStatus_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1458,6 +1487,13 @@ type AgentServer interface {
 	// for its own workloads. The full set each time; one not listed is removed. Never sent to a
 	// member that is not in a cluster.
 	SetClusterForwarders(context.Context, *SetClusterForwardersRequest) (*SetClusterForwardersResponse, error)
+	// Hand this member the cluster's replicated Apps. The member that runs one sends its Volumes and
+	// Files to every other member as they change; each other member keeps a copy of its own, which a
+	// failover restore marked from_replica puts in place. The full set each time; one not listed
+	// loses its copy here.
+	SetClusterReplicas(context.Context, *SetClusterReplicasRequest) (*SetClusterReplicasResponse, error)
+	// How each copy on this member stands.
+	ClusterReplicaStatus(context.Context, *ClusterReplicaStatusRequest) (*ClusterReplicaStatusResponse, error)
 	// Back up a database or a project to a destination, streaming progress.
 	Backup(*BackupRequest, grpc.ServerStreamingServer[BackupEvent]) error
 	// Restore a database or project from a previously-written artifact, IN PLACE,
@@ -1702,6 +1738,12 @@ func (UnimplementedAgentServer) ExpectClusterImage(context.Context, *ExpectClust
 }
 func (UnimplementedAgentServer) SetClusterForwarders(context.Context, *SetClusterForwardersRequest) (*SetClusterForwardersResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetClusterForwarders not implemented")
+}
+func (UnimplementedAgentServer) SetClusterReplicas(context.Context, *SetClusterReplicasRequest) (*SetClusterReplicasResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetClusterReplicas not implemented")
+}
+func (UnimplementedAgentServer) ClusterReplicaStatus(context.Context, *ClusterReplicaStatusRequest) (*ClusterReplicaStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ClusterReplicaStatus not implemented")
 }
 func (UnimplementedAgentServer) Backup(*BackupRequest, grpc.ServerStreamingServer[BackupEvent]) error {
 	return status.Error(codes.Unimplemented, "method Backup not implemented")
@@ -2395,6 +2437,42 @@ func _Agent_SetClusterForwarders_Handler(srv interface{}, ctx context.Context, d
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(AgentServer).SetClusterForwarders(ctx, req.(*SetClusterForwardersRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_SetClusterReplicas_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetClusterReplicasRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).SetClusterReplicas(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_SetClusterReplicas_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).SetClusterReplicas(ctx, req.(*SetClusterReplicasRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_ClusterReplicaStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ClusterReplicaStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).ClusterReplicaStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_ClusterReplicaStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).ClusterReplicaStatus(ctx, req.(*ClusterReplicaStatusRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -3250,6 +3328,14 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SetClusterForwarders",
 			Handler:    _Agent_SetClusterForwarders_Handler,
+		},
+		{
+			MethodName: "SetClusterReplicas",
+			Handler:    _Agent_SetClusterReplicas_Handler,
+		},
+		{
+			MethodName: "ClusterReplicaStatus",
+			Handler:    _Agent_ClusterReplicaStatus_Handler,
 		},
 		{
 			MethodName: "S3Check",
