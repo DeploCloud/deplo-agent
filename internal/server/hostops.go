@@ -246,8 +246,9 @@ func (s *Service) bringUpTraefik(ctx context.Context, path string, restartOnly b
 		}
 		return nil
 	}
-	// A proxy may mount the routes file of its answers (ADR-0048): docker would make a missing one a directory.
-	if p := filepath.Join(filepath.Dir(path), answerRoutesFile); !regularFile(p) {
+	// A proxy that mounts the routes file of its answers (ADR-0048) finds one: docker would make a missing one a
+	// directory. One that does not is left without it.
+	if p := filepath.Join(filepath.Dir(path), answerRoutesFile); mountsAnswerRoutes(path) && !regularFile(p) {
 		_ = os.WriteFile(p, []byte("{}\n"), 0o644)
 	}
 	res, err := dockercli.Run(ctx, 180*time.Second,
@@ -506,4 +507,10 @@ func startInstaller(script, dir, version string) error {
 func regularFile(path string) bool {
 	st, err := os.Stat(path)
 	return err == nil && st.Mode().IsRegular()
+}
+
+// mountsAnswerRoutes says whether the proxy's stack file names the routes file of its answers.
+func mountsAnswerRoutes(compose string) bool {
+	raw, err := os.ReadFile(compose)
+	return err == nil && strings.Contains(string(raw), "./"+answerRoutesFile+":")
 }
