@@ -9,11 +9,13 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/clusterlink/wire"
 	"github.com/DeploCloud/deplo-agent/internal/forwarder"
+	"github.com/DeploCloud/deplo-agent/internal/hostinfo"
 )
 
 // Answers (ADR-0048): a cluster App's domain answers on every server. Each server's proxy passes the domain's TLS,
@@ -62,7 +64,20 @@ type answerRefusal struct {
 	count       uint32
 	first, last time.Time
 	cap         int
+	memory      bool
 }
+
+// refusalKey is what a refusal is counted by: the App, or none for this server's caps, and which of them.
+type refusalKey struct {
+	app     string
+	waiting bool
+}
+
+// answerHostMemory is this host's memory, read once; tests replace it.
+var answerHostMemory = sync.OnceValue(hostinfo.MemTotalBytes)
+
+// answerConnBytes is what one carried connection may cost this agent: two copy buffers of 32 KB.
+const answerConnBytes = 64 << 10
 
 type answer struct {
 	AppID   string        `json:"appId"`
@@ -156,7 +171,9 @@ func validateAnswers(req *pb.SetClusterForwardersRequest, st *forwardState) erro
 
 // answerCaps is this cluster's caps: connections through this agent, waiting for all of its Apps, waiting for one.
 // The caller holds f.mu.
-func (f *forwarders) answerCaps() (conns, waiting, perApp int) {
+// A cluster's cap never takes more than a quarter of this server's memory: one that joined later, or is smaller
+// than the one the cap was checked against, holds it to what fits (memory says so).
+func (f *forwarders) answerCaps() (conns, waiting, perApp int, memory bool) {
 	conns, perApp = answerMaxConns, answerWaitPerApp
 	if f.st.AnswerMaxConns > 0 {
 		conns = int(f.st.AnswerMaxConns)
@@ -164,29 +181,37 @@ func (f *forwarders) answerCaps() (conns, waiting, perApp int) {
 	if f.st.AnswerMaxWaiting > 0 {
 		perApp = int(f.st.AnswerMaxWaiting)
 	}
-	return conns, max(conns/4, 1), perApp
+	if fit := int(answerHostMemory() / 4 / answerConnBytes); fit > 0 && fit < conns {
+		conns, memory = max(fit, 4), true
+	}
+	return conns, max(conns/4, 1), perApp, memory
 }
 
-// refuse counts one connection turned away, by App or, empty, past this server's cap; the caller holds f.mu.
-func (f *forwarders) refuse(appID string, limit int) {
-	r := f.refused[appID]
+// refuse counts one connection turned away, by App or, empty, past one of this server's caps; the caller holds f.mu.
+func (f *forwarders) refuse(k refusalKey, limit int, memory bool) {
+	r := f.refused[k]
 	now := time.Now()
 	if r == nil {
 		r = &answerRefusal{first: now}
-		f.refused[appID] = r
+		f.refused[k] = r
 	}
 	r.count++
-	r.last, r.cap = now, limit
+	r.last, r.cap, r.memory = now, limit, memory
 }
 
 // takeRefusals hands Deplo what was turned away since the last table, and forgets it; the caller holds f.mu.
 func (f *forwarders) takeRefusals() []*pb.ClusterAnswerRefusal {
 	out := make([]*pb.ClusterAnswerRefusal, 0, len(f.refused))
-	for app, r := range f.refused {
-		out = append(out, &pb.ClusterAnswerRefusal{AppId: app, Count: r.count, FirstUnixMs: r.first.UnixMilli(),
-			LastUnixMs: r.last.UnixMilli(), Cap: uint32(r.cap)})
+	for k, r := range f.refused {
+		out = append(out, &pb.ClusterAnswerRefusal{AppId: k.app, Count: r.count, FirstUnixMs: r.first.UnixMilli(),
+			LastUnixMs: r.last.UnixMilli(), Cap: uint32(r.cap), Waiting: k.waiting, Memory: r.memory})
 	}
-	slices.SortFunc(out, func(a, b *pb.ClusterAnswerRefusal) int { return strings.Compare(a.AppId, b.AppId) })
+	slices.SortFunc(out, func(a, b *pb.ClusterAnswerRefusal) int {
+		if c := strings.Compare(a.AppId, b.AppId); c != 0 {
+			return c
+		}
+		return strings.Compare(fmt.Sprint(a.Waiting), fmt.Sprint(b.Waiting))
+	})
 	clear(f.refused)
 	return out
 }
@@ -275,8 +300,8 @@ func (f *forwarders) acceptAnswers(l *heldListener) {
 func (f *forwarders) admit() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if conns, _, _ := f.answerCaps(); f.conns >= conns {
-		f.refuse("", conns)
+	if conns, _, _, memory := f.answerCaps(); f.conns >= conns {
+		f.refuse(refusalKey{}, conns, memory)
 		return false
 	}
 	f.conns++
@@ -376,13 +401,13 @@ func (f *forwarders) await(appID string) (<-chan struct{}, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	g := f.gate(appID)
-	_, waiting, perApp := f.answerCaps()
+	_, waiting, perApp, memory := f.answerCaps()
 	if g.waiting >= perApp {
-		f.refuse(appID, perApp)
+		f.refuse(refusalKey{app: appID, waiting: true}, perApp, false)
 		return nil, false
 	}
 	if f.waiting >= waiting {
-		f.refuse("", waiting)
+		f.refuse(refusalKey{waiting: true}, waiting, memory)
 		return nil, false
 	}
 	g.waiting++

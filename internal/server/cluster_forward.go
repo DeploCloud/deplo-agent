@@ -150,14 +150,14 @@ type forwarders struct {
 	gates          map[string]*answerGate
 	waiting, conns int
 	// refused is every connection turned away since the last table, by App ("" past this server's own cap).
-	refused map[string]*answerRefusal
+	refused map[refusalKey]*answerRefusal
 }
 
 func (s *Service) forwarders() *forwarders {
 	s.fwdOnce.Do(func() {
 		f := &forwarders{s: s, listeners: map[string]*heldListener{}, redirected: map[string]int{}, open: map[string]int{},
 			readiness: map[string]*answerReadyCheck{}, readySeen: map[string]time.Time{}, gates: map[string]*answerGate{},
-			refused: map[string]*answerRefusal{}}
+			refused: map[refusalKey]*answerRefusal{}}
 		if s.agentDir != "" {
 			if raw, err := os.ReadFile(f.file()); err == nil {
 				_ = json.Unmarshal(raw, &f.st)
