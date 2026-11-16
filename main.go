@@ -22,6 +22,7 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/capture"
 	"github.com/DeploCloud/deplo-agent/internal/forwarder"
 	"github.com/DeploCloud/deplo-agent/internal/link"
+	"github.com/DeploCloud/deplo-agent/internal/reap"
 	"github.com/DeploCloud/deplo-agent/internal/server"
 )
 
@@ -55,6 +56,10 @@ func main() {
 	flag.Parse()
 	for _, k := range []string{"DEPLO_BOOTSTRAP_URL", "DEPLO_BOOTSTRAP_TOKEN", "DEPLO_BOOTSTRAP_FINGERPRINT"} {
 		_ = os.Unsetenv(k)
+	}
+	// After a self-update this is still the parent of what the run before started and ended: those are collected.
+	if n := reap.Exited(); n > 0 {
+		log.Printf("deplo-agent: collected %d processes an earlier run left behind", n)
 	}
 	if *showCaps {
 		printCapabilities(os.Stdout)
