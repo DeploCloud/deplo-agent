@@ -86,6 +86,9 @@ type forwardState struct {
 	Answers      []answer `json:"answers,omitempty"`
 	ServeAnswers []string `json:"serveAnswers,omitempty"`
 	AnswerPort   uint32   `json:"answerPort,omitempty"`
+	// The caps Deplo set for this cluster; zero is the default.
+	AnswerMaxConns   uint32 `json:"answerMaxConns,omitempty"`
+	AnswerMaxWaiting uint32 `json:"answerMaxWaiting,omitempty"`
 }
 
 // forwardSpec is one forwarder container.
@@ -146,12 +149,15 @@ type forwarders struct {
 	// gates are the connections waiting for each App; waiting counts them all, conns every passed-on connection.
 	gates          map[string]*answerGate
 	waiting, conns int
+	// refused is every connection turned away since the last table, by App ("" past this server's own cap).
+	refused map[string]*answerRefusal
 }
 
 func (s *Service) forwarders() *forwarders {
 	s.fwdOnce.Do(func() {
 		f := &forwarders{s: s, listeners: map[string]*heldListener{}, redirected: map[string]int{}, open: map[string]int{},
-			readiness: map[string]*answerReadyCheck{}, readySeen: map[string]time.Time{}, gates: map[string]*answerGate{}}
+			readiness: map[string]*answerReadyCheck{}, readySeen: map[string]time.Time{}, gates: map[string]*answerGate{},
+			refused: map[string]*answerRefusal{}}
 		if s.agentDir != "" {
 			if raw, err := os.ReadFile(f.file()); err == nil {
 				_ = json.Unmarshal(raw, &f.st)
@@ -264,7 +270,8 @@ func (s *Service) SetClusterForwarders(ctx context.Context, req *pb.SetClusterFo
 		return nil, status.Errorf(codes.Unavailable, "run the name forwarders: %v", err)
 	}
 	f.save()
-	return &pb.SetClusterForwardersResponse{Held: int32(len(st.Hold)), Served: int32(len(st.Serve))}, nil
+	return &pb.SetClusterForwardersResponse{Held: int32(len(st.Hold)), Served: int32(len(st.Serve)),
+		AnswerRefusals: f.takeRefusals()}, nil
 }
 
 // Resume runs the saved table again after the agent (re)starts.

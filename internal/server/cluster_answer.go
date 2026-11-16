@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
@@ -46,12 +47,22 @@ var (
 	answerSettle = 3 * time.Second
 	// answerReadyFor is how long a ready answer is kept before docker is asked again.
 	answerReadyFor = 5 * time.Second
-	// At most this many connections wait for one App, and for all of this server's together, and this many pass
-	// through this agent at once, waiting or carried: past either, a connection is closed at once.
-	answerWaitPerApp    = 128
-	answerWaitPerServer = 512
-	answerMaxConns      = 2048
+	// By default at most this many connections pass through this agent at once, waiting or carried (a quarter of
+	// them may wait), and this many wait for one App: past either, a connection is closed at once. Deplo can set
+	// both per cluster.
+	answerMaxConns   = 2048
+	answerWaitPerApp = 128
 )
+
+// answerMaxCap bounds what a table may set.
+const answerMaxCap = 65536
+
+// answerRefusal counts the connections turned away for one reason, and when.
+type answerRefusal struct {
+	count       uint32
+	first, last time.Time
+	cap         int
+}
 
 type answer struct {
 	AppID   string        `json:"appId"`
@@ -135,7 +146,49 @@ func validateAnswers(req *pb.SetClusterForwardersRequest, st *forwardState) erro
 		return fmt.Errorf("passing domains on needs the port of the proxy's internal entrypoint")
 	}
 	st.AnswerPort = port
+	conns, waiting := req.GetAnswerMaxConns(), req.GetAnswerMaxWaiting()
+	if conns > answerMaxCap || (conns > 0 && conns < 4) || waiting > answerMaxCap {
+		return fmt.Errorf("the answers' connection caps are out of range")
+	}
+	st.AnswerMaxConns, st.AnswerMaxWaiting = conns, waiting
 	return nil
+}
+
+// answerCaps is this cluster's caps: connections through this agent, waiting for all of its Apps, waiting for one.
+// The caller holds f.mu.
+func (f *forwarders) answerCaps() (conns, waiting, perApp int) {
+	conns, perApp = answerMaxConns, answerWaitPerApp
+	if f.st.AnswerMaxConns > 0 {
+		conns = int(f.st.AnswerMaxConns)
+	}
+	if f.st.AnswerMaxWaiting > 0 {
+		perApp = int(f.st.AnswerMaxWaiting)
+	}
+	return conns, max(conns/4, 1), perApp
+}
+
+// refuse counts one connection turned away, by App or, empty, past this server's cap; the caller holds f.mu.
+func (f *forwarders) refuse(appID string, limit int) {
+	r := f.refused[appID]
+	now := time.Now()
+	if r == nil {
+		r = &answerRefusal{first: now}
+		f.refused[appID] = r
+	}
+	r.count++
+	r.last, r.cap = now, limit
+}
+
+// takeRefusals hands Deplo what was turned away since the last table, and forgets it; the caller holds f.mu.
+func (f *forwarders) takeRefusals() []*pb.ClusterAnswerRefusal {
+	out := make([]*pb.ClusterAnswerRefusal, 0, len(f.refused))
+	for app, r := range f.refused {
+		out = append(out, &pb.ClusterAnswerRefusal{AppId: app, Count: r.count, FirstUnixMs: r.first.UnixMilli(),
+			LastUnixMs: r.last.UnixMilli(), Cap: uint32(r.cap)})
+	}
+	slices.SortFunc(out, func(a, b *pb.ClusterAnswerRefusal) int { return strings.Compare(a.AppId, b.AppId) })
+	clear(f.refused)
+	return out
 }
 
 // reconcileAnswers runs the one answer forwarder and writes the proxy's routes file; the caller holds f.mu.
@@ -218,11 +271,12 @@ func (f *forwarders) acceptAnswers(l *heldListener) {
 	}
 }
 
-// admit counts a connection through this agent, or refuses one past answerMaxConns.
+// admit counts a connection through this agent, or refuses one past this server's cap.
 func (f *forwarders) admit() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.conns >= answerMaxConns {
+	if conns, _, _ := f.answerCaps(); f.conns >= conns {
+		f.refuse("", conns)
 		return false
 	}
 	f.conns++
@@ -322,7 +376,13 @@ func (f *forwarders) await(appID string) (<-chan struct{}, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	g := f.gate(appID)
-	if g.waiting >= answerWaitPerApp || f.waiting >= answerWaitPerServer {
+	_, waiting, perApp := f.answerCaps()
+	if g.waiting >= perApp {
+		f.refuse(appID, perApp)
+		return nil, false
+	}
+	if f.waiting >= waiting {
+		f.refuse("", waiting)
 		return nil, false
 	}
 	g.waiting++

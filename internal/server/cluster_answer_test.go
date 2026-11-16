@@ -335,6 +335,8 @@ func TestAnswers_refuseABadTable(t *testing.T) {
 	for name, req := range map[string]*pb.SetClusterForwardersRequest{
 		"no entrypoint":   {ClusterId: "cl1", Answers: []*pb.ClusterAnswer{shop()}},
 		"served, no port": {ClusterId: "cl1", ServeAnswers: []string{"prj1"}},
+		"a cap too high":  {ClusterId: "cl1", AnswerMaxConns: 1 << 20},
+		"a cap too low":   {ClusterId: "cl1", AnswerMaxConns: 2},
 	} {
 		if _, err := validateForwarders(req); err == nil {
 			t.Errorf("%s: taken", name)
@@ -350,14 +352,6 @@ func TestAnswers_advertised(t *testing.T) {
 	if !slices.Contains(Capabilities, "cluster.forwarders.answers") {
 		t.Fatal("Hello does not advertise cluster.forwarders.answers")
 	}
-}
-
-// caps sets the waiting and connection caps for one test.
-func caps(t *testing.T, perApp, perServer, conns int) {
-	t.Helper()
-	a, b, c := answerWaitPerApp, answerWaitPerServer, answerMaxConns
-	answerWaitPerApp, answerWaitPerServer, answerMaxConns = perApp, perServer, conns
-	t.Cleanup(func() { answerWaitPerApp, answerWaitPerServer, answerMaxConns = a, b, c })
 }
 
 // waitingFor opens n connections, and returns once this agent has total waiting.
@@ -405,12 +399,13 @@ func TestAnswers_oneReadinessCheckForEveryWaitingConnection(t *testing.T) {
 
 func TestAnswers_closeAConnectionPastTheWaitingCaps(t *testing.T) {
 	quickAnswers(t, 5*time.Second)
-	caps(t, 2, 3, 100)
 	a, b, fa, _, members := answerPair(t)
 	blog := &pb.ClusterAnswer{AppId: "prj2", TlsPort: 10003, WebPort: 10004, Routes: routesFor("prj2", 10003, 10004, "blog.example.com")}
 	onA := backend(t, "proxy-a")
-	apply(t, a, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members, AnswerPort: onA,
-		Answers: []*pb.ClusterAnswer{shop(), blog}, ServeAnswers: []string{"prj1", "prj2"}})
+	// 12 connections, a quarter of which (3) may wait, and 2 for one App.
+	table := &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members, AnswerPort: onA,
+		Answers: []*pb.ClusterAnswer{shop(), blog}, ServeAnswers: []string{"prj1", "prj2"}, AnswerMaxConns: 12, AnswerMaxWaiting: 2}
+	apply(t, a, table)
 	_ = b
 	placeOn(t, a, "srvA", appEntry("srvA"), lease.Entry{Kind: "app", ID: "prj2", Member: "srvA", Slug: "blog"})
 	fa.mu.Lock()
@@ -427,13 +422,33 @@ func TestAnswers_closeAConnectionPastTheWaitingCaps(t *testing.T) {
 	if got := askPort(t, s, 10003); got != "" || time.Since(start) > time.Second {
 		t.Fatalf("past the server's cap a connection answered %q after %v", got, time.Since(start))
 	}
+	// Deplo hears of both with the next table, once.
+	res, err := a.SetClusterForwarders(context.Background(), table)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string][2]uint32{}
+	for _, r := range res.GetAnswerRefusals() {
+		got[r.GetAppId()] = [2]uint32{r.GetCount(), r.GetCap()}
+		if r.GetFirstUnixMs() == 0 || r.GetLastUnixMs() < r.GetFirstUnixMs() {
+			t.Fatalf("a refusal without its times: %+v", r)
+		}
+	}
+	if got["prj1"] != [2]uint32{1, 2} || got[""] != [2]uint32{1, 3} || len(got) != 2 {
+		t.Fatalf("Deplo was told %v", got)
+	}
+	if res, _ := a.SetClusterForwarders(context.Background(), table); len(res.GetAnswerRefusals()) != 0 {
+		t.Fatalf("a refusal was reported twice: %v", res.GetAnswerRefusals())
+	}
 }
 
 func TestAnswers_closeAConnectionPastTheForwardersCap(t *testing.T) {
 	quickAnswers(t, 5*time.Second)
-	caps(t, 100, 100, 1)
 	a, b, fa, _, members := answerPair(t)
 	bothAnswer(t, a, b, members)
+	old := answerMaxConns
+	answerMaxConns = 1
+	t.Cleanup(func() { answerMaxConns = old })
 	placeOn(t, a, "srvA", appEntry("srvA"))
 	fa.mu.Lock()
 	fa.notReady["prj1"] = true
