@@ -2542,6 +2542,18 @@ message SetClusterForwardersRequest {
   repeated ClusterForwarderMember members = 2;
   repeated ClusterHeldName hold = 3;
   repeated ClusterServedName serve = 4;
+  // The Apps whose domains this member passes on to the server that runs them (ADR-0048).
+  repeated ClusterEntrance entrances = 5;
+  // The Apps whose passed-on domains this member answers, while it runs them.
+  repeated string serve_entrances = 6;
+  // The port of the proxy's internal entrypoint, which reads the PROXY protocol header.
+  uint32 entrance_port = 7;
+}
+
+// An App whose domains answer on every server: the labels the proxy passes them on by, Deplo's own rendering.
+message ClusterEntrance {
+  string app_id = 1;
+  repeated string labels = 2;
 }
 
 message SetClusterForwardersResponse {

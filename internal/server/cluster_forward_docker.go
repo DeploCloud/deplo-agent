@@ -33,6 +33,7 @@ var dockerForwardOps = forwardOps{
 	listen:   listenForwarder,
 	pids:     forwarderPids,
 	redirect: redirectAllPorts,
+	proxy:    proxyAddress,
 }
 
 // fwdProto names what a forwarder container speaks to this agent: a container of another one is replaced.
@@ -59,23 +60,34 @@ func listenForwarder(dir string) (net.Listener, error) {
 }
 
 func forwarderSpecTag(s forwardSpec) string {
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%s|%d|%s", fwdProto, s.Network, s.Alias, s.Port, s.Dir)))
+	spec := fmt.Sprintf("%s|%s|%s|%d|%s", fwdProto, s.Network, s.Alias, s.Port, s.Dir)
+	// Only an entrance has labels: a name forwarder keeps the tag it had, and is not replaced by an update.
+	if len(s.Labels) > 0 {
+		spec += "|" + strings.Join(s.Labels, "\n")
+	}
+	sum := sha256.Sum256([]byte(spec))
 	return hex.EncodeToString(sum[:6])
 }
 
-// forwarderRunArgs is the whole container: this binary and one socket, no privilege, no label a stack carries.
+// forwarderRunArgs is the whole container: this binary and one socket, no privilege, and no label a stack carries:
+// an entrance's are the proxy's, which Deplo renders.
 func forwarderRunArgs(exe string, s forwardSpec) []string {
-	return []string{
+	args := []string{
 		"run", "-d", "--name", s.Container,
 		"--network", s.Network, "--network-alias", s.Alias, "--restart", "unless-stopped",
 		"--user", "65534:65534", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--read-only",
 		"--sysctl", "net.ipv4.ip_unprivileged_port_start=0",
 		"--memory", "32m", "--pids-limit", "64", "--log-driver", "none",
 		"--label", fwdLabelKey + "=1", "--label", fwdSpecLabel + "=" + forwarderSpecTag(s),
-		"-v", exe + ":/deplo-agent:ro", "-v", s.Dir + ":" + fwdSocketDir + ":ro",
-		"--entrypoint", "/deplo-agent", fwdImage,
-		"forward", "--listen", fmt.Sprintf(":%d", s.Port), "--to", fwdSocketDir + "/" + fwdSocket,
 	}
+	for _, l := range s.Labels {
+		args = append(args, "--label", l)
+	}
+	return append(args,
+		"-v", exe+":/deplo-agent:ro", "-v", s.Dir+":"+fwdSocketDir+":ro",
+		"--entrypoint", "/deplo-agent", fwdImage,
+		"forward", "--listen", fmt.Sprintf(":%d", s.Port), "--to", fwdSocketDir+"/"+fwdSocket,
+	)
 }
 
 // ensureForwarderContainer starts the container that holds one name, and leaves a running one of the same spec.
@@ -194,4 +206,18 @@ func forwarderPids(ctx context.Context, containers []string) (map[string]int, er
 		}
 	}
 	return out, nil
+}
+
+// proxyAddress is this server's proxy on its own network: where a passed-on domain is handed over.
+func proxyAddress(ctx context.Context) (string, error) {
+	res, err := dockercli.Run(ctx, 10*time.Second, "inspect", "--format",
+		fmt.Sprintf(`{{(index .NetworkSettings.Networks %q).IPAddress}}`, entranceNetwork), traefikContainer)
+	if err != nil || res.Code != 0 {
+		return "", fmt.Errorf("this server's proxy is not running")
+	}
+	ip := strings.TrimSpace(res.Stdout)
+	if net.ParseIP(ip) == nil {
+		return "", fmt.Errorf("this server's proxy has no address on %s", entranceNetwork)
+	}
+	return ip, nil
 }

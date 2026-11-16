@@ -80,6 +80,10 @@ type forwardState struct {
 	Members map[string]string `json:"members"` // server id -> certificate fingerprint
 	Hold    []heldName        `json:"hold"`
 	Serve   []servedName      `json:"serve"`
+	// Entrances are the Apps this member passes domains on for, and ServeEntrances those it answers (ADR-0048).
+	Entrances      []entrance `json:"entrances,omitempty"`
+	ServeEntrances []string   `json:"serveEntrances,omitempty"`
+	EntrancePort   uint32     `json:"entrancePort,omitempty"`
 }
 
 // forwardSpec is one forwarder container.
@@ -90,6 +94,8 @@ type forwardSpec struct {
 	Port      uint32
 	// Dir holds the socket this agent answers that one container on; nothing else is handed it.
 	Dir string
+	// Labels are the proxy's, on an entrance only.
+	Labels []string
 }
 
 // forwardOps is what name forwarders ask of docker and the host; tests replace it.
@@ -104,6 +110,8 @@ type forwardOps struct {
 	// pids is each forwarder container's process, and redirect sends every TCP port of its network to one.
 	pids     func(ctx context.Context, containers []string) (map[string]int, error)
 	redirect func(pid int, port uint32) error
+	// proxy is this server's own proxy on its network: where a passed-on domain is handed over.
+	proxy func(ctx context.Context) (string, error)
 }
 
 // `_` is in no slug, so no stack's container (deplo-<slug>..., db-<slug>) can hold a forwarder's name.
@@ -180,7 +188,7 @@ func validateForwarders(req *pb.SetClusterForwardersRequest) (forwardState, erro
 	if st.Cluster == "" {
 		return st, fmt.Errorf("a cluster id is required")
 	}
-	if len(req.GetHold())+len(req.GetServe())+len(req.GetMembers()) > maxFwdEntries {
+	if len(req.GetHold())+len(req.GetServe())+len(req.GetMembers())+len(req.GetEntrances())+len(req.GetServeEntrances()) > maxFwdEntries {
 		return st, fmt.Errorf("at most %d entries", maxFwdEntries)
 	}
 	for _, m := range req.GetMembers() {
@@ -220,7 +228,7 @@ func validateForwarders(req *pb.SetClusterForwardersRequest) (forwardState, erro
 		}
 		st.Serve = append(st.Serve, e)
 	}
-	return st, nil
+	return st, validateEntrances(req, &st)
 }
 
 // SetClusterForwarders applies the full table; see the RPC's contract in proto/agent.proto.
@@ -254,7 +262,7 @@ func (f *forwarders) Resume() {
 	defer cancel()
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(f.st.Hold) == 0 {
+	if len(f.st.Hold)+len(f.st.Entrances) == 0 {
 		return
 	}
 	if err := f.reconcile(ctx); err != nil {
@@ -267,7 +275,7 @@ func (f *forwarders) Resume() {
 func (f *forwarders) Clear() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	idle := len(f.st.Hold) == 0 && len(f.listeners) == 0
+	idle := len(f.st.Hold)+len(f.st.Entrances) == 0 && len(f.listeners) == 0
 	f.st = forwardState{}
 	if idle {
 		if f.s.agentDir != "" {
@@ -316,6 +324,7 @@ func (f *forwarders) reconcile(ctx context.Context) error {
 		}
 		note(ops.ensure(ctx, forwardSpec{Container: name, Network: h.Network, Alias: h.Name, Port: h.Port, Dir: l.dir}))
 	}
+	f.reconcileEntrances(ctx, wanted, note)
 	f.redirectLocked(ctx)
 	if have, err := ops.list(ctx); err == nil {
 		for _, name := range have {
@@ -343,14 +352,19 @@ func (f *forwarders) reconcile(ctx context.Context) error {
 // its own port. The caller holds f.mu.
 func (f *forwarders) redirectLocked(ctx context.Context) {
 	ops := f.ops()
-	if ops.pids == nil || ops.redirect == nil || len(f.st.Hold) == 0 {
+	if ops.pids == nil || ops.redirect == nil || len(f.st.Hold)+len(f.st.Entrances) == 0 {
 		return
 	}
 	ports := map[string]uint32{}
-	names := make([]string, 0, len(f.st.Hold))
+	names := make([]string, 0, len(f.st.Hold)+len(f.st.Entrances))
 	for _, h := range f.st.Hold {
 		c := containerFor(h)
 		ports[c] = h.Port
+		names = append(names, c)
+	}
+	for _, e := range f.st.Entrances {
+		c := entranceContainer(e.AppID)
+		ports[c] = entranceTLS
 		names = append(names, c)
 	}
 	pids, err := ops.pids(ctx, names)
@@ -583,6 +597,10 @@ func parseFwdArg(arg string) (network, kind, id, service string, port uint32, ok
 func (s *Service) serveForward(from wire.Party, c net.Conn, arg string) {
 	network, kind, id, service, port, ok := parseFwdArg(arg)
 	f := s.forwarders()
+	if ok && kind == entranceKind {
+		f.serveEntranceStream(from, c, network, id, port)
+		return
+	}
 	var e servedName
 	if ok {
 		e, ok = f.authorize(from, network, kind, id, service)

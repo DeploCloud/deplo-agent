@@ -98,6 +98,7 @@ func (h *fakeFwdHost) ops() forwardOps {
 			h.redirects = append(h.redirects, fmt.Sprintf("%d:%d", pid, port))
 			return nil
 		},
+		proxy: func(context.Context) (string, error) { return "127.0.0.1", nil },
 	}
 }
 

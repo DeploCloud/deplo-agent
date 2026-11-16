@@ -136,6 +136,7 @@ var Capabilities = []string{
 	"cluster.replicas",
 	"cluster.network",
 	"cluster.forwarders.services",
+	"cluster.forwarders.entrances",
 }
 
 // AgentVersion is the version this agent reports over Hello.
