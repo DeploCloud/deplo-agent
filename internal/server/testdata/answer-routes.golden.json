@@ -1,10 +1,7 @@
 {
   "about": "ADR-0048: the routes the panel renders for one App and the forms the server agent accepts. Kept the same in DeploCloud/deplo (lib/deploy/answer-routes.golden.json) and DeploCloud/deplo-agent (internal/server/testdata/answer-routes.golden.json): change both in one step.",
   "appId": "prj_contract",
-  "hosts": [
-    "shop.example.com",
-    "www.shop.example.com"
-  ],
+  "hosts": ["shop.example.com", "www.shop.example.com"],
   "slot": 3,
   "tlsPort": 20006,
   "webPort": 20007,
@@ -18,9 +15,7 @@
       "routers": {
         "deplo-answer-prj_contract": {
           "rule": "HostSNI(`shop.example.com`) || HostSNI(`www.shop.example.com`)",
-          "entryPoints": [
-            "websecure"
-          ],
+          "entryPoints": ["websecure"],
           "service": "deplo-answer-prj_contract",
           "tls": {
             "passthrough": true
@@ -44,9 +39,7 @@
       "routers": {
         "deplo-answer-prj_contract-acme": {
           "rule": "(Host(`shop.example.com`) || Host(`www.shop.example.com`)) && PathPrefix(`/.well-known/acme-challenge/`)",
-          "entryPoints": [
-            "web"
-          ],
+          "entryPoints": ["web"],
           "service": "deplo-answer-prj_contract-acme",
           "priority": 2000000001
         }
