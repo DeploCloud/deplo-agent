@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -80,7 +81,8 @@ type forwardState struct {
 	Members map[string]string `json:"members"` // server id -> certificate fingerprint
 	Hold    []heldName        `json:"hold"`
 	Serve   []servedName      `json:"serve"`
-	// Entrances are the Apps this member passes domains on for, and ServeEntrances those it answers (ADR-0048).
+	// Entrances are the Apps whose domains answer on every server, and ServeEntrances those this one answers for
+	// while it runs them (ADR-0048).
 	Entrances      []entrance `json:"entrances,omitempty"`
 	ServeEntrances []string   `json:"serveEntrances,omitempty"`
 	EntrancePort   uint32     `json:"entrancePort,omitempty"`
@@ -94,8 +96,6 @@ type forwardSpec struct {
 	Port      uint32
 	// Dir holds the socket this agent answers that one container on; nothing else is handed it.
 	Dir string
-	// Labels are the proxy's, on an entrance only.
-	Labels []string
 }
 
 // forwardOps is what name forwarders ask of docker and the host; tests replace it.
@@ -110,8 +110,10 @@ type forwardOps struct {
 	// pids is each forwarder container's process, and redirect sends every TCP port of its network to one.
 	pids     func(ctx context.Context, containers []string) (map[string]int, error)
 	redirect func(pid int, port uint32) error
-	// proxy is this server's own proxy on its network: where a passed-on domain is handed over.
-	proxy func(ctx context.Context) (string, error)
+	// proxyDial connects to a port on this server's own proxy, inside its network: where a passed-on domain goes.
+	proxyDial func(ctx context.Context, port uint32) (net.Conn, error)
+	// ready says whether an App answers here, and since when; a zero time when only a health check says so.
+	ready func(ctx context.Context, appID string) (time.Time, bool)
 }
 
 // `_` is in no slug, so no stack's container (deplo-<slug>..., db-<slug>) can hold a forwarder's name.
@@ -136,11 +138,16 @@ type forwarders struct {
 	listeners map[string]*heldListener
 	// redirected is the process each container's redirect was set up in: a restarted container needs it again.
 	redirected map[string]int
+	// open counts the connections this agent carries to each member, so the least busy is tried first.
+	open map[string]int
+	// readyUntil keeps a yes about an App's readiness a moment; readySeen is when it was first seen healthy.
+	readyUntil, readySeen map[string]time.Time
 }
 
 func (s *Service) forwarders() *forwarders {
 	s.fwdOnce.Do(func() {
-		f := &forwarders{s: s, listeners: map[string]*heldListener{}, redirected: map[string]int{}}
+		f := &forwarders{s: s, listeners: map[string]*heldListener{}, redirected: map[string]int{}, open: map[string]int{},
+			readyUntil: map[string]time.Time{}, readySeen: map[string]time.Time{}}
 		if s.agentDir != "" {
 			if raw, err := os.ReadFile(f.file()); err == nil {
 				_ = json.Unmarshal(raw, &f.st)
@@ -362,10 +369,9 @@ func (f *forwarders) redirectLocked(ctx context.Context) {
 		ports[c] = h.Port
 		names = append(names, c)
 	}
-	for _, e := range f.st.Entrances {
-		c := entranceContainer(e.AppID)
-		ports[c] = entranceTLS
-		names = append(names, c)
+	if len(f.st.Entrances) > 0 {
+		ports[entranceContainer()] = entranceListen
+		names = append(names, entranceContainer())
 	}
 	pids, err := ops.pids(ctx, names)
 	if err != nil {
@@ -429,21 +435,23 @@ func (f *forwarders) serveHeld(key string, c net.Conn) {
 	in, port := readDialedPort(c, h.Port)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	memberID, here, ok := f.s.leaseGuard().locate(cluster, h.Kind, h.ID)
-	if !ok {
-		return
-	}
+	// Every member that runs the workload can answer: this one first, then the least busy, past any that refuse.
+	here, others := f.s.leaseGuard().holders(cluster, h.Kind, h.ID)
 	var up net.Conn
-	var err error
+	via := ""
 	if here {
-		up, err = f.dialLocal(ctx, h.ID, h.Network, h.Service, port)
-	} else {
-		up, err = f.dialMember(ctx, members[memberID], h, port)
+		up, _ = f.dialLocal(ctx, h.ID, h.Network, h.Service, port)
 	}
-	if err != nil {
+	if up == nil {
+		up, via = f.dialHolders(others, func(member string) (net.Conn, error) {
+			return f.dialMember(ctx, members[member], h, port)
+		})
+	}
+	if up == nil {
 		return
 	}
 	forwarder.Join(in, up)
+	f.release(via)
 }
 
 // bufferedConn is a connection whose first bytes were read ahead.
@@ -624,6 +632,28 @@ func (s *Service) serveForward(from wire.Party, c net.Conn, arg string) {
 		return
 	}
 	forwarder.Join(c, up)
+}
+
+// holders is every member the leader placed a workload on, from the last renewal: whether this one is among them,
+// and the others in placement order. A standby copy holds the stack, not the name, and is never one.
+func (g *leaseGuard) holders(cluster, kind, id string) (here bool, others []string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	c := g.clusters[cluster]
+	if c == nil {
+		return false, nil
+	}
+	for _, e := range c.Placement {
+		if e.Kind != kind || e.ID != id || e.Member == "" || e.Standby {
+			continue
+		}
+		if e.Member == c.Member {
+			here = true
+		} else if !slices.Contains(others, e.Member) {
+			others = append(others, e.Member)
+		}
+	}
+	return here, others
 }
 
 // locate says which member runs a workload now, and whether that is this one, from the placement the last renewal carried.

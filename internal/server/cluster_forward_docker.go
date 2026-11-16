@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
@@ -25,15 +26,16 @@ const (
 )
 
 var dockerForwardOps = forwardOps{
-	network:  ensureTenantNetwork,
-	ensure:   ensureForwarderContainer,
-	remove:   removeForwarderContainer,
-	list:     listForwarderContainers,
-	target:   workloadAddress,
-	listen:   listenForwarder,
-	pids:     forwarderPids,
-	redirect: redirectAllPorts,
-	proxy:    proxyAddress,
+	network:   ensureTenantNetwork,
+	ensure:    ensureForwarderContainer,
+	remove:    removeForwarderContainer,
+	list:      listForwarderContainers,
+	target:    workloadAddress,
+	listen:    listenForwarder,
+	pids:      forwarderPids,
+	redirect:  redirectAllPorts,
+	proxyDial: dialProxyLoopback,
+	ready:     appReady,
 }
 
 // fwdProto names what a forwarder container speaks to this agent: a container of another one is replaced.
@@ -60,34 +62,23 @@ func listenForwarder(dir string) (net.Listener, error) {
 }
 
 func forwarderSpecTag(s forwardSpec) string {
-	spec := fmt.Sprintf("%s|%s|%s|%d|%s", fwdProto, s.Network, s.Alias, s.Port, s.Dir)
-	// Only an entrance has labels: a name forwarder keeps the tag it had, and is not replaced by an update.
-	if len(s.Labels) > 0 {
-		spec += "|" + strings.Join(s.Labels, "\n")
-	}
-	sum := sha256.Sum256([]byte(spec))
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%s|%d|%s", fwdProto, s.Network, s.Alias, s.Port, s.Dir)))
 	return hex.EncodeToString(sum[:6])
 }
 
-// forwarderRunArgs is the whole container: this binary and one socket, no privilege, and no label a stack carries:
-// an entrance's are the proxy's, which Deplo renders.
+// forwarderRunArgs is the whole container: this binary and one socket, no privilege, no label a stack carries.
 func forwarderRunArgs(exe string, s forwardSpec) []string {
-	args := []string{
+	return []string{
 		"run", "-d", "--name", s.Container,
 		"--network", s.Network, "--network-alias", s.Alias, "--restart", "unless-stopped",
 		"--user", "65534:65534", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--read-only",
 		"--sysctl", "net.ipv4.ip_unprivileged_port_start=0",
 		"--memory", "32m", "--pids-limit", "64", "--log-driver", "none",
 		"--label", fwdLabelKey + "=1", "--label", fwdSpecLabel + "=" + forwarderSpecTag(s),
-	}
-	for _, l := range s.Labels {
-		args = append(args, "--label", l)
-	}
-	return append(args,
-		"-v", exe+":/deplo-agent:ro", "-v", s.Dir+":"+fwdSocketDir+":ro",
+		"-v", exe + ":/deplo-agent:ro", "-v", s.Dir + ":" + fwdSocketDir + ":ro",
 		"--entrypoint", "/deplo-agent", fwdImage,
-		"forward", "--listen", fmt.Sprintf(":%d", s.Port), "--to", fwdSocketDir+"/"+fwdSocket,
-	)
+		"forward", "--listen", fmt.Sprintf(":%d", s.Port), "--to", fwdSocketDir + "/" + fwdSocket,
+	}
 }
 
 // ensureForwarderContainer starts the container that holds one name, and leaves a running one of the same spec.
@@ -208,16 +199,68 @@ func forwarderPids(ctx context.Context, containers []string) (map[string]int, er
 	return out, nil
 }
 
-// proxyAddress is this server's proxy on its own network: where a passed-on domain is handed over.
-func proxyAddress(ctx context.Context) (string, error) {
-	res, err := dockercli.Run(ctx, 10*time.Second, "inspect", "--format",
-		fmt.Sprintf(`{{(index .NetworkSettings.Networks %q).IPAddress}}`, entranceNetwork), traefikContainer)
+// appReady says whether a running container of the App answers: healthy where it has a health check, and since
+// it started where it has none. A health check gives no time it turned healthy, so that answer has none.
+func appReady(ctx context.Context, appID string) (time.Time, bool) {
+	if !fwdID.MatchString(appID) {
+		return time.Time{}, false
+	}
+	res, err := dockercli.Run(ctx, 10*time.Second, "ps", "-q", "--filter", "label=deplo.project="+appID,
+		"--filter", "status=running")
+	ids := strings.Fields(res.Stdout)
+	if err != nil || res.Code != 0 || len(ids) == 0 {
+		return time.Time{}, false
+	}
+	args := append([]string{"inspect", "--format", "{{.State.StartedAt}} {{if .State.Health}}{{.State.Health.Status}}{{end}}"}, ids...)
+	res, err = dockercli.Run(ctx, 10*time.Second, args...)
 	if err != nil || res.Code != 0 {
-		return "", fmt.Errorf("this server's proxy is not running")
+		return time.Time{}, false
 	}
-	ip := strings.TrimSpace(res.Stdout)
-	if net.ParseIP(ip) == nil {
-		return "", fmt.Errorf("this server's proxy has no address on %s", entranceNetwork)
+	for _, line := range strings.Split(strings.TrimSpace(res.Stdout), "\n") {
+		f := strings.Fields(line)
+		switch {
+		case len(f) == 1:
+			if at, err := time.Parse(time.RFC3339Nano, f[0]); err == nil {
+				return at, true
+			}
+		case len(f) == 2 && f[1] == "healthy":
+			return time.Time{}, true
+		}
 	}
-	return ip, nil
+	return time.Time{}, false
+}
+
+var proxyPid struct {
+	sync.Mutex
+	pid int
+}
+
+// dialProxyLoopback connects to the proxy's internal entrypoint, which listens on its own loopback: only a process
+// inside its network, as this agent is for that one call, can reach it, and it trusts the PROXY header from there.
+func dialProxyLoopback(ctx context.Context, port uint32) (net.Conn, error) {
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port)))
+	for attempt := 0; attempt < 2; attempt++ {
+		proxyPid.Lock()
+		pid := proxyPid.pid
+		proxyPid.Unlock()
+		if pid == 0 || attempt > 0 {
+			res, err := dockercli.Run(ctx, 10*time.Second, "inspect", "--format", "{{.State.Pid}}", traefikContainer)
+			if err != nil || res.Code != 0 {
+				return nil, fmt.Errorf("this server's proxy is not running")
+			}
+			if pid, err = strconv.Atoi(strings.TrimSpace(res.Stdout)); err != nil || pid <= 0 {
+				return nil, fmt.Errorf("this server's proxy is not running")
+			}
+			proxyPid.Lock()
+			proxyPid.pid = pid
+			proxyPid.Unlock()
+		}
+		// A proxy that restarted has a new process: the second attempt looks it up again.
+		if c, err := dialInNetwork(ctx, pid, addr); err == nil {
+			return c, nil
+		} else if attempt > 0 {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("this server's proxy cannot be reached")
 }

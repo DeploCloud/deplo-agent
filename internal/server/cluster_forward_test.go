@@ -32,11 +32,13 @@ type fakeFwdHost struct {
 	// pid is each forwarder container's process (1 unless set), and redirects every redirect set up.
 	pid       map[string]int
 	redirects []string
+	// notReady is each App that is not ready here yet; every other one is.
+	notReady map[string]bool
 }
 
 func newFakeFwdHost() *fakeFwdHost {
 	return &fakeFwdHost{specs: map[string]forwardSpec{}, running: map[string]string{}, services: map[string]string{},
-		pid: map[string]int{}}
+		pid: map[string]int{}, notReady: map[string]bool{}}
 }
 
 func (h *fakeFwdHost) ops() forwardOps {
@@ -98,7 +100,15 @@ func (h *fakeFwdHost) ops() forwardOps {
 			h.redirects = append(h.redirects, fmt.Sprintf("%d:%d", pid, port))
 			return nil
 		},
-		proxy: func(context.Context) (string, error) { return "127.0.0.1", nil },
+		proxyDial: func(ctx context.Context, port uint32) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		},
+		ready: func(_ context.Context, appID string) (time.Time, bool) {
+			h.mu.Lock()
+			defer h.mu.Unlock()
+			return time.Now().Add(-time.Hour), !h.notReady[appID]
+		},
 	}
 }
 
