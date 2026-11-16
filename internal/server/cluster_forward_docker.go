@@ -199,35 +199,60 @@ func forwarderPids(ctx context.Context, containers []string) (map[string]int, er
 	return out, nil
 }
 
-// appReady says whether a running container of the App answers: healthy where it has a health check, and since
-// it started where it has none. A health check gives no time it turned healthy, so that answer has none.
-func appReady(ctx context.Context, appID string) (time.Time, bool) {
+// appReady reads every container of the App here: it answers when one runs, every one with a health check is
+// healthy, and none is still being created or restarting. One that exited (a job that ran) does not count.
+func appReady(ctx context.Context, appID string) appReadiness {
 	if !fwdID.MatchString(appID) {
-		return time.Time{}, false
+		return appReadiness{}
 	}
-	res, err := dockercli.Run(ctx, 10*time.Second, "ps", "-q", "--filter", "label=deplo.project="+appID,
-		"--filter", "status=running")
+	res, err := dockercli.Run(ctx, 10*time.Second, "ps", "-aq", "--filter", "label=deplo.project="+appID)
 	ids := strings.Fields(res.Stdout)
 	if err != nil || res.Code != 0 || len(ids) == 0 {
-		return time.Time{}, false
+		return appReadiness{}
 	}
-	args := append([]string{"inspect", "--format", "{{.State.StartedAt}} {{if .State.Health}}{{.State.Health.Status}}{{end}}"}, ids...)
+	args := append([]string{"inspect", "--format",
+		"{{.State.Status}} {{.State.StartedAt}} {{if .State.Health}}{{.State.Health.Status}}{{end}}"}, ids...)
 	res, err = dockercli.Run(ctx, 10*time.Second, args...)
 	if err != nil || res.Code != 0 {
-		return time.Time{}, false
+		return appReadiness{}
 	}
-	for _, line := range strings.Split(strings.TrimSpace(res.Stdout), "\n") {
+	return readinessOf(strings.Split(strings.TrimSpace(res.Stdout), "\n"))
+}
+
+// readinessOf is the rule appReady applies, one line per container: its state, when it started, its health.
+func readinessOf(lines []string) appReadiness {
+	var r appReadiness
+	running := false
+	for _, line := range lines {
 		f := strings.Fields(line)
-		switch {
-		case len(f) == 1:
-			if at, err := time.Parse(time.RFC3339Nano, f[0]); err == nil {
-				return at, true
+		if len(f) < 2 {
+			return appReadiness{}
+		}
+		switch f[0] {
+		case "exited", "dead":
+			continue
+		case "running":
+		default:
+			return appReadiness{}
+		}
+		running = true
+		if len(f) == 3 {
+			if f[2] != "healthy" {
+				return appReadiness{}
 			}
-		case len(f) == 2 && f[1] == "healthy":
-			return time.Time{}, true
+			r.Health = true
+			continue
+		}
+		at, err := time.Parse(time.RFC3339Nano, f[1])
+		if err != nil {
+			return appReadiness{}
+		}
+		if at.After(r.Since) {
+			r.Since = at
 		}
 	}
-	return time.Time{}, false
+	r.OK = running
+	return r
 }
 
 var proxyPid struct {

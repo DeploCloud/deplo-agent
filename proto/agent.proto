@@ -2542,21 +2542,21 @@ message SetClusterForwardersRequest {
   repeated ClusterForwarderMember members = 2;
   repeated ClusterHeldName hold = 3;
   repeated ClusterServedName serve = 4;
-  // The Apps whose domains answer on every server (ADR-0048), on this one through its one entrance forwarder.
-  repeated ClusterEntrance entrances = 5;
+  // The Apps whose domains answer on every server (ADR-0048), on this one through its one answer forwarder.
+  repeated ClusterAnswer answers = 5;
   // The Apps whose passed-on domains this member answers, while it runs them.
-  repeated string serve_entrances = 6;
+  repeated string serve_answers = 6;
   // The port of the proxy's internal entrypoint, on its own loopback, which reads the PROXY protocol header.
-  uint32 entrance_port = 7;
+  uint32 answer_port = 7;
 }
 
 // An App whose domains answer on every server, and how this member's proxy passes them on.
-message ClusterEntrance {
+message ClusterAnswer {
   string app_id = 1;
   // The proxy's routers and services for its domains: Traefik dynamic configuration as JSON, Deplo's rendering,
-  // which the agent checks and writes to the proxy's entrances file.
+  // which the agent checks and writes to the proxy's routes file.
   string routes = 2;
-  // The entrance forwarder's ports its TLS and its certificate checks arrive on.
+  // The answer forwarder's ports its TLS and its certificate checks arrive on.
   uint32 tls_port = 3;
   uint32 web_port = 4;
 }

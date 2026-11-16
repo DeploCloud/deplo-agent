@@ -32,8 +32,9 @@ type fakeFwdHost struct {
 	// pid is each forwarder container's process (1 unless set), and redirects every redirect set up.
 	pid       map[string]int
 	redirects []string
-	// notReady is each App that is not ready here yet; every other one is.
-	notReady map[string]bool
+	// notReady is each App that is not ready here yet; every other one is. readyCalls counts the checks.
+	notReady   map[string]bool
+	readyCalls int
 }
 
 func newFakeFwdHost() *fakeFwdHost {
@@ -104,10 +105,11 @@ func (h *fakeFwdHost) ops() forwardOps {
 			var d net.Dialer
 			return d.DialContext(ctx, "tcp", fmt.Sprintf("127.0.0.1:%d", port))
 		},
-		ready: func(_ context.Context, appID string) (time.Time, bool) {
+		ready: func(_ context.Context, appID string) appReadiness {
 			h.mu.Lock()
 			defer h.mu.Unlock()
-			return time.Now().Add(-time.Hour), !h.notReady[appID]
+			h.readyCalls++
+			return appReadiness{OK: !h.notReady[appID], Since: time.Now().Add(-time.Hour)}
 		},
 	}
 }

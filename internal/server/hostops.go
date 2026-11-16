@@ -246,8 +246,8 @@ func (s *Service) bringUpTraefik(ctx context.Context, path string, restartOnly b
 		}
 		return nil
 	}
-	// A proxy may mount the entrances file (ADR-0048): docker would make a missing one a directory.
-	if p := filepath.Join(filepath.Dir(path), entranceRoutesFile); !regularFile(p) {
+	// A proxy may mount the routes file of its answers (ADR-0048): docker would make a missing one a directory.
+	if p := filepath.Join(filepath.Dir(path), answerRoutesFile); !regularFile(p) {
 		_ = os.WriteFile(p, []byte("{}\n"), 0o644)
 	}
 	res, err := dockercli.Run(ctx, 180*time.Second,

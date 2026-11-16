@@ -81,11 +81,11 @@ type forwardState struct {
 	Members map[string]string `json:"members"` // server id -> certificate fingerprint
 	Hold    []heldName        `json:"hold"`
 	Serve   []servedName      `json:"serve"`
-	// Entrances are the Apps whose domains answer on every server, and ServeEntrances those this one answers for
+	// Answers are the Apps whose domains answer on every server, and ServeAnswers those this one answers for
 	// while it runs them (ADR-0048).
-	Entrances      []entrance `json:"entrances,omitempty"`
-	ServeEntrances []string   `json:"serveEntrances,omitempty"`
-	EntrancePort   uint32     `json:"entrancePort,omitempty"`
+	Answers      []answer `json:"answers,omitempty"`
+	ServeAnswers []string `json:"serveAnswers,omitempty"`
+	AnswerPort   uint32   `json:"answerPort,omitempty"`
 }
 
 // forwardSpec is one forwarder container.
@@ -112,8 +112,8 @@ type forwardOps struct {
 	redirect func(pid int, port uint32) error
 	// proxyDial connects to a port on this server's own proxy, inside its network: where a passed-on domain goes.
 	proxyDial func(ctx context.Context, port uint32) (net.Conn, error)
-	// ready says whether an App answers here, and since when; a zero time when only a health check says so.
-	ready func(ctx context.Context, appID string) (time.Time, bool)
+	// ready says whether every container of an App here answers, and since when.
+	ready func(ctx context.Context, appID string) appReadiness
 }
 
 // `_` is in no slug, so no stack's container (deplo-<slug>..., db-<slug>) can hold a forwarder's name.
@@ -140,14 +140,18 @@ type forwarders struct {
 	redirected map[string]int
 	// open counts the connections this agent carries to each member, so the least busy is tried first.
 	open map[string]int
-	// readyUntil keeps a yes about an App's readiness a moment; readySeen is when it was first seen healthy.
-	readyUntil, readySeen map[string]time.Time
+	// readiness is each App's last readiness answer here; readySeen is when it was first seen healthy.
+	readiness map[string]*answerReadyCheck
+	readySeen map[string]time.Time
+	// gates are the connections waiting for each App; waiting counts them all, conns every passed-on connection.
+	gates          map[string]*answerGate
+	waiting, conns int
 }
 
 func (s *Service) forwarders() *forwarders {
 	s.fwdOnce.Do(func() {
 		f := &forwarders{s: s, listeners: map[string]*heldListener{}, redirected: map[string]int{}, open: map[string]int{},
-			readyUntil: map[string]time.Time{}, readySeen: map[string]time.Time{}}
+			readiness: map[string]*answerReadyCheck{}, readySeen: map[string]time.Time{}, gates: map[string]*answerGate{}}
 		if s.agentDir != "" {
 			if raw, err := os.ReadFile(f.file()); err == nil {
 				_ = json.Unmarshal(raw, &f.st)
@@ -195,7 +199,7 @@ func validateForwarders(req *pb.SetClusterForwardersRequest) (forwardState, erro
 	if st.Cluster == "" {
 		return st, fmt.Errorf("a cluster id is required")
 	}
-	if len(req.GetHold())+len(req.GetServe())+len(req.GetMembers())+len(req.GetEntrances())+len(req.GetServeEntrances()) > maxFwdEntries {
+	if len(req.GetHold())+len(req.GetServe())+len(req.GetMembers())+len(req.GetAnswers())+len(req.GetServeAnswers()) > maxFwdEntries {
 		return st, fmt.Errorf("at most %d entries", maxFwdEntries)
 	}
 	for _, m := range req.GetMembers() {
@@ -235,7 +239,7 @@ func validateForwarders(req *pb.SetClusterForwardersRequest) (forwardState, erro
 		}
 		st.Serve = append(st.Serve, e)
 	}
-	return st, validateEntrances(req, &st)
+	return st, validateAnswers(req, &st)
 }
 
 // SetClusterForwarders applies the full table; see the RPC's contract in proto/agent.proto.
@@ -269,7 +273,7 @@ func (f *forwarders) Resume() {
 	defer cancel()
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(f.st.Hold)+len(f.st.Entrances) == 0 {
+	if len(f.st.Hold)+len(f.st.Answers) == 0 {
 		return
 	}
 	if err := f.reconcile(ctx); err != nil {
@@ -282,7 +286,7 @@ func (f *forwarders) Resume() {
 func (f *forwarders) Clear() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	idle := len(f.st.Hold)+len(f.st.Entrances) == 0 && len(f.listeners) == 0
+	idle := len(f.st.Hold)+len(f.st.Answers) == 0 && len(f.listeners) == 0
 	f.st = forwardState{}
 	if idle {
 		if f.s.agentDir != "" {
@@ -331,7 +335,7 @@ func (f *forwarders) reconcile(ctx context.Context) error {
 		}
 		note(ops.ensure(ctx, forwardSpec{Container: name, Network: h.Network, Alias: h.Name, Port: h.Port, Dir: l.dir}))
 	}
-	f.reconcileEntrances(ctx, wanted, note)
+	f.reconcileAnswers(ctx, wanted, note)
 	f.redirectLocked(ctx)
 	if have, err := ops.list(ctx); err == nil {
 		for _, name := range have {
@@ -359,19 +363,19 @@ func (f *forwarders) reconcile(ctx context.Context) error {
 // its own port. The caller holds f.mu.
 func (f *forwarders) redirectLocked(ctx context.Context) {
 	ops := f.ops()
-	if ops.pids == nil || ops.redirect == nil || len(f.st.Hold)+len(f.st.Entrances) == 0 {
+	if ops.pids == nil || ops.redirect == nil || len(f.st.Hold)+len(f.st.Answers) == 0 {
 		return
 	}
 	ports := map[string]uint32{}
-	names := make([]string, 0, len(f.st.Hold)+len(f.st.Entrances))
+	names := make([]string, 0, len(f.st.Hold)+len(f.st.Answers))
 	for _, h := range f.st.Hold {
 		c := containerFor(h)
 		ports[c] = h.Port
 		names = append(names, c)
 	}
-	if len(f.st.Entrances) > 0 {
-		ports[entranceContainer()] = entranceListen
-		names = append(names, entranceContainer())
+	if len(f.st.Answers) > 0 {
+		ports[answerContainer()] = answerListen
+		names = append(names, answerContainer())
 	}
 	pids, err := ops.pids(ctx, names)
 	if err != nil {
@@ -605,8 +609,8 @@ func parseFwdArg(arg string) (network, kind, id, service string, port uint32, ok
 func (s *Service) serveForward(from wire.Party, c net.Conn, arg string) {
 	network, kind, id, service, port, ok := parseFwdArg(arg)
 	f := s.forwarders()
-	if ok && kind == entranceKind {
-		f.serveEntranceStream(from, c, network, id, port)
+	if ok && kind == answerKind {
+		f.serveAnswerStream(from, c, network, id, port)
 		return
 	}
 	var e servedName
