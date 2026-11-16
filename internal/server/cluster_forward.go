@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -80,6 +81,14 @@ type forwardState struct {
 	Members map[string]string `json:"members"` // server id -> certificate fingerprint
 	Hold    []heldName        `json:"hold"`
 	Serve   []servedName      `json:"serve"`
+	// Answers are the Apps whose domains answer on every server, and ServeAnswers those this one answers for
+	// while it runs them (ADR-0048).
+	Answers      []answer `json:"answers,omitempty"`
+	ServeAnswers []string `json:"serveAnswers,omitempty"`
+	AnswerPort   uint32   `json:"answerPort,omitempty"`
+	// The caps Deplo set for this cluster; zero is the default.
+	AnswerMaxConns   uint32 `json:"answerMaxConns,omitempty"`
+	AnswerMaxWaiting uint32 `json:"answerMaxWaiting,omitempty"`
 }
 
 // forwardSpec is one forwarder container.
@@ -104,6 +113,10 @@ type forwardOps struct {
 	// pids is each forwarder container's process, and redirect sends every TCP port of its network to one.
 	pids     func(ctx context.Context, containers []string) (map[string]int, error)
 	redirect func(pid int, port uint32) error
+	// proxyDial connects to a port on this server's own proxy, inside its network: where a passed-on domain goes.
+	proxyDial func(ctx context.Context, port uint32) (net.Conn, error)
+	// ready says whether every container of an App here answers, and since when.
+	ready func(ctx context.Context, appID string) appReadiness
 }
 
 // `_` is in no slug, so no stack's container (deplo-<slug>..., db-<slug>) can hold a forwarder's name.
@@ -128,11 +141,23 @@ type forwarders struct {
 	listeners map[string]*heldListener
 	// redirected is the process each container's redirect was set up in: a restarted container needs it again.
 	redirected map[string]int
+	// open counts the connections this agent carries to each member, so the least busy is tried first.
+	open map[string]int
+	// readiness is each App's last readiness answer here; readySeen is when it was first seen healthy.
+	readiness map[string]*answerReadyCheck
+	readySeen map[string]time.Time
+	// gates are the connections waiting for each App; waiting counts them all, conns every passed-on connection.
+	gates          map[string]*answerGate
+	waiting, conns int
+	// refused is every connection turned away since the last table, by App ("" past this server's own cap).
+	refused map[string]*answerRefusal
 }
 
 func (s *Service) forwarders() *forwarders {
 	s.fwdOnce.Do(func() {
-		f := &forwarders{s: s, listeners: map[string]*heldListener{}, redirected: map[string]int{}}
+		f := &forwarders{s: s, listeners: map[string]*heldListener{}, redirected: map[string]int{}, open: map[string]int{},
+			readiness: map[string]*answerReadyCheck{}, readySeen: map[string]time.Time{}, gates: map[string]*answerGate{},
+			refused: map[string]*answerRefusal{}}
 		if s.agentDir != "" {
 			if raw, err := os.ReadFile(f.file()); err == nil {
 				_ = json.Unmarshal(raw, &f.st)
@@ -180,7 +205,7 @@ func validateForwarders(req *pb.SetClusterForwardersRequest) (forwardState, erro
 	if st.Cluster == "" {
 		return st, fmt.Errorf("a cluster id is required")
 	}
-	if len(req.GetHold())+len(req.GetServe())+len(req.GetMembers()) > maxFwdEntries {
+	if len(req.GetHold())+len(req.GetServe())+len(req.GetMembers())+len(req.GetAnswers())+len(req.GetServeAnswers()) > maxFwdEntries {
 		return st, fmt.Errorf("at most %d entries", maxFwdEntries)
 	}
 	for _, m := range req.GetMembers() {
@@ -220,7 +245,7 @@ func validateForwarders(req *pb.SetClusterForwardersRequest) (forwardState, erro
 		}
 		st.Serve = append(st.Serve, e)
 	}
-	return st, nil
+	return st, validateAnswers(req, &st)
 }
 
 // SetClusterForwarders applies the full table; see the RPC's contract in proto/agent.proto.
@@ -245,7 +270,8 @@ func (s *Service) SetClusterForwarders(ctx context.Context, req *pb.SetClusterFo
 		return nil, status.Errorf(codes.Unavailable, "run the name forwarders: %v", err)
 	}
 	f.save()
-	return &pb.SetClusterForwardersResponse{Held: int32(len(st.Hold)), Served: int32(len(st.Serve))}, nil
+	return &pb.SetClusterForwardersResponse{Held: int32(len(st.Hold)), Served: int32(len(st.Serve)),
+		AnswerRefusals: f.takeRefusals()}, nil
 }
 
 // Resume runs the saved table again after the agent (re)starts.
@@ -254,7 +280,7 @@ func (f *forwarders) Resume() {
 	defer cancel()
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if len(f.st.Hold) == 0 {
+	if len(f.st.Hold)+len(f.st.Answers) == 0 {
 		return
 	}
 	if err := f.reconcile(ctx); err != nil {
@@ -267,7 +293,7 @@ func (f *forwarders) Resume() {
 func (f *forwarders) Clear() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	idle := len(f.st.Hold) == 0 && len(f.listeners) == 0
+	idle := len(f.st.Hold)+len(f.st.Answers) == 0 && len(f.listeners) == 0
 	f.st = forwardState{}
 	if idle {
 		if f.s.agentDir != "" {
@@ -316,6 +342,7 @@ func (f *forwarders) reconcile(ctx context.Context) error {
 		}
 		note(ops.ensure(ctx, forwardSpec{Container: name, Network: h.Network, Alias: h.Name, Port: h.Port, Dir: l.dir}))
 	}
+	f.reconcileAnswers(ctx, wanted, note)
 	f.redirectLocked(ctx)
 	if have, err := ops.list(ctx); err == nil {
 		for _, name := range have {
@@ -343,15 +370,19 @@ func (f *forwarders) reconcile(ctx context.Context) error {
 // its own port. The caller holds f.mu.
 func (f *forwarders) redirectLocked(ctx context.Context) {
 	ops := f.ops()
-	if ops.pids == nil || ops.redirect == nil || len(f.st.Hold) == 0 {
+	if ops.pids == nil || ops.redirect == nil || len(f.st.Hold)+len(f.st.Answers) == 0 {
 		return
 	}
 	ports := map[string]uint32{}
-	names := make([]string, 0, len(f.st.Hold))
+	names := make([]string, 0, len(f.st.Hold)+len(f.st.Answers))
 	for _, h := range f.st.Hold {
 		c := containerFor(h)
 		ports[c] = h.Port
 		names = append(names, c)
+	}
+	if len(f.st.Answers) > 0 {
+		ports[answerContainer()] = answerListen
+		names = append(names, answerContainer())
 	}
 	pids, err := ops.pids(ctx, names)
 	if err != nil {
@@ -415,21 +446,23 @@ func (f *forwarders) serveHeld(key string, c net.Conn) {
 	in, port := readDialedPort(c, h.Port)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	memberID, here, ok := f.s.leaseGuard().locate(cluster, h.Kind, h.ID)
-	if !ok {
-		return
-	}
+	// Every member that runs the workload can answer: this one first, then the least busy, past any that refuse.
+	here, others := f.s.leaseGuard().holders(cluster, h.Kind, h.ID)
 	var up net.Conn
-	var err error
+	via := ""
 	if here {
-		up, err = f.dialLocal(ctx, h.ID, h.Network, h.Service, port)
-	} else {
-		up, err = f.dialMember(ctx, members[memberID], h, port)
+		up, _ = f.dialLocal(ctx, h.ID, h.Network, h.Service, port)
 	}
-	if err != nil {
+	if up == nil {
+		up, via = f.dialHolders(others, func(member string) (net.Conn, error) {
+			return f.dialMember(ctx, members[member], h, port)
+		})
+	}
+	if up == nil {
 		return
 	}
 	forwarder.Join(in, up)
+	f.release(via)
 }
 
 // bufferedConn is a connection whose first bytes were read ahead.
@@ -583,6 +616,10 @@ func parseFwdArg(arg string) (network, kind, id, service string, port uint32, ok
 func (s *Service) serveForward(from wire.Party, c net.Conn, arg string) {
 	network, kind, id, service, port, ok := parseFwdArg(arg)
 	f := s.forwarders()
+	if ok && kind == answerKind {
+		f.serveAnswerStream(from, c, network, id, port)
+		return
+	}
 	var e servedName
 	if ok {
 		e, ok = f.authorize(from, network, kind, id, service)
@@ -606,6 +643,28 @@ func (s *Service) serveForward(from wire.Party, c net.Conn, arg string) {
 		return
 	}
 	forwarder.Join(c, up)
+}
+
+// holders is every member the leader placed a workload on, from the last renewal: whether this one is among them,
+// and the others in placement order. A standby copy holds the stack, not the name, and is never one.
+func (g *leaseGuard) holders(cluster, kind, id string) (here bool, others []string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	c := g.clusters[cluster]
+	if c == nil {
+		return false, nil
+	}
+	for _, e := range c.Placement {
+		if e.Kind != kind || e.ID != id || e.Member == "" || e.Standby {
+			continue
+		}
+		if e.Member == c.Member {
+			here = true
+		} else if !slices.Contains(others, e.Member) {
+			others = append(others, e.Member)
+		}
+	}
+	return here, others
 }
 
 // locate says which member runs a workload now, and whether that is this one, from the placement the last renewal carried.

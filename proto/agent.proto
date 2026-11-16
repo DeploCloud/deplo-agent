@@ -2542,9 +2542,42 @@ message SetClusterForwardersRequest {
   repeated ClusterForwarderMember members = 2;
   repeated ClusterHeldName hold = 3;
   repeated ClusterServedName serve = 4;
+  // The Apps whose domains answer on every server (ADR-0048), on this one through its one answer forwarder.
+  repeated ClusterAnswer answers = 5;
+  // The Apps whose passed-on domains this member answers, while it runs them.
+  repeated string serve_answers = 6;
+  // The port of the proxy's internal entrypoint, on its own loopback, which reads the PROXY protocol header.
+  uint32 answer_port = 7;
+  // How many passed-on connections this member carries at once, waiting or carried (0: 2048), a quarter of which may
+  // wait; and how many may wait for one App (0: 128). Past either a connection is closed at once, and reported.
+  uint32 answer_max_conns = 8;
+  uint32 answer_max_waiting = 9;
+}
+
+// An App whose domains answer on every server, and how this member's proxy passes them on.
+message ClusterAnswer {
+  string app_id = 1;
+  // The proxy's routers and services for its domains: Traefik dynamic configuration as JSON, Deplo's rendering,
+  // which the agent checks and writes to the proxy's routes file.
+  string routes = 2;
+  // The answer forwarder's ports its TLS and its certificate checks arrive on.
+  uint32 tls_port = 3;
+  uint32 web_port = 4;
+}
+
+// Connections this member turned away: app_id empty, past its own cap; set, past that App's waiting cap.
+message ClusterAnswerRefusal {
+  string app_id = 1;
+  uint32 count = 2;
+  int64 first_unix_ms = 3;
+  int64 last_unix_ms = 4;
+  // The cap they ran into.
+  uint32 cap = 5;
 }
 
 message SetClusterForwardersResponse {
+  // Connections turned away since the last table (ADR-0048): each is reported once, then forgotten.
+  repeated ClusterAnswerRefusal answer_refusals = 3;
   int32 held = 1;
   int32 served = 2;
 }

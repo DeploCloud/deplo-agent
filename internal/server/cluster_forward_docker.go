@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
@@ -25,14 +27,16 @@ const (
 )
 
 var dockerForwardOps = forwardOps{
-	network:  ensureTenantNetwork,
-	ensure:   ensureForwarderContainer,
-	remove:   removeForwarderContainer,
-	list:     listForwarderContainers,
-	target:   workloadAddress,
-	listen:   listenForwarder,
-	pids:     forwarderPids,
-	redirect: redirectAllPorts,
+	network:   ensureTenantNetwork,
+	ensure:    ensureForwarderContainer,
+	remove:    removeForwarderContainer,
+	list:      listForwarderContainers,
+	target:    workloadAddress,
+	listen:    listenForwarder,
+	pids:      forwarderPids,
+	redirect:  redirectAllPorts,
+	proxyDial: dialProxyLoopback,
+	ready:     appReady,
 }
 
 // fwdProto names what a forwarder container speaks to this agent: a container of another one is replaced.
@@ -194,4 +198,117 @@ func forwarderPids(ctx context.Context, containers []string) (map[string]int, er
 		}
 	}
 	return out, nil
+}
+
+// appReady reads every container of the App here: it answers when one runs, every one with a health check is
+// healthy, and none is still being created or restarting. One that exited (a job that ran) does not count.
+func appReady(ctx context.Context, appID string) appReadiness {
+	if !fwdID.MatchString(appID) {
+		return appReadiness{}
+	}
+	res, err := dockercli.Run(ctx, 10*time.Second, "ps", "-aq", "--filter", "label=deplo.project="+appID)
+	ids := strings.Fields(res.Stdout)
+	if err != nil || res.Code != 0 || len(ids) == 0 {
+		return appReadiness{}
+	}
+	args := append([]string{"inspect", "--format", `{"status":{{json .State.Status}},"started":{{json .State.StartedAt}},` +
+		`"health":{{if .State.Health}}{{json .State.Health}}{{else}}null{{end}}}`}, ids...)
+	res, err = dockercli.Run(ctx, 10*time.Second, args...)
+	if err != nil || res.Code != 0 {
+		return appReadiness{}
+	}
+	return readinessOf(strings.Split(strings.TrimSpace(res.Stdout), "\n"))
+}
+
+type containerState struct {
+	Status  string    `json:"status"`
+	Started time.Time `json:"started"`
+	Health  *struct {
+		Status        string
+		FailingStreak int
+		Log           []struct {
+			End      time.Time
+			ExitCode int
+		}
+	} `json:"health"`
+}
+
+// readinessOf is the rule appReady applies, one container per line. A container without a health check counts
+// from its start; one with a check from the oldest check docker keeps, when every one kept passed.
+func readinessOf(lines []string) appReadiness {
+	var r appReadiness
+	running := false
+	later := func(t time.Time) {
+		if t.After(r.Since) {
+			r.Since = t
+		}
+	}
+	for _, line := range lines {
+		var c containerState
+		if json.Unmarshal([]byte(line), &c) != nil {
+			return appReadiness{}
+		}
+		switch c.Status {
+		case "exited", "dead":
+			continue
+		case "running":
+		default:
+			return appReadiness{}
+		}
+		running = true
+		h := c.Health
+		if h == nil {
+			later(c.Started)
+			continue
+		}
+		if h.Status != "healthy" {
+			return appReadiness{}
+		}
+		passed := h.FailingStreak == 0 && len(h.Log) > 0
+		for _, l := range h.Log {
+			passed = passed && l.ExitCode == 0
+		}
+		if passed {
+			later(h.Log[0].End)
+		} else {
+			r.Health = true
+		}
+	}
+	r.OK = running
+	return r
+}
+
+var proxyPid struct {
+	sync.Mutex
+	pid int
+}
+
+// dialProxyLoopback connects to the proxy's internal entrypoint, which listens on its own loopback: only a process
+// inside its network, as this agent is for that one call, can reach it, and it trusts the PROXY header from there.
+func dialProxyLoopback(ctx context.Context, port uint32) (net.Conn, error) {
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port)))
+	for attempt := 0; attempt < 2; attempt++ {
+		proxyPid.Lock()
+		pid := proxyPid.pid
+		proxyPid.Unlock()
+		if pid == 0 || attempt > 0 {
+			res, err := dockercli.Run(ctx, 10*time.Second, "inspect", "--format", "{{.State.Pid}}", traefikContainer)
+			if err != nil || res.Code != 0 {
+				return nil, fmt.Errorf("this server's proxy is not running")
+			}
+			if pid, err = strconv.Atoi(strings.TrimSpace(res.Stdout)); err != nil || pid <= 0 {
+				return nil, fmt.Errorf("this server's proxy is not running")
+			}
+			proxyPid.Lock()
+			proxyPid.pid = pid
+			proxyPid.Unlock()
+		}
+		// A proxy that restarted has a new process: the second attempt looks it up again.
+		if c, err := dialInNetwork(ctx, pid, addr); err == nil {
+			return c, nil
+		} else if attempt > 0 {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("this server's proxy cannot be reached")
 }
