@@ -165,12 +165,13 @@ func (b *bind) Send(bufs [][]byte, ep conn.Endpoint) error {
 	if bufs = e.p.withoutStaleInits(bufs); len(bufs) == 0 {
 		return nil
 	}
+	// In flight from here, held or sent: one of p's arriving while it waits for a path has crossed it.
+	e.p.noteSent(bufs)
 	addr, link, direct := b.m.routeOrHold(e.p, bufs)
 	if !direct && link == nil {
 		b.m.relayFor(e.p)
 		return nil
 	}
-	e.p.noteSent(bufs)
 	if direct {
 		for _, buf := range bufs {
 			if err := b.sendUDP(buf, addr); err != nil {

@@ -133,8 +133,8 @@ type peer struct {
 
 	pongs      int
 	pongWindow time.Time
-	// sentInit is when this end last sent p a handshake initiation, and tookInit when it last took one of p's,
-	// in Unix nanoseconds.
+	// sentInit is when WireGuard last handed over an initiation for p, held or sent, until p answers it (0 then);
+	// tookInit is when this end last took one of p's. Unix nanoseconds.
 	sentInit atomic.Int64
 	tookInit atomic.Int64
 }
@@ -598,6 +598,8 @@ func (m *Mesh) handleProbe(b []byte, from netip.AddrPort) {
 			}
 		}
 		m.mu.Unlock()
+		// Taken while it waited, one of p's initiations makes this end's own queued one stale.
+		flush = p.withoutStaleInits(flush)
 		p.noteSent(flush)
 		for _, b := range flush {
 			m.bind.sendUDP(b, to)
@@ -612,7 +614,12 @@ func isInitiation(b []byte) bool {
 	return len(b) >= 4 && b[0] == 1 && b[1] == 0 && b[2] == 0 && b[3] == 0
 }
 
-// noteSent records the handshake initiations among what goes to p.
+// isResponse says whether a WireGuard message answers a handshake initiation: type 2, little-endian.
+func isResponse(b []byte) bool {
+	return len(b) >= 4 && b[0] == 2 && b[1] == 0 && b[2] == 0 && b[3] == 0
+}
+
+// noteSent records the handshake initiations among what WireGuard hands over for p, held or sent.
 func (p *peer) noteSent(bufs [][]byte) {
 	for _, b := range bufs {
 		if isInitiation(b) {
@@ -648,6 +655,11 @@ func (m *Mesh) crossed(p *peer, pkt []byte) bool {
 // takeInitiation lets a peer's handshake in, and drops this end's own queued one: sent after it, it would only
 // undo the handshake WireGuard is answering now.
 func (m *Mesh) takeInitiation(p *peer, pkt []byte) bool {
+	// An answer ends this end's handshake: a restarted peer's next initiation crosses nothing, and is let in.
+	if isResponse(pkt) {
+		p.sentInit.Store(0)
+		return true
+	}
 	if m.crossed(p, pkt) {
 		return false
 	}
@@ -735,6 +747,7 @@ func (m *Mesh) attach(p *peer, c net.Conn) {
 		flush = p.takePending(time.Now())
 	}
 	m.mu.Unlock()
+	flush = p.withoutStaleInits(flush)
 	p.noteSent(flush)
 	for _, b := range flush {
 		if l.write(b) != nil {
