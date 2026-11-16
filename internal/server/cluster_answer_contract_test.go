@@ -62,16 +62,33 @@ func TestAnswers_thePanelsRoutesPassAsTheyAre(t *testing.T) {
 	}
 }
 
-// The panel keeps the same file; beside this repo, the two must say the same.
-func TestAnswers_theReferenceAgreesWithThePanelRepo(t *testing.T) {
+// panelReference is the panel's own copy of the reference, from DEPLO_REPO or a checkout beside this repo.
+func panelReference(t *testing.T) string {
+	t.Helper()
 	repo := os.Getenv("DEPLO_REPO")
 	if repo == "" {
 		repo = filepath.Join("..", "..", "..", "deplo")
 	}
-	theirs := filepath.Join(repo, "lib", "deploy", "answer-routes.golden.json")
-	if _, err := os.Stat(theirs); err != nil {
-		t.Skip("no deplo checkout beside this repo (set DEPLO_REPO)")
+	path := filepath.Join(repo, "lib", "deploy", "answer-routes.golden.json")
+	if _, err := os.Stat(path); err != nil {
+		t.Skip("no panel reference beside this repo (set DEPLO_REPO)")
 	}
+	return path
+}
+
+// What the panel renders today passes this agent, even while its copy lags a change made here first.
+func TestAnswers_thePanelsReferencePasses(t *testing.T) {
+	ref, _ := readAnswerReference(t, panelReference(t))
+	if _, err := validateForwarders(&pb.SetClusterForwardersRequest{ClusterId: "cl1", AnswerPort: ref.EntrypointPort,
+		Answers:      []*pb.ClusterAnswer{{AppId: ref.AppID, Routes: string(ref.Routes), TlsPort: ref.TLSPort, WebPort: ref.WebPort}},
+		ServeAnswers: []string{ref.AppID}}); err != nil {
+		t.Fatalf("this agent refuses what the panel renders today: %v", err)
+	}
+}
+
+// The panel keeps the same file; beside this repo, the two must say the same.
+func TestAnswers_theReferenceAgreesWithThePanelRepo(t *testing.T) {
+	theirs := panelReference(t)
 	_, mine := readAnswerReference(t, filepath.Join("testdata", "answer-routes.golden.json"))
 	_, panel := readAnswerReference(t, theirs)
 	if !reflect.DeepEqual(mine, panel) {

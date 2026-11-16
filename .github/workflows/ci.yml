@@ -62,3 +62,34 @@ jobs:
           for arch in amd64 arm64; do
             CGO_ENABLED=0 GOOS=linux GOARCH="${arch}" go build -o /dev/null .
           done
+
+  # The answers' routes are a contract with the panel (DeploCloud/deplo, docs/agents/cluster-rollout.md §7): the
+  # agent changes first, so the panel's reference may lag this one's, but what the panel renders today must still
+  # pass this agent's checks, or every App of a cluster would stop answering everywhere.
+  panel-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: DeploCloud/deplo
+          path: panel
+          sparse-checkout: lib/deploy/answer-routes.golden.json
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Compare with the panel's reference
+        run: |
+          if [ ! -f panel/lib/deploy/answer-routes.golden.json ]; then echo "the panel has no reference yet"; exit 0; fi
+          if diff <(jq -S . internal/server/testdata/answer-routes.golden.json) <(jq -S . panel/lib/deploy/answer-routes.golden.json); then
+            echo "the two references are the same"
+          else
+            echo "::notice::the panel's reference differs from this agent's: the panel has not caught up yet"
+          fi
+      - name: This agent accepts what the panel renders today
+        run: go test ./internal/server -run 'TestAnswers_thePanelsReferencePasses' -count=1 -v
+        env:
+          CGO_ENABLED: "0"
+          DEPLO_REPO: ${{ github.workspace }}/panel
