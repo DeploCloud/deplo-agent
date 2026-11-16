@@ -91,6 +91,8 @@ type Mesh struct {
 	byAddr map[netip.AddrPort]*peer
 	stop   chan struct{}
 	closed bool
+	// loop is run(), which Close waits for: nothing of a closed network is still running when it returns.
+	loop sync.WaitGroup
 	// blockUDP drops every datagram this end sends: a test's way to cut the direct path.
 	blockUDP atomic.Bool
 
@@ -211,7 +213,11 @@ func Start(cfg Config) (*Mesh, error) {
 	if err := m.listenAlive(); err != nil {
 		cfg.Logf("cluster network: no liveness inside the tunnel: %v", err)
 	}
-	go m.run()
+	m.loop.Add(1)
+	go func() {
+		defer m.loop.Done()
+		m.run()
+	}()
 	return m, nil
 }
 
@@ -423,7 +429,22 @@ func (m *Mesh) Close() error {
 	if m.alive != nil {
 		m.alive.Close()
 	}
+	// Streams end while the netstack can still carry their last packets; untrack takes connsMu, so not under it.
+	m.connsMu.Lock()
+	var open []*tracked
+	for _, set := range m.conns {
+		for c := range set {
+			open = append(open, c)
+		}
+	}
+	m.connsMu.Unlock()
+	for _, c := range open {
+		c.Close()
+	}
+	// Down first: WireGuard's receivers end before it closes the netstack, which panics when a packet still comes in.
+	_ = m.dev.Down()
 	m.dev.Close()
+	m.loop.Wait()
 	return nil
 }
 

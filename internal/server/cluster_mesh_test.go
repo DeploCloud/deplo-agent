@@ -186,3 +186,42 @@ func TestNetwork_advertised(t *testing.T) {
 		t.Fatal("Hello does not advertise cluster.mesh")
 	}
 }
+
+// Off its last cluster while a leader or relay still runs beside it, a server keeps its network until they stop:
+// a leader extends every lease through it as it stops.
+func TestNetwork_closesOnlyAfterTheLeaderAndRelayBesideItStop(t *testing.T) {
+	a, b, _, _, fpA, fpB := memberPair(t)
+	joinNetwork(t, a, b, fpA, fpB, true)
+	h := a.clusterHost()
+	stopHost := func() {
+		h.mu.Lock()
+		h.stop()
+		h.mu.Unlock()
+	}
+	h.live.Store(true)
+	if _, err := a.SetClusterNetwork(context.Background(), &pb.SetClusterNetworkRequest{ClusterId: "cl1"}); err != nil {
+		t.Fatal(err)
+	}
+	if a.network().current() == nil {
+		t.Fatal("the network closed while the leader beside it still runs")
+	}
+	stopHost()
+	if a.network().current() != nil {
+		t.Fatal("the network still runs after the leader and relay stopped")
+	}
+	if _, err := os.Stat(filepath.Join(a.agentDir, "cluster", "mesh.sock")); err == nil {
+		t.Fatal("the leader's way onto the network is still open")
+	}
+
+	// Back on a cluster before the leader stops: nothing closes then.
+	joinNetwork(t, a, b, fpA, fpB, true)
+	h.live.Store(true)
+	if _, err := a.SetClusterNetwork(context.Background(), &pb.SetClusterNetworkRequest{ClusterId: "cl1"}); err != nil {
+		t.Fatal(err)
+	}
+	joinNetwork(t, a, b, fpA, fpB, true)
+	stopHost()
+	if a.network().current() == nil {
+		t.Fatal("a network back on a cluster closed when the leader stopped")
+	}
+}
