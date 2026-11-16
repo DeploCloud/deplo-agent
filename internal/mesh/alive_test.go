@@ -1,7 +1,10 @@
 package mesh
 
 import (
+	"bytes"
+	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"testing"
@@ -190,4 +193,75 @@ func TestMesh_anAcceptedConnectionIsFiledUnderItsPeer(t *testing.T) {
 	if b.m.peerByAddr(net.TCPAddrFromAddrPort(netip.MustParseAddrPort("[fdde:9100::a]:1"))) != fpA {
 		t.Fatal("a peer's tunnel address does not name it")
 	}
+}
+
+// keysInOrder is two private keys whose public keys sort the way asked: a's below b's when aLower.
+func keysInOrder(t *testing.T, aLower bool) (Key, Key) {
+	t.Helper()
+	for {
+		ka, err := NewPrivateKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		kb, err := NewPrivateKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		pa, _ := ka.Public()
+		pb, _ := kb.Public()
+		if (bytes.Compare(pa[:], pb[:]) < 0) == aLower {
+			return ka, kb
+		}
+	}
+}
+
+// A restart right after a handshake, within the window where two initiations count as crossed: the restarted
+// run's first initiation is let in, whichever key is lower, instead of waiting for WireGuard's retry 5 s later.
+func TestMesh_aPeerThatRestartsRightAfterAHandshakeIsReachedAtOnce(t *testing.T) {
+	for _, aLower := range []bool{true, false} {
+		t.Run(fmt.Sprintf("the staying end's key lower: %v", aLower), func(t *testing.T) {
+			for round := 0; round < 3; round++ {
+				ka, kb := keysInOrder(t, aLower)
+				a, b := startWithKey(t, ka, fpA, "fdde:9100::a", 0), startWithKey(t, kb, fpB, "fdde:9100::b", 0)
+				connect(t, a, b, true)
+				echo(t, b)
+				roundTrip(t, dial(t, a, b), "before the restart")
+				// Past WireGuard's 20 ms flood guard (no restart is that quick), well inside the 1 s window.
+				time.Sleep(100 * time.Millisecond)
+				port := b.m.Port()
+				b.m.Close()
+				t0 := time.Now()
+				again := startWithKey(t, kb, fpB, "fdde:9100::b", port)
+				if err := again.m.SetPeers([]Peer{a.as(true)}); err != nil {
+					t.Fatal(err)
+				}
+				echo(t, again)
+				for {
+					ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+					c, err := a.m.Dial(ctx, fpB, servicePort)
+					cancel()
+					if err == nil {
+						roundTrip(t, c, "after the restart")
+						c.Close()
+						break
+					}
+					if time.Since(t0) > 2*time.Second {
+						t.Fatalf("round %d: the restarted run was not reached within 2 s", round)
+					}
+				}
+				a.m.Close()
+				again.m.Close()
+			}
+		})
+	}
+}
+
+func startWithKey(t *testing.T, key Key, fp, addr string, port uint16) side {
+	t.Helper()
+	m, err := Start(Config{PrivateKey: key, Port: port, Address: netip.MustParseAddr(addr), Logf: t.Logf})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { m.Close() })
+	return side{m: m, key: key, fp: fp}
 }
