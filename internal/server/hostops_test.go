@@ -397,3 +397,24 @@ func TestInstallerScriptDoesNotWriteThroughASymlink(t *testing.T) {
 		t.Fatalf("the symlink target was overwritten: %q", got)
 	}
 }
+
+// A proxy that does not mount the answers' routes file gets none beside its stack; one that does finds it.
+func TestTraefikConfigWritesTheRoutesFileOnlyForAProxyThatMountsIt(t *testing.T) {
+	for name, tc := range map[string]struct {
+		compose string
+		want    bool
+	}{
+		"a proxy outside the feature": {"services:\n  traefik:\n    image: traefik\n", false},
+		"a proxy that answers":        {"services:\n  traefik:\n    volumes:\n      - ./answers.yml:/deplo-dynamic/deplo-answers.yml:ro\n", true},
+	} {
+		dir := t.TempDir()
+		compose := filepath.Join(dir, "docker-compose.yml")
+		if err := os.WriteFile(compose, []byte(tc.compose), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got := mountsAnswerRoutes(compose)
+		if got != tc.want {
+			t.Errorf("%s: mounts the routes file %v", name, got)
+		}
+	}
+}

@@ -185,6 +185,9 @@ func zoneFromPath(p string) string {
 	return strings.TrimPrefix(p[i+len(marker):], "/")
 }
 
+// MemTotalBytes is this host's memory, 0 when it cannot be read.
+func MemTotalBytes() int64 { return memTotal() }
+
 func memTotal() int64 {
 	f, err := os.Open("/proc/meminfo")
 	if err != nil {

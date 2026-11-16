@@ -429,6 +429,9 @@ func TestAnswers_closeAConnectionPastTheWaitingCaps(t *testing.T) {
 	}
 	got := map[string][2]uint32{}
 	for _, r := range res.GetAnswerRefusals() {
+		if !r.GetWaiting() || r.GetMemory() {
+			t.Fatalf("a waiting cap reported as another: %+v", r)
+		}
 		got[r.GetAppId()] = [2]uint32{r.GetCount(), r.GetCap()}
 		if r.GetFirstUnixMs() == 0 || r.GetLastUnixMs() < r.GetFirstUnixMs() {
 			t.Fatalf("a refusal without its times: %+v", r)
@@ -535,6 +538,31 @@ func TestAnswers_rewriteTheRoutesFileInPlace(t *testing.T) {
 		after, _ := os.Stat(path)
 		if string(got) != string(want) || !os.SameFile(before, after) {
 			t.Fatalf("the file holds %q (same file: %v), want %q", got, os.SameFile(before, after), want)
+		}
+	}
+}
+
+// A cluster's cap is held to a quarter of this server's memory, at 64 KB a connection.
+func TestAnswers_aServersMemoryHoldsTheClustersCap(t *testing.T) {
+	old := answerHostMemory
+	t.Cleanup(func() { answerHostMemory = old })
+	for name, tc := range map[string]struct {
+		memory int64
+		cap    uint32
+		conns  int
+		bound  bool
+	}{
+		"512 MB, the default":   {512 << 20, 0, 2048, false},
+		"256 MB, the default":   {256 << 20, 0, 1024, true},
+		"512 MB, a cap of 8192": {512 << 20, 8192, 2048, true},
+		"16 GB, a cap of 8192":  {16 << 30, 8192, 8192, false},
+		"memory unknown, 8192":  {0, 8192, 8192, false},
+	} {
+		answerHostMemory = func() int64 { return tc.memory }
+		f := &forwarders{st: forwardState{AnswerMaxConns: tc.cap}}
+		conns, waiting, _, bound := f.answerCaps()
+		if conns != tc.conns || waiting != tc.conns/4 || bound != tc.bound {
+			t.Errorf("%s: %d connections, %d waiting, held by memory %v", name, conns, waiting, bound)
 		}
 	}
 }

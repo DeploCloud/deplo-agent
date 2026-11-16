@@ -2571,8 +2571,11 @@ message ClusterAnswerRefusal {
   uint32 count = 2;
   int64 first_unix_ms = 3;
   int64 last_unix_ms = 4;
-  // The cap they ran into.
+  // The cap they ran into: a server's waiting cap rather than its connection cap, and a connection cap this
+  // server's memory set lower than the cluster's.
   uint32 cap = 5;
+  bool waiting = 6;
+  bool memory = 7;
 }
 
 message SetClusterForwardersResponse {
