@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -210,8 +211,8 @@ func appReady(ctx context.Context, appID string) appReadiness {
 	if err != nil || res.Code != 0 || len(ids) == 0 {
 		return appReadiness{}
 	}
-	args := append([]string{"inspect", "--format",
-		"{{.State.Status}} {{.State.StartedAt}} {{if .State.Health}}{{.State.Health.Status}}{{end}}"}, ids...)
+	args := append([]string{"inspect", "--format", `{"status":{{json .State.Status}},"started":{{json .State.StartedAt}},` +
+		`"health":{{if .State.Health}}{{json .State.Health}}{{else}}null{{end}}}`}, ids...)
 	res, err = dockercli.Run(ctx, 10*time.Second, args...)
 	if err != nil || res.Code != 0 {
 		return appReadiness{}
@@ -219,16 +220,35 @@ func appReady(ctx context.Context, appID string) appReadiness {
 	return readinessOf(strings.Split(strings.TrimSpace(res.Stdout), "\n"))
 }
 
-// readinessOf is the rule appReady applies, one line per container: its state, when it started, its health.
+type containerState struct {
+	Status  string    `json:"status"`
+	Started time.Time `json:"started"`
+	Health  *struct {
+		Status        string
+		FailingStreak int
+		Log           []struct {
+			End      time.Time
+			ExitCode int
+		}
+	} `json:"health"`
+}
+
+// readinessOf is the rule appReady applies, one container per line. A container without a health check counts
+// from its start; one with a check from the oldest check docker keeps, when every one kept passed.
 func readinessOf(lines []string) appReadiness {
 	var r appReadiness
 	running := false
+	later := func(t time.Time) {
+		if t.After(r.Since) {
+			r.Since = t
+		}
+	}
 	for _, line := range lines {
-		f := strings.Fields(line)
-		if len(f) < 2 {
+		var c containerState
+		if json.Unmarshal([]byte(line), &c) != nil {
 			return appReadiness{}
 		}
-		switch f[0] {
+		switch c.Status {
 		case "exited", "dead":
 			continue
 		case "running":
@@ -236,19 +256,22 @@ func readinessOf(lines []string) appReadiness {
 			return appReadiness{}
 		}
 		running = true
-		if len(f) == 3 {
-			if f[2] != "healthy" {
-				return appReadiness{}
-			}
-			r.Health = true
+		h := c.Health
+		if h == nil {
+			later(c.Started)
 			continue
 		}
-		at, err := time.Parse(time.RFC3339Nano, f[1])
-		if err != nil {
+		if h.Status != "healthy" {
 			return appReadiness{}
 		}
-		if at.After(r.Since) {
-			r.Since = at
+		passed := h.FailingStreak == 0 && len(h.Log) > 0
+		for _, l := range h.Log {
+			passed = passed && l.ExitCode == 0
+		}
+		if passed {
+			later(h.Log[0].End)
+		} else {
+			r.Health = true
 		}
 	}
 	r.OK = running

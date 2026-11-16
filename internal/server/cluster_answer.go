@@ -79,8 +79,8 @@ type answerReadyCheck struct {
 // appReadiness is what docker says of an App's containers here.
 type appReadiness struct {
 	OK bool
-	// Since is when the last container without a health check started. Health says a container has one: when it
-	// turned healthy is known only from the moment it is seen so.
+	// Since is when the last container started, or passed the oldest health check docker keeps. Health says one
+	// is healthy with no such check to tell since when: then it counts from the moment it is seen so.
 	Since  time.Time
 	Health bool
 }

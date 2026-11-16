@@ -447,23 +447,40 @@ func TestAnswers_closeAConnectionPastTheForwardersCap(t *testing.T) {
 }
 
 func TestAnswers_readyOnlyWhenEveryContainerIs(t *testing.T) {
-	old := time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano)
+	at := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
+	checked := at.Add(30 * time.Minute)
+	ts := func(t time.Time) string { return t.Format(time.RFC3339Nano) }
+	plain := func(status string) string {
+		return `{"status":"` + status + `","started":"` + ts(at) + `","health":null}`
+	}
+	health := func(status string, streak int, exits ...int) string {
+		var log []string
+		for i, e := range exits {
+			log = append(log, fmt.Sprintf(`{"End":"%s","ExitCode":%d}`, ts(checked.Add(time.Duration(i)*time.Minute)), e))
+		}
+		return fmt.Sprintf(`{"status":"running","started":"%s","health":{"Status":"%s","FailingStreak":%d,"Log":[%s]}}`,
+			ts(at), status, streak, strings.Join(log, ","))
+	}
 	for name, tc := range map[string]struct {
-		lines  []string
-		ok     bool
-		health bool
+		lines []string
+		ok    bool
+		since time.Time
+		// unknown: healthy, with no kept check to say since when.
+		unknown bool
 	}{
-		"one without a health check":              {[]string{"running " + old + " "}, true, false},
-		"one healthy":                             {[]string{"running " + old + " healthy"}, true, true},
-		"a healthy one beside a starting one":     {[]string{"running " + old + " healthy", "running " + old + " starting"}, false, false},
-		"no health check beside an unhealthy one": {[]string{"running " + old + " ", "running " + old + " unhealthy"}, false, false},
-		"a job that ran beside a healthy one":     {[]string{"exited " + old + " ", "running " + old + " healthy"}, true, true},
-		"one restarting":                          {[]string{"running " + old + " healthy", "restarting " + old + " "}, false, false},
-		"one still being created":                 {[]string{"created 0001-01-01T00:00:00Z "}, false, false},
-		"nothing running":                         {[]string{"exited " + old + " "}, false, false},
+		"one without a health check":              {[]string{plain("running")}, true, at, false},
+		"healthy since its oldest kept check":     {[]string{health("healthy", 0, 0, 0, 0)}, true, checked, false},
+		"healthy after a failed check":            {[]string{health("healthy", 0, 1, 0, 0)}, true, time.Time{}, true},
+		"a healthy one beside a starting one":     {[]string{health("healthy", 0, 0), health("starting", 0)}, false, time.Time{}, false},
+		"no health check beside an unhealthy one": {[]string{plain("running"), health("unhealthy", 3, 1, 1, 1)}, false, time.Time{}, false},
+		"a job that ran beside a healthy one":     {[]string{plain("exited"), health("healthy", 0, 0)}, true, checked, false},
+		"one restarting":                          {[]string{health("healthy", 0, 0), plain("restarting")}, false, time.Time{}, false},
+		"one still being created":                 {[]string{plain("created")}, false, time.Time{}, false},
+		"nothing running":                         {[]string{plain("exited")}, false, time.Time{}, false},
+		"a line docker did not write":             {[]string{"running " + ts(at)}, false, time.Time{}, false},
 	} {
 		r := readinessOf(tc.lines)
-		if r.OK != tc.ok || (r.OK && r.Health != tc.health) {
+		if r.OK != tc.ok || (r.OK && (!r.Since.Equal(tc.since) || r.Health != tc.unknown)) {
 			t.Errorf("%s: %+v", name, r)
 		}
 	}
