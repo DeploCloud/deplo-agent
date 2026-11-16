@@ -646,7 +646,8 @@ func (s *Service) serveForward(from wire.Party, c net.Conn, arg string) {
 }
 
 // holders is every member the leader placed a workload on, from the last renewal: whether this one is among them,
-// and the others in placement order. A standby copy holds the stack, not the name, and is never one.
+// and the others in placement order. A standby copy holds the stack, not the name, and is never one. This member
+// holds nothing on a lease that is not current: a copy back from a power cut answers for nobody.
 func (g *leaseGuard) holders(cluster, kind, id string) (here bool, others []string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -654,12 +655,13 @@ func (g *leaseGuard) holders(cluster, kind, id string) (here bool, others []stri
 	if c == nil {
 		return false, nil
 	}
+	current := c.current(g.now())
 	for _, e := range c.Placement {
 		if e.Kind != kind || e.ID != id || e.Member == "" || e.Standby {
 			continue
 		}
 		if e.Member == c.Member {
-			here = true
+			here = here || current
 		} else if !slices.Contains(others, e.Member) {
 			others = append(others, e.Member)
 		}
@@ -676,13 +678,18 @@ func (g *leaseGuard) locate(cluster, kind, id string) (member string, here, ok b
 	if c == nil {
 		return "", false, false
 	}
+	current := c.current(g.now())
 	for _, e := range c.Placement {
 		// A standby copy holds the stack, not the name: connections still go to the workload itself.
 		if e.Kind != kind || e.ID != id || e.Member == "" || e.Standby {
 			continue
 		}
 		if e.Member == c.Member {
-			return e.Member, true, true
+			// Not on a lease that is not current: the copy here may be one that moved away.
+			if current {
+				return e.Member, true, true
+			}
+			continue
 		}
 		if !ok {
 			member, ok = e.Member, true

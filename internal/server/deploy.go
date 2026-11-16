@@ -327,6 +327,7 @@ func (s *Service) startStack(ctx context.Context, req *pb.DeployRequest, e *emit
 		}
 		return false
 	}
+	s.writerRedeployed(ctx, req.GetSlug())
 	return up
 }
 

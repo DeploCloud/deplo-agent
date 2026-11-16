@@ -137,6 +137,7 @@ var Capabilities = []string{
 	"cluster.network",
 	"cluster.forwarders.services",
 	"cluster.forwarders.answers",
+	"cluster.supervise",
 }
 
 // AgentVersion is the version this agent reports over Hello.
@@ -196,6 +197,10 @@ type Service struct {
 
 	restartOnce sync.Once
 	rw          *restartWatcher
+
+	// The cluster's single-writer stacks, started under their lease; see cluster_supervise.go.
+	supOnce sync.Once
+	sup     *supervisor
 
 	// Replication of App data; see cluster_replicas.go.
 	replOnce sync.Once
@@ -477,6 +482,7 @@ func (s *Service) StopStack(ctx context.Context, ref *pb.StackRef) (*pb.StackRes
 	defer s.lockStack(slug)()
 	res, err := dockercli.Run(ctx, time.Minute, s.composeCtl(slug, append([]string{"stop"}, services...)...)...)
 	if err == nil && res.Code == 0 {
+		s.writerStopped(slug, services)
 		return &pb.StackResult{Ok: true}, nil
 	}
 	// A single-image app has no compose service to name, so its fallback is the stack's own container.
@@ -485,6 +491,7 @@ func (s *Service) StopStack(ctx context.Context, ref *pb.StackRef) (*pb.StackRes
 	}
 	r2, err2 := dockercli.Run(ctx, 30*time.Second, "stop", "deplo-"+slug)
 	if err2 == nil && r2.Code == 0 {
+		s.writerStopped(slug, nil)
 		return &pb.StackResult{Ok: true}, nil
 	}
 	return &pb.StackResult{Ok: false, Error: stackFailure(res, err, r2, err2)}, nil
@@ -503,6 +510,9 @@ func (s *Service) StartStack(ctx context.Context, ref *pb.StackRef) (*pb.StackRe
 	res, err := s.startLocked(ctx, slug)
 	if done() {
 		return nil, status.Error(codes.FailedPrecondition, awaitingLeader)
+	}
+	if err == nil && res.GetOk() {
+		s.supervision().cleared(slug)
 	}
 	return res, err
 }
@@ -538,7 +548,11 @@ func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.Stack
 		return nil, err
 	}
 	defer s.lockStack(slug)()
-	return s.destroyStack(ctx, ref)
+	res, err := s.destroyStack(ctx, ref)
+	if err == nil && res.GetOk() {
+		s.supervision().forget(slug)
+	}
+	return res, err
 }
 
 // destroyStack is DestroyStack for a caller that already holds the stack's lock.
@@ -648,6 +662,7 @@ func (s *Service) Reroute(ctx context.Context, req *pb.RerouteRequest) (*pb.Stac
 	if done() {
 		return nil, status.Error(codes.FailedPrecondition, awaitingLeader)
 	}
+	s.writerRedeployed(ctx, slug)
 	return res, err
 }
 

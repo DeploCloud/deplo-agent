@@ -27,6 +27,7 @@ var (
 func init() {
 	runFailoverDeploy = func(s *Service, ctx context.Context, req *pb.DeployRequest, e *emitter) { s.runDeploy(ctx, req, e) }
 	runFailoverRestore = restoreLikeTheRPC
+	stopFailoverStack = stopAfterFailedRestore
 }
 
 func restoreLikeTheRPC(s *Service, ctx context.Context, req *pb.RestoreRequest) error {
@@ -54,7 +55,9 @@ func restoreLikeTheRPC(s *Service, ctx context.Context, req *pb.RestoreRequest) 
 }
 
 // stopFailoverStack stops a stack whose restore failed, so it never serves empty; a var for the same reason.
-var stopFailoverStack = func(s *Service, ctx context.Context, slug string) {
+var stopFailoverStack func(s *Service, ctx context.Context, slug string)
+
+func stopAfterFailedRestore(s *Service, ctx context.Context, slug string) {
 	if _, err := s.StopStack(ctx, &pb.StackRef{Slug: slug}); err != nil {
 		fmt.Fprintf(os.Stderr, "deplo-agent: could not stop %s after its restore failed: %v\n", slug, err)
 	}
