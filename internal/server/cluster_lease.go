@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -50,6 +51,12 @@ type clusterLease struct {
 	Late []lease.Saved `json:"late,omitempty"`
 	// Boot is the server's boot the lease was last renewed in: see cold.
 	Boot string `json:"boot,omitempty"`
+	// Witness is a lease that keeps what leaders said of extensions; one an older agent wrote did not.
+	Witness bool `json:"witness,omitempty"`
+	// Announced is until when a lease of the cluster may live on an extension a leader announced, and
+	// Unannounced until when one may because a leader that announces nothing renewed this member.
+	Announced   time.Time `json:"announced,omitempty"`
+	Unannounced time.Time `json:"unannounced,omitempty"`
 	// cold is a lease that was dead when this agent started after the server itself did: Docker brought every
 	// stack back, so nothing of it runs until the leader speaks. An agent that only restarted fences as usual.
 	cold bool
@@ -132,8 +139,42 @@ func newLeaseGuard(file string, now func() time.Time, fence func(context.Context
 		if c != nil && c.ranOut(now()) {
 			c.cold, c.Fenced = c.Boot == "" || c.Boot != bootID(), false
 		}
+		if c != nil {
+			witness(nil, c, now(), lease.Order{Announces: true})
+		}
 	}
 	return g
+}
+
+// witness carries what a member knows of extensions into its next lease, and adds what this order says. What
+// leaders did before it kept count is unknown: the longest lease any of them may have given.
+func witness(prev, next *clusterLease, now time.Time, o lease.Order) {
+	switch {
+	case prev != nil && prev.Witness:
+		next.Announced, next.Unannounced = prev.Announced, prev.Unannounced
+	case !next.Witness:
+		next.Unannounced = now.Add(lease.FenceAfter + lease.ExtendFor)
+	}
+	next.Witness = true
+	if !o.Probe && !o.Announces {
+		next.Unannounced = latest(next.Unannounced, now.Add(lease.FenceAfter+lease.ExtendFor))
+	}
+	if o.Announce > 0 {
+		next.Announced = latest(next.Announced, now.Add(min(time.Duration(o.Announce)*time.Second, lease.AnnouncedAtMost)))
+	}
+}
+
+func latest(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
+}
+
+// unsure is how many seconds a lease of the cluster may still live on an extension, as far as this member can tell.
+func (c *clusterLease) unsure(now time.Time) *int {
+	s := max(int(math.Ceil(latest(c.Announced, c.Unannounced).Sub(now).Seconds())), 0)
+	return &s
 }
 
 // bootID names this boot of the server; empty when the kernel does not say, which reads as another boot.
@@ -212,7 +253,8 @@ func (g *leaseGuard) Renew(o lease.Order) lease.Reply {
 	next := &clusterLease{Epoch: o.Epoch, Member: o.Member, RenewedAt: g.now(), Boot: bootID(), Placement: o.Placement, ExtraSeconds: min(max(o.ExtendSeconds, 0), int(lease.ExtendFor/time.Second)),
 		FenceSeconds: min(max(o.FenceSeconds, 0), int(lease.FenceAfter/time.Second))}
 	g.confirmStarts(o)
-	r := lease.Reply{OK: true, Epoch: o.Epoch, StoppedWithin: int((next.fence() + fenceTakes()).Seconds())}
+	witness(g.clusters[o.Cluster], next, g.now(), o)
+	r := lease.Reply{OK: true, Epoch: o.Epoch, StoppedWithin: int((next.fence() + fenceTakes()).Seconds()), Unsure: next.unsure(g.now())}
 	g.comeBack(o, g.clusters[o.Cluster], next, &r)
 	g.clusters[o.Cluster] = next
 	// A start order carries neither keeps nor stores: it says nothing about them.
@@ -231,15 +273,17 @@ func (g *leaseGuard) Probe(o lease.Order) lease.Reply {
 	c := g.clusters[o.Cluster]
 	switch {
 	case c == nil:
-		g.clusters[o.Cluster] = &clusterLease{Epoch: o.Epoch, Member: o.Member}
+		c = &clusterLease{Epoch: o.Epoch, Member: o.Member}
+		g.clusters[o.Cluster] = c
 	case o.Epoch < c.Epoch:
 		return lease.Reply{Error: lease.StaleEpoch, Epoch: c.Epoch}
 	default:
 		c.Epoch = o.Epoch
 	}
+	witness(nil, c, g.now(), o)
 	g.endOlderStarts(o.Cluster, o.Epoch)
 	g.save()
-	return lease.Reply{OK: true, Epoch: o.Epoch}
+	return lease.Reply{OK: true, Epoch: o.Epoch, Unsure: c.unsure(g.now())}
 }
 
 // Check stops the single-writer workloads of every lease that has run out, once each. A stop that fails is tried again on the next check.

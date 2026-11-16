@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -300,7 +301,7 @@ func TestLease_aProbeRenewsNothingAndRefusesOlderEpochsFromThenOn(t *testing.T) 
 	f := newGuard(t)
 	f.g.Renew(orderFor(3))
 	f.clk.Add(50 * time.Second)
-	if got := serveOrder(t, f.g, wire.RoleLeader, `{"cluster":"clu_1","member":"srv_a","epoch":4,"probe":true}`); got != `{"ok":true,"epoch":4}` {
+	if got := serveOrder(t, f.g, wire.RoleLeader, `{"cluster":"clu_1","member":"srv_a","epoch":4,"probe":true}`); got != `{"ok":true,"epoch":4,"unsure":310}` {
 		t.Fatalf("a probe got %q", got)
 	}
 	if got := serveOrder(t, f.g, wire.RoleLeader, `{"cluster":"clu_1","member":"srv_a","epoch":3,"probe":true}`); !strings.Contains(got, `"stale_epoch"`) || !strings.Contains(got, `"epoch":4`) {
@@ -319,7 +320,7 @@ func TestLease_aProbeRenewsNothingAndRefusesOlderEpochsFromThenOn(t *testing.T) 
 
 func TestLease_aProbeToAMemberWithNoLeaseStartsNone(t *testing.T) {
 	f := newGuard(t)
-	if got := serveOrder(t, f.g, wire.RoleLeader, `{"cluster":"clu_1","member":"srv_a","epoch":2,"probe":true}`); got != `{"ok":true,"epoch":2}` {
+	if got := serveOrder(t, f.g, wire.RoleLeader, `{"cluster":"clu_1","member":"srv_a","epoch":2,"probe":true}`); got != `{"ok":true,"epoch":2,"unsure":360}` {
 		t.Fatalf("a probe got %q", got)
 	}
 	f.clk.Add(time.Hour)
@@ -356,5 +357,62 @@ func TestLease_anOrderNamingSomethingThatIsNoSlugIsRefused(t *testing.T) {
 	f.g.Check(context.Background())
 	if len(f.fenced) != 0 || len(looked) != 0 {
 		t.Fatalf("a refused order reached the disk: fenced %v, looked at %v", f.fenced, looked)
+	}
+}
+
+// A member keeps count of what leaders said of extensions, to tell a leader that takes over: unknown before it kept
+// count, nothing once leaders that announce renewed it past the longest lease, and what an announcement says.
+func TestLease_aMemberSaysHowLongAnExtensionMayStillKeepALeaseAlive(t *testing.T) {
+	f := newGuard(t)
+	longest := int((lease.FenceAfter + lease.ExtendFor).Seconds())
+	o := orderFor(3)
+	o.Announces = true
+	if r := f.g.Renew(o); r.Unsure == nil || *r.Unsure != longest {
+		t.Fatalf("a member that never kept count said %v, want the longest lease any leader may give", r.Unsure)
+	}
+	f.clk.Add(lease.FenceAfter + lease.ExtendFor)
+	if r := f.g.Renew(o); r.Unsure == nil || *r.Unsure != 0 {
+		t.Fatalf("after leaders that announce: %v, want 0", r.Unsure)
+	}
+	o.Announce = 370
+	if r := f.g.Renew(o); *r.Unsure != 370 {
+		t.Fatalf("after an announcement: %d, want 370", *r.Unsure)
+	}
+	f.clk.Add(time.Minute)
+	o.Announce = 0
+	if r := f.reopen().Renew(o); *r.Unsure != 310 {
+		t.Fatalf("after a restart of the agent: %d, want what the announcement still covers", *r.Unsure)
+	}
+	if r := f.g.Renew(orderFor(3)); *r.Unsure != longest {
+		t.Fatalf("after a leader that announces nothing: %d, want the longest lease it may have given", *r.Unsure)
+	}
+}
+
+// A lease file an older agent wrote kept no count: what leaders did meanwhile is unknown.
+func TestLease_aLeaseAnOlderAgentWroteIsUnsureForTheLongestLease(t *testing.T) {
+	f := newGuard(t)
+	o := orderFor(3)
+	o.Announces = true
+	f.g.Renew(o)
+	f.clk.Add(lease.FenceAfter + lease.ExtendFor)
+	raw, err := os.ReadFile(f.file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var file map[string]map[string]any
+	if err := json.Unmarshal(raw, &file); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range file {
+		delete(c, "witness")
+		delete(c, "announced")
+		delete(c, "unannounced")
+	}
+	raw, _ = json.Marshal(file)
+	if err := os.WriteFile(f.file, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if r := f.reopen().Renew(o); *r.Unsure != int((lease.FenceAfter + lease.ExtendFor).Seconds()) {
+		t.Fatalf("an older agent's lease said %d", *r.Unsure)
 	}
 }

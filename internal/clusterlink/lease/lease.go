@@ -17,6 +17,9 @@ const FenceAfter = 60 * time.Second
 // it moves a silent member's single-writer workloads, so raise it in deplo-cluster first, never here alone.
 const ExtendFor = 5 * time.Minute
 
+// AnnouncedAtMost is the longest an announcement keeps an extension possible: more than any leader announces.
+const AnnouncedAtMost = ExtendFor + FenceAfter + time.Minute
+
 // MaxLine bounds one order or reply.
 const MaxLine = 16 << 20
 
@@ -51,6 +54,11 @@ type Order struct {
 	ExtendSeconds int `json:"extendSeconds,omitempty"`
 	// FenceSeconds is how long the lease lives without the next renewal, at most FenceAfter; zero is FenceAfter.
 	FenceSeconds int `json:"fenceSeconds,omitempty"`
+	// Announces is a leader that extends no lease before every member took its announcement of the extension.
+	Announces bool `json:"announces,omitempty"`
+	// Announce says a lease of this cluster may live this many seconds more because of an extension that follows:
+	// kept, to tell a leader that takes over.
+	Announce int `json:"announce,omitempty"`
 	// Probe only asks whether this member takes the epoch. It renews nothing and changes nothing else, and a
 	// member that answers refuses every older epoch from then on.
 	Probe bool `json:"probe,omitempty"`
@@ -205,6 +213,9 @@ type Reply struct {
 	Unplaced []string `json:"unplaced,omitempty"`
 	// Later answers a Keep sent after the return, once this member keeps nothing of a stack any more.
 	Later *Later `json:"later,omitempty"`
+	// Unsure is how many seconds a lease of this cluster, this member's or another's, may still live because of an
+	// extension, as far as this member can tell; nil is an older agent.
+	Unsure *int `json:"unsure,omitempty"`
 }
 
 // Later is what became of data a member kept past its return.
