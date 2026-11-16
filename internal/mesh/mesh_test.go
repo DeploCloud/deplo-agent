@@ -289,3 +289,58 @@ func TestKey_roundTripsThroughItsText(t *testing.T) {
 		t.Fatal("a short key was read")
 	}
 }
+
+// Closed while a peer still sends to it, a network shuts down with no race and no panic in WireGuard's netstack:
+// its receivers stop before the netstack does.
+func TestMesh_closingWhileAPeerStillSendsToIt(t *testing.T) {
+	for round := 0; round < 20; round++ {
+		a, b := start(t, nil, fpA, "fdde:9100::a"), start(t, nil, fpB, "fdde:9100::b")
+		connect(t, a, b, true)
+		echo(t, a)
+		c := dial(t, b, a)
+		roundTrip(t, c, "before the close")
+		stop := make(chan struct{})
+		var wg sync.WaitGroup
+		// A stream that keeps sending, and dials to a port nothing listens on: a's netstack answers each packet,
+		// which is the write the race was in.
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			buf := make([]byte, 1024)
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_ = c.SetWriteDeadline(time.Now().Add(50 * time.Millisecond))
+				if _, err := c.Write(buf); err != nil {
+					return
+				}
+			}
+		}()
+		for i := 0; i < 4; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for {
+					select {
+					case <-stop:
+						return
+					default:
+					}
+					ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+					if d, err := b.m.Dial(ctx, fpA, servicePort+1); err == nil {
+						d.Close()
+					}
+					cancel()
+				}
+			}()
+		}
+		time.Sleep(time.Duration(10+round%5*10) * time.Millisecond)
+		a.m.Close()
+		close(stop)
+		wg.Wait()
+		b.m.Close()
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/netip"
 	"os"
@@ -63,6 +64,8 @@ type clusterNetwork struct {
 	door net.Listener
 	// on is read under the member lock, so it never takes mu.
 	on atomic.Bool
+	// closeAfterHost: no cluster is left, but a leader or relay still runs here; the network closes once they stop.
+	closeAfterHost bool
 }
 
 func (s *Service) network() *clusterNetwork {
@@ -248,9 +251,14 @@ func (n *clusterNetwork) peersLocked() []mesh.Peer {
 // applyLocked makes the running network match the saved one; the caller holds mu.
 func (n *clusterNetwork) applyLocked() error {
 	if len(n.st.Clusters) == 0 {
+		if n.m != nil && n.s.clusterHost().live.Load() {
+			n.closeAfterHost = true
+			return nil
+		}
 		n.stopLocked()
 		return nil
 	}
+	n.closeAfterHost = false
 	addr, ok := meshAddress(n.st.Address)
 	if !ok {
 		return errors.New("no address inside the tunnel for this server")
@@ -304,9 +312,30 @@ func (n *clusterNetwork) stopLocked() {
 		n.ln = nil
 	}
 	if n.m != nil {
-		n.m.Close()
+		closeMesh(n.m)
 		n.m = nil
 	}
+}
+
+// afterHostStopped closes a network that waited for this server's leader and relay to stop.
+func (n *clusterNetwork) afterHostStopped() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.closeAfterHost && len(n.st.Clusters) == 0 {
+		n.stopLocked()
+	}
+	n.closeAfterHost = false
+}
+
+// closeMesh outlives a panic raised while closing; one in a goroutine of WireGuard's own cannot be caught here,
+// which is why Mesh.Close stops those first and the network closes after the leader and relay.
+func closeMesh(m *mesh.Mesh) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("deplo-agent: cluster network: closing it failed: %v", r)
+		}
+	}()
+	m.Close()
 }
 
 func (n *clusterNetwork) responseLocked() *pb.SetClusterNetworkResponse {

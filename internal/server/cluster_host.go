@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -51,6 +52,8 @@ type clusterHost struct {
 	state  clusterState
 	cancel context.CancelFunc
 	procs  []*clusterProc
+	// live says a leader or relay runs here; read without mu, so the network can wait for them to stop.
+	live atomic.Bool
 }
 
 type clusterProc struct {
@@ -138,6 +141,7 @@ func (h *clusterHost) start(dir string, st clusterState) {
 		h.procs = append(h.procs, p)
 		go p.supervise(pctx, bin, func() []string { return h.svc.clusterEnv(dir, name) }, reaped)
 	}
+	h.live.Store(len(h.procs) > 0)
 	go h.svc.keepRelaysFile(ctx, dir, st)
 }
 
@@ -152,6 +156,9 @@ func (h *clusterHost) stop() {
 		h.cancel()
 	}
 	h.cancel, h.procs, h.state = nil, nil, clusterState{}
+	h.live.Store(false)
+	// The network goes last: a leader extends every lease through it as it stops.
+	h.svc.network().afterHostStopped()
 }
 
 func clusterSocket(dir string) string { return filepath.Join(dir, "leader.sock") }
