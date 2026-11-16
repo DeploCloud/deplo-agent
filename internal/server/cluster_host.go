@@ -175,6 +175,8 @@ func (p *clusterProc) supervise(ctx context.Context, bin string, env func() []st
 		cmd.Env = env()
 		cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
 		cmd.WaitDelay = clusterStopWait
+		out := &clusterLog{role: p.role}
+		cmd.Stdout, cmd.Stderr = out, out
 		started := time.Now()
 		if err := cmd.Start(); err != nil {
 			log.Printf("deplo-agent: cluster %v: start: %v", p.args, err)
@@ -199,6 +201,43 @@ func (p *clusterProc) supervise(ctx context.Context, bin string, env func() []st
 	}
 }
 
+// clusterLog carries what a supervised process prints into this agent's own log, a line at a time.
+type clusterLog struct {
+	role string
+	out  io.Writer
+	buf  []byte
+}
+
+// clusterLogLine is the longest line kept whole; a longer one is cut rather than held.
+const clusterLogLine = 4096
+
+func (w *clusterLog) Write(p []byte) (int, error) {
+	w.buf = append(w.buf, p...)
+	for {
+		i := bytes.IndexByte(w.buf, '\n')
+		if i < 0 {
+			break
+		}
+		w.line(w.buf[:i])
+		w.buf = w.buf[i+1:]
+	}
+	if len(w.buf) > clusterLogLine {
+		w.line(w.buf)
+		w.buf = nil
+	}
+	return len(p), nil
+}
+
+func (w *clusterLog) line(b []byte) {
+	out := w.out
+	if out == nil {
+		out = os.Stderr
+	}
+	if b = bytes.TrimRight(b, "\r"); len(b) > 0 {
+		fmt.Fprintf(out, "deplo-agent: cluster %s: %s\n", w.role, b)
+	}
+}
+
 // reapStale ends the process a pid file names when it is our binary, and waits for it as a stop does.
 func reapStale(pidFile, bin string) {
 	raw, err := os.ReadFile(pidFile)
@@ -218,6 +257,8 @@ func reapStale(pidFile, bin string) {
 	if !ours() {
 		return
 	}
+	// After a self-update this agent is still the parent of what its earlier run started: nothing else collects it.
+	defer collect(pid)
 	_ = syscall.Kill(pid, syscall.SIGTERM)
 	for end := time.Now().Add(clusterStopWait); time.Now().Before(end); {
 		if !ours() {
@@ -226,6 +267,16 @@ func reapStale(pidFile, bin string) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	_ = syscall.Kill(pid, syscall.SIGKILL)
+}
+
+// collect waits for a child process that was told to end, so it does not stay behind as a zombie.
+func collect(pid int) {
+	for end := time.Now().Add(time.Second); time.Now().Before(end); time.Sleep(50 * time.Millisecond) {
+		var ws syscall.WaitStatus
+		if got, err := syscall.Wait4(pid, &ws, syscall.WNOHANG, nil); got == pid || err != nil {
+			return
+		}
+	}
 }
 
 // InstallCluster puts the verified deplo-cluster binary on this host and runs it; see the RPC's contract in proto/agent.proto.

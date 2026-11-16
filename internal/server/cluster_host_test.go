@@ -422,3 +422,49 @@ func TestStartCluster_endsALeftBehindLeaderBeforeItsRelay(t *testing.T) {
 		t.Fatalf("ended in the order %q, want the leader first", got)
 	}
 }
+
+func TestClusterLog_carriesEachLineIntoTheAgentsLog(t *testing.T) {
+	var out strings.Builder
+	w := &clusterLog{role: "leader", out: &out}
+	long := strings.Repeat("x", clusterLogLine+1)
+	for _, p := range []string{"deplo-cluster: one\r\npart", "ial\n\n", long} {
+		if n, err := w.Write([]byte(p)); n != len(p) || err != nil {
+			t.Fatalf("write: %d, %v", n, err)
+		}
+	}
+	want := "deplo-agent: cluster leader: deplo-cluster: one\n" +
+		"deplo-agent: cluster leader: partial\n" +
+		"deplo-agent: cluster leader: " + long + "\n"
+	if out.String() != want {
+		t.Fatalf("logged %q", out.String())
+	}
+}
+
+// After a self-update this agent is the parent of what its earlier run started: ending one also collects it.
+func TestReapStale_collectsTheProcessItEnded(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("reads /proc")
+	}
+	dir := t.TempDir()
+	bin := filepath.Join(dir, clusterBinaryName)
+	sleep, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip("no sleep")
+	}
+	raw, _ := os.ReadFile(sleep)
+	if err := os.WriteFile(bin, raw, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pid, err := syscall.ForkExec(bin, []string{bin, "300"}, &syscall.ProcAttr{Files: []uintptr{0, 1, 2}})
+	if err != nil {
+		t.Skipf("cannot run a copy of sleep: %v", err)
+	}
+	pidFile := filepath.Join(dir, "leader.pid")
+	os.WriteFile(pidFile, []byte(strconv.Itoa(pid)), 0o600)
+	reapStale(pidFile, bin)
+	if _, err := os.Stat("/proc/" + strconv.Itoa(pid)); err == nil {
+		syscall.Kill(pid, syscall.SIGKILL)
+		syscall.Wait4(pid, nil, 0, nil)
+		t.Fatal("the ended process stayed behind for nobody to collect")
+	}
+}
