@@ -445,10 +445,18 @@ func parseWriterContainers(out string) []writerContainer {
 		code, _ := strconv.Atoi(f[6])
 		started, _ := parseDockerTime(f[7])
 		finished, _ := parseDockerTime(f[8])
-		cs = append(cs, writerContainer{ID: f[0], Name: strings.TrimPrefix(f[1], "/"), Service: f[2], State: f[3], Policy: f[4],
-			Label: f[5], ExitCode: code, StartedAt: started, FinishedAt: finished})
+		cs = append(cs, writerContainer{ID: f[0], Name: strings.TrimPrefix(f[1], "/"), Service: labelValue(f[2]), State: f[3],
+			Policy: f[4], Label: labelValue(f[5]), ExitCode: code, StartedAt: started, FinishedAt: finished})
 	}
 	return cs
+}
+
+// labelValue is a label as this listing prints it: Docker writes "<no value>" for one the container lacks.
+func labelValue(s string) string {
+	if s == "<no value>" {
+		return ""
+	}
+	return s
 }
 
 func setRestartPolicy(ctx context.Context, ids []string, policy string) error {

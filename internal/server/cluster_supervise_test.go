@@ -145,6 +145,40 @@ func TestSupervise_aLeaseReadBackFromDiskTurnsThePolicyOffAndStartsNothing(t *te
 	}
 }
 
+// The listing as Docker prints it for a container Deplo rendered before the label existed (deplo#237 lab, canary.10).
+const unlabelledListing = "c1\t/db-writer\tdb-writer\texited\tunless-stopped\t<no value>\t255\t" +
+	"2026-03-01T11:00:00.1Z\t2026-03-01T11:59:00.2Z\tFalse\n"
+
+func TestParseWriterContainers_aLabelTheContainerLacksIsEmpty(t *testing.T) {
+	cs := parseWriterContainers(unlabelledListing + "c2\t/x\t<no value>\texited\tno\talways\t0\t\t\t<no value>\n")
+	if len(cs) != 2 || cs[0].Label != "" || cs[0].Service != writer || cs[0].Policy != "unless-stopped" {
+		t.Fatalf("parsed %+v, want db-writer with no label and its policy", cs)
+	}
+	if cs[1].Service != "" || cs[1].Label != "always" {
+		t.Fatalf("parsed %+v, want no service and the label always", cs[1])
+	}
+}
+
+func TestSupervise_aContainerWithoutTheLabelIsStartedAfterTheAgentRestarts(t *testing.T) {
+	clk := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	saved := map[string]*clusterLease{"clu_1": {Epoch: 1, Member: "srv_a", RenewedAt: clk, Placement: placedOn("srv_a"), Boot: bootID()}}
+	s, _, fw := supervisedMember(t, saved)
+	fw.cs[writer] = parseWriterContainers(unlabelledListing)
+	supervise(t, s)
+	if fw.cs[writer][0].Policy != "no" {
+		t.Fatalf("Docker's restart policy is still %q", fw.cs[writer][0].Policy)
+	}
+	// The agent starts again: only what is on disk says the container was meant to come back.
+	sv := newSupervisor(s.supervisorFile(), s.sup.now)
+	sv.list, sv.setPolicy, sv.start = fw.list, fw.setPolicy, fw.start
+	s.sup = sv
+	renewHere(t, s)
+	supervise(t, s)
+	if got := fw.startedIDs(); !slices.Equal(got, []string{"c1"}) {
+		t.Fatalf("started %v, want c1: its policy was unless-stopped", got)
+	}
+}
+
 func TestSupervise_startsNothingPlacedElsewhereOrOnALeaseThatRanOut(t *testing.T) {
 	s, clk, fw := supervisedMember(t, nil)
 	s.leaseGuard().Renew(lease.Order{Cluster: "clu_1", Member: "srv_a", Epoch: 1, Placement: placedOn("srv_b")})
