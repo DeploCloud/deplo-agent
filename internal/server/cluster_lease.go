@@ -100,6 +100,41 @@ func (g *leaseGuard) writers() (all, mine []string) {
 	return all, mine
 }
 
+// whyNotMine says why writers leaves a stack out of mine, in a sentence for the log; "" when it is in mine.
+func (g *leaseGuard) whyNotMine(slug string) string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := g.now()
+	why := "no lease names it"
+	for id, c := range g.clusters {
+		for _, e := range c.Placement {
+			if e.Slug != slug || !e.SingleWriter && !e.Standby {
+				continue
+			}
+			at, starting := g.starting[e.Slug]
+			switch {
+			case !c.heard:
+				why = "no leader has renewed this server's lease since the agent started"
+			case c.ranOut(now):
+				why = "its lease ran out"
+			case c.Returning:
+				why = "this server is coming back to its cluster, and what moved away is not removed yet"
+			case g.settling[id]:
+				why = "what the lease left on this server is being settled"
+			case e.Member != c.Member && e.Member == "":
+				why = "the leader has placed it on no server"
+			case e.Member != c.Member:
+				why = "the leader placed it on " + e.Member
+			case starting && at.IsZero():
+				why = "a start order from the leader is bringing it up"
+			default:
+				return ""
+			}
+		}
+	}
+	return why
+}
+
 // isWriter says a lease names the stack as one that must never run twice.
 func (g *leaseGuard) isWriter(slug string) bool {
 	all, _ := g.writers()

@@ -482,7 +482,7 @@ func (s *Service) StopStack(ctx context.Context, ref *pb.StackRef) (*pb.StackRes
 	defer s.lockStack(slug)()
 	res, err := dockercli.Run(ctx, time.Minute, s.composeCtl(slug, append([]string{"stop"}, services...)...)...)
 	if err == nil && res.Code == 0 {
-		s.writerStopped(slug, services)
+		s.writerStopped(ctx, slug, services)
 		return &pb.StackResult{Ok: true}, nil
 	}
 	// A single-image app has no compose service to name, so its fallback is the stack's own container.
@@ -491,7 +491,7 @@ func (s *Service) StopStack(ctx context.Context, ref *pb.StackRef) (*pb.StackRes
 	}
 	r2, err2 := dockercli.Run(ctx, 30*time.Second, "stop", "deplo-"+slug)
 	if err2 == nil && r2.Code == 0 {
-		s.writerStopped(slug, nil)
+		s.writerStopped(ctx, slug, nil)
 		return &pb.StackResult{Ok: true}, nil
 	}
 	return &pb.StackResult{Ok: false, Error: stackFailure(res, err, r2, err2)}, nil

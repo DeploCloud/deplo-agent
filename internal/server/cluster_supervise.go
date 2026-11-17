@@ -14,6 +14,8 @@ import (
 	"sync"
 	"time"
 
+	"go.yaml.in/yaml/v3"
+
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
@@ -39,17 +41,32 @@ type writerContainer struct {
 	StartedAt, FinishedAt                   time.Time
 }
 
-// intent is the restart policy Docker would apply: Deplo's label, else the policy this agent turned off.
-func (c writerContainer) intent(kept map[string]string) string {
-	switch {
-	case c.Label != "":
-		return c.Label
-	case kept[c.Service] != "":
-		return kept[c.Service]
-	case c.Policy != "":
-		return c.Policy
+// intent is the restart policy the container is meant to have, and where it was read. A record that is missing or
+// unreadable means supervision: a writer is never kept down for want of one.
+func (c writerContainer) intent(kept, rendered map[string]string) (policy, from string) {
+	if p, ok := restartPolicy(c.Label); ok {
+		return p, "Deplo's label"
 	}
-	return "no"
+	if p, ok := restartPolicy(kept[c.Service]); ok {
+		return p, "the policy this agent turned off"
+	}
+	if p, ok := restartPolicy(c.Policy); ok && p != "no" {
+		return p, "Docker's policy"
+	}
+	if p, ok := restartPolicy(rendered[c.Service]); ok {
+		return p, "the stack's file"
+	}
+	return "unless-stopped", "no record of its policy, so it is supervised"
+}
+
+// restartPolicy reads a restart policy as Docker or compose writes it; ok is false for anything else.
+func restartPolicy(s string) (string, bool) {
+	p, _, _ := strings.Cut(strings.ToLower(strings.TrimSpace(s)), ":")
+	switch p {
+	case "no", "always", "unless-stopped", "on-failure":
+		return p, true
+	}
+	return "", false
 }
 
 // wantsStart says Docker's own policy would start the container now: one that ran and exited, never one only created.
@@ -72,6 +89,13 @@ type supervisor struct {
 	list      func(ctx context.Context, slug string) ([]writerContainer, error)
 	setPolicy func(ctx context.Context, ids []string, policy string) error
 	start     func(ctx context.Context, id string) error
+	// rendered is the restart policy per service in the stack's own file, as Deplo rendered it.
+	rendered func(slug string) map[string]string
+	logf     func(format string, a ...any)
+
+	// said is the last reason logged per stack or container, so each change is logged once.
+	saidMu sync.Mutex
+	said   map[string]string
 
 	mu sync.Mutex
 	// kept is the policy turned off, per stack and service; stopped the services stopped on purpose, "" the whole stack.
@@ -91,17 +115,40 @@ type supervisorState struct {
 func newSupervisor(file string, now func() time.Time) *supervisor {
 	sv := &supervisor{file: file, now: now, list: listWriterContainers, setPolicy: setRestartPolicy, start: startContainer,
 		kept: map[string]map[string]string{}, stopped: map[string][]string{}, pause: map[string]time.Duration{},
-		nextAt: map[string]time.Time{}, busy: map[string]bool{}}
+		nextAt: map[string]time.Time{}, busy: map[string]bool{}, said: map[string]string{}, logf: logCluster}
 	var st supervisorState
-	if raw, err := os.ReadFile(file); err == nil && json.Unmarshal(raw, &st) == nil {
+	raw, err := os.ReadFile(file)
+	if err == nil {
+		err = json.Unmarshal(raw, &st)
+	}
+	switch {
+	case err == nil:
 		if st.Kept != nil {
 			sv.kept = st.Kept
 		}
 		if st.Stopped != nil {
 			sv.stopped = st.Stopped
 		}
+	case !errors.Is(err, os.ErrNotExist):
+		sv.logf("could not read %s, so every writer here is supervised: %v", file, err)
 	}
 	return sv
+}
+
+// logCluster is the supervisor's log line: info level, in the agent's journal.
+func logCluster(format string, a ...any) {
+	fmt.Fprintf(os.Stderr, "deplo-agent: cluster: "+format+"\n", a...)
+}
+
+// note logs why a writer is or is not started, once each time the reason changes; "" only forgets the last one.
+func (sv *supervisor) note(key, why string) {
+	sv.saidMu.Lock()
+	same := sv.said[key] == why
+	sv.said[key] = why
+	sv.saidMu.Unlock()
+	if !same && why != "" {
+		sv.logf("%s", why)
+	}
 }
 
 // saveLocked writes what must outlive this agent; the caller holds sv.mu.
@@ -114,23 +161,24 @@ func (sv *supervisor) saveLocked() {
 		err = writeFileAtomic(sv.file, raw, 0o600)
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "deplo-agent: could not keep the cluster's restart policies in %s: %v\n", sv.file, err)
+		sv.logf("could not keep the restart policies in %s: %v", sv.file, err)
 	}
 }
 
 // stoppedOnPurpose keeps a stop someone asked for, so the stack stays down as Docker would leave it.
-func (sv *supervisor) stoppedOnPurpose(slug string, services []string) {
+func (sv *supervisor) stoppedOnPurpose(slug string, services []string, why string) {
 	if len(services) == 0 {
 		services = []string{""}
 	}
 	sv.mu.Lock()
-	defer sv.mu.Unlock()
 	for _, name := range services {
 		if !slices.Contains(sv.stopped[slug], name) {
 			sv.stopped[slug] = append(sv.stopped[slug], name)
 		}
 	}
 	sv.saveLocked()
+	sv.mu.Unlock()
+	sv.logf("%s stays down until it is started or deployed again: %s", slug, why)
 }
 
 // cleared ends the stops kept for a stack that was started or deployed again.
@@ -140,6 +188,7 @@ func (sv *supervisor) cleared(slug string) {
 	if _, ok := sv.stopped[slug]; ok {
 		delete(sv.stopped, slug)
 		sv.saveLocked()
+		sv.logf("%s was started or deployed again: the supervisor looks after it again", slug)
 	}
 }
 
@@ -206,10 +255,10 @@ func (sv *supervisor) quiet(ctx context.Context, slug string) {
 		return
 	}
 	if err := sv.setPolicy(ctx, ids, "no"); err != nil {
-		fmt.Fprintf(os.Stderr, "deplo-agent: cluster: could not turn Docker's restart policy off for %s: %v\n", slug, err)
+		sv.logf("could not turn Docker's restart policy off for %s: %v", slug, err)
 		return
 	}
-	fmt.Fprintf(os.Stderr, "deplo-agent: cluster: %s starts only under its lease now: Docker's restart policy is off for %d container(s)\n", slug, len(ids))
+	sv.logf("%s starts only under its lease now: Docker's restart policy is off for %d container(s)", slug, len(ids))
 }
 
 // due lists what of a stack Docker's own policy would start now; true reserves the stack for one start.
@@ -221,7 +270,15 @@ func (sv *supervisor) due(ctx context.Context, slug string) bool {
 	}
 	sv.mu.Unlock()
 	cs, err := sv.list(ctx, slug)
-	if err != nil || len(sv.startable(slug, cs)) == 0 {
+	if err != nil {
+		sv.note(slug, fmt.Sprintf("%s is not looked after this time: Docker did not list its containers: %v", slug, err))
+		return false
+	}
+	if len(cs) == 0 {
+		sv.note(slug, slug+" has no container on this server")
+		return false
+	}
+	if len(sv.startable(slug, cs)) == 0 {
 		return false
 	}
 	sv.mu.Lock()
@@ -239,20 +296,43 @@ func (sv *supervisor) done(slug string) {
 	sv.mu.Unlock()
 }
 
-// startable is the stopped containers of a stack Docker would start again now: not stopped on purpose, past their pause.
+// startable is the stopped containers of a stack Docker would start again now: not stopped on purpose, past their
+// pause. Why each other one is left as it is goes to the log.
 func (sv *supervisor) startable(slug string, cs []writerContainer) []writerContainer {
-	sv.mu.Lock()
-	defer sv.mu.Unlock()
-	if slices.Contains(sv.stopped[slug], "") {
-		return nil
+	var rendered map[string]string
+	if sv.rendered != nil {
+		rendered = sv.rendered(slug)
 	}
-	now := sv.now()
+	type said struct{ key, why string }
+	var notes []said
 	var out []writerContainer
-	for _, c := range cs {
-		if slices.Contains(sv.stopped[slug], c.Service) || !c.wantsStart(c.intent(sv.kept[slug])) || now.Before(sv.nextAt[c.ID]) {
-			continue
+	sv.mu.Lock()
+	now := sv.now()
+	if slices.Contains(sv.stopped[slug], "") {
+		notes = append(notes, said{slug, slug + " stays down: it was stopped on purpose"})
+	} else {
+		notes = append(notes, said{slug, ""})
+		for _, c := range cs {
+			policy, from := c.intent(sv.kept[slug], rendered)
+			switch {
+			case slices.Contains(sv.stopped[slug], c.Service):
+				notes = append(notes, said{c.ID, c.Name + " stays down: it was stopped on purpose"})
+			case c.State != "exited":
+				notes = append(notes, said{c.ID, fmt.Sprintf("%s is %s", c.Name, c.State)})
+			case !c.wantsStart(policy):
+				notes = append(notes, said{c.ID, fmt.Sprintf("%s stays down: its restart policy %s (%s) does not start it after exit %d",
+					c.Name, policy, from, c.ExitCode)})
+			case now.Before(sv.nextAt[c.ID]):
+				notes = append(notes, said{c.ID, fmt.Sprintf("%s is started again at %s, after a pause (restart policy %s, %s)",
+					c.Name, sv.nextAt[c.ID].Format(time.TimeOnly), policy, from)})
+			default:
+				out = append(out, c)
+			}
 		}
-		out = append(out, c)
+	}
+	sv.mu.Unlock()
+	for _, n := range notes {
+		sv.note(n.key, n.why)
 	}
 	return out
 }
@@ -273,10 +353,11 @@ func (sv *supervisor) startDue(ctx context.Context, slug string) {
 		sv.nextAt[c.ID], sv.pause[c.ID] = sv.now().Add(p), min(2*p, superviseLongest)
 		sv.mu.Unlock()
 		if err := sv.start(ctx, c.ID); err != nil {
-			fmt.Fprintf(os.Stderr, "deplo-agent: cluster: could not start %s again: %v\n", c.Name, err)
+			sv.note(c.ID, fmt.Sprintf("could not start %s again: %v", c.Name, err))
 			continue
 		}
-		fmt.Fprintf(os.Stderr, "deplo-agent: cluster: started %s again under its lease: it had stopped by itself (exit %d)\n", c.Name, c.ExitCode)
+		sv.note(c.ID, "")
+		sv.logf("started %s again under its lease: it had stopped by itself (exit %d)", c.Name, c.ExitCode)
 	}
 }
 
@@ -297,17 +378,17 @@ func (sv *supervisor) release(ctx context.Context, slugs []string) {
 		}
 		by := map[string][]string{}
 		for _, c := range cs {
-			p := c.Label
-			if p == "" {
-				p = kept[slug][c.Service]
+			p, ok := restartPolicy(c.Label)
+			if !ok {
+				p, ok = restartPolicy(kept[slug][c.Service])
 			}
-			if p != "" && p != "no" && p != c.Policy {
+			if ok && p != "no" && p != c.Policy {
 				by[p] = append(by[p], c.ID)
 			}
 		}
 		for p, ids := range by {
 			if err := sv.setPolicy(ctx, ids, p); err != nil {
-				fmt.Fprintf(os.Stderr, "deplo-agent: could not give %s its restart policy back: %v\n", slug, err)
+				sv.logf("could not give %s its restart policy back: %v", slug, err)
 			}
 		}
 	}
@@ -325,8 +406,62 @@ func (s *Service) supervisorFile() string {
 }
 
 func (s *Service) supervision() *supervisor {
-	s.supOnce.Do(func() { s.sup = newSupervisor(s.supervisorFile(), time.Now) })
+	s.supOnce.Do(func() {
+		s.sup = newSupervisor(s.supervisorFile(), time.Now)
+		s.sup.rendered = s.renderedRestart
+	})
 	return s.sup
+}
+
+// renderedRestart is the restart policy of each service in the stack's file: Deplo's label there, else `restart:`,
+// else Docker's own default. A file that cannot be read says nothing, and nothing is taken from it.
+func (s *Service) renderedRestart(slug string) map[string]string {
+	raw, err := os.ReadFile(s.stackPath(slug))
+	if err != nil {
+		return nil
+	}
+	return renderedPolicies(raw)
+}
+
+func renderedPolicies(raw []byte) map[string]string {
+	var doc struct {
+		Services map[string]struct {
+			Restart string `yaml:"restart"`
+			Labels  any    `yaml:"labels"`
+		} `yaml:"services"`
+	}
+	if yaml.Unmarshal(raw, &doc) != nil {
+		return nil
+	}
+	out := map[string]string{}
+	for name, svc := range doc.Services {
+		p := svc.Restart
+		if l := composeLabel(svc.Labels, restartLabel); l != "" {
+			p = l
+		}
+		if p == "" {
+			p = "no"
+		}
+		out[name] = p
+	}
+	return out
+}
+
+// composeLabel reads one label of a compose service, written as a map or as a list of key=value.
+func composeLabel(labels any, key string) string {
+	switch l := labels.(type) {
+	case map[string]any:
+		if v, ok := l[key]; ok && v != nil {
+			return fmt.Sprint(v)
+		}
+	case []any:
+		for _, item := range l {
+			if k, v, ok := strings.Cut(fmt.Sprint(item), "="); ok && k == key {
+				return v
+			}
+		}
+	}
+	return ""
 }
 
 // superviseWriters keeps this member's single-writer stacks to their lease until ctx ends.
@@ -354,7 +489,14 @@ func (s *Service) superviseOnce(ctx context.Context) {
 	}
 	// What the leases name is turned off before any lease is heard: a power cut can come at any time.
 	sv.sweep(ctx, here)
-	for _, slug := range mine {
+	for _, slug := range here {
+		if !slices.Contains(mine, slug) {
+			if why := g.whyNotMine(slug); why != "" {
+				sv.note("lease "+slug, slug+" is not started here: "+why)
+			}
+			continue
+		}
+		sv.note("lease "+slug, "")
 		if sv.due(ctx, slug) {
 			go s.restartWriter(slug)
 		}
@@ -367,10 +509,12 @@ func (s *Service) restartWriter(slug string) {
 	defer sv.done(slug)
 	done, ok := s.lockToStart(slug)
 	if !ok {
+		sv.note("lease "+slug, slug+" is not started here: its lease ran out")
 		return
 	}
 	defer done()
-	if _, mine := s.leaseGuard().writers(); !slices.Contains(mine, slug) {
+	if why := s.leaseGuard().whyNotMine(slug); why != "" {
+		sv.note("lease "+slug, slug+" is not started here: "+why)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
@@ -378,11 +522,23 @@ func (s *Service) restartWriter(slug string) {
 	sv.startDue(ctx, slug)
 }
 
+type stopReasonKey struct{}
+
+// stoppedBecause tells StopStack who stops the stack and why, for the log; a stop with none is one Deplo asked for.
+func stoppedBecause(ctx context.Context, why string) context.Context {
+	return context.WithValue(ctx, stopReasonKey{}, why)
+}
+
 // writerStopped keeps a stop someone asked for of a cluster's single-writer stack.
-func (s *Service) writerStopped(slug string, services []string) {
-	if s.leaseGuard().isWriter(slug) {
-		s.supervision().stoppedOnPurpose(slug, services)
+func (s *Service) writerStopped(ctx context.Context, slug string, services []string) {
+	if !s.leaseGuard().isWriter(slug) {
+		return
 	}
+	why, _ := ctx.Value(stopReasonKey{}).(string)
+	if why == "" {
+		why = "Deplo stopped it"
+	}
+	s.supervision().stoppedOnPurpose(slug, services, why)
 }
 
 // writerRedeployed follows a deploy or reroute of a single-writer stack: what runs now is wanted, and its new
@@ -402,7 +558,7 @@ func (s *Service) restoringWriter(slug string) func() {
 	if slug == "" || !s.leaseGuard().isWriter(slug) {
 		return func() {}
 	}
-	s.supervision().stoppedOnPurpose(slug, nil)
+	s.supervision().stoppedOnPurpose(slug, nil, "a restore stopped it")
 	return func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()

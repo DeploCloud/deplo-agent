@@ -58,7 +58,7 @@ func restoreLikeTheRPC(s *Service, ctx context.Context, req *pb.RestoreRequest) 
 var stopFailoverStack func(s *Service, ctx context.Context, slug string)
 
 func stopAfterFailedRestore(s *Service, ctx context.Context, slug string) {
-	if _, err := s.StopStack(ctx, &pb.StackRef{Slug: slug}); err != nil {
+	if _, err := s.StopStack(stoppedBecause(ctx, "its restore failed, so it never serves empty"), &pb.StackRef{Slug: slug}); err != nil {
 		fmt.Fprintf(os.Stderr, "deplo-agent: could not stop %s after its restore failed: %v\n", slug, err)
 	}
 }

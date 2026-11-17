@@ -266,7 +266,7 @@ func (s *Service) keepLeft(ctx context.Context, e lease.Entry, k lease.Keep, mem
 	if !holdsVolume(ctx, req.GetProject().GetVolumeNames()) {
 		return nil, errNothingHeld
 	}
-	if _, err := s.StopStack(ctx, &pb.StackRef{Slug: e.Slug}); err != nil {
+	if _, err := s.StopStack(stoppedBecause(ctx, "its copy here is saved before it goes"), &pb.StackRef{Slug: e.Slug}); err != nil {
 		return nil, err
 	}
 	defer s.lockStack(e.Slug)()
@@ -313,5 +313,5 @@ func (s *Service) purgeLeft(ctx context.Context, e lease.Entry, k lease.Keep, st
 
 // stopMoved stops a stack that waits for the leader's word on its data.
 func (s *Service) stopMoved(ctx context.Context, slug string) error {
-	return stackErr(s.StopStack(ctx, &pb.StackRef{Slug: slug}))
+	return stackErr(s.StopStack(stoppedBecause(ctx, "it runs on another server now, and its data waits for the leader's word"), &pb.StackRef{Slug: slug}))
 }
