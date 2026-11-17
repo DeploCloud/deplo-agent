@@ -182,6 +182,53 @@ func TestReturn_aRenewalThatLandsWhileTheFenceStopsStartsWhatItStopped(t *testin
 	}
 }
 
+// deplo#237 case 1b-9: at a lab-wide boot the supervisor started a writer while the fence stopped the rest, the
+// fence then saw it running and failed, and web, which nothing else starts, stayed down until the server's next move.
+func TestReturn_aFenceThatFailsStillStartsWhatItStopped(t *testing.T) {
+	f := newReturn(t)
+	f.renew(orderFor(3))
+	f.clk.Add(5 * time.Minute)
+	rebooted(t)
+	f.reopen()
+	f.wire()
+	fence := f.g.fence
+	f.g.fence = func(ctx context.Context, es []lease.Entry) error {
+		_ = fence(ctx, es)
+		f.g.Renew(orderFor(3))
+		return errors.New("files: still running")
+	}
+	f.g.Check(context.Background())
+	f.g.work.Wait()
+	if got := f.startedSlugs(); got != "db-main,files,web" {
+		t.Fatalf("started %q, want every stack the fence stopped, web included", got)
+	}
+}
+
+func TestReturn_aFenceThatFailsIsTriedAgainAndHoldsWhatItStopped(t *testing.T) {
+	f := newReturn(t)
+	f.renew(orderFor(3))
+	f.clk.Add(lease.FenceAfter + time.Second)
+	tries := 0
+	f.g.fence = func(context.Context, []lease.Entry) error {
+		tries++
+		if tries == 1 {
+			// db-main stopped, files did not: the next try finds only files running.
+			f.stopped["db-main"] = true
+			return errors.New("files: still running")
+		}
+		return nil
+	}
+	f.g.Check(context.Background())
+	f.g.Check(context.Background())
+	if tries != 2 {
+		t.Fatalf("the fence ran %d times, want a second try after the one that failed", tries)
+	}
+	f.renew(orderFor(3))
+	if got := f.startedSlugs(); got != "db-main,files" {
+		t.Fatalf("started %q, want what the first try stopped", got)
+	}
+}
+
 func TestReturn_anOlderEpochIsRefusedAndStartsNothing(t *testing.T) {
 	f := newReturn(t)
 	f.renew(orderFor(3))

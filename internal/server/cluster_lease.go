@@ -386,16 +386,17 @@ func (g *leaseGuard) Check(ctx context.Context) {
 		err := g.fence(ctx, d.entries)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "deplo-agent: cluster %s: lease ran out, could not stop its workloads: %v\n", d.cluster, err)
-			continue
 		}
 		g.mu.Lock()
-		// What stopped is held either way; a renewal that landed while stopping wins, and starts it again at once.
+		// What stopped is held either way, also when a stack still runs; a renewal that landed while stopping wins
+		// and starts it again at once. A stop that failed is not fenced, so the next check tries it again.
 		if c := g.clusters[d.cluster]; c != nil {
 			c.Held = union(c.Held, held)
-			if c.ranOut(g.now()) {
-				c.Fenced = true
-			} else {
+			switch {
+			case !c.ranOut(g.now()):
 				g.settleLocked(d.cluster, c)
+			case err == nil:
+				c.Fenced = true
 			}
 			g.save()
 		}
