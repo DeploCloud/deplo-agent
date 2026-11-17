@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -305,6 +306,130 @@ func TestSupervise_logsEveryReasonOnceEachTimeItChanges(t *testing.T) {
 	supervise(t, s)
 	if log.count("stays down until it is started or deployed again: its restore failed") != 1 || log.count(writer+" stays down: it was stopped on purpose") != 1 {
 		t.Fatalf("the stop on purpose was not logged once with its reason: %q", log.lines)
+	}
+}
+
+// bootRace is three writers and a stateless App on srv_a, with the fence, the return and Docker sharing one picture
+// of what runs, as on lab-2 after the lab-wide boot of deplo#237's case 1b-5.
+type bootRace struct {
+	s   *Service
+	clk *fakeClock
+	fw  *fakeWriters
+	ids map[string]string
+}
+
+func placedFour(web string) []lease.Entry {
+	return []lease.Entry{{Kind: "database", ID: "db_1", Member: "srv_a", Slug: "db-pg", SingleWriter: true},
+		{Kind: "app", ID: "prj_1", Member: "srv_a", Slug: "notes", SingleWriter: true},
+		{Kind: "app", ID: "prj_2", Member: "srv_a", Slug: "volw", SingleWriter: true},
+		{Kind: "app", ID: "prj_3", Member: web, Slug: "web"}}
+}
+
+func newBootRace(t *testing.T) *bootRace {
+	clk := time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+	saved := map[string]*clusterLease{"clu_1": {Epoch: 1, Member: "srv_a", RenewedAt: clk.Add(-time.Hour), Placement: placedFour("srv_a"), Boot: bootID()}}
+	s, c, fw := supervisedMember(t, saved)
+	b := &bootRace{s: s, clk: c, fw: fw, ids: map[string]string{"db-pg": "pg1", "notes": "n1", "volw": "v1"}}
+	fw.cs = map[string][]writerContainer{}
+	for slug, id := range b.ids {
+		fw.cs[slug] = []writerContainer{{ID: id, Name: slug, Service: slug, State: "exited", Policy: "unless-stopped", ExitCode: 255}}
+	}
+	g := s.leaseGuard()
+	g.running = func(_ context.Context, slug string) bool { return b.runs(slug) }
+	g.has = func(string) bool { return true }
+	g.remove = func(context.Context, lease.Entry) error { return nil }
+	g.resume = func(ctx context.Context, slug string) error {
+		if id := b.ids[slug]; id != "" {
+			return fw.start(ctx, id)
+		}
+		return nil
+	}
+	g.fence = func(context.Context, []lease.Entry) error { b.stopAll(); return nil }
+	return b
+}
+
+func (b *bootRace) runs(slug string) bool {
+	b.fw.mu.Lock()
+	defer b.fw.mu.Unlock()
+	cs := b.fw.cs[slug]
+	return len(cs) > 0 && cs[0].State == "running"
+}
+
+func (b *bootRace) stopAll() {
+	for _, id := range b.ids {
+		b.fw.stops(id, 137)
+	}
+}
+
+func (b *bootRace) renew(web string) {
+	b.s.leaseGuard().Renew(lease.Order{Cluster: "clu_1", Member: "srv_a", Epoch: 1, Placement: placedFour(web)})
+	b.s.leaseGuard().work.Wait()
+}
+
+func (b *bootRace) down(t *testing.T) []string {
+	t.Helper()
+	var out []string
+	for _, slug := range []string{"db-pg", "notes", "volw"} {
+		if !b.runs(slug) {
+			out = append(out, slug)
+		}
+	}
+	return out
+}
+
+func TestSupervise_aFenceThatRacesTheSupervisorAtBootLeavesNoWriterDown(t *testing.T) {
+	b := newBootRace(t)
+	b.renew("srv_a")
+	supervise(t, b.s)
+	if d := b.down(t); len(d) != 0 {
+		t.Fatalf("down after the first renewal: %v", d)
+	}
+	// No renewal for the whole lease: the fence stops all three, and the supervisor starts db-pg again meanwhile,
+	// so the fence fails and holds nothing. The leader moved web away while it heard nothing.
+	b.clk.Add(lease.FenceAfter + time.Second)
+	b.s.leaseGuard().fence = func(context.Context, []lease.Entry) error {
+		b.stopAll()
+		_ = b.fw.start(context.Background(), "pg1")
+		return errors.New("db-pg: still running")
+	}
+	b.s.leaseGuard().Check(context.Background())
+	b.renew("srv_b")
+	for i := 0; i < 3; i++ {
+		b.clk.Add(3 * time.Second)
+		b.renew("srv_b")
+		supervise(t, b.s)
+	}
+	if d := b.down(t); len(d) != 0 {
+		t.Fatalf("still down after the return: %v", d)
+	}
+}
+
+func TestSupervise_aSecondRunOutWhileAWriterIsDownLeavesNoWriterDown(t *testing.T) {
+	b := newBootRace(t)
+	b.renew("srv_a")
+	supervise(t, b.s)
+	// The first run-out stops everything; the lease is back before the supervisor has started volw again.
+	b.clk.Add(lease.FenceAfter + time.Second)
+	b.s.leaseGuard().fence = func(context.Context, []lease.Entry) error {
+		b.stopAll()
+		_ = b.fw.start(context.Background(), "pg1")
+		return errors.New("db-pg: still running")
+	}
+	b.s.leaseGuard().Check(context.Background())
+	b.renew("srv_b")
+	_ = b.fw.start(context.Background(), "n1")
+	// A second run-out finds volw down: the fence holds only db-pg and notes, and the return starts only those.
+	b.clk.Add(lease.FenceAfter + time.Second)
+	b.s.leaseGuard().fence = func(context.Context, []lease.Entry) error { b.stopAll(); return nil }
+	b.s.leaseGuard().Check(context.Background())
+	b.renew("srv_b")
+	for i := 0; i < 3; i++ {
+		b.clk.Add(3 * time.Second)
+		b.renew("srv_b")
+		supervise(t, b.s)
+	}
+	if d := b.down(t); len(d) != 0 {
+		t.Fatalf("still down after the second return: %v", d)
 	}
 }
 
