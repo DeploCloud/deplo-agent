@@ -229,8 +229,11 @@ func (s *Service) startMember(m *clusterMember, st memberState) {
 	m.st = st
 	if !st.Member {
 		if wasMember {
+			all, _ := s.leaseGuard().writers()
 			s.leaseGuard().Forget()
 			go s.forwarders().Clear()
+			// No cluster supervises them any more: Docker's restart policy comes back.
+			go s.supervision().release(context.Background(), all)
 		}
 		// A server that only leads stays a party for its network's packets, which a relay may have to carry.
 		if onNetwork {
@@ -264,6 +267,7 @@ func (s *Service) runParty(m *clusterMember, member bool) {
 	go p.Run(ctx)
 	if member {
 		go s.leaseGuard().Run(ctx)
+		go s.superviseWriters(ctx)
 		go s.forwarders().Resume()
 		go s.forwarders().Watch(ctx)
 		go s.replicas().Run(ctx)

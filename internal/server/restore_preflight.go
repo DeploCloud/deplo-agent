@@ -30,6 +30,12 @@ func (s *Service) restoreArtifact(ctx context.Context, kind pb.BackupKind, db *p
 		e.result(false, "unknown restore kind")
 		return
 	}
+	// The restore stops the stack: nothing starts it again behind its back.
+	slug := p.GetSlug()
+	if kind == pb.BackupKind_BACKUP_KIND_DATABASE {
+		slug = db.GetContainer()
+	}
+	defer s.restoringWriter(slug)()
 	if src.expectedSha256 != "" && src.store == nil {
 		e.log("info", "Checking the backup before restoring it")
 	}

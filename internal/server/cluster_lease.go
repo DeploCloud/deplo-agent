@@ -60,6 +60,8 @@ type clusterLease struct {
 	// cold is a lease that was dead when this agent started after the server itself did: Docker brought every
 	// stack back, so nothing of it runs until the leader speaks. An agent that only restarted fences as usual.
 	cold bool
+	// heard is a lease a leader renewed since this agent started; one read back from disk says where things were.
+	heard bool
 	// since is when the return under way began, and asked whether the leader has said it moved this member's work.
 	since time.Time
 	asked bool
@@ -67,6 +69,41 @@ type clusterLease struct {
 
 func (c *clusterLease) ranOut(now time.Time) bool {
 	return !c.RenewedAt.IsZero() && now.Sub(c.RenewedAt) >= c.fence()+time.Duration(c.ExtraSeconds)*time.Second
+}
+
+// current is a lease to act on now: renewed in this run of the agent, and not run out since.
+func (c *clusterLease) current(now time.Time) bool { return c.heard && !c.ranOut(now) }
+
+// writers is every single-writer stack the leases name, and those a current lease places here and leaves to this
+// member: no return under way, no start order bringing it up. A standby copy shares its database's stack.
+func (g *leaseGuard) writers() (all, mine []string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := g.now()
+	for id, c := range g.clusters {
+		quiet := c.current(now) && !c.Returning && !g.settling[id]
+		for _, e := range c.Placement {
+			if e.Slug == "" || !e.SingleWriter && !e.Standby {
+				continue
+			}
+			if !slices.Contains(all, e.Slug) {
+				all = append(all, e.Slug)
+			}
+			at, starting := g.starting[e.Slug]
+			if quiet && e.Member == c.Member && (!starting || !at.IsZero()) && !slices.Contains(mine, e.Slug) {
+				mine = append(mine, e.Slug)
+			}
+		}
+	}
+	slices.Sort(all)
+	slices.Sort(mine)
+	return all, mine
+}
+
+// isWriter says a lease names the stack as one that must never run twice.
+func (g *leaseGuard) isWriter(slug string) bool {
+	all, _ := g.writers()
+	return slices.Contains(all, slug)
 }
 
 func (c *clusterLease) fence() time.Duration {
@@ -250,7 +287,7 @@ func (g *leaseGuard) Renew(o lease.Order) lease.Reply {
 		g.clusters[o.Cluster] = u
 	}
 	delete(g.clusters, unreadableLease)
-	next := &clusterLease{Epoch: o.Epoch, Member: o.Member, RenewedAt: g.now(), Boot: bootID(), Placement: o.Placement, ExtraSeconds: min(max(o.ExtendSeconds, 0), int(lease.ExtendFor/time.Second)),
+	next := &clusterLease{Epoch: o.Epoch, Member: o.Member, RenewedAt: g.now(), Boot: bootID(), Placement: o.Placement, heard: true, ExtraSeconds: min(max(o.ExtendSeconds, 0), int(lease.ExtendFor/time.Second)),
 		FenceSeconds: min(max(o.FenceSeconds, 0), int(lease.FenceAfter/time.Second))}
 	g.confirmStarts(o)
 	witness(g.clusters[o.Cluster], next, g.now(), o)
