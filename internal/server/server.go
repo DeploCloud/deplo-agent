@@ -138,6 +138,8 @@ var Capabilities = []string{
 	"cluster.forwarders.services",
 	"cluster.forwarders.answers",
 	"cluster.supervise",
+	// The supervisor that starts a writer whose restart policy it cannot read: a Deplo renders restart "no" only past this.
+	"cluster.supervise.failsafe",
 }
 
 // AgentVersion is the version this agent reports over Hello.

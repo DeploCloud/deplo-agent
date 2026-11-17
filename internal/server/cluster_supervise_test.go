@@ -597,3 +597,10 @@ func TestHolders_aLeaseReadBackFromDiskHoldsNothingHere(t *testing.T) {
 		t.Fatal("a lease that ran out answers for the copy here")
 	}
 }
+
+// canary.10 also says cluster.supervise and leaves a writer with no label down: a Deplo must tell the two apart.
+func TestSupervise_advertisesTheFailSafeSupervisor(t *testing.T) {
+	if !slices.Contains(Capabilities, "cluster.supervise.failsafe") {
+		t.Fatal("Hello does not advertise cluster.supervise.failsafe")
+	}
+}
