@@ -29,7 +29,9 @@ import (
 var leaseCheckEvery = time.Second
 
 type clusterLease struct {
-	Epoch     uint64        `json:"epoch"`
+	Epoch uint64 `json:"epoch"`
+	// PlacedAt is the epoch of the renewal that last set Placement: a probe takes a newer epoch and places nothing.
+	PlacedAt  uint64        `json:"placedAt,omitempty"`
 	Member    string        `json:"member"`
 	RenewedAt time.Time     `json:"renewedAt"`
 	Placement []lease.Entry `json:"placement"`
@@ -291,7 +293,7 @@ func (g *leaseGuard) Renew(o lease.Order) lease.Reply {
 		g.clusters[o.Cluster] = u
 	}
 	delete(g.clusters, unreadableLease)
-	next := &clusterLease{Epoch: o.Epoch, Member: o.Member, RenewedAt: g.now(), Boot: bootID(), Placement: o.Placement, heard: true, ExtraSeconds: min(max(o.ExtendSeconds, 0), int(lease.ExtendFor/time.Second)),
+	next := &clusterLease{Epoch: o.Epoch, PlacedAt: o.Epoch, Member: o.Member, RenewedAt: g.now(), Boot: bootID(), Placement: o.Placement, heard: true, ExtraSeconds: min(max(o.ExtendSeconds, 0), int(lease.ExtendFor/time.Second)),
 		FenceSeconds: min(max(o.FenceSeconds, 0), int(lease.FenceAfter/time.Second))}
 	g.confirmStarts(o)
 	witness(g.clusters[o.Cluster], next, g.now(), o)
@@ -346,6 +348,43 @@ func (g *leaseGuard) relinquishLocked(cluster string, c *clusterLease) {
 			}
 		}()
 	}
+}
+
+// placedHere is the single-writer stacks this member's lease of a cluster places here, and that lease's epoch: read
+// before a probe takes the newer epoch.
+func (g *leaseGuard) placedHere(cluster string) ([]string, uint64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	c := g.clusters[cluster]
+	if c == nil {
+		return nil, 0
+	}
+	var out []string
+	for _, e := range c.Placement {
+		if e.Slug != "" && e.SingleWriter && e.Member == c.Member && !slices.Contains(out, e.Slug) {
+			out = append(out, e.Slug)
+		}
+	}
+	if c.PlacedAt == 0 {
+		return out, c.Epoch
+	}
+	return out, c.PlacedAt
+}
+
+// runningOf is the stacks among placed that run here now, each with the epoch of the lease that placed them.
+func (g *leaseGuard) runningOf(placed []string, epoch uint64) []lease.Writer {
+	if g.running == nil || len(placed) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var out []lease.Writer
+	for _, slug := range placed {
+		if g.running(ctx, slug) {
+			out = append(out, lease.Writer{Slug: slug, Epoch: epoch})
+		}
+	}
+	return out
 }
 
 // Probe answers a leader that is not sure it still leads: the epoch is taken and nothing else changes. The
@@ -498,7 +537,12 @@ func (g *leaseGuard) Serve(from wire.Party, c net.Conn) {
 		return
 	}
 	if o.Probe {
-		_ = lease.WriteReply(c, g.Probe(o))
+		placed, epoch := g.placedHere(o.Cluster)
+		r := g.Probe(o)
+		if r.OK {
+			r.Running = g.runningOf(placed, epoch)
+		}
+		_ = lease.WriteReply(c, r)
 		return
 	}
 	r := g.Renew(o)

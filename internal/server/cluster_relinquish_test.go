@@ -14,8 +14,8 @@ import (
 // relinquishFixture is a member with a live lease whose relinquish only records what it was asked to stop.
 type relinquishFixture struct {
 	*returnFixture
-	mu      sync.Mutex
-	stopped []string
+	mu           sync.Mutex
+	relinquished []string
 }
 
 func newRelinquish(t *testing.T) *relinquishFixture {
@@ -30,7 +30,7 @@ func (f *relinquishFixture) wireRelinquish() {
 	f.g.relinquish = func(_ context.Context, slug string) (bool, error) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		f.stopped = append(f.stopped, slug)
+		f.relinquished = append(f.relinquished, slug)
 		return true, nil
 	}
 }
@@ -38,7 +38,7 @@ func (f *relinquishFixture) wireRelinquish() {
 func (f *relinquishFixture) stoppedSlugs() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	out := slices.Clone(f.stopped)
+	out := slices.Clone(f.relinquished)
 	slices.Sort(out)
 	return strings.Join(out, ",")
 }
@@ -95,5 +95,21 @@ func TestRelinquish_aReturnAndAStackPlacedOnNoneAreLeftToTheirOwnPaths(t *testin
 	}
 	if got := f.removedSlugs(); got != "files,web" {
 		t.Fatalf("the return removed %q", got)
+	}
+}
+
+func TestProbe_saysWhichWritersRunHereAndUnderWhichEpoch(t *testing.T) {
+	f := newRelinquish(t)
+	f.renew(orderFor(3))
+	f.stopped["files"] = true
+	p := lease.Order{Cluster: "clu_1", Member: "srv_a", Epoch: 4, Probe: true}
+	r := serve(t, f.g, p)
+	if !r.OK || len(r.Running) != 1 || r.Running[0] != (lease.Writer{Slug: "db-main", Epoch: 3}) {
+		t.Fatalf("a probe at epoch 4 answered %+v, want db-main placed here at epoch 3: files is stopped, web has no data", r)
+	}
+	// The probe took epoch 4 but placed nothing: the next one still names epoch 3 as what placed db-main here.
+	p.Epoch = 5
+	if r := serve(t, f.g, p); len(r.Running) != 1 || r.Running[0].Epoch != 3 {
+		t.Fatalf("the second probe answered %+v", r.Running)
 	}
 }

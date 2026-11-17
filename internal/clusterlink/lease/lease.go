@@ -211,11 +211,20 @@ type Reply struct {
 	// Unplaced is the stacks the order placed on no member that this member still has, running or stopped by
 	// itself: the leader hands what waits for room back to it rather than start a second copy.
 	Unplaced []string `json:"unplaced,omitempty"`
+	// Running answers a probe: the single-writer stacks this member runs that its lease placed here, and that
+	// lease's epoch. A leader that takes over keeps each where it runs, the newest epoch first (deplo#241).
+	Running []Writer `json:"running,omitempty"`
 	// Later answers a Keep sent after the return, once this member keeps nothing of a stack any more.
 	Later *Later `json:"later,omitempty"`
 	// Unsure is how many seconds a lease of this cluster, this member's or another's, may still live because of an
 	// extension, as far as this member can tell; nil is an older agent.
 	Unsure *int `json:"unsure,omitempty"`
+}
+
+// Writer is a single-writer stack a member runs, and the epoch of the lease that placed it there.
+type Writer struct {
+	Slug  string `json:"slug"`
+	Epoch uint64 `json:"epoch"`
 }
 
 // Later is what became of data a member kept past its return.
