@@ -27,7 +27,7 @@ func composeBaseArgs(project, stackFile, envFile, projectDir string) []string {
 func (s *Service) prepareStackImages(ctx context.Context, req *pb.DeployRequest, base []string, e *emitter) ([]string, bool) {
 	env := dockerConfigEnv(req)
 	steps := [][]string{
-		append(append([]string{}, base...), "pull", "--ignore-buildable", "--quiet"),
+		stackPullArgs(req, base),
 		append(append([]string{}, base...), "build",
 			"--build-arg", "BUILDKIT_CACHE_MOUNT_NS="+s.cacheNamespace(req.GetSlug())),
 	}
@@ -71,6 +71,22 @@ func (s *Service) prepareStackImages(ctx context.Context, req *pb.DeployRequest,
 		return nil, false
 	}
 	return images, true
+}
+
+// failoverPrefix names the deploy a failover start runs (see startFromBundle).
+const failoverPrefix = "failover-"
+
+func isFailoverDeploy(req *pb.DeployRequest) bool {
+	return strings.HasPrefix(req.GetDeployId(), failoverPrefix)
+}
+
+// stackPullArgs: a failover start uses what the server already holds, and asks the registry only for an image it lacks.
+func stackPullArgs(req *pb.DeployRequest, base []string) []string {
+	args := append(append([]string{}, base...), "pull", "--ignore-buildable")
+	if isFailoverDeploy(req) {
+		args = append(args, "--policy", "missing")
+	}
+	return append(args, "--quiet")
 }
 
 // stackBuilds: some service has a build section; a stack of ready-made images skips `compose build`.

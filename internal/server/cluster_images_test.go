@@ -316,10 +316,12 @@ func TestExpectClusterImage_refusals(t *testing.T) {
 	_, b, _ := twoMembers(t, newImageHost(), newImageHost())
 	fp := strings.Repeat("a", 64)
 	for name, req := range map[string]*pb.ExpectClusterImageRequest{
-		"an image outside deplo/":   {ImageRef: "postgres:16", SourceFingerprint: fp},
-		"the forwarder's image":     {ImageRef: fwdImage, SourceFingerprint: fp},
-		"a source that is no print": {ImageRef: "deplo/web:dpl_aa", SourceFingerprint: "nope"},
-		"a keep beyond the limit":   {ImageRef: "deplo/web:dpl_aa", SourceFingerprint: fp, Keep: 99},
+		"a reference no registry takes": {ImageRef: "Post gres:16", SourceFingerprint: fp},
+		"a flag for docker":             {ImageRef: "--output=/etc", SourceFingerprint: fp},
+		"a path that climbs":            {ImageRef: "a/../b:1", SourceFingerprint: fp},
+		"the forwarder's image":         {ImageRef: fwdImage, SourceFingerprint: fp},
+		"a source that is no print":     {ImageRef: "deplo/web:dpl_aa", SourceFingerprint: "nope"},
+		"a keep beyond the limit":       {ImageRef: "deplo/web:dpl_aa", SourceFingerprint: fp, Keep: 99},
 	} {
 		if _, err := b.ExpectClusterImage(context.Background(), req); code(err) != codes.InvalidArgument {
 			t.Errorf("%s: got %v", name, err)
@@ -339,12 +341,12 @@ func TestCopyClusterImage_refusals(t *testing.T) {
 		req  *pb.CopyClusterImageRequest
 		want codes.Code
 	}{
-		"an image outside deplo/":   {&pb.CopyClusterImageRequest{ImageRef: "postgres:16", TargetFingerprint: target}, codes.InvalidArgument},
-		"a flag as the ref":         {&pb.CopyClusterImageRequest{ImageRef: "--all", TargetFingerprint: target}, codes.InvalidArgument},
-		"a target that is no print": {&pb.CopyClusterImageRequest{ImageRef: "deplo/web:dpl_aa", TargetFingerprint: "nope"}, codes.InvalidArgument},
-		"a keep beyond the limit":   {&pb.CopyClusterImageRequest{ImageRef: "deplo/web:dpl_aa", TargetFingerprint: target, Keep: 99}, codes.InvalidArgument},
-		"an image this host lacks":  {&pb.CopyClusterImageRequest{ImageRef: "deplo/web:dpl_zz", TargetFingerprint: target}, codes.FailedPrecondition},
-		"a member the relay lacks":  {&pb.CopyClusterImageRequest{ImageRef: "deplo/web:dpl_aa", TargetFingerprint: strings.Repeat("a", 64)}, codes.Unavailable},
+		"a reference no registry takes": {&pb.CopyClusterImageRequest{ImageRef: "--output=/etc", TargetFingerprint: target}, codes.InvalidArgument},
+		"a flag as the ref":             {&pb.CopyClusterImageRequest{ImageRef: "--all", TargetFingerprint: target}, codes.InvalidArgument},
+		"a target that is no print":     {&pb.CopyClusterImageRequest{ImageRef: "deplo/web:dpl_aa", TargetFingerprint: "nope"}, codes.InvalidArgument},
+		"a keep beyond the limit":       {&pb.CopyClusterImageRequest{ImageRef: "deplo/web:dpl_aa", TargetFingerprint: target, Keep: 99}, codes.InvalidArgument},
+		"an image this host lacks":      {&pb.CopyClusterImageRequest{ImageRef: "deplo/web:dpl_zz", TargetFingerprint: target}, codes.FailedPrecondition},
+		"a member the relay lacks":      {&pb.CopyClusterImageRequest{ImageRef: "deplo/web:dpl_aa", TargetFingerprint: strings.Repeat("a", 64)}, codes.Unavailable},
 	}
 	for name, c := range cases {
 		if _, err := a.CopyClusterImage(ctx, c.req); code(err) != c.want {
@@ -400,5 +402,37 @@ func TestAcceptMemberStream_servesOnlyMembersAndOnlyAnnouncedImages(t *testing.T
 	}
 	if got := asked(t, member, "SOMETHING else", newImageHost()); got != "" {
 		t.Fatalf("an unknown verb was answered %q", got)
+	}
+}
+
+func TestCopyClusterImage_aRegistryImagePrunesNoOtherTag(t *testing.T) {
+	src := newImageHost("postgres:17")
+	dst := newImageHost("postgres:16", "postgres:15", "deplo/web:dpl_aa")
+	a, b, target := twoMembers(t, src, dst)
+	expect(t, b, a, "postgres:17", 2)
+	resp, err := a.CopyClusterImage(context.Background(), &pb.CopyClusterImageRequest{ImageRef: "postgres:17", TargetFingerprint: target, Keep: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.GetPruned()) != 0 || !slices.Contains(dst.tags, "postgres:15") || !slices.Contains(dst.tags, "postgres:16") {
+		t.Fatalf("pruned %v, the member holds %v: another database runs postgres:16", resp.GetPruned(), dst.tags)
+	}
+}
+
+func TestStackPullArgs_aFailoverStartPullsOnlyWhatIsMissing(t *testing.T) {
+	base := []string{"compose", "-p", "deplo-db-pg", "-f", "s.yml"}
+	got := strings.Join(stackPullArgs(&pb.DeployRequest{DeployId: failoverPrefix + "dpl_1-9"}, base), " ")
+	if !strings.HasSuffix(got, "pull --ignore-buildable --policy missing --quiet") {
+		t.Fatalf("a failover start pulls with %q", got)
+	}
+	got = strings.Join(stackPullArgs(&pb.DeployRequest{DeployId: "dpl_1"}, base), " ")
+	if strings.Contains(got, "--policy") {
+		t.Fatalf("a deploy pulls with %q: it must fetch the newest image", got)
+	}
+}
+
+func TestCapabilities_advertisesRegistryImages(t *testing.T) {
+	if !slices.Contains(Capabilities, "cluster.images.registry") {
+		t.Fatal("Hello does not advertise cluster.images.registry")
 	}
 }

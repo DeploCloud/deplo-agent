@@ -142,6 +142,8 @@ var Capabilities = []string{
 	"cluster.supervise.failsafe",
 	// A member that stops its copy of a writer a current lease places elsewhere, and tells a probing leader what runs.
 	"cluster.relinquish",
+	// A failover start pulls only an image the server lacks, and a copied registry image prunes no other tag.
+	"cluster.images.registry",
 }
 
 // AgentVersion is the version this agent reports over Hello.
