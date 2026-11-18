@@ -156,7 +156,7 @@ func (s *Service) startFromBundle(ctx context.Context, st *lease.Start) error {
 		return err
 	}
 	req := &pb.DeployRequest{
-		DeployId:         fmt.Sprintf("failover-%s-%d", st.DeploymentID, time.Now().Unix()),
+		DeployId:         fmt.Sprintf("%s%s-%d", failoverPrefix, st.DeploymentID, time.Now().Unix()),
 		Slug:             st.Slug,
 		ProjectId:        st.ProjectID,
 		ImageRef:         st.ImageRef,

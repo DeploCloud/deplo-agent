@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -43,7 +44,7 @@ type expectedImage struct {
 // ExpectClusterImage notes one image another member is about to send; see the RPC's contract in proto/agent.proto.
 func (s *Service) ExpectClusterImage(_ context.Context, req *pb.ExpectClusterImageRequest) (*pb.ExpectClusterImageResponse, error) {
 	ref, from, keep := req.GetImageRef(), strings.ToLower(req.GetSourceFingerprint()), int(req.GetKeep())
-	if err := validateImageRef(ref); err != nil {
+	if err := validateClusterImageRef(ref); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	if ref == fwdImage {
@@ -175,8 +176,27 @@ func removeImage(ctx context.Context, ref string) error {
 	return nil
 }
 
+// registryRefPattern is a registry image reference: [host[:port]/]path[:tag][@sha256:digest], lowercase path.
+var registryRefPattern = regexp.MustCompile(`^([a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?/)?[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*(:[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(@sha256:[a-f0-9]{64})?$`)
+
+// validateClusterImageRef takes Deplo's own build or a registry image: a member copies what a failover may start
+// there, so it never needs the registry. A receiver still takes only what Deplo told it to expect, from that member.
+func validateClusterImageRef(ref string) error {
+	if validateImageRef(ref) == nil {
+		return nil
+	}
+	if len(ref) > 255 || strings.Contains(ref, "..") || !registryRefPattern.MatchString(ref) {
+		return fmt.Errorf("unsafe image ref %q", ref)
+	}
+	return nil
+}
+
 // pruneReleases keeps ref and the newest others up to `keep` releases of its App; one in use stays and is not reported.
 func (s *Service) pruneReleases(ctx context.Context, ref string, keep int) []string {
+	// A registry image's other tags are other workloads' (postgres:16 beside postgres:17): only Deplo's builds are releases.
+	if !strings.HasPrefix(ref, "deplo/") {
+		return nil
+	}
 	tags, err := s.images().tags(ctx, repoOf(ref))
 	if err != nil {
 		return nil
@@ -228,7 +248,7 @@ func (s *Service) acceptMemberStream(from wire.Party, c net.Conn) {
 func (s *Service) receiveImage(from wire.Party, c net.Conn, arg string) {
 	refArg, _, _ := strings.Cut(arg, " ")
 	keep, ok := s.takeExpected(from.Fingerprint, refArg)
-	if !ok || validateImageRef(refArg) != nil {
+	if !ok || validateClusterImageRef(refArg) != nil {
 		_ = wire.WriteHeader(c, wire.VerbErr, "this server was not told to expect that image")
 		return
 	}
@@ -273,7 +293,7 @@ func oneLine(s string) string {
 // CopyClusterImage sends a built image to one member of this agent's cluster; see the RPC's contract in proto/agent.proto.
 func (s *Service) CopyClusterImage(ctx context.Context, req *pb.CopyClusterImageRequest) (*pb.CopyClusterImageResponse, error) {
 	ref := req.GetImageRef()
-	if err := validateImageRef(ref); err != nil {
+	if err := validateClusterImageRef(ref); err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	to := wire.Party{Fingerprint: strings.ToLower(req.GetTargetFingerprint()), Role: wire.RoleMember}
