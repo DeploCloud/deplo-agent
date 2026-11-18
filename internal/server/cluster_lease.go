@@ -29,7 +29,9 @@ import (
 var leaseCheckEvery = time.Second
 
 type clusterLease struct {
-	Epoch     uint64        `json:"epoch"`
+	Epoch uint64 `json:"epoch"`
+	// PlacedAt is the epoch of the renewal that last set Placement: a probe takes a newer epoch and places nothing.
+	PlacedAt  uint64        `json:"placedAt,omitempty"`
 	Member    string        `json:"member"`
 	RenewedAt time.Time     `json:"renewedAt"`
 	Placement []lease.Entry `json:"placement"`
@@ -166,6 +168,10 @@ type leaseGuard struct {
 	purge func(ctx context.Context, e lease.Entry, k lease.Keep, still func() bool) error
 	// stop stops a stack and removes nothing.
 	stop func(ctx context.Context, slug string) error
+	// relinquish stops this member's copy of a stack a current lease places on another member, and says whether
+	// one ran; relinquishing are the stacks it is stopping now.
+	relinquish    func(ctx context.Context, slug string) (bool, error)
+	relinquishing map[string]bool
 	// keeps is where each cluster's moved stacks are saved, as the leader last said. Never written to disk:
 	// a keep carries the destination's credentials.
 	keeps map[string]map[string]lease.Keep
@@ -196,7 +202,7 @@ type leaseGuard struct {
 const unreadableLease = "unreadable"
 
 func newLeaseGuard(file string, now func() time.Time, fence func(context.Context, []lease.Entry) error) *leaseGuard {
-	g := &leaseGuard{file: file, now: now, fence: fence, clusters: map[string]*clusterLease{}, settling: map[string]bool{}, starting: map[string]time.Time{}, keeps: map[string]map[string]lease.Keep{}, stores: map[string][]lease.Store{}, retryAt: map[string]time.Time{}, retryWait: map[string]time.Duration{}}
+	g := &leaseGuard{file: file, now: now, fence: fence, clusters: map[string]*clusterLease{}, settling: map[string]bool{}, relinquishing: map[string]bool{}, starting: map[string]time.Time{}, keeps: map[string]map[string]lease.Keep{}, stores: map[string][]lease.Store{}, retryAt: map[string]time.Time{}, retryWait: map[string]time.Duration{}}
 	if raw, err := os.ReadFile(file); err == nil {
 		if err := json.Unmarshal(raw, &g.clusters); err != nil {
 			fmt.Fprintf(os.Stderr, "deplo-agent: the cluster lease in %s cannot be read (%v): taken as a lease that ran out\n", file, err)
@@ -322,19 +328,98 @@ func (g *leaseGuard) Renew(o lease.Order) lease.Reply {
 		g.clusters[o.Cluster] = u
 	}
 	delete(g.clusters, unreadableLease)
-	next := &clusterLease{Epoch: o.Epoch, Member: o.Member, RenewedAt: g.now(), Boot: bootID(), Placement: o.Placement, heard: true, ExtraSeconds: min(max(o.ExtendSeconds, 0), int(lease.ExtendFor/time.Second)),
+	next := &clusterLease{Epoch: o.Epoch, PlacedAt: o.Epoch, Member: o.Member, RenewedAt: g.now(), Boot: bootID(), Placement: o.Placement, heard: true, ExtraSeconds: min(max(o.ExtendSeconds, 0), int(lease.ExtendFor/time.Second)),
 		FenceSeconds: min(max(o.FenceSeconds, 0), int(lease.FenceAfter/time.Second))}
 	g.confirmStarts(o)
 	witness(g.clusters[o.Cluster], next, g.now(), o)
 	r := lease.Reply{OK: true, Epoch: o.Epoch, StoppedWithin: int((next.fence() + fenceTakes()).Seconds()), Unsure: next.unsure(g.now())}
 	g.comeBack(o, g.clusters[o.Cluster], next, &r)
 	g.clusters[o.Cluster] = next
+	g.relinquishLocked(o.Cluster, next)
 	// A start order carries neither keeps nor stores: it says nothing about them.
 	if o.Start == nil {
 		g.stores[o.Cluster] = o.Stores
 	}
 	g.save()
 	return r
+}
+
+// relinquishLocked stops every single-writer stack a current lease places on another member and on none of its
+// entries here, whatever the leader meant: a holder loses the right to run when its lease moves (deplo#241). A
+// return removes its own copies, and a stack a start order is bringing up here waits for the leader. Holds g.mu.
+func (g *leaseGuard) relinquishLocked(cluster string, c *clusterLease) {
+	if g.relinquish == nil || c.Returning {
+		return
+	}
+	here, away := map[string]bool{}, map[string]string{}
+	for _, e := range c.Placement {
+		switch {
+		case e.Slug == "" || !e.SingleWriter && !e.Standby:
+		case e.Member == c.Member:
+			here[e.Slug] = true
+		case e.Member != "":
+			away[e.Slug] = e.Member
+		}
+	}
+	for slug, member := range away {
+		if _, starting := g.starting[slug]; here[slug] || starting || g.relinquishing[slug] || g.has != nil && !g.has(slug) {
+			continue
+		}
+		g.relinquishing[slug] = true
+		g.work.Add(1)
+		go func() {
+			defer g.work.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 2*(fenceGrace+10*time.Second))
+			defer cancel()
+			stopped, err := g.relinquish(ctx, slug)
+			g.mu.Lock()
+			delete(g.relinquishing, slug)
+			g.mu.Unlock()
+			switch {
+			case err != nil:
+				fmt.Fprintf(os.Stderr, "deplo-agent: cluster %s: %s runs on %s now, and its copy here could not be stopped: %v\n", cluster, slug, member, err)
+			case stopped:
+				fmt.Fprintf(os.Stderr, "deplo-agent: cluster %s: stopped %s here: the leader placed it on %s\n", cluster, slug, member)
+			}
+		}()
+	}
+}
+
+// placedHere is the single-writer stacks this member's lease of a cluster places here, and that lease's epoch: read
+// before a probe takes the newer epoch.
+func (g *leaseGuard) placedHere(cluster string) ([]string, uint64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	c := g.clusters[cluster]
+	if c == nil {
+		return nil, 0
+	}
+	var out []string
+	for _, e := range c.Placement {
+		if e.Slug != "" && e.SingleWriter && e.Member == c.Member && !slices.Contains(out, e.Slug) {
+			out = append(out, e.Slug)
+		}
+	}
+	if c.PlacedAt == 0 {
+		return out, c.Epoch
+	}
+	return out, c.PlacedAt
+}
+
+// runningOf is the stacks among placed that run here now, each with the epoch of the lease that placed them.
+func (g *leaseGuard) runningOf(placed []string, epoch uint64) []lease.Writer {
+	if g.running == nil || len(placed) == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var out []lease.Writer
+	for _, slug := range placed {
+		if g.running(ctx, slug) {
+			out = append(out, lease.Writer{Slug: slug, Epoch: epoch})
+		}
+	}
+	return out
 }
 
 // Probe answers a leader that is not sure it still leads: the epoch is taken and nothing else changes. The
@@ -488,7 +573,12 @@ func (g *leaseGuard) Serve(from wire.Party, c net.Conn) {
 		return
 	}
 	if o.Probe {
-		_ = lease.WriteReply(c, g.Probe(o))
+		placed, epoch := g.placedHere(o.Cluster)
+		r := g.Probe(o)
+		if r.OK {
+			r.Running, r.Reports = g.runningOf(placed, epoch), true
+		}
+		_ = lease.WriteReply(c, r)
 		return
 	}
 	r := g.Renew(o)
@@ -598,6 +688,7 @@ func (s *Service) leaseGuard() *leaseGuard {
 		s.lease.start, s.lease.leader = s.startFromBundle, s.leaderPins
 		s.lease.remove, s.lease.resume, s.lease.trim = s.removeMoved, s.resumeHeld, s.trimReplicas
 		s.lease.keep, s.lease.purge, s.lease.stop = s.keepLeft, s.purgeLeft, s.stopMoved
+		s.lease.relinquish = s.relinquishStack
 		s.lease.has = func(slug string) bool { return isFile(s.stackPath(slug)) }
 		s.lease.running = stackRuns
 		if s.lease.unreadable && s.loadMember().Member {
@@ -672,6 +763,21 @@ func (s *Service) fenceStack(ctx context.Context, slug string) error {
 		return fmt.Errorf("%s: still running", slug)
 	}
 	return nil
+}
+
+// relinquishStack stops a stack whose lease moved to another member: once at once, as the fence does, then again
+// under the stack's lock, so a start that was under way when the lease moved does not outlive it. Nothing is removed.
+func (s *Service) relinquishStack(ctx context.Context, slug string) (bool, error) {
+	stopped := false
+	var err error
+	if stackRuns(ctx, slug) {
+		stopped, err = true, s.fenceStack(ctx, slug)
+	}
+	defer s.lockStack(slug)()
+	if stackRuns(ctx, slug) {
+		stopped, err = true, s.fenceStack(ctx, slug)
+	}
+	return stopped, err
 }
 
 // lockToStart takes a stack's lock for something that brings it up, refused while this member has no live lease.
