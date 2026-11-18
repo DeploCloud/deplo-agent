@@ -196,13 +196,15 @@ type leaseGuard struct {
 	// leader is the cluster this server is in and the certificates Deplo named as its leaders: the relay's
 	// word for who leads is never enough. nil (a guard under test) takes any leader.
 	leader func() (cluster string, fingerprints []string)
+	// logf writes a line of the agent's log; tests read it.
+	logf func(format string, args ...any)
 }
 
 // unreadableLease names the lease a file that would not open stands for: one that ran out, of nobody knows what.
 const unreadableLease = "unreadable"
 
 func newLeaseGuard(file string, now func() time.Time, fence func(context.Context, []lease.Entry) error) *leaseGuard {
-	g := &leaseGuard{file: file, now: now, fence: fence, clusters: map[string]*clusterLease{}, settling: map[string]bool{}, relinquishing: map[string]bool{}, starting: map[string]time.Time{}, keeps: map[string]map[string]lease.Keep{}, stores: map[string][]lease.Store{}, retryAt: map[string]time.Time{}, retryWait: map[string]time.Duration{}}
+	g := &leaseGuard{file: file, now: now, fence: fence, clusters: map[string]*clusterLease{}, settling: map[string]bool{}, relinquishing: map[string]bool{}, starting: map[string]time.Time{}, keeps: map[string]map[string]lease.Keep{}, stores: map[string][]lease.Store{}, retryAt: map[string]time.Time{}, retryWait: map[string]time.Duration{}, logf: stderrf}
 	if raw, err := os.ReadFile(file); err == nil {
 		if err := json.Unmarshal(raw, &g.clusters); err != nil {
 			fmt.Fprintf(os.Stderr, "deplo-agent: the cluster lease in %s cannot be read (%v): taken as a lease that ran out\n", file, err)
@@ -222,6 +224,36 @@ func newLeaseGuard(file string, now func() time.Time, fence func(context.Context
 		}
 	}
 	return g
+}
+
+func stderrf(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) }
+
+// stopReason says why a lease that ran out stops an entry here, for the log; the caller holds g.mu.
+func (g *leaseGuard) stopReason(c *clusterLease, e lease.Entry) string {
+	switch {
+	case e.Member == c.Member && e.SingleWriter:
+		return "its lease ran out"
+	case e.Member == c.Member && c.cold:
+		return "the server booted on a lease that had run out"
+	default:
+		return "its lease ran out and the leader placed it on no server"
+	}
+}
+
+// leaseAge says which lease a decision read, how old it was and where it came from, for the log.
+func (c *clusterLease) leaseAge(now time.Time) string {
+	from := "renewed in this run of the agent"
+	if !c.heard {
+		from = "read from disk at start"
+	}
+	if c.cold {
+		from += ", the server booted since"
+	}
+	age := "never renewed"
+	if !c.RenewedAt.IsZero() {
+		age = "renewed " + now.Sub(c.RenewedAt).Round(100*time.Millisecond).String() + " ago"
+	}
+	return fmt.Sprintf("epoch %d, %s, lives %s, %s", c.Epoch, age, c.fence()+time.Duration(c.ExtraSeconds)*time.Second, from)
 }
 
 // witness carries what a member knows of extensions into its next lease, and adds what this order says. What
@@ -365,6 +397,7 @@ func (g *leaseGuard) relinquishLocked(cluster string, c *clusterLease) {
 		if _, starting := g.starting[slug]; here[slug] || starting || g.relinquishing[slug] || g.has != nil && !g.has(slug) {
 			continue
 		}
+		g.logf("deplo-agent: cluster %s: stopping %s here: the lease places it on %s (lease %s)", cluster, slug, member, c.leaseAge(g.now()))
 		g.relinquishing[slug] = true
 		g.work.Add(1)
 		go func() {
@@ -456,10 +489,13 @@ func (g *leaseGuard) Check(ctx context.Context) {
 		if c.Fenced || !c.ranOut(now) {
 			continue
 		}
+		// deplo-agent#59: every stop decision is logged with its reason and the lease it read.
 		var mine []lease.Entry
+		age := c.leaseAge(now)
 		for _, e := range c.Placement {
 			if g.fences(c, e) {
 				mine = append(mine, e)
+				g.logf("deplo-agent: cluster %s: stopping %s here: %s (lease %s)", id, e.Slug, g.stopReason(c, e), age)
 			}
 		}
 		todo = append(todo, due{id, mine})
@@ -479,6 +515,9 @@ func (g *leaseGuard) Check(ctx context.Context) {
 			c.Held = union(c.Held, held)
 			switch {
 			case !c.ranOut(g.now()):
+				if len(c.Held) > 0 {
+					g.logf("deplo-agent: cluster %s: a renewal landed while its stacks were stopping: starting %s again", d.cluster, strings.Join(c.Held, ", "))
+				}
 				g.settleLocked(d.cluster, c)
 			case err == nil:
 				c.Fenced = true
@@ -797,6 +836,8 @@ func (s *Service) lockToStart(slug string) (done func() bool, ok bool) {
 		defer cancel()
 		if err := s.fenceStack(ctx, slug); err != nil {
 			fmt.Fprintf(os.Stderr, "deplo-agent: the lease ran out while %s started, and it could not be stopped again: %v\n", slug, err)
+		} else {
+			fmt.Fprintf(os.Stderr, "deplo-agent: stopped %s again: its lease ran out while it started\n", slug)
 		}
 		return true
 	}, true
