@@ -104,12 +104,28 @@ func TestProbe_saysWhichWritersRunHereAndUnderWhichEpoch(t *testing.T) {
 	f.stopped["files"] = true
 	p := lease.Order{Cluster: "clu_1", Member: "srv_a", Epoch: 4, Probe: true}
 	r := serve(t, f.g, p)
-	if !r.OK || len(r.Running) != 1 || r.Running[0] != (lease.Writer{Slug: "db-main", Epoch: 3}) {
+	if !r.OK || !r.Reports || len(r.Running) != 1 || r.Running[0] != (lease.Writer{Slug: "db-main", Epoch: 3}) {
 		t.Fatalf("a probe at epoch 4 answered %+v, want db-main placed here at epoch 3: files is stopped, web has no data", r)
 	}
 	// The probe took epoch 4 but placed nothing: the next one still names epoch 3 as what placed db-main here.
 	p.Epoch = 5
 	if r := serve(t, f.g, p); len(r.Running) != 1 || r.Running[0].Epoch != 3 {
 		t.Fatalf("the second probe answered %+v", r.Running)
+	}
+}
+
+func TestProbe_reportsAlsoWhenNothingRunsHere(t *testing.T) {
+	f := newRelinquish(t)
+	f.renew(orderFor(3))
+	f.stopped["files"], f.stopped["db-main"] = true, true
+	r := serve(t, f.g, lease.Order{Cluster: "clu_1", Member: "srv_a", Epoch: 4, Probe: true})
+	if !r.OK || !r.Reports || len(r.Running) != 0 {
+		t.Fatalf("a probe answered %+v, want Reports with nothing running: a leader tells it from an older agent", r)
+	}
+}
+
+func TestCapabilities_advertisesRelinquish(t *testing.T) {
+	if !slices.Contains(Capabilities, "cluster.relinquish") {
+		t.Fatal("Hello does not advertise cluster.relinquish")
 	}
 }

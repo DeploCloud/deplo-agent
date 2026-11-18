@@ -576,7 +576,7 @@ func (g *leaseGuard) Serve(from wire.Party, c net.Conn) {
 		placed, epoch := g.placedHere(o.Cluster)
 		r := g.Probe(o)
 		if r.OK {
-			r.Running = g.runningOf(placed, epoch)
+			r.Running, r.Reports = g.runningOf(placed, epoch), true
 		}
 		_ = lease.WriteReply(c, r)
 		return

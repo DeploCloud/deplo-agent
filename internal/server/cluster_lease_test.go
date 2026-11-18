@@ -301,7 +301,7 @@ func TestLease_aProbeRenewsNothingAndRefusesOlderEpochsFromThenOn(t *testing.T) 
 	f := newGuard(t)
 	f.g.Renew(orderFor(3))
 	f.clk.Add(50 * time.Second)
-	if got := serveOrder(t, f.g, wire.RoleLeader, `{"cluster":"clu_1","member":"srv_a","epoch":4,"probe":true}`); got != `{"ok":true,"epoch":4,"unsure":310}` {
+	if got := serveOrder(t, f.g, wire.RoleLeader, `{"cluster":"clu_1","member":"srv_a","epoch":4,"probe":true}`); got != `{"ok":true,"epoch":4,"reports":true,"unsure":310}` {
 		t.Fatalf("a probe got %q", got)
 	}
 	if got := serveOrder(t, f.g, wire.RoleLeader, `{"cluster":"clu_1","member":"srv_a","epoch":3,"probe":true}`); !strings.Contains(got, `"stale_epoch"`) || !strings.Contains(got, `"epoch":4`) {
@@ -320,7 +320,7 @@ func TestLease_aProbeRenewsNothingAndRefusesOlderEpochsFromThenOn(t *testing.T) 
 
 func TestLease_aProbeToAMemberWithNoLeaseStartsNone(t *testing.T) {
 	f := newGuard(t)
-	if got := serveOrder(t, f.g, wire.RoleLeader, `{"cluster":"clu_1","member":"srv_a","epoch":2,"probe":true}`); got != `{"ok":true,"epoch":2,"unsure":360}` {
+	if got := serveOrder(t, f.g, wire.RoleLeader, `{"cluster":"clu_1","member":"srv_a","epoch":2,"probe":true}`); got != `{"ok":true,"epoch":2,"reports":true,"unsure":360}` {
 		t.Fatalf("a probe got %q", got)
 	}
 	f.clk.Add(time.Hour)
