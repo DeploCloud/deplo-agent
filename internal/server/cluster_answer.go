@@ -493,7 +493,7 @@ func (f *forwarders) look(appID string) {
 
 // routeOpen asks, without connecting anyone, whether this server or another that runs the App would answer now.
 func (f *forwarders) routeOpen(ctx context.Context, cluster string, members map[string]string, appID string) bool {
-	here, others := f.s.leaseGuard().holders(cluster, "app", appID)
+	here, others := f.s.leaseGuard().answerHolders(cluster, appID)
 	if here && f.ready(ctx, appID) {
 		return true
 	}
@@ -511,7 +511,7 @@ func (f *forwarders) routeOpen(ctx context.Context, cluster string, members map[
 // the one this agent has the fewest connections open to first. A server that refuses is passed over.
 func (f *forwarders) reachAnswer(ctx context.Context, cluster string, members map[string]string, appID string,
 	port uint32) (net.Conn, string) {
-	here, others := f.s.leaseGuard().holders(cluster, "app", appID)
+	here, others := f.s.leaseGuard().answerHolders(cluster, appID)
 	if here && f.ready(ctx, appID) {
 		if up, err := f.dialProxy(ctx, port); err == nil {
 			return up, ""
@@ -679,6 +679,6 @@ func (f *forwarders) authorizeAnswer(from wire.Party, network, appID string) boo
 	for _, fp := range st.Members {
 		inCluster = inCluster || fp == from.Fingerprint
 	}
-	here, _ := f.s.leaseGuard().holders(st.Cluster, "app", appID)
+	here, _ := f.s.leaseGuard().answerHolders(st.Cluster, appID)
 	return inCluster && here
 }
