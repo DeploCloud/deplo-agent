@@ -62,6 +62,7 @@ func (f *forwarders) installCerts(raw json.RawMessage, now time.Time) (int, erro
 			continue
 		}
 		f.files = slices.DeleteFunc(f.files, func(o proxyCert) bool { return sameNames(o.Names, pc.Names) })
+		pc.installed = now
 		f.files = append(f.files, pc)
 		n++
 	}
@@ -118,7 +119,45 @@ func (f *forwarders) storePlan(ctx context.Context) storeMerge {
 	return m
 }
 
-// forgetFiles takes the pairs now in the store out of the routes file; the proxy is stopped meanwhile.
+// staleAfter is how long an installed pair of an App that does not run here is kept: a failover installs it a
+// moment before the App starts.
+var staleAfter = 15 * time.Minute
+
+// pruneFiles takes out of the routes file, live, a pair that expired and one of an App that has not run here
+// since it was installed. Neither needs the proxy stopped: only its store is erased by a running proxy.
+func (f *forwarders) pruneFiles(ctx context.Context, now time.Time) {
+	f.mu.Lock()
+	f.loadFiles()
+	files, answers := slices.Clone(f.files), slices.Clone(f.st.Answers)
+	f.mu.Unlock()
+	runs := f.ops().runs
+	var gone []proxyCert
+	for _, c := range files {
+		if !c.NotAfter.After(now) {
+			gone = append(gone, c)
+			continue
+		}
+		if runs == nil || now.Sub(c.installed) < staleAfter {
+			continue
+		}
+		for _, a := range answers {
+			if a.Routes == nil || !slices.ContainsFunc(c.Names, func(h string) bool { return slices.Contains(a.Routes.hosts(), h) }) {
+				continue
+			}
+			if here, err := runs(ctx, a.AppID); err == nil && !here {
+				gone = append(gone, c)
+			}
+			break
+		}
+	}
+	if len(gone) > 0 {
+		if err := f.forgetFiles(gone); err != nil {
+			fmt.Fprintf(os.Stderr, "deplo-agent: proxy certificates: could not rewrite the routes file: %v\n", err)
+		}
+	}
+}
+
+// forgetFiles takes pairs out of the routes file: ones now in the store (the proxy is stopped then), or pruned.
 func (f *forwarders) forgetFiles(gone []proxyCert) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -217,14 +256,26 @@ func (s *Service) keepProxyCerts(ctx context.Context) {
 			return
 		case now := <-t.C:
 			s.traffic().sample(now)
+			s.forwarders().pruneFiles(ctx, now)
 			s.restartForRenewal(ctx, now)
 		}
 	}
 }
 
+// renewRetry is how long a restart for a renewal waits after one that put nothing in the store.
+var renewRetry = time.Hour
+
 func (s *Service) restartForRenewal(ctx context.Context, now time.Time) {
-	files := s.forwarders().installedCerts()
+	f := s.forwarders()
+	// Only a pair of an App that runs here goes into the store; one that does not is pruned instead.
+	files := f.storePlan(ctx).keep
 	if len(files) == 0 {
+		return
+	}
+	f.mu.Lock()
+	tried := f.renewTried
+	f.mu.Unlock()
+	if now.Sub(tried) < renewRetry {
 		return
 	}
 	path := s.traefikCompose()
@@ -243,6 +294,11 @@ func (s *Service) restartForRenewal(ctx context.Context, now time.Time) {
 		return
 	}
 	merged, err := s.startProxy(ctx, path, true)
+	if len(merged) == 0 {
+		f.mu.Lock()
+		f.renewTried = now
+		f.mu.Unlock()
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "deplo-agent: could not restart the proxy for a certificate's renewal: %v\n", err)
 		return

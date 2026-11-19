@@ -35,6 +35,8 @@ type proxyCert struct {
 	Key      string
 	NotAfter time.Time
 	Sum      string
+	// installed is when this agent put the pair in the routes file (or read it back there).
+	installed time.Time
 }
 
 var errBadCert = errors.New("a certificate and its key do not make a valid pair")

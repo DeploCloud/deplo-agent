@@ -282,6 +282,7 @@ func (f *forwarders) loadFiles() {
 	}
 	for _, c := range r.TLS.Certificates {
 		if pc, err := parseProxyCert(c.CertFile, c.KeyFile); err == nil {
+			pc.installed = time.Now()
 			f.files = append(f.files, pc)
 		}
 	}

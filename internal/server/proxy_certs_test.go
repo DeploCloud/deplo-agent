@@ -11,6 +11,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"math/big"
 	"os"
@@ -468,5 +469,49 @@ func captureStderr(t *testing.T, f func()) string {
 func TestProxyCerts_advertised(t *testing.T) {
 	if !slices.Contains(Capabilities, "cluster.answers.certificates") {
 		t.Fatal("Hello does not name cluster.answers.certificates")
+	}
+}
+
+// A pair of an App that never started here restarts nothing; it goes from the routes file once it is stale.
+func TestProxyCerts_aPairOfAnAppThatDoesNotRunHereRestartsNothingAndGoes(t *testing.T) {
+	h := newProxyHost(t)
+	c, k := testPair(t, time.Now().Add(25*time.Minute), shopNames...)
+	if _, err := h.s.forwarders().installCerts(bundleCerts([2]string{c, k}), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	h.runs["prj1"] = false
+	now := time.Now()
+	for i := 0; i < 3; i++ {
+		h.s.restartForRenewal(context.Background(), now.Add(time.Duration(i)*time.Minute))
+	}
+	if h.applied != 0 {
+		t.Fatalf("the proxy restarted %d times for an App that does not run here", h.applied)
+	}
+	h.s.forwarders().pruneFiles(context.Background(), now.Add(time.Minute))
+	if len(h.s.forwarders().installedCerts()) != 1 {
+		t.Fatal("a pair just installed for a failover went before its App could start")
+	}
+	h.s.forwarders().pruneFiles(context.Background(), now.Add(staleAfter+time.Minute))
+	if len(h.s.forwarders().installedCerts()) != 0 || h.applied != 0 {
+		t.Fatal("a stale pair stays, or its removal restarted the proxy")
+	}
+}
+
+func TestProxyCerts_anExpiredPairGoesAndAFailedMergeIsNotRetriedEveryMinute(t *testing.T) {
+	h := newProxyHost(t)
+	c, k := testPair(t, time.Now().Add(25*time.Minute), shopNames...)
+	if _, err := h.s.forwarders().installCerts(bundleCerts([2]string{c, k}), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	stopProxy = func(context.Context) error { return errors.New("docker is gone") }
+	now := time.Now()
+	h.s.restartForRenewal(context.Background(), now)
+	h.s.restartForRenewal(context.Background(), now.Add(time.Minute))
+	if h.applied != 1 {
+		t.Fatalf("the proxy restarted %d times, want once before backing off", h.applied)
+	}
+	h.s.forwarders().pruneFiles(context.Background(), now.Add(26*time.Minute))
+	if len(h.s.forwarders().installedCerts()) != 0 {
+		t.Fatal("an expired pair is still served from the routes file")
 	}
 }

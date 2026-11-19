@@ -157,6 +157,8 @@ type forwarders struct {
 	// They live in the routes file only, never in the saved table.
 	files       []proxyCert
 	filesLoaded bool
+	// renewTried is when a restart for a renewal last put nothing in the store: it waits before the next one.
+	renewTried time.Time
 }
 
 func (s *Service) forwarders() *forwarders {
