@@ -97,6 +97,7 @@ func newProxyHost(t *testing.T) *proxyHost {
 	if err := validateAnswers(&pb.SetClusterForwardersRequest{AnswerPort: 8443, Answers: []*pb.ClusterAnswer{shop()}}, &st); err != nil {
 		t.Fatal(err)
 	}
+	st.Cluster = "clu_1"
 	s.forwarders().st = st
 	s.traefikApply = func(context.Context, string, bool) error {
 		h.steps = append(h.steps, "start")
@@ -109,6 +110,13 @@ func newProxyHost(t *testing.T) *proxyHost {
 	certSettle = 0
 	t.Cleanup(func() { stopProxy, certSettle = old, settle })
 	return h
+}
+
+// placedOn is a lease from the leader that runs the shop App on another member.
+func (h *proxyHost) placedOn(t *testing.T, member string) {
+	t.Helper()
+	h.s.leaseGuard().Renew(lease.Order{Cluster: "clu_1", Member: "srv_a", Epoch: 1,
+		Placement: []lease.Entry{{Kind: "app", ID: "prj1", Member: member, Slug: "shop"}}})
 }
 
 // putInStore writes a pair into the store the way Traefik does, base64 in JSON.
@@ -309,6 +317,7 @@ func TestProxyCerts_aServerThatNoLongerRunsTheAppDropsItsEntry(t *testing.T) {
 	h.putInStore(t, c, k, shopNames...)
 	h.putInStore(t, otherC, otherK, "blog.example.com")
 	h.runs["prj1"] = false
+	h.placedOn(t, "srv_b")
 	if _, err := h.s.startProxy(context.Background(), h.s.traefikCompose(), false); err != nil {
 		t.Fatal(err)
 	}
@@ -513,5 +522,47 @@ func TestProxyCerts_anExpiredPairGoesAndAFailedMergeIsNotRetriedEveryMinute(t *t
 	h.s.forwarders().pruneFiles(context.Background(), now.Add(26*time.Minute))
 	if len(h.s.forwarders().installedCerts()) != 0 {
 		t.Fatal("an expired pair is still served from the routes file")
+	}
+}
+
+// Found on the lab: a server the App left renewed its stale entry on its account's earlier authorization, with no
+// check at all. Once the App has run elsewhere for a while, the proxy restarts once and the entry goes.
+func TestProxyCerts_aServerTheAppLeftDropsItsEntryOnceAndSaysSo(t *testing.T) {
+	h := newProxyHost(t)
+	c, k := testPair(t, time.Now().Add(time.Hour), shopNames...)
+	h.putInStore(t, c, k, shopNames...)
+	h.runs["prj1"] = false
+	now := time.Now()
+	h.s.dropStaleEntries(context.Background(), now.Add(time.Hour))
+	if h.applied != 0 {
+		t.Fatal("an App stopped on its own server lost its certificate")
+	}
+	h.placedOn(t, "srv_b")
+	h.s.dropStaleEntries(context.Background(), now)
+	if h.applied != 0 {
+		t.Fatal("the proxy restarted the moment the App left: a move back would have cost it")
+	}
+	h.s.dropStaleEntries(context.Background(), now.Add(staleFor+time.Second))
+	if h.applied != 1 || len(h.storeSums(t)) != 0 {
+		t.Fatalf("restarts %d, entries left %d: want one restart that drops it", h.applied, len(h.storeSums(t)))
+	}
+	got := h.s.proxyRestarts().take(0)
+	if len(got) != 1 || !got[0].GetDropped() || !slices.Equal(got[0].GetHosts(), shopNames) {
+		t.Fatalf("recorded %v", got)
+	}
+	h.s.dropStaleEntries(context.Background(), now.Add(time.Hour))
+	if h.applied != 1 {
+		t.Fatal("the proxy restarted again with nothing left to drop")
+	}
+}
+
+func TestProxyCerts_aServerThatRunsTheAppKeepsItsEntry(t *testing.T) {
+	h := newProxyHost(t)
+	c, k := testPair(t, time.Now().Add(time.Hour), shopNames...)
+	h.putInStore(t, c, k, shopNames...)
+	h.s.dropStaleEntries(context.Background(), time.Now())
+	h.s.dropStaleEntries(context.Background(), time.Now().Add(time.Hour))
+	if h.applied != 0 || len(h.storeSums(t)) != 1 {
+		t.Fatal("the App's own server restarted its proxy or lost its certificate")
 	}
 }
