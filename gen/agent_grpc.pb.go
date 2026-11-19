@@ -23,91 +23,92 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Agent_Hello_FullMethodName                = "/deplo.agent.v1.Agent/Hello"
-	Agent_Metrics_FullMethodName              = "/deplo.agent.v1.Agent/Metrics"
-	Agent_ContainerStats_FullMethodName       = "/deplo.agent.v1.Agent/ContainerStats"
-	Agent_StreamMetrics_FullMethodName        = "/deplo.agent.v1.Agent/StreamMetrics"
-	Agent_Deploy_FullMethodName               = "/deplo.agent.v1.Agent/Deploy"
-	Agent_ReattachDeploy_FullMethodName       = "/deplo.agent.v1.Agent/ReattachDeploy"
-	Agent_DeployStream_FullMethodName         = "/deplo.agent.v1.Agent/DeployStream"
-	Agent_StopStack_FullMethodName            = "/deplo.agent.v1.Agent/StopStack"
-	Agent_StartStack_FullMethodName           = "/deplo.agent.v1.Agent/StartStack"
-	Agent_DestroyStack_FullMethodName         = "/deplo.agent.v1.Agent/DestroyStack"
-	Agent_Reroute_FullMethodName              = "/deplo.agent.v1.Agent/Reroute"
-	Agent_ExportVolume_FullMethodName         = "/deplo.agent.v1.Agent/ExportVolume"
-	Agent_ImportVolume_FullMethodName         = "/deplo.agent.v1.Agent/ImportVolume"
-	Agent_VolumeUsage_FullMethodName          = "/deplo.agent.v1.Agent/VolumeUsage"
-	Agent_ExportFiles_FullMethodName          = "/deplo.agent.v1.Agent/ExportFiles"
-	Agent_ImportFiles_FullMethodName          = "/deplo.agent.v1.Agent/ImportFiles"
-	Agent_ExportHostPath_FullMethodName       = "/deplo.agent.v1.Agent/ExportHostPath"
-	Agent_ImportHostPath_FullMethodName       = "/deplo.agent.v1.Agent/ImportHostPath"
-	Agent_ExportImage_FullMethodName          = "/deplo.agent.v1.Agent/ExportImage"
-	Agent_ImportImage_FullMethodName          = "/deplo.agent.v1.Agent/ImportImage"
-	Agent_ReadStack_FullMethodName            = "/deplo.agent.v1.Agent/ReadStack"
-	Agent_Inspect_FullMethodName              = "/deplo.agent.v1.Agent/Inspect"
-	Agent_CheckPort_FullMethodName            = "/deplo.agent.v1.Agent/CheckPort"
-	Agent_ProbeHttp_FullMethodName            = "/deplo.agent.v1.Agent/ProbeHttp"
-	Agent_DockerCleanup_FullMethodName        = "/deplo.agent.v1.Agent/DockerCleanup"
-	Agent_SelfUpdate_FullMethodName           = "/deplo.agent.v1.Agent/SelfUpdate"
-	Agent_SelfUninstall_FullMethodName        = "/deplo.agent.v1.Agent/SelfUninstall"
-	Agent_InstallCluster_FullMethodName       = "/deplo.agent.v1.Agent/InstallCluster"
-	Agent_RemoveCluster_FullMethodName        = "/deplo.agent.v1.Agent/RemoveCluster"
-	Agent_ClusterStatus_FullMethodName        = "/deplo.agent.v1.Agent/ClusterStatus"
-	Agent_ClusterCall_FullMethodName          = "/deplo.agent.v1.Agent/ClusterCall"
-	Agent_SetClusterMember_FullMethodName     = "/deplo.agent.v1.Agent/SetClusterMember"
-	Agent_ClusterWatch_FullMethodName         = "/deplo.agent.v1.Agent/ClusterWatch"
-	Agent_CopyClusterImage_FullMethodName     = "/deplo.agent.v1.Agent/CopyClusterImage"
-	Agent_ExpectClusterImage_FullMethodName   = "/deplo.agent.v1.Agent/ExpectClusterImage"
-	Agent_SetClusterForwarders_FullMethodName = "/deplo.agent.v1.Agent/SetClusterForwarders"
-	Agent_SetClusterReplicas_FullMethodName   = "/deplo.agent.v1.Agent/SetClusterReplicas"
-	Agent_ClusterReplicaStatus_FullMethodName = "/deplo.agent.v1.Agent/ClusterReplicaStatus"
-	Agent_SetClusterNetwork_FullMethodName    = "/deplo.agent.v1.Agent/SetClusterNetwork"
-	Agent_Backup_FullMethodName               = "/deplo.agent.v1.Agent/Backup"
-	Agent_Restore_FullMethodName              = "/deplo.agent.v1.Agent/Restore"
-	Agent_S3Check_FullMethodName              = "/deplo.agent.v1.Agent/S3Check"
-	Agent_S3Delete_FullMethodName             = "/deplo.agent.v1.Agent/S3Delete"
-	Agent_ReadStoreFile_FullMethodName        = "/deplo.agent.v1.Agent/ReadStoreFile"
-	Agent_WriteStoreFile_FullMethodName       = "/deplo.agent.v1.Agent/WriteStoreFile"
-	Agent_RestoreFrom_FullMethodName          = "/deplo.agent.v1.Agent/RestoreFrom"
-	Agent_FollowLogs_FullMethodName           = "/deplo.agent.v1.Agent/FollowLogs"
-	Agent_Attach_FullMethodName               = "/deplo.agent.v1.Agent/Attach"
-	Agent_ListInstances_FullMethodName        = "/deplo.agent.v1.Agent/ListInstances"
-	Agent_Exec_FullMethodName                 = "/deplo.agent.v1.Agent/Exec"
-	Agent_ShellLabel_FullMethodName           = "/deplo.agent.v1.Agent/ShellLabel"
-	Agent_StartJob_FullMethodName             = "/deplo.agent.v1.Agent/StartJob"
-	Agent_PollJob_FullMethodName              = "/deplo.agent.v1.Agent/PollJob"
-	Agent_KillJob_FullMethodName              = "/deplo.agent.v1.Agent/KillJob"
-	Agent_ListFiles_FullMethodName            = "/deplo.agent.v1.Agent/ListFiles"
-	Agent_ReadFile_FullMethodName             = "/deplo.agent.v1.Agent/ReadFile"
-	Agent_WriteFile_FullMethodName            = "/deplo.agent.v1.Agent/WriteFile"
-	Agent_UploadFile_FullMethodName           = "/deplo.agent.v1.Agent/UploadFile"
-	Agent_CreateDir_FullMethodName            = "/deplo.agent.v1.Agent/CreateDir"
-	Agent_DeleteFile_FullMethodName           = "/deplo.agent.v1.Agent/DeleteFile"
-	Agent_RenameFile_FullMethodName           = "/deplo.agent.v1.Agent/RenameFile"
-	Agent_FilesExist_FullMethodName           = "/deplo.agent.v1.Agent/FilesExist"
-	Agent_StartDev_FullMethodName             = "/deplo.agent.v1.Agent/StartDev"
-	Agent_StopDev_FullMethodName              = "/deplo.agent.v1.Agent/StopDev"
-	Agent_ResetDevWorkspace_FullMethodName    = "/deplo.agent.v1.Agent/ResetDevWorkspace"
-	Agent_TeardownDev_FullMethodName          = "/deplo.agent.v1.Agent/TeardownDev"
-	Agent_EnsureGateway_FullMethodName        = "/deplo.agent.v1.Agent/EnsureGateway"
-	Agent_ProvisionSshUser_FullMethodName     = "/deplo.agent.v1.Agent/ProvisionSshUser"
-	Agent_DeprovisionSshUser_FullMethodName   = "/deplo.agent.v1.Agent/DeprovisionSshUser"
-	Agent_StartTunnel_FullMethodName          = "/deplo.agent.v1.Agent/StartTunnel"
-	Agent_GetTunnel_FullMethodName            = "/deplo.agent.v1.Agent/GetTunnel"
-	Agent_StopTunnel_FullMethodName           = "/deplo.agent.v1.Agent/StopTunnel"
-	Agent_RenewalCSR_FullMethodName           = "/deplo.agent.v1.Agent/RenewalCSR"
-	Agent_InstallRenewedCert_FullMethodName   = "/deplo.agent.v1.Agent/InstallRenewedCert"
-	Agent_HostInfo_FullMethodName             = "/deplo.agent.v1.Agent/HostInfo"
-	Agent_SetTimezone_FullMethodName          = "/deplo.agent.v1.Agent/SetTimezone"
-	Agent_TraefikConfig_FullMethodName        = "/deplo.agent.v1.Agent/TraefikConfig"
-	Agent_RestartControlPlane_FullMethodName  = "/deplo.agent.v1.Agent/RestartControlPlane"
-	Agent_UpdateControlPlane_FullMethodName   = "/deplo.agent.v1.Agent/UpdateControlPlane"
-	Agent_ListWorkloadImages_FullMethodName   = "/deplo.agent.v1.Agent/ListWorkloadImages"
-	Agent_InventoryImage_FullMethodName       = "/deplo.agent.v1.Agent/InventoryImage"
-	Agent_InventoryCandidate_FullMethodName   = "/deplo.agent.v1.Agent/InventoryCandidate"
-	Agent_SetLinkAddresses_FullMethodName     = "/deplo.agent.v1.Agent/SetLinkAddresses"
-	Agent_StopListening_FullMethodName        = "/deplo.agent.v1.Agent/StopListening"
-	Agent_CaptureScreenshot_FullMethodName    = "/deplo.agent.v1.Agent/CaptureScreenshot"
+	Agent_Hello_FullMethodName                 = "/deplo.agent.v1.Agent/Hello"
+	Agent_Metrics_FullMethodName               = "/deplo.agent.v1.Agent/Metrics"
+	Agent_ContainerStats_FullMethodName        = "/deplo.agent.v1.Agent/ContainerStats"
+	Agent_StreamMetrics_FullMethodName         = "/deplo.agent.v1.Agent/StreamMetrics"
+	Agent_Deploy_FullMethodName                = "/deplo.agent.v1.Agent/Deploy"
+	Agent_ReattachDeploy_FullMethodName        = "/deplo.agent.v1.Agent/ReattachDeploy"
+	Agent_DeployStream_FullMethodName          = "/deplo.agent.v1.Agent/DeployStream"
+	Agent_StopStack_FullMethodName             = "/deplo.agent.v1.Agent/StopStack"
+	Agent_StartStack_FullMethodName            = "/deplo.agent.v1.Agent/StartStack"
+	Agent_DestroyStack_FullMethodName          = "/deplo.agent.v1.Agent/DestroyStack"
+	Agent_Reroute_FullMethodName               = "/deplo.agent.v1.Agent/Reroute"
+	Agent_ExportVolume_FullMethodName          = "/deplo.agent.v1.Agent/ExportVolume"
+	Agent_ImportVolume_FullMethodName          = "/deplo.agent.v1.Agent/ImportVolume"
+	Agent_VolumeUsage_FullMethodName           = "/deplo.agent.v1.Agent/VolumeUsage"
+	Agent_ExportFiles_FullMethodName           = "/deplo.agent.v1.Agent/ExportFiles"
+	Agent_ImportFiles_FullMethodName           = "/deplo.agent.v1.Agent/ImportFiles"
+	Agent_ExportHostPath_FullMethodName        = "/deplo.agent.v1.Agent/ExportHostPath"
+	Agent_ImportHostPath_FullMethodName        = "/deplo.agent.v1.Agent/ImportHostPath"
+	Agent_ExportImage_FullMethodName           = "/deplo.agent.v1.Agent/ExportImage"
+	Agent_ImportImage_FullMethodName           = "/deplo.agent.v1.Agent/ImportImage"
+	Agent_ReadStack_FullMethodName             = "/deplo.agent.v1.Agent/ReadStack"
+	Agent_Inspect_FullMethodName               = "/deplo.agent.v1.Agent/Inspect"
+	Agent_CheckPort_FullMethodName             = "/deplo.agent.v1.Agent/CheckPort"
+	Agent_ProbeHttp_FullMethodName             = "/deplo.agent.v1.Agent/ProbeHttp"
+	Agent_DockerCleanup_FullMethodName         = "/deplo.agent.v1.Agent/DockerCleanup"
+	Agent_SelfUpdate_FullMethodName            = "/deplo.agent.v1.Agent/SelfUpdate"
+	Agent_SelfUninstall_FullMethodName         = "/deplo.agent.v1.Agent/SelfUninstall"
+	Agent_InstallCluster_FullMethodName        = "/deplo.agent.v1.Agent/InstallCluster"
+	Agent_RemoveCluster_FullMethodName         = "/deplo.agent.v1.Agent/RemoveCluster"
+	Agent_ClusterStatus_FullMethodName         = "/deplo.agent.v1.Agent/ClusterStatus"
+	Agent_ClusterCall_FullMethodName           = "/deplo.agent.v1.Agent/ClusterCall"
+	Agent_SetClusterMember_FullMethodName      = "/deplo.agent.v1.Agent/SetClusterMember"
+	Agent_ClusterWatch_FullMethodName          = "/deplo.agent.v1.Agent/ClusterWatch"
+	Agent_CopyClusterImage_FullMethodName      = "/deplo.agent.v1.Agent/CopyClusterImage"
+	Agent_ExpectClusterImage_FullMethodName    = "/deplo.agent.v1.Agent/ExpectClusterImage"
+	Agent_SetClusterForwarders_FullMethodName  = "/deplo.agent.v1.Agent/SetClusterForwarders"
+	Agent_ReadProxyCertificates_FullMethodName = "/deplo.agent.v1.Agent/ReadProxyCertificates"
+	Agent_SetClusterReplicas_FullMethodName    = "/deplo.agent.v1.Agent/SetClusterReplicas"
+	Agent_ClusterReplicaStatus_FullMethodName  = "/deplo.agent.v1.Agent/ClusterReplicaStatus"
+	Agent_SetClusterNetwork_FullMethodName     = "/deplo.agent.v1.Agent/SetClusterNetwork"
+	Agent_Backup_FullMethodName                = "/deplo.agent.v1.Agent/Backup"
+	Agent_Restore_FullMethodName               = "/deplo.agent.v1.Agent/Restore"
+	Agent_S3Check_FullMethodName               = "/deplo.agent.v1.Agent/S3Check"
+	Agent_S3Delete_FullMethodName              = "/deplo.agent.v1.Agent/S3Delete"
+	Agent_ReadStoreFile_FullMethodName         = "/deplo.agent.v1.Agent/ReadStoreFile"
+	Agent_WriteStoreFile_FullMethodName        = "/deplo.agent.v1.Agent/WriteStoreFile"
+	Agent_RestoreFrom_FullMethodName           = "/deplo.agent.v1.Agent/RestoreFrom"
+	Agent_FollowLogs_FullMethodName            = "/deplo.agent.v1.Agent/FollowLogs"
+	Agent_Attach_FullMethodName                = "/deplo.agent.v1.Agent/Attach"
+	Agent_ListInstances_FullMethodName         = "/deplo.agent.v1.Agent/ListInstances"
+	Agent_Exec_FullMethodName                  = "/deplo.agent.v1.Agent/Exec"
+	Agent_ShellLabel_FullMethodName            = "/deplo.agent.v1.Agent/ShellLabel"
+	Agent_StartJob_FullMethodName              = "/deplo.agent.v1.Agent/StartJob"
+	Agent_PollJob_FullMethodName               = "/deplo.agent.v1.Agent/PollJob"
+	Agent_KillJob_FullMethodName               = "/deplo.agent.v1.Agent/KillJob"
+	Agent_ListFiles_FullMethodName             = "/deplo.agent.v1.Agent/ListFiles"
+	Agent_ReadFile_FullMethodName              = "/deplo.agent.v1.Agent/ReadFile"
+	Agent_WriteFile_FullMethodName             = "/deplo.agent.v1.Agent/WriteFile"
+	Agent_UploadFile_FullMethodName            = "/deplo.agent.v1.Agent/UploadFile"
+	Agent_CreateDir_FullMethodName             = "/deplo.agent.v1.Agent/CreateDir"
+	Agent_DeleteFile_FullMethodName            = "/deplo.agent.v1.Agent/DeleteFile"
+	Agent_RenameFile_FullMethodName            = "/deplo.agent.v1.Agent/RenameFile"
+	Agent_FilesExist_FullMethodName            = "/deplo.agent.v1.Agent/FilesExist"
+	Agent_StartDev_FullMethodName              = "/deplo.agent.v1.Agent/StartDev"
+	Agent_StopDev_FullMethodName               = "/deplo.agent.v1.Agent/StopDev"
+	Agent_ResetDevWorkspace_FullMethodName     = "/deplo.agent.v1.Agent/ResetDevWorkspace"
+	Agent_TeardownDev_FullMethodName           = "/deplo.agent.v1.Agent/TeardownDev"
+	Agent_EnsureGateway_FullMethodName         = "/deplo.agent.v1.Agent/EnsureGateway"
+	Agent_ProvisionSshUser_FullMethodName      = "/deplo.agent.v1.Agent/ProvisionSshUser"
+	Agent_DeprovisionSshUser_FullMethodName    = "/deplo.agent.v1.Agent/DeprovisionSshUser"
+	Agent_StartTunnel_FullMethodName           = "/deplo.agent.v1.Agent/StartTunnel"
+	Agent_GetTunnel_FullMethodName             = "/deplo.agent.v1.Agent/GetTunnel"
+	Agent_StopTunnel_FullMethodName            = "/deplo.agent.v1.Agent/StopTunnel"
+	Agent_RenewalCSR_FullMethodName            = "/deplo.agent.v1.Agent/RenewalCSR"
+	Agent_InstallRenewedCert_FullMethodName    = "/deplo.agent.v1.Agent/InstallRenewedCert"
+	Agent_HostInfo_FullMethodName              = "/deplo.agent.v1.Agent/HostInfo"
+	Agent_SetTimezone_FullMethodName           = "/deplo.agent.v1.Agent/SetTimezone"
+	Agent_TraefikConfig_FullMethodName         = "/deplo.agent.v1.Agent/TraefikConfig"
+	Agent_RestartControlPlane_FullMethodName   = "/deplo.agent.v1.Agent/RestartControlPlane"
+	Agent_UpdateControlPlane_FullMethodName    = "/deplo.agent.v1.Agent/UpdateControlPlane"
+	Agent_ListWorkloadImages_FullMethodName    = "/deplo.agent.v1.Agent/ListWorkloadImages"
+	Agent_InventoryImage_FullMethodName        = "/deplo.agent.v1.Agent/InventoryImage"
+	Agent_InventoryCandidate_FullMethodName    = "/deplo.agent.v1.Agent/InventoryCandidate"
+	Agent_SetLinkAddresses_FullMethodName      = "/deplo.agent.v1.Agent/SetLinkAddresses"
+	Agent_StopListening_FullMethodName         = "/deplo.agent.v1.Agent/StopListening"
+	Agent_CaptureScreenshot_FullMethodName     = "/deplo.agent.v1.Agent/CaptureScreenshot"
 )
 
 // AgentClient is the client API for Agent service.
@@ -232,6 +233,10 @@ type AgentClient interface {
 	// for its own workloads. The full set each time; one not listed is removed. Never sent to a
 	// member that is not in a cluster.
 	SetClusterForwarders(ctx context.Context, in *SetClusterForwardersRequest, opts ...grpc.CallOption) (*SetClusterForwardersResponse, error)
+	// The certificates this server's proxy holds for some hostnames (ADR-0048, Hello capability
+	// "cluster.answers.certificates"): its ACME store's and those a failover installed as files. One whose
+	// digest Deplo already holds comes back without its key.
+	ReadProxyCertificates(ctx context.Context, in *ReadProxyCertificatesRequest, opts ...grpc.CallOption) (*ReadProxyCertificatesResponse, error)
 	// Hand this member the cluster's replicated Apps. The member that runs one sends its Volumes and
 	// Files to every other member as they change; each other member keeps a copy of its own, which a
 	// failover restore marked from_replica puts in place. The full set each time; one not listed
@@ -820,6 +825,16 @@ func (c *agentClient) SetClusterForwarders(ctx context.Context, in *SetClusterFo
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SetClusterForwardersResponse)
 	err := c.cc.Invoke(ctx, Agent_SetClusterForwarders_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) ReadProxyCertificates(ctx context.Context, in *ReadProxyCertificatesRequest, opts ...grpc.CallOption) (*ReadProxyCertificatesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReadProxyCertificatesResponse)
+	err := c.cc.Invoke(ctx, Agent_ReadProxyCertificates_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1501,6 +1516,10 @@ type AgentServer interface {
 	// for its own workloads. The full set each time; one not listed is removed. Never sent to a
 	// member that is not in a cluster.
 	SetClusterForwarders(context.Context, *SetClusterForwardersRequest) (*SetClusterForwardersResponse, error)
+	// The certificates this server's proxy holds for some hostnames (ADR-0048, Hello capability
+	// "cluster.answers.certificates"): its ACME store's and those a failover installed as files. One whose
+	// digest Deplo already holds comes back without its key.
+	ReadProxyCertificates(context.Context, *ReadProxyCertificatesRequest) (*ReadProxyCertificatesResponse, error)
 	// Hand this member the cluster's replicated Apps. The member that runs one sends its Volumes and
 	// Files to every other member as they change; each other member keeps a copy of its own, which a
 	// failover restore marked from_replica puts in place. The full set each time; one not listed
@@ -1755,6 +1774,9 @@ func (UnimplementedAgentServer) ExpectClusterImage(context.Context, *ExpectClust
 }
 func (UnimplementedAgentServer) SetClusterForwarders(context.Context, *SetClusterForwardersRequest) (*SetClusterForwardersResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetClusterForwarders not implemented")
+}
+func (UnimplementedAgentServer) ReadProxyCertificates(context.Context, *ReadProxyCertificatesRequest) (*ReadProxyCertificatesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReadProxyCertificates not implemented")
 }
 func (UnimplementedAgentServer) SetClusterReplicas(context.Context, *SetClusterReplicasRequest) (*SetClusterReplicasResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetClusterReplicas not implemented")
@@ -2457,6 +2479,24 @@ func _Agent_SetClusterForwarders_Handler(srv interface{}, ctx context.Context, d
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(AgentServer).SetClusterForwarders(ctx, req.(*SetClusterForwardersRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_ReadProxyCertificates_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReadProxyCertificatesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).ReadProxyCertificates(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_ReadProxyCertificates_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).ReadProxyCertificates(ctx, req.(*ReadProxyCertificatesRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -3366,6 +3406,10 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SetClusterForwarders",
 			Handler:    _Agent_SetClusterForwarders_Handler,
+		},
+		{
+			MethodName: "ReadProxyCertificates",
+			Handler:    _Agent_ReadProxyCertificates_Handler,
 		},
 		{
 			MethodName: "SetClusterReplicas",

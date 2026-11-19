@@ -37,6 +37,7 @@ var dockerForwardOps = forwardOps{
 	redirect:  redirectAllPorts,
 	proxyDial: dialProxyLoopback,
 	ready:     appReady,
+	runs:      appRunsHere,
 }
 
 // fwdProto names what a forwarder container speaks to this agent: a container of another one is replaced.
@@ -202,6 +203,21 @@ func forwarderPids(ctx context.Context, containers []string) (map[string]int, er
 
 // appReady reads every container of the App here: it answers when one runs, every one with a health check is
 // healthy, and none is still being created or restarting. One that exited (a job that ran) does not count.
+func appRunsHere(ctx context.Context, appID string) (bool, error) {
+	if !fwdID.MatchString(appID) {
+		return false, nil
+	}
+	res, err := dockercli.Run(ctx, 10*time.Second, "ps", "-q", "--filter", "label=deplo.project="+appID,
+		"--filter", "status=running")
+	if err != nil {
+		return false, err
+	}
+	if res.Code != 0 {
+		return false, fmt.Errorf("docker ps: %s", firstLine(res.Stderr))
+	}
+	return strings.TrimSpace(res.Stdout) != "", nil
+}
+
 func appReady(ctx context.Context, appID string) appReadiness {
 	if !fwdID.MatchString(appID) {
 		return appReadiness{}

@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -249,9 +250,10 @@ func (f *forwarders) writeAnswerRoutes() error {
 		return nil
 	}
 	path := filepath.Join(dir, answerRoutesFile)
-	want := renderAnswerRoutes(f.st.Answers)
+	f.loadFiles()
+	want := renderAnswerRoutes(f.st.Answers, f.files)
 	if have, err := os.ReadFile(path); err == nil && bytes.Equal(have, want) {
-		return nil
+		return os.Chmod(path, 0o600)
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
@@ -259,12 +261,43 @@ func (f *forwarders) writeAnswerRoutes() error {
 	return rewriteInPlace(path, want)
 }
 
+// loadFiles reads back, once, the certificates an earlier run of this agent installed in the routes file.
+// The caller holds f.mu.
+func (f *forwarders) loadFiles() {
+	if f.filesLoaded {
+		return
+	}
+	f.filesLoaded = true
+	dir := f.s.traefikDir()
+	if dir == "" {
+		return
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, answerRoutesFile))
+	if err != nil {
+		return
+	}
+	var r answerRoutes
+	if json.Unmarshal(raw, &r) != nil || r.TLS == nil {
+		return
+	}
+	for _, c := range r.TLS.Certificates {
+		if pc, err := parseProxyCert(c.CertFile, c.KeyFile); err == nil {
+			pc.installed = time.Now()
+			f.files = append(f.files, pc)
+		}
+	}
+}
+
+// The routes file can hold a key, so only its owner reads it; the proxy reads it as root.
 func rewriteInPlace(path string, data []byte) error {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0o644)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0o600)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
+	if err := file.Chmod(0o600); err != nil {
+		return err
+	}
 	st, err := file.Stat()
 	if err != nil {
 		return err

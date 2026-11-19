@@ -185,6 +185,11 @@ service Agent {
   // member that is not in a cluster.
   rpc SetClusterForwarders(SetClusterForwardersRequest) returns (SetClusterForwardersResponse);
 
+  // The certificates this server's proxy holds for some hostnames (ADR-0048, Hello capability
+  // "cluster.answers.certificates"): its ACME store's and those a failover installed as files. One whose
+  // digest Deplo already holds comes back without its key.
+  rpc ReadProxyCertificates(ReadProxyCertificatesRequest) returns (ReadProxyCertificatesResponse);
+
   // ---- REPLICATION OF APP DATA (Hello capability "cluster.replicas") ----
 
   // Hand this member the cluster's replicated Apps. The member that runs one sends its Volumes and
@@ -2552,6 +2557,37 @@ message SetClusterForwardersRequest {
   // wait; and how many may wait for one App (0: 128). Past either a connection is closed at once, and reported.
   uint32 answer_max_conns = 8;
   uint32 answer_max_waiting = 9;
+  // The newest proxy restart Deplo has recorded: this member forgets those up to it.
+  int64 proxy_restarts_seen_ms = 10;
+}
+
+// A restart of the proxy this agent made so that a certificate's renewal can happen.
+message ProxyRestart {
+  int64 at_unix_ms = 1;
+  // The hostnames whose certificate went into the proxy's store.
+  repeated string hosts = 2;
+  // True when it ran at once: no quiet hour was left before the renewal window.
+  bool urgent = 3;
+}
+
+message ReadProxyCertificatesRequest {
+  repeated string hosts = 1;
+  // Hostname to the sha256 (hex, of the leaf's DER) of the certificate Deplo already holds for it.
+  map<string, string> known = 2;
+}
+
+// One certificate, covering the hostnames asked for in hosts.
+message ProxyCertificate {
+  repeated string hosts = 1;
+  // The chain and its key as PEM; key_pem is empty when the digest is the one Deplo holds.
+  string cert_pem = 2;
+  string key_pem = 3;
+  string sha256 = 4;
+  int64 not_after_unix_ms = 5;
+}
+
+message ReadProxyCertificatesResponse {
+  repeated ProxyCertificate certificates = 1;
 }
 
 // An App whose domains answer on every server, and how this member's proxy passes them on.
@@ -2581,6 +2617,9 @@ message ClusterAnswerRefusal {
 message SetClusterForwardersResponse {
   // Connections turned away since the last table (ADR-0048): each is reported once, then forgotten.
   repeated ClusterAnswerRefusal answer_refusals = 3;
+  // The restarts of this server's proxy made for a certificate's renewal (ADR-0048), kept until Deplo has
+  // read them (proxy_restarts_seen_ms).
+  repeated ProxyRestart proxy_restarts = 4;
   int32 held = 1;
   int32 served = 2;
 }

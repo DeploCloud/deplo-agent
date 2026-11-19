@@ -144,6 +144,8 @@ var Capabilities = []string{
 	"cluster.relinquish",
 	// A failover start pulls only an image the server lacks, and a copied registry image prunes no other tag.
 	"cluster.images.registry",
+	// ReadProxyCertificates, and a failover's certificates installed as files then moved into the proxy's store.
+	"cluster.answers.certificates",
 }
 
 // AgentVersion is the version this agent reports over Hello.
