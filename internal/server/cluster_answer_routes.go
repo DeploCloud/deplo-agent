@@ -32,6 +32,18 @@ var (
 type answerRoutes struct {
 	TCP  *answerTCP  `json:"tcp,omitempty"`
 	HTTP *answerHTTP `json:"http,omitempty"`
+	// TLS is this agent's own: the certificates a failover installed as files. Never from a table.
+	TLS *answerTLSFiles `json:"tls,omitempty"`
+}
+
+type answerTLSFiles struct {
+	Certificates []answerTLSFile `json:"certificates"`
+}
+
+// answerTLSFile is one pair given inline: Traefik reads a value that names no file as the content itself.
+type answerTLSFile struct {
+	CertFile string `json:"certFile"`
+	KeyFile  string `json:"keyFile"`
 }
 
 type answerTCP struct {
@@ -92,6 +104,9 @@ func parseAnswerRoutes(e answer, raw string) (*answerRoutes, error) {
 	if dec.More() {
 		return nil, fmt.Errorf("its routes are more than one document")
 	}
+	if r.TLS != nil {
+		return nil, fmt.Errorf("its routes carry certificates, which only a failover installs")
+	}
 	if r.TCP == nil || len(r.TCP.Routers) == 0 {
 		return nil, fmt.Errorf("it passes no hostname on")
 	}
@@ -150,7 +165,7 @@ func (r *answerRoutes) hosts() []string {
 
 // renderAnswerRoutes is the proxy's routes file: every App's checked routes in one document, written from
 // what was checked rather than from what was sent. Names are the App's own, so nothing collides.
-func renderAnswerRoutes(answers []answer) []byte {
+func renderAnswerRoutes(answers []answer, files []proxyCert) []byte {
 	all := answerRoutes{TCP: &answerTCP{Routers: map[string]answerTCPRouter{}, Services: map[string]answerTCPService{}},
 		HTTP: &answerHTTP{Routers: map[string]answerHTTPRouter{}, Services: map[string]answerHTTPService{}}}
 	for _, e := range answers {
@@ -174,8 +189,17 @@ func renderAnswerRoutes(answers []answer) []byte {
 			}
 		}
 	}
-	if len(all.TCP.Routers) == 0 {
+	for _, c := range files {
+		if all.TLS == nil {
+			all.TLS = &answerTLSFiles{}
+		}
+		all.TLS.Certificates = append(all.TLS.Certificates, answerTLSFile{CertFile: c.Cert, KeyFile: c.Key})
+	}
+	if len(all.TCP.Routers) == 0 && all.TLS == nil {
 		return []byte("{}\n")
+	}
+	if len(all.TCP.Routers) == 0 {
+		all.TCP = nil
 	}
 	if len(all.HTTP.Routers) == 0 {
 		all.HTTP = nil

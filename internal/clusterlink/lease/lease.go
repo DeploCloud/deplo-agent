@@ -170,6 +170,8 @@ type Start struct {
 	Restore *Restore `json:"restore,omitempty"`
 	// Promote makes the standby copy this member holds the workload, before the stack is started over it.
 	Promote *Promote `json:"promote,omitempty"`
+	// Certificates are the App's own, for its domains that answer on every server, passed on unread.
+	Certificates json.RawMessage `json:"certificates,omitempty"`
 }
 
 // Promote is the command the control plane rendered for one engine, run inside the standby's container.

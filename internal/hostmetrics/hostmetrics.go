@@ -189,6 +189,9 @@ func readNetCounters() (rx, tx int64) {
 	return r, t
 }
 
+// NetCounters is the host's received and sent bytes on every interface that carries its traffic.
+func NetCounters() (rx, tx int64, ok bool) { return readNetCountersOK() }
+
 func readNetCountersOK() (rx, tx int64, ok bool) {
 	f, err := os.Open("/proc/net/dev")
 	if err != nil {

@@ -270,6 +270,7 @@ func (s *Service) runParty(m *clusterMember, member bool) {
 		go s.superviseWriters(ctx)
 		go s.forwarders().Resume()
 		go s.forwarders().Watch(ctx)
+		go s.keepProxyCerts(ctx)
 		go s.replicas().Run(ctx)
 	}
 }

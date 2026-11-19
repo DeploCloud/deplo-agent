@@ -211,7 +211,7 @@ func (s *Service) TraefikConfig(ctx context.Context, req *pb.TraefikConfigReques
 		_ = os.Chmod(path+".bak", 0o600)
 	}
 
-	if err := s.applyTraefik(ctx, path, req.GetRestartOnly()); err != nil {
+	if _, err := s.startProxy(ctx, path, req.GetRestartOnly()); err != nil {
 		if !req.GetRestartOnly() {
 			if rerr := os.Rename(path+".bak", path); rerr == nil {
 				_ = s.applyTraefik(ctx, path, false)
@@ -249,7 +249,7 @@ func (s *Service) bringUpTraefik(ctx context.Context, path string, restartOnly b
 	// A proxy that mounts the routes file of its answers (ADR-0048) finds one: docker would make a missing one a
 	// directory. One that does not is left without it.
 	if p := filepath.Join(filepath.Dir(path), answerRoutesFile); mountsAnswerRoutes(path) && !regularFile(p) {
-		_ = os.WriteFile(p, []byte("{}\n"), 0o644)
+		_ = os.WriteFile(p, []byte("{}\n"), 0o600)
 	}
 	res, err := dockercli.Run(ctx, 180*time.Second,
 		"compose", "-f", path, "up", "-d", "--force-recreate", "--remove-orphans")

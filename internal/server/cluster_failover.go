@@ -191,6 +191,12 @@ func (s *Service) startFromBundle(ctx context.Context, st *lease.Start) error {
 	for _, a := range st.RegistryAuth {
 		req.RegistryAuth = append(req.RegistryAuth, &pb.RegistryAuth{Host: a.Host, Username: a.Username, Password: a.Password})
 	}
+	// The App's certificates answer before it does, so its router finds one and orders none (ADR-0048).
+	if n, err := s.forwarders().installCerts(st.Certificates, time.Now()); err != nil {
+		fmt.Fprintf(os.Stderr, "deplo-agent: failover of %s: %v\n", st.Slug, err)
+	} else if n > 0 {
+		time.Sleep(certSettle)
+	}
 	var result *pb.DeployResult
 	e := &emitter{send: func(ev *pb.DeployEvent) error {
 		if r := ev.GetResult(); r != nil {

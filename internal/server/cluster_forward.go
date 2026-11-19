@@ -117,6 +117,8 @@ type forwardOps struct {
 	proxyDial func(ctx context.Context, port uint32) (net.Conn, error)
 	// ready says whether every container of an App here answers, and since when.
 	ready func(ctx context.Context, appID string) appReadiness
+	// runs says whether a container of an App runs here: a proxy's store keeps its certificate only then.
+	runs func(ctx context.Context, appID string) (bool, error)
 }
 
 // `_` is in no slug, so no stack's container (deplo-<slug>..., db-<slug>) can hold a forwarder's name.
@@ -151,6 +153,10 @@ type forwarders struct {
 	waiting, conns int
 	// refused is every connection turned away since the last table, by App ("" past this server's own cap).
 	refused map[refusalKey]*answerRefusal
+	// files are the certificates a failover installed for the proxy to serve until its next start (ADR-0048).
+	// They live in the routes file only, never in the saved table.
+	files       []proxyCert
+	filesLoaded bool
 }
 
 func (s *Service) forwarders() *forwarders {
@@ -271,7 +277,7 @@ func (s *Service) SetClusterForwarders(ctx context.Context, req *pb.SetClusterFo
 	}
 	f.save()
 	return &pb.SetClusterForwardersResponse{Held: int32(len(st.Hold)), Served: int32(len(st.Serve)),
-		AnswerRefusals: f.takeRefusals()}, nil
+		AnswerRefusals: f.takeRefusals(), ProxyRestarts: s.proxyRestarts().take(req.GetProxyRestartsSeenMs())}, nil
 }
 
 // Resume runs the saved table again after the agent (re)starts.
