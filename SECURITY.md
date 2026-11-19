@@ -19,4 +19,4 @@ every deplo install. Reports are handled together with the control plane:
 Every confirmed vulnerability gets a GitHub Security Advisory that credits the reporter, and the
 fix ships as a new agent release. Please keep the details private until the advisory is published.
 
-Full policy and scope: **[deplo/SECURITY.md](https://github.com/DeploCloud/deplo/blob/main/SECURITY.md)**.
+Full policy and scope: **[Deplo's security policy](https://github.com/DeploCloud/deplo/security/policy)**.

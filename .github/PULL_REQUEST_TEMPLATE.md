@@ -16,4 +16,4 @@
 - [ ] I added tests for the new behaviour, or said in the pull request why it cannot be tested
 - [ ] A new RPC is additive and gated behind a `Hello` capability, so an older control plane still works
 - [ ] This does not move port routing, compose rendering or Traefik labels into the agent (ADR-0006)
-- [ ] I read [CONTRIBUTING.md](../CONTRIBUTING.md) and signed the [CLA](https://github.com/DeploCloud/deplo/blob/main/CLA.md) (the bot asks below on your first pull request)
+- [ ] I read [CONTRIBUTING.md](../CONTRIBUTING.md) and signed the [CLA](https://github.com/DeploCloud/deplo/blob/main/.github/CLA.md) (the bot asks below on your first pull request)

@@ -68,7 +68,7 @@ period. Body only when the _why_ does not fit the title.
 deplo-agent is **AGPL-3.0-only**, and DeploCloud also offers Deplo under commercial terms.
 For that to keep working, every contribution has to arrive with the right to do both.
 
-That right is the **[CLA](https://github.com/DeploCloud/deplo/blob/main/CLA.md)**, and a
+That right is the **[CLA](https://github.com/DeploCloud/deplo/blob/main/.github/CLA.md)**, and a
 bot asks for it on your first pull request here: you read the document and post one
 sentence as a comment.
 
