@@ -2568,6 +2568,9 @@ message ProxyRestart {
   repeated string hosts = 2;
   // True when it ran at once: no quiet hour was left before the renewal window.
   bool urgent = 3;
+  // True when it took out of the store the certificate of an App that now runs elsewhere (hosts), so that this
+  // server never renews it.
+  bool dropped = 4;
 }
 
 message ReadProxyCertificatesRequest {

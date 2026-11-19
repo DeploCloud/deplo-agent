@@ -159,6 +159,8 @@ type forwarders struct {
 	filesLoaded bool
 	// renewTried is when a restart for a renewal last put nothing in the store: it waits before the next one.
 	renewTried time.Time
+	// staleSince is when the store was first seen holding the certificate of a passed-on App that runs elsewhere.
+	staleSince time.Time
 }
 
 func (s *Service) forwarders() *forwarders {

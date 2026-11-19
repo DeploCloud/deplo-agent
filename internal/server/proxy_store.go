@@ -98,21 +98,31 @@ func (f *forwarders) storeCerts() []proxyCert {
 func (f *forwarders) storePlan(ctx context.Context) storeMerge {
 	f.mu.Lock()
 	f.loadFiles()
-	files, answers := slices.Clone(f.files), slices.Clone(f.st.Answers)
+	files, answers, cluster := slices.Clone(f.files), slices.Clone(f.st.Answers), f.st.Cluster
 	f.mu.Unlock()
 	var m storeMerge
+	var running []string
 	if runs := f.ops().runs; runs != nil {
 		for _, a := range answers {
 			if a.Routes == nil {
 				continue
 			}
-			if here, err := runs(ctx, a.AppID); err == nil && !here {
+			here, err := runs(ctx, a.AppID)
+			if err != nil {
+				continue
+			}
+			if here {
+				running = append(running, a.Routes.hosts()...)
+				continue
+			}
+			// Only an App the leader runs elsewhere: one stopped on its own server keeps its certificate.
+			if _, others := f.s.leaseGuard().answerHolders(cluster, a.AppID); len(others) > 0 {
 				m.drop = append(m.drop, a.Routes.hosts()...)
 			}
 		}
 	}
 	for _, c := range files {
-		if !slices.ContainsFunc(c.Names, func(h string) bool { return slices.Contains(m.drop, h) }) {
+		if !slices.ContainsFunc(c.Names, func(h string) bool { return !slices.Contains(running, h) }) {
 			m.keep = append(m.keep, c)
 		}
 	}
@@ -258,7 +268,54 @@ func (s *Service) keepProxyCerts(ctx context.Context) {
 			s.traffic().sample(now)
 			s.forwarders().pruneFiles(ctx, now)
 			s.restartForRenewal(ctx, now)
+			s.dropStaleEntries(ctx, now)
 		}
+	}
+}
+
+// staleFor is how long the store must have held the certificate of an App that does not run here before the
+// proxy restarts to drop it: a move back within it needs no restart.
+var staleFor = 2 * time.Minute
+
+// dropStaleEntries restarts the proxy once its store holds the certificate of a passed-on App that runs elsewhere.
+// Kept, its renewal would go through on the ACME account's authorization from when the App ran here, with no
+// check at all, and the certificate would be issued twice (found on the lab, ADR-0048).
+func (s *Service) dropStaleEntries(ctx context.Context, now time.Time) {
+	f := s.forwarders()
+	plan := f.storePlan(ctx)
+	stale := false
+	for _, c := range f.storeCerts() {
+		stale = stale || slices.ContainsFunc(plan.drop, c.covers)
+	}
+	f.mu.Lock()
+	if !stale {
+		f.staleSince = time.Time{}
+		f.mu.Unlock()
+		return
+	}
+	if f.staleSince.IsZero() {
+		f.staleSince = now
+	}
+	since, tried := f.staleSince, f.renewTried
+	f.mu.Unlock()
+	if now.Sub(since) < staleFor || now.Sub(tried) < renewRetry {
+		return
+	}
+	if _, err := s.startProxy(ctx, s.traefikCompose(), true); err != nil {
+		fmt.Fprintf(os.Stderr, "deplo-agent: could not restart the proxy to drop a moved App's certificate: %v\n", err)
+	}
+	left := false
+	for _, c := range f.storeCerts() {
+		left = left || slices.ContainsFunc(plan.drop, c.covers)
+	}
+	f.mu.Lock()
+	f.staleSince = time.Time{}
+	if left {
+		f.renewTried = now
+	}
+	f.mu.Unlock()
+	if !left {
+		s.proxyRestarts().add(&pb.ProxyRestart{AtUnixMs: now.UnixMilli(), Hosts: plan.drop, Dropped: true})
 	}
 }
 
@@ -325,9 +382,10 @@ func (s *Service) proxyRestarts() *restartLog {
 }
 
 type savedRestart struct {
-	At     int64    `json:"at"`
-	Hosts  []string `json:"hosts"`
-	Urgent bool     `json:"urgent,omitempty"`
+	At      int64    `json:"at"`
+	Hosts   []string `json:"hosts"`
+	Urgent  bool     `json:"urgent,omitempty"`
+	Dropped bool     `json:"dropped,omitempty"`
 }
 
 func (l *restartLog) read() []savedRestart {
@@ -349,7 +407,7 @@ func (l *restartLog) write(list []savedRestart) {
 func (l *restartLog) add(r *pb.ProxyRestart) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	list := append(l.read(), savedRestart{At: r.GetAtUnixMs(), Hosts: r.GetHosts(), Urgent: r.GetUrgent()})
+	list := append(l.read(), savedRestart{At: r.GetAtUnixMs(), Hosts: r.GetHosts(), Urgent: r.GetUrgent(), Dropped: r.GetDropped()})
 	if len(list) > maxRestarts {
 		list = list[len(list)-maxRestarts:]
 	}
@@ -367,7 +425,7 @@ func (l *restartLog) take(seen int64) []*pb.ProxyRestart {
 	}
 	out := make([]*pb.ProxyRestart, 0, len(kept))
 	for _, r := range kept {
-		out = append(out, &pb.ProxyRestart{AtUnixMs: r.At, Hosts: r.Hosts, Urgent: r.Urgent})
+		out = append(out, &pb.ProxyRestart{AtUnixMs: r.At, Hosts: r.Hosts, Urgent: r.Urgent, Dropped: r.Dropped})
 	}
 	return out
 }
