@@ -677,6 +677,18 @@ func (g *leaseGuard) holders(cluster, kind, id string) (here bool, others []stri
 	return here, others
 }
 
+// answerHolders is holders for a passed-on domain: a server coming back answers none itself until what moved away
+// is gone, or its proxy would pass the check of a renewal its stale store asked for, issuing a certificate twice.
+func (g *leaseGuard) answerHolders(cluster, id string) (here bool, others []string) {
+	here, others = g.holders(cluster, "app", id)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if c := g.clusters[cluster]; c != nil && c.Returning {
+		here = false
+	}
+	return here, others
+}
+
 // locate says which member runs a workload now, and whether that is this one, from the placement the last renewal carried.
 // With replicas on several members this one is preferred, then the first in placement order.
 func (g *leaseGuard) locate(cluster, kind, id string) (member string, here, ok bool) {

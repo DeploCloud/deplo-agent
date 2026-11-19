@@ -614,3 +614,20 @@ func TestReturn_aLeaseThatRunsOutStopsTheStackItsOrderPlacedNowhereToo(t *testin
 		t.Fatalf("stopped %q, want the database it has and nothing that was never on this server", got)
 	}
 }
+
+// Found on the lab (ADR-0048): a server back from a power cut was placed its stateless App again for a moment, passed
+// the certificate check of the renewal its stale store asked for to itself, and a certificate was issued twice.
+func TestReturn_aServerComingBackAnswersNoPassedOnDomainItself(t *testing.T) {
+	f := newGuard(t)
+	f.g.Renew(orderFor(3))
+	f.clk.Add(5 * time.Minute)
+	rebooted(t)
+	g := f.reopen()
+	g.Renew(orderFor(4))
+	if here, _ := g.holders("clu_1", "app", "prj_1"); !here {
+		t.Fatal("the renewal does not place the App here: the case is not set up")
+	}
+	if here, _ := g.answerHolders("clu_1", "prj_1"); here {
+		t.Fatal("a server still coming back answers a passed-on domain itself")
+	}
+}
