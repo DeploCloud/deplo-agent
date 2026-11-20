@@ -536,6 +536,8 @@ func (z *clusterZones) publishViewLocked() {
 		for _, r := range c.Certs {
 			zn := bare(r.Zone)
 			v.held[zn] = true
+			// Its pair comes over DNS too, so one taken over goes in the store under the resolver that renews it.
+			v.dns[zn], v.dns["*."+zn] = true, true
 			for _, h := range r.Covered {
 				v.covered[h] = true
 			}

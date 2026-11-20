@@ -419,6 +419,9 @@ func TestZoneCert_aRenewerOrdersOnlyWhenNoValidCertificateExists(t *testing.T) {
 	if len(plan.keep) != 1 || !sameNames(plan.keep[0].Names, zoneNames()) {
 		t.Fatalf("the next start keeps %v", plan.keep)
 	}
+	if plan.resolverOf(plan.keep[0], proxyACME{Resolver: "letsencrypt", Resolvers: map[string]bool{zoneResolver: true}}) != zoneResolver {
+		t.Fatal("a pair taken over would be renewed over HTTP")
+	}
 	if _, err := h.s.startProxy(context.Background(), h.s.traefikCompose(), true); err != nil {
 		t.Fatal(err)
 	}
