@@ -121,11 +121,30 @@ func (f *forwarders) storePlan(ctx context.Context) storeMerge {
 			}
 		}
 	}
+	zv := f.s.currentZoneView()
 	for _, c := range files {
+		if zone := zv.zoneOf(c); zone != "" {
+			// A zone's certificate goes into the store only where it is renewed; elsewhere it stays a file.
+			if zv.renew[zone] {
+				m.keep = append(m.keep, c)
+			}
+			continue
+		}
 		if !slices.ContainsFunc(c.Names, func(h string) bool { return !slices.Contains(running, h) }) {
 			m.keep = append(m.keep, c)
 		}
 	}
+	for zone := range zv.zones {
+		if zv.renew[zone] {
+			m.protect = append(m.protect, zoneCertNames(zone))
+		} else {
+			m.dropSets = append(m.dropSets, zoneCertNames(zone))
+		}
+	}
+	if len(zv.covered) > 0 {
+		m.covered = zv.covered
+	}
+	m.dns = zv.dns
 	return m
 }
 
@@ -147,6 +166,13 @@ func (f *forwarders) pruneFiles(ctx context.Context, now time.Time) {
 			gone = append(gone, c)
 			continue
 		}
+		if zone := f.s.currentZoneView().zoneOf(c); zone != "" {
+			// A zone's certificate stays while the zone has one, whichever App runs here.
+			if !f.s.currentZoneView().held[zone] {
+				gone = append(gone, c)
+			}
+			continue
+		}
 		if runs == nil || now.Sub(c.installed) < staleAfter {
 			continue
 		}
@@ -165,6 +191,25 @@ func (f *forwarders) pruneFiles(ctx context.Context, now time.Time) {
 			fmt.Fprintf(os.Stderr, "deplo-agent: proxy certificates: could not rewrite the routes file: %v\n", err)
 		}
 	}
+}
+
+// keepAsFiles puts pairs in the routes file, each unless a file as new already covers the same names.
+func (f *forwarders) keepAsFiles(list []proxyCert) error {
+	if len(list) == 0 {
+		return nil
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.loadFiles()
+	for _, c := range list {
+		if slices.ContainsFunc(f.files, func(o proxyCert) bool { return sameNames(o.Names, c.Names) && !o.NotAfter.Before(c.NotAfter) }) {
+			continue
+		}
+		f.files = slices.DeleteFunc(f.files, func(o proxyCert) bool { return sameNames(o.Names, c.Names) })
+		c.installed = time.Now()
+		f.files = append(f.files, c)
+	}
+	return f.writeAnswerRoutes()
 }
 
 // forgetFiles takes pairs out of the routes file: ones now in the store (the proxy is stopped then), or pruned.
@@ -221,13 +266,18 @@ func (s *Service) mergeStore(ctx context.Context, path string, plan storeMerge) 
 		fmt.Fprintf(os.Stderr, "deplo-agent: proxy certificates: %v\n", err)
 		return nil
 	}
-	if plan.apply(st, acme.Resolver) {
+	changed, zones := plan.apply(st, acme)
+	if changed {
 		if err := st.write(acme.Store); err != nil {
 			fmt.Fprintf(os.Stderr, "deplo-agent: proxy certificates: could not write the store: %v\n", err)
 			return nil
 		}
 	}
 	if err := s.forwarders().forgetFiles(plan.keep); err != nil {
+		fmt.Fprintf(os.Stderr, "deplo-agent: proxy certificates: could not rewrite the routes file: %v\n", err)
+	}
+	// A zone's certificate this server no longer renews keeps being served, from the routes file.
+	if err := s.forwarders().keepAsFiles(zones); err != nil {
 		fmt.Fprintf(os.Stderr, "deplo-agent: proxy certificates: could not rewrite the routes file: %v\n", err)
 	}
 	var hosts []string
@@ -284,8 +334,14 @@ func (s *Service) dropStaleEntries(ctx context.Context, now time.Time) {
 	f := s.forwarders()
 	plan := f.storePlan(ctx)
 	stale := false
+	var zoneHosts []string
 	for _, c := range f.storeCerts() {
-		stale = stale || slices.ContainsFunc(plan.drop, c.covers)
+		if plan.drops(c) {
+			stale = true
+			if !slices.ContainsFunc(plan.drop, c.covers) {
+				zoneHosts = append(zoneHosts, c.Names...)
+			}
+		}
 	}
 	f.mu.Lock()
 	if !stale {
@@ -306,7 +362,7 @@ func (s *Service) dropStaleEntries(ctx context.Context, now time.Time) {
 	}
 	left := false
 	for _, c := range f.storeCerts() {
-		left = left || slices.ContainsFunc(plan.drop, c.covers)
+		left = left || plan.drops(c)
 	}
 	f.mu.Lock()
 	f.staleSince = time.Time{}
@@ -315,7 +371,11 @@ func (s *Service) dropStaleEntries(ctx context.Context, now time.Time) {
 	}
 	f.mu.Unlock()
 	if !left {
-		s.proxyRestarts().add(&pb.ProxyRestart{AtUnixMs: now.UnixMilli(), Hosts: plan.drop, Dropped: true})
+		if len(zoneHosts) > 0 {
+			s.proxyRestarts().add(&pb.ProxyRestart{AtUnixMs: now.UnixMilli(), Hosts: zoneHosts, Dropped: true, Zone: true})
+		} else {
+			s.proxyRestarts().add(&pb.ProxyRestart{AtUnixMs: now.UnixMilli(), Hosts: plan.drop, Dropped: true})
+		}
 	}
 }
 

@@ -2582,6 +2582,9 @@ message ProxyRestart {
   // True when it took out of the store the certificate of an App that now runs elsewhere (hosts), so that this
   // server never renews it.
   bool dropped = 4;
+  // With dropped: what went is a zone's certificate another server renews, or certificates of names a zone's
+  // certificate now serves (ADR-0049).
+  bool zone = 5;
 }
 
 message ReadProxyCertificatesRequest {
@@ -2690,6 +2693,35 @@ message SetClusterZoneRequest {
   // leaves the answers (5 to 60 s); 0 is the default, 30 s and 10 s.
   uint32 answer_ttl_seconds = 6;
   uint32 drop_after_seconds = 7;
+  // The certificate checks over DNS the cluster's proxies may answer (ADR-0049 phase 3), the same list for every
+  // member; an agent without Hello "dns.challenge" ignores them.
+  repeated ClusterZoneChallenge challenges = 8;
+  // Each zone's own certificate and this server's part in it.
+  repeated ClusterZoneCertificate certificates = 9;
+}
+
+// One name a certificate check sets a TXT record at, and the only member whose proxy may set it.
+message ClusterZoneChallenge {
+  // What the proxy asks for, "_acme-challenge.shop.example.com", and the name inside the zone that answers it: the
+  // same name inside the zone, the one its CNAME points at for a name outside it.
+  string asked = 1;
+  string at = 2;
+  string owner_fingerprint = 3;
+}
+
+// A zone's own certificate, for the zone and every name one label below it.
+message ClusterZoneCertificate {
+  string zone = 1;
+  // This server orders and renews it; every other member only holds it.
+  bool renew = 2;
+  // No valid certificate exists anywhere: the renewer orders one.
+  bool order = 3;
+  // The certificate Deplo holds, by the SHA-256 of its leaf, and the pair only when this server lacks it.
+  string sha256 = 4;
+  string cert_pem = 5;
+  string key_pem = 6;
+  // The hostnames it serves: a certificate of their own leaves this server's proxy.
+  repeated string covered = 7;
 }
 
 message ClusterZone {
@@ -2726,6 +2758,23 @@ message SetClusterZoneResponse {
   int32 heard = 5;
   // The location table it places visitors with, by the SHA-256 of the table; empty when it holds none.
   string geo_sha256 = 6;
+  // Each zone's certificate as this server holds it.
+  repeated ClusterZoneCertificateState certificates = 7;
+}
+
+message ClusterZoneCertificateState {
+  string zone = 1;
+  // The newest valid pair this server holds, by the SHA-256 of its leaf; empty for none.
+  string sha256 = 2;
+  int64 not_after_unix_ms = 3;
+  // The pair itself, only when it is not the one Deplo sent.
+  string cert_pem = 4;
+  string key_pem = 5;
+  // The proxy's last failed order or renewal of it, as the proxy logged it; empty once a newer pair is held.
+  string error = 6;
+  int64 error_at_unix_ms = 7;
+  // The proxy is asked to order it now.
+  bool ordering = 8;
 }
 
 message SetGeoTableRequest {

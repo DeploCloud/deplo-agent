@@ -80,6 +80,18 @@ type answerHTTPRouter struct {
 	EntryPoints []string `json:"entryPoints"`
 	Service     string   `json:"service"`
 	Priority    int64    `json:"priority,omitempty"`
+	// TLS is only this agent's own, on the router that orders a zone's certificate. Never from a table.
+	TLS *answerRouterTLS `json:"tls,omitempty"`
+}
+
+type answerRouterTLS struct {
+	CertResolver string            `json:"certResolver"`
+	Domains      []answerTLSDomain `json:"domains"`
+}
+
+type answerTLSDomain struct {
+	Main string   `json:"main"`
+	SANs []string `json:"sans"`
 }
 
 type answerHTTPService struct {
@@ -140,7 +152,8 @@ func parseAnswerRoutes(e answer, raw string) (*answerRoutes, error) {
 		}
 	}
 	for name, rt := range r.HTTP.Routers {
-		if !own(name) || !answerWebRule.MatchString(rt.Rule) || !slices.Equal(rt.EntryPoints, []string{"web"}) || rt.Priority < 0 {
+		if !own(name) || !answerWebRule.MatchString(rt.Rule) || !slices.Equal(rt.EntryPoints, []string{"web"}) || rt.Priority < 0 ||
+			rt.TLS != nil {
 			return nil, fmt.Errorf("HTTP router %q is not the certificate checks of its hostnames on web", name)
 		}
 		if _, ok := r.HTTP.Services[rt.Service]; !ok {
@@ -164,8 +177,8 @@ func (r *answerRoutes) hosts() []string {
 }
 
 // renderAnswerRoutes is the proxy's routes file: every App's checked routes in one document, written from
-// what was checked rather than from what was sent. Names are the App's own, so nothing collides.
-func renderAnswerRoutes(answers []answer, files []proxyCert) []byte {
+// what was checked rather than from what was sent, and this agent's own zone routers. Names never collide.
+func renderAnswerRoutes(answers []answer, files []proxyCert, zones map[string]answerHTTPRouter) []byte {
 	all := answerRoutes{TCP: &answerTCP{Routers: map[string]answerTCPRouter{}, Services: map[string]answerTCPService{}},
 		HTTP: &answerHTTP{Routers: map[string]answerHTTPRouter{}, Services: map[string]answerHTTPService{}}}
 	for _, e := range answers {
@@ -189,13 +202,16 @@ func renderAnswerRoutes(answers []answer, files []proxyCert) []byte {
 			}
 		}
 	}
+	for k, v := range zones {
+		all.HTTP.Routers[k] = v
+	}
 	for _, c := range files {
 		if all.TLS == nil {
 			all.TLS = &answerTLSFiles{}
 		}
 		all.TLS.Certificates = append(all.TLS.Certificates, answerTLSFile{CertFile: c.Cert, KeyFile: c.Key})
 	}
-	if len(all.TCP.Routers) == 0 && all.TLS == nil {
+	if len(all.TCP.Routers) == 0 && len(all.HTTP.Routers) == 0 && all.TLS == nil {
 		return []byte("{}\n")
 	}
 	if len(all.TCP.Routers) == 0 {

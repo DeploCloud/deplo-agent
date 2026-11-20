@@ -39,3 +39,30 @@ func dialInNetwork(ctx context.Context, pid int, addr string) (net.Conn, error) 
 	r := <-done
 	return r.c, r.err
 }
+
+// listenInNetwork listens on addr inside the network of process pid: a socket stays in the network it was made in,
+// so only a process there reaches it. The thread that entered it ends with its goroutine, as dialInNetwork's does.
+func listenInNetwork(pid int, addr string) (net.Listener, error) {
+	type result struct {
+		ln  net.Listener
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		runtime.LockOSThread()
+		ns, err := os.Open(fmt.Sprintf("/proc/%d/ns/net", pid))
+		if err != nil {
+			done <- result{nil, err}
+			return
+		}
+		defer ns.Close()
+		if err := unix.Setns(int(ns.Fd()), unix.CLONE_NEWNET); err != nil {
+			done <- result{nil, err}
+			return
+		}
+		ln, err := net.Listen("tcp", addr)
+		done <- result{ln, err}
+	}()
+	r := <-done
+	return r.ln, r.err
+}

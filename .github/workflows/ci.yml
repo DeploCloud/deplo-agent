@@ -64,6 +64,13 @@ jobs:
           CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/dnszone.test" ./internal/dnszone
           sudo "$RUNNER_TEMP/dnszone.test" -test.run 'TestProcess_|TestSupervisor_' -test.count=1 -test.v | tee "$RUNNER_TEMP/dnszone.log"
           grep -q -- '--- PASS: TestProcess_hasNoneOfTheAgentsPrivileges' "$RUNNER_TEMP/dnszone.log"
+      # The certificate checks' endpoint listens inside the proxy's own network only (ADR-0049 phase 3).
+      - name: The checks' endpoint is reachable from the proxy's network alone
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/server.test" ./internal/server
+          sudo "$RUNNER_TEMP/server.test" -test.run 'TestChallenge_listensOnlyInTheProxysNetwork' -test.count=1 -test.v | tee "$RUNNER_TEMP/server.log"
+          grep -q -- '--- PASS: TestChallenge_listensOnlyInTheProxysNetwork' "$RUNNER_TEMP/server.log"
       - name: Fuzz the name server's packet path
         run: go test ./internal/dnszone -run '^$' -fuzz '^FuzzReply$' -fuzztime 30s
       - name: Fuzz the client subnet a resolver sends

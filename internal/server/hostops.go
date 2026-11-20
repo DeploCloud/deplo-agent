@@ -244,12 +244,19 @@ func (s *Service) bringUpTraefik(ctx context.Context, path string, restartOnly b
 		if res.Code != 0 {
 			return fmt.Errorf("could not restart Traefik: %s", firstLine(res.Stderr))
 		}
+		s.challenge().rebind()
 		return nil
 	}
 	// A proxy that mounts the routes file of its answers (ADR-0048) finds one: docker would make a missing one a
 	// directory. One that does not is left without it.
 	if p := filepath.Join(filepath.Dir(path), answerRoutesFile); mountsAnswerRoutes(path) && !regularFile(p) {
 		_ = os.WriteFile(p, []byte("{}\n"), 0o600)
+	}
+	// So does one whose certificate checks go through this agent (ADR-0049): its secret exists before it starts.
+	if raw, err := os.ReadFile(path); err == nil && strings.Contains(string(raw), challengeSecretFile) {
+		if err := ensureChallengeSecret(filepath.Join(filepath.Dir(path), challengeSecretFile)); err != nil {
+			return fmt.Errorf("could not make the proxy's certificate check secret: %v", err)
+		}
 	}
 	res, err := dockercli.Run(ctx, 180*time.Second,
 		"compose", "-f", path, "up", "-d", "--force-recreate", "--remove-orphans")
@@ -264,6 +271,7 @@ func (s *Service) bringUpTraefik(ctx context.Context, path string, restartOnly b
 			return fmt.Errorf("could not reconnect Traefik to %s: %v", n, err)
 		}
 	}
+	s.challenge().rebind()
 	return nil
 }
 

@@ -337,14 +337,17 @@ func TestProcess_hasNoneOfTheAgentsPrivileges(t *testing.T) {
 		t.Fatal("the name server wrote into its root")
 	}
 
-	// The real name server, as the agent starts it, placing visitors with the table.
+	// The real name server, as the agent starts it, placing visitors with the table and answering a check's record.
 	s, _ = superviseWith(t, "serve", geo)
 	addr := listeningAt(t, s)
-	if err := s.SetTable(geoTable()); err != nil {
+	tb := geoTable()
+	tb.Zones[0].TXT = []TXT{{Name: "_acme-challenge.go.example.com", Values: []string{"check-value"}}}
+	if err := s.SetTable(tb); err != nil {
 		t.Fatal(err)
 	}
 	eventually(t, 5*time.Second, "an answer", func() bool { return answers(addr, "udp") == 3 })
 	eventually(t, 5*time.Second, "Milan first", func() bool { return nearestFrom(addr, geotest.MilanV4) == "203.0.113.1 203.0.113.2" })
+	eventually(t, 5*time.Second, "the check's record", func() bool { return checkRecord(addr) == "check-value" })
 	pid := s.PID()
 	st := statusOf(t, pid)
 	for k, want := range map[string]string{"Uid": "65534 65534 65534 65534", "Gid": "65534 65534 65534 65534",
@@ -365,6 +368,16 @@ func TestProcess_hasNoneOfTheAgentsPrivileges(t *testing.T) {
 	if len(entries) != 1 || entries[0].Name() != "deplo-agent" {
 		t.Errorf("its root holds %v", entries)
 	}
+}
+
+// checkRecord is the TXT record the name server answers at the zone's certificate check.
+func checkRecord(addr string) string {
+	c := &dns.Client{Timeout: 500 * time.Millisecond}
+	r, _, err := c.Exchange(query("_acme-challenge.go.example.com.", dns.TypeTXT), addr)
+	if err != nil || r.Rcode != dns.RcodeSuccess || len(r.Answer) != 1 {
+		return ""
+	}
+	return strings.Join(r.Answer[0].(*dns.TXT).Txt, "")
 }
 
 // nearestFrom asks for the A records as a resolver for a client in subnet does, and says them in the order given.

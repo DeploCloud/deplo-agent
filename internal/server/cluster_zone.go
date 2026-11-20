@@ -64,6 +64,11 @@ type zoneCluster struct {
 	DropAfter   uint32          `json:"dropAfter"`
 	Serial      uint32          `json:"serial"`
 	Last        *dnszone.Agreed `json:"last,omitempty"`
+	// Phase 3: the certificate checks the cluster's proxies may answer, and this server's part in each zone's
+	// certificate. The pairs Deplo sent with them are never kept here.
+	Challenges []zoneChallenge `json:"challenges,omitempty"`
+	Certs      []zoneCertRole  `json:"certs,omitempty"`
+	pairs      map[string]proxyCert
 }
 
 type zoneFile struct {
@@ -74,6 +79,15 @@ type clusterZones struct {
 	s  *Service
 	mu sync.Mutex
 	st zoneFile
+	// txt is every certificate check record this server answers, per cluster and per member that set it.
+	txt map[string]map[string]txtState
+	// certs is how each zone's certificate went on this server's proxy, by zone.
+	certs map[string]*zoneCertRun
+	// seq numbers this server's own record sets, seqs the last one taken from each member; tended is the last
+	// look at the zones' certificates.
+	seq    int64
+	seqs   map[string]int64
+	tended time.Time
 	// geo is the digest of the location table on disk, "" for none; geoRead says it was looked at.
 	geo      string
 	geoRead  bool
@@ -87,7 +101,8 @@ type clusterZones struct {
 
 func (s *Service) zones() *clusterZones {
 	s.zoneOnce.Do(func() {
-		z := &clusterZones{s: s, verdicts: map[string]dnszone.Verdict{}}
+		z := &clusterZones{s: s, verdicts: map[string]dnszone.Verdict{}, txt: map[string]map[string]txtState{},
+			certs: map[string]*zoneCertRun{}}
 		if s.agentDir != "" {
 			if raw, err := os.ReadFile(z.file()); err == nil {
 				_ = json.Unmarshal(raw, &z.st)
@@ -97,6 +112,7 @@ func (s *Service) zones() *clusterZones {
 			z.st.Clusters = map[string]*zoneCluster{}
 		}
 		s.zone = z
+		z.publishViewLocked()
 	})
 	return s.zone
 }
@@ -216,8 +232,11 @@ func validateZone(req *pb.SetClusterZoneRequest) (*zoneCluster, error) {
 		}
 		c.Zones = append(c.Zones, e)
 	}
+	if err := validateZoneCerts(req, c, seen); err != nil {
+		return nil, err
+	}
 	// The process refuses a table that does not hold together: refuse it here, in the RPC's reply.
-	if err := dnszone.CheckTable(&dnszone.Table{Zones: c.tableZones(dnszone.Verdict{State: dnszone.StateFail})}); err != nil {
+	if err := dnszone.CheckTable(&dnszone.Table{Zones: c.tableZones(dnszone.Verdict{State: dnszone.StateFail}, nil)}); err != nil {
 		return nil, err
 	}
 	return c, nil
@@ -232,8 +251,8 @@ func (c *zoneCluster) addrsOf(fp string) dnszone.Addrs {
 	return dnszone.Addrs{}
 }
 
-// tableZones is what the process answers for this cluster's zones under a verdict.
-func (c *zoneCluster) tableZones(v dnszone.Verdict) []dnszone.Zone {
+// tableZones is what the process answers for this cluster's zones under a verdict, with the check records set.
+func (c *zoneCluster) tableZones(v dnszone.Verdict, txt map[string]txtState) []dnszone.Zone {
 	ns := make([]dnszone.Addrs, 0, len(c.NameServers))
 	for _, fp := range c.NameServers {
 		ns = append(ns, c.addrsOf(fp))
@@ -242,7 +261,7 @@ func (c *zoneCluster) tableZones(v dnszone.Verdict) []dnszone.Zone {
 	out := make([]dnszone.Zone, 0, len(c.Zones))
 	for _, e := range c.Zones {
 		out = append(out, dnszone.Zone{Name: e.Name, Names: e.Names, NameServers: ns, Fail: v.State == dnszone.StateFail,
-			Servers: v.Addrs, Near: near, TTL: c.TTL, Serial: c.Serial})
+			Servers: v.Addrs, Near: near, TXT: c.records(e.Name, txt), TTL: c.TTL, Serial: c.Serial})
 	}
 	return out
 }
@@ -314,6 +333,7 @@ func (s *Service) SetClusterZone(_ context.Context, req *pb.SetClusterZoneReques
 	if c == nil {
 		delete(z.st.Clusters, id)
 		delete(z.verdicts, id)
+		delete(z.txt, id)
 	} else {
 		if old != nil {
 			c.Last, c.Serial = old.Last, old.Serial
@@ -324,16 +344,25 @@ func (s *Service) SetClusterZone(_ context.Context, req *pb.SetClusterZoneReques
 		z.st.Clusters[id] = c
 	}
 	z.save()
+	z.publishViewLocked()
 	z.ensureLocked()
 	sup := z.sup
 	z.mu.Unlock()
 	if sup != nil {
 		sup.Rebind()
 	}
+	if c != nil {
+		s.installZonePairs(c)
+		c.pairs = nil
+	}
+	s.refreshZoneRoutes()
 	z.mu.Lock()
 	defer z.mu.Unlock()
 	z.pushLocked(time.Now())
 	resp := &pb.SetClusterZoneResponse{}
+	if c != nil {
+		resp.Certificates = z.certStatesLocked(c, time.Now())
+	}
 	if z.sup != nil {
 		resp.Listening, resp.Problem = z.sup.Listening()
 	}
@@ -459,6 +488,7 @@ func (z *clusterZones) loop(stop, done chan struct{}, sup *dnszone.Supervisor) {
 			z.mu.Lock()
 			z.pushLocked(now)
 			z.mu.Unlock()
+			z.s.tendZoneCerts(now)
 		}
 	}
 }
@@ -493,6 +523,7 @@ func (z *clusterZones) pushLocked(now time.Time) {
 	var table dnszone.Table
 	taken := map[string]string{}
 	agreed := false
+	z.pruneTXTLocked(now)
 	for _, id := range ids {
 		c := z.st.Clusters[id]
 		drop := time.Duration(c.DropAfter) * time.Second
@@ -508,7 +539,7 @@ func (z *clusterZones) pushLocked(now time.Time) {
 			log.Printf("deplo-agent: cluster %s: the DNS zone answers %s, hearing %d of %d servers", id, v.State, v.Heard, v.Of)
 		}
 		z.verdicts[id] = v
-		for _, zn := range c.tableZones(v) {
+		for _, zn := range c.tableZones(v, z.txt[id]) {
 			if other, dup := taken[zn.Name]; dup {
 				log.Printf("deplo-agent: zone %s is given to clusters %s and %s; %s answers it", zn.Name, other, id, other)
 				continue

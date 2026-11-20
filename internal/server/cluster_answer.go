@@ -251,7 +251,7 @@ func (f *forwarders) writeAnswerRoutes() error {
 	}
 	path := filepath.Join(dir, answerRoutesFile)
 	f.loadFiles()
-	want := renderAnswerRoutes(f.st.Answers, f.files)
+	want := renderAnswerRoutes(f.st.Answers, f.files, f.zoneRoutersLocked())
 	if have, err := os.ReadFile(path); err == nil && bytes.Equal(have, want) {
 		return os.Chmod(path, 0o600)
 	}
