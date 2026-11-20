@@ -327,18 +327,24 @@ func (s *Supervisor) startProcess(path string, files []*os.File, kinds string) (
 			ExtraFiles:  files,
 			SysProcAttr: procAttr(s.cfg.Root, !s.noNS),
 		}
-		stdin, err := cmd.StdinPipe()
+		// An os.Pipe of our own, not StdinPipe: its write end takes a deadline, so a stuck process cannot hold the agent.
+		r, stdin, err := os.Pipe()
 		if err != nil {
 			return nil, nil, nil, err
 		}
+		cmd.Stdin = r
 		stderr, err := cmd.StderrPipe()
 		if err != nil {
+			r.Close()
+			stdin.Close()
 			return nil, nil, nil, err
 		}
 		err = cmd.Start()
+		r.Close()
 		if err == nil {
 			return cmd, stdin, stderr, nil
 		}
+		stdin.Close()
 		if s.noNS || cmd.SysProcAttr.Cloneflags == 0 || !namespaceRefused(err) {
 			return nil, nil, nil, err
 		}
