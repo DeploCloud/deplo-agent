@@ -10,6 +10,7 @@ require (
 	github.com/creack/pty v1.1.24
 	github.com/google/nftables v0.3.0
 	github.com/hashicorp/yamux v0.1.2
+	github.com/miekg/dns v1.1.73
 	github.com/minio/minio-go/v7 v7.4.1
 	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/sys v0.48.0

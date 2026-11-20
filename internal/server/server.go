@@ -19,6 +19,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
+	"github.com/DeploCloud/deplo-agent/internal/dnszone"
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 	"github.com/DeploCloud/deplo-agent/internal/hostinfo"
 	"github.com/DeploCloud/deplo-agent/internal/hostmetrics"
@@ -146,6 +147,8 @@ var Capabilities = []string{
 	"cluster.images.registry",
 	// ReadProxyCertificates, and a failover's certificates installed as files then moved into the proxy's store.
 	"cluster.answers.certificates",
+	// SetClusterZone: the cluster's DNS zone, answered by an unprivileged process on port 53 (ADR-0049).
+	"dns.zone",
 }
 
 // AgentVersion is the version this agent reports over Hello.
@@ -217,6 +220,12 @@ type Service struct {
 	// The cluster's private network; see cluster_mesh.go.
 	netOnce sync.Once
 	cnet    *clusterNetwork
+
+	// The cluster's DNS zone; see cluster_zone.go. Tests replace what the network heard and how the process starts.
+	zoneOnce   sync.Once
+	zone       *clusterZones
+	zoneHeard  func() (map[string]time.Time, time.Time)
+	zoneConfig func(*dnszone.Config)
 }
 
 type stackLock struct {

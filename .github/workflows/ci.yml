@@ -56,6 +56,16 @@ jobs:
           CGO_ENABLED: "0"
           # A runner serves nothing, so the tests that drive a real Docker daemon run here and nowhere by accident.
           DEPLO_AGENT_TEST_REAL_DOCKER: "1"
+      # The cluster's name server parses packets from anyone, so it runs with none of the agent's privileges
+      # (ADR-0049). The agent runs as root, so this does too: the test fails if it was skipped.
+      - name: The name server has none of the agent's privileges
+        run: |
+          set -euo pipefail
+          CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/dnszone.test" ./internal/dnszone
+          sudo "$RUNNER_TEMP/dnszone.test" -test.run 'TestProcess_|TestSupervisor_' -test.count=1 -test.v | tee "$RUNNER_TEMP/dnszone.log"
+          grep -q -- '--- PASS: TestProcess_hasNoneOfTheAgentsPrivileges' "$RUNNER_TEMP/dnszone.log"
+      - name: Fuzz the name server's packet path
+        run: go test ./internal/dnszone -run '^$' -fuzz '^FuzzReply$' -fuzztime 30s
       - name: Verify it builds static for both target arches
         run: |
           set -euo pipefail
@@ -74,7 +84,9 @@ jobs:
         with:
           repository: DeploCloud/deplo
           path: panel
-          sparse-checkout: lib/deploy/answer-routes.golden.json
+          sparse-checkout: |
+            lib/deploy/answer-routes.golden.json
+            lib/deploy/cluster-zone.golden.json
           sparse-checkout-cone-mode: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -89,7 +101,7 @@ jobs:
             echo "::notice::the panel's reference differs from this agent's: the panel has not caught up yet"
           fi
       - name: This agent accepts what the panel renders today
-        run: go test ./internal/server -run 'TestAnswers_thePanelsReferencePasses' -count=1 -v
+        run: go test ./internal/server -run 'TestAnswers_thePanelsReferencePasses|TestZone_thePanelsRequestPasses' -count=1 -v
         env:
           CGO_ENABLED: "0"
           DEPLO_REPO: ${{ github.workspace }}/panel

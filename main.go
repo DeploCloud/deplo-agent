@@ -20,6 +20,7 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/bootstrap"
 	"github.com/DeploCloud/deplo-agent/internal/capture"
+	"github.com/DeploCloud/deplo-agent/internal/dnszone"
 	"github.com/DeploCloud/deplo-agent/internal/forwarder"
 	"github.com/DeploCloud/deplo-agent/internal/link"
 	"github.com/DeploCloud/deplo-agent/internal/reap"
@@ -30,6 +31,10 @@ func main() {
 	// The same binary, mounted into the screenshot browser's container.
 	if len(os.Args) > 1 && os.Args[1] == "capture" {
 		os.Exit(capture.Main(os.Stdin, os.Stdout))
+	}
+	// The same binary, started unprivileged as the cluster's name server (ADR-0049).
+	if len(os.Args) > 1 && os.Args[1] == "dns" {
+		os.Exit(dnszone.Main(os.Stdin, os.Stderr))
 	}
 	// The same binary, mounted into a name forwarder's container (#200).
 	if len(os.Args) > 1 && os.Args[1] == "forward" {
@@ -119,6 +124,7 @@ func main() {
 	svc.StartCluster()
 	svc.StartClusterMember()
 	svc.StartClusterNetwork()
+	svc.StartClusterZone()
 	if certMgr != nil {
 		svc.EnableCertRenewal(certMgr)
 	}

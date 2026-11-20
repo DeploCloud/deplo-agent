@@ -1,0 +1,405 @@
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"net/netip"
+	"os"
+	"path/filepath"
+	"reflect"
+	"sort"
+	"sync"
+	"time"
+
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+
+	pb "github.com/DeploCloud/deplo-agent/gen"
+	"github.com/DeploCloud/deplo-agent/internal/bootstrap"
+	"github.com/DeploCloud/deplo-agent/internal/dnszone"
+)
+
+// A cluster's DNS zone (ADR-0049): this agent decides who is healthy and the majority, and hands the answers to an
+// unprivileged name server process it starts (internal/dnszone). https://deplo.build/docs/operations/clusters/dns-zone
+const (
+	zoneDefaultTTL   = 30
+	zoneDefaultDrop  = 10
+	maxZoneServers   = 64
+	maxZoneAddresses = 8
+	zoneTick         = time.Second
+	zoneRebindEvery  = 10 * time.Second
+)
+
+type zoneMember struct {
+	Fingerprint string   `json:"fingerprint"`
+	V4          []string `json:"v4,omitempty"`
+	V6          []string `json:"v6,omitempty"`
+	Emptying    bool     `json:"emptying,omitempty"`
+}
+
+type zoneEntry struct {
+	Name  string   `json:"name"`
+	Names []string `json:"names"`
+}
+
+// zoneCluster is what Deplo said for one cluster, and the last set this server agreed on for it.
+type zoneCluster struct {
+	Self        string          `json:"self"`
+	Zones       []zoneEntry     `json:"zones"`
+	Members     []zoneMember    `json:"members"`
+	NameServers []string        `json:"nameServers"`
+	TTL         uint32          `json:"ttl"`
+	DropAfter   uint32          `json:"dropAfter"`
+	Serial      uint32          `json:"serial"`
+	Last        *dnszone.Agreed `json:"last,omitempty"`
+}
+
+type zoneFile struct {
+	Clusters map[string]*zoneCluster `json:"clusters"`
+}
+
+type clusterZones struct {
+	s        *Service
+	mu       sync.Mutex
+	st       zoneFile
+	sup      *dnszone.Supervisor
+	verdicts map[string]dnszone.Verdict
+	sent     []byte
+	since    time.Time
+	stop     chan struct{}
+	done     chan struct{}
+}
+
+func (s *Service) zones() *clusterZones {
+	s.zoneOnce.Do(func() {
+		z := &clusterZones{s: s, verdicts: map[string]dnszone.Verdict{}}
+		if s.agentDir != "" {
+			if raw, err := os.ReadFile(z.file()); err == nil {
+				_ = json.Unmarshal(raw, &z.st)
+			}
+		}
+		if z.st.Clusters == nil {
+			z.st.Clusters = map[string]*zoneCluster{}
+		}
+		s.zone = z
+	})
+	return s.zone
+}
+
+func (z *clusterZones) file() string { return filepath.Join(z.s.agentDir, "cluster-zone.json") }
+
+func (z *clusterZones) save() {
+	raw, err := json.Marshal(z.st)
+	if err == nil {
+		err = writeFileAtomic(z.file(), raw, 0o600)
+	}
+	if err != nil {
+		log.Printf("deplo-agent: could not keep the cluster's DNS zone in %s: %v", z.file(), err)
+	}
+}
+
+// StartClusterZone answers again for the zones kept on disk, with Deplo down or not.
+func (s *Service) StartClusterZone() {
+	if s.agentDir == "" {
+		return
+	}
+	z := s.zones()
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	z.ensureLocked()
+}
+
+func zoneAddr(raw string) (netip.Addr, bool) {
+	a, err := netip.ParseAddr(raw)
+	if err != nil {
+		return a, false
+	}
+	a = a.Unmap()
+	return a, a.Zone() == "" && a.IsGlobalUnicast()
+}
+
+func validateZone(req *pb.SetClusterZoneRequest) (*zoneCluster, error) {
+	if !fwdID.MatchString(req.GetClusterId()) {
+		return nil, errors.New("a cluster id is required")
+	}
+	if len(req.GetZones()) == 0 {
+		return nil, nil
+	}
+	c := &zoneCluster{Self: req.GetSelfFingerprint(), TTL: req.GetAnswerTtlSeconds(), DropAfter: req.GetDropAfterSeconds()}
+	switch {
+	case c.TTL == 0:
+		c.TTL = zoneDefaultTTL
+	case c.TTL < 10 || c.TTL > 300:
+		return nil, fmt.Errorf("answers live 10 to 300 s, not %d", c.TTL)
+	}
+	switch {
+	case c.DropAfter == 0:
+		c.DropAfter = zoneDefaultDrop
+	case c.DropAfter < 5 || c.DropAfter > 60:
+		return nil, fmt.Errorf("a silent server leaves the answers after 5 to 60 s, not %d", c.DropAfter)
+	}
+	if n := len(req.GetServers()); n == 0 || n > maxZoneServers {
+		return nil, fmt.Errorf("1 to %d servers, not %d", maxZoneServers, n)
+	}
+	seen := map[string]bool{}
+	for _, srv := range req.GetServers() {
+		fp := srv.GetFingerprint()
+		if !validFingerprint(fp) || seen[fp] {
+			return nil, fmt.Errorf("%q is not one certificate fingerprint", fp)
+		}
+		seen[fp] = true
+		if len(srv.GetAddresses()) > maxZoneAddresses {
+			return nil, fmt.Errorf("at most %d addresses for one server", maxZoneAddresses)
+		}
+		m := zoneMember{Fingerprint: fp, Emptying: srv.GetEmptying()}
+		for _, raw := range srv.GetAddresses() {
+			a, ok := zoneAddr(raw)
+			if !ok {
+				return nil, fmt.Errorf("%q is not an address a server answers on", raw)
+			}
+			if a.Is4() {
+				m.V4 = append(m.V4, a.String())
+			} else {
+				m.V6 = append(m.V6, a.String())
+			}
+		}
+		c.Members = append(c.Members, m)
+	}
+	if !seen[c.Self] {
+		return nil, errors.New("this server is not one of the cluster's servers")
+	}
+	if len(req.GetNameServers()) > 4 {
+		return nil, errors.New("at most 4 name servers")
+	}
+	named := map[string]bool{}
+	for _, fp := range req.GetNameServers() {
+		if !seen[fp] || named[fp] {
+			return nil, fmt.Errorf("name server %q is not one of the cluster's servers", fp)
+		}
+		named[fp] = true
+		c.NameServers = append(c.NameServers, fp)
+	}
+	for _, raw := range req.GetZones() {
+		name, err := dnszone.Name(raw.GetName())
+		if err != nil {
+			return nil, err
+		}
+		e := zoneEntry{Name: name}
+		for _, n := range raw.GetNames() {
+			cn, err := dnszone.Name(n)
+			if err != nil {
+				return nil, err
+			}
+			e.Names = append(e.Names, cn)
+		}
+		c.Zones = append(c.Zones, e)
+	}
+	// The process refuses a table that does not hold together: refuse it here, in the RPC's reply.
+	if err := dnszone.CheckTable(&dnszone.Table{Zones: c.tableZones(dnszone.Verdict{State: dnszone.StateFail})}); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func (c *zoneCluster) addrsOf(fp string) dnszone.Addrs {
+	for _, m := range c.Members {
+		if m.Fingerprint == fp {
+			return dnszone.Addrs{V4: m.V4, V6: m.V6}
+		}
+	}
+	return dnszone.Addrs{}
+}
+
+// tableZones is what the process answers for this cluster's zones under a verdict.
+func (c *zoneCluster) tableZones(v dnszone.Verdict) []dnszone.Zone {
+	ns := make([]dnszone.Addrs, 0, len(c.NameServers))
+	for _, fp := range c.NameServers {
+		ns = append(ns, c.addrsOf(fp))
+	}
+	out := make([]dnszone.Zone, 0, len(c.Zones))
+	for _, e := range c.Zones {
+		out = append(out, dnszone.Zone{Name: e.Name, Names: e.Names, NameServers: ns, Fail: v.State == dnszone.StateFail,
+			Servers: v.Addrs, TTL: c.TTL, Serial: c.Serial})
+	}
+	return out
+}
+
+// sameShape is whether two configurations answer the same records; the SOA serial moves only when they do not.
+func sameShape(a, b *zoneCluster) bool {
+	return reflect.DeepEqual(a.Zones, b.Zones) && reflect.DeepEqual(a.Members, b.Members) &&
+		reflect.DeepEqual(a.NameServers, b.NameServers) && a.TTL == b.TTL
+}
+
+// SetClusterZone hands this server its cluster's DNS zones; see the RPC's contract in proto/agent.proto.
+func (s *Service) SetClusterZone(_ context.Context, req *pb.SetClusterZoneRequest) (*pb.SetClusterZoneResponse, error) {
+	if s.agentDir == "" || !bootstrap.Provisioned(s.agentDir) {
+		return nil, status.Error(codes.FailedPrecondition, "this server agent has no certificate to answer for a cluster with")
+	}
+	c, err := validateZone(req)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	z := s.zones()
+	z.mu.Lock()
+	id := req.GetClusterId()
+	old := z.st.Clusters[id]
+	if c == nil {
+		delete(z.st.Clusters, id)
+		delete(z.verdicts, id)
+	} else {
+		if old != nil {
+			c.Last, c.Serial = old.Last, old.Serial
+		}
+		if old == nil || !sameShape(old, c) {
+			c.Serial = max(uint32(time.Now().Unix()), c.Serial+1)
+		}
+		z.st.Clusters[id] = c
+	}
+	z.save()
+	z.ensureLocked()
+	sup := z.sup
+	z.mu.Unlock()
+	if sup != nil {
+		sup.Rebind()
+	}
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	z.pushLocked(time.Now())
+	resp := &pb.SetClusterZoneResponse{}
+	if z.sup != nil {
+		resp.Listening, resp.Problem = z.sup.Listening()
+	}
+	if v, ok := z.verdicts[id]; ok {
+		resp.State, resp.Answering, resp.Heard = v.State, v.Servers, int32(v.Heard)
+	}
+	return resp, nil
+}
+
+// ensureLocked runs the name server and its loop while any cluster has a zone here, and stops them when none has.
+func (z *clusterZones) ensureLocked() {
+	if len(z.st.Clusters) == 0 {
+		if z.sup != nil {
+			close(z.stop)
+			sup, done := z.sup, z.done
+			z.sup, z.sent = nil, nil
+			z.mu.Unlock()
+			<-done
+			sup.Close()
+			z.mu.Lock()
+		}
+		return
+	}
+	if z.sup != nil {
+		return
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		log.Printf("deplo-agent: the cluster's name server cannot start: %v", err)
+		return
+	}
+	cfg := dnszone.Config{
+		Path: exe, Args: []string{"dns"}, Port: 53,
+		Root:    filepath.Join(z.s.agentDir, "dns-root"),
+		PIDFile: filepath.Join(z.s.agentDir, "dns.pid"),
+		Logf:    func(f string, a ...any) { log.Printf("deplo-agent: "+f, a...) },
+	}
+	if z.s.zoneConfig != nil {
+		z.s.zoneConfig(&cfg)
+	}
+	z.since = time.Now()
+	z.sup = dnszone.Start(cfg)
+	z.stop, z.done = make(chan struct{}), make(chan struct{})
+	go z.loop(z.stop, z.done, z.sup)
+}
+
+func (z *clusterZones) loop(stop, done chan struct{}, sup *dnszone.Supervisor) {
+	defer close(done)
+	tick := time.NewTicker(zoneTick)
+	defer tick.Stop()
+	rebind := time.Now()
+	for {
+		select {
+		case <-stop:
+			return
+		case now := <-tick.C:
+			if now.Sub(rebind) >= zoneRebindEvery {
+				rebind = now
+				sup.Rebind()
+			}
+			z.mu.Lock()
+			z.pushLocked(now)
+			z.mu.Unlock()
+		}
+	}
+}
+
+// heard is when each server of the private network was last heard, and when this server's network started.
+func (s *Service) heard() (map[string]time.Time, time.Time) {
+	if s.zoneHeard != nil {
+		return s.zoneHeard()
+	}
+	m := s.network().current()
+	if m == nil {
+		return nil, time.Time{}
+	}
+	return m.Heard(), m.Started()
+}
+
+// pushLocked decides how each cluster is answered now and hands the process the table when it changed.
+func (z *clusterZones) pushLocked(now time.Time) {
+	if z.sup == nil {
+		return
+	}
+	heard, netSince := z.s.heard()
+	since := z.since
+	if netSince.After(since) {
+		since = netSince
+	}
+	ids := make([]string, 0, len(z.st.Clusters))
+	for id := range z.st.Clusters {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	var table dnszone.Table
+	taken := map[string]string{}
+	agreed := false
+	for _, id := range ids {
+		c := z.st.Clusters[id]
+		drop := time.Duration(c.DropAfter) * time.Second
+		members := make([]dnszone.Member, 0, len(c.Members))
+		for _, m := range c.Members {
+			members = append(members, dnszone.Member{Fingerprint: m.Fingerprint, Addrs: dnszone.Addrs{V4: m.V4, V6: m.V6}, Emptying: m.Emptying})
+		}
+		v := dnszone.Decide(members, c.Self, heard, now, drop, now.Before(since.Add(drop)), c.Last)
+		if v.Agreed != nil {
+			c.Last, agreed = v.Agreed, true
+		}
+		if was, ok := z.verdicts[id]; !ok || was.State != v.State {
+			log.Printf("deplo-agent: cluster %s: the DNS zone answers %s, hearing %d of %d servers", id, v.State, v.Heard, v.Of)
+		}
+		z.verdicts[id] = v
+		for _, zn := range c.tableZones(v) {
+			if other, dup := taken[zn.Name]; dup {
+				log.Printf("deplo-agent: zone %s is given to clusters %s and %s; %s answers it", zn.Name, other, id, other)
+				continue
+			}
+			taken[zn.Name] = id
+			table.Zones = append(table.Zones, zn)
+		}
+	}
+	if agreed {
+		z.save()
+	}
+	raw, _ := json.Marshal(table)
+	if string(raw) == string(z.sent) {
+		return
+	}
+	if err := z.sup.SetTable(&table); err != nil {
+		log.Printf("deplo-agent: the cluster's DNS answers were refused: %v", err)
+		return
+	}
+	z.sent = raw
+}
