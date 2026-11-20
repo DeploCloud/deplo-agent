@@ -64,6 +64,7 @@ const (
 	Agent_ClusterReplicaStatus_FullMethodName  = "/deplo.agent.v1.Agent/ClusterReplicaStatus"
 	Agent_SetClusterNetwork_FullMethodName     = "/deplo.agent.v1.Agent/SetClusterNetwork"
 	Agent_SetClusterZone_FullMethodName        = "/deplo.agent.v1.Agent/SetClusterZone"
+	Agent_SetGeoTable_FullMethodName           = "/deplo.agent.v1.Agent/SetGeoTable"
 	Agent_Backup_FullMethodName                = "/deplo.agent.v1.Agent/Backup"
 	Agent_Restore_FullMethodName               = "/deplo.agent.v1.Agent/Restore"
 	Agent_S3Check_FullMethodName               = "/deplo.agent.v1.Agent/S3Check"
@@ -252,6 +253,9 @@ type AgentClient interface {
 	// unprivileged process, naming the members it hears over the private network. The full set each
 	// time; no zones stops it answering for the cluster. Kept on disk, so it answers with Deplo down.
 	SetClusterZone(ctx context.Context, in *SetClusterZoneRequest, opts ...grpc.CallOption) (*SetClusterZoneResponse, error)
+	// Hand this server the location table its name server places visitors with (ADR-0049 phase 2), as
+	// Deplo's release carries it; gated on Hello "dns.geo". Kept on disk; no server fetches one itself.
+	SetGeoTable(ctx context.Context, in *SetGeoTableRequest, opts ...grpc.CallOption) (*SetGeoTableResponse, error)
 	// Back up a database or a project to a destination, streaming progress.
 	Backup(ctx context.Context, in *BackupRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[BackupEvent], error)
 	// Restore a database or project from a previously-written artifact, IN PLACE,
@@ -880,6 +884,16 @@ func (c *agentClient) SetClusterZone(ctx context.Context, in *SetClusterZoneRequ
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SetClusterZoneResponse)
 	err := c.cc.Invoke(ctx, Agent_SetClusterZone_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) SetGeoTable(ctx context.Context, in *SetGeoTableRequest, opts ...grpc.CallOption) (*SetGeoTableResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetGeoTableResponse)
+	err := c.cc.Invoke(ctx, Agent_SetGeoTable_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1549,6 +1563,9 @@ type AgentServer interface {
 	// unprivileged process, naming the members it hears over the private network. The full set each
 	// time; no zones stops it answering for the cluster. Kept on disk, so it answers with Deplo down.
 	SetClusterZone(context.Context, *SetClusterZoneRequest) (*SetClusterZoneResponse, error)
+	// Hand this server the location table its name server places visitors with (ADR-0049 phase 2), as
+	// Deplo's release carries it; gated on Hello "dns.geo". Kept on disk; no server fetches one itself.
+	SetGeoTable(context.Context, *SetGeoTableRequest) (*SetGeoTableResponse, error)
 	// Back up a database or a project to a destination, streaming progress.
 	Backup(*BackupRequest, grpc.ServerStreamingServer[BackupEvent]) error
 	// Restore a database or project from a previously-written artifact, IN PLACE,
@@ -1808,6 +1825,9 @@ func (UnimplementedAgentServer) SetClusterNetwork(context.Context, *SetClusterNe
 }
 func (UnimplementedAgentServer) SetClusterZone(context.Context, *SetClusterZoneRequest) (*SetClusterZoneResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetClusterZone not implemented")
+}
+func (UnimplementedAgentServer) SetGeoTable(context.Context, *SetGeoTableRequest) (*SetGeoTableResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetGeoTable not implemented")
 }
 func (UnimplementedAgentServer) Backup(*BackupRequest, grpc.ServerStreamingServer[BackupEvent]) error {
 	return status.Error(codes.Unimplemented, "method Backup not implemented")
@@ -2591,6 +2611,24 @@ func _Agent_SetClusterZone_Handler(srv interface{}, ctx context.Context, dec fun
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(AgentServer).SetClusterZone(ctx, req.(*SetClusterZoneRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_SetGeoTable_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetGeoTableRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).SetGeoTable(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_SetGeoTable_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).SetGeoTable(ctx, req.(*SetGeoTableRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -3466,6 +3504,10 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SetClusterZone",
 			Handler:    _Agent_SetClusterZone_Handler,
+		},
+		{
+			MethodName: "SetGeoTable",
+			Handler:    _Agent_SetGeoTable_Handler,
 		},
 		{
 			MethodName: "S3Check",

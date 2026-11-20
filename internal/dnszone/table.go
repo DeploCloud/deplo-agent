@@ -5,6 +5,7 @@ package dnszone
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net/netip"
 	"strings"
 
@@ -36,10 +37,20 @@ type Zone struct {
 	// NameServers are ns1, ns2, ... of the zone, in that order.
 	NameServers []Addrs `json:"ns"`
 	// Fail answers SERVFAIL for every name of the zone: this server hears too few of its cluster.
-	Fail    bool   `json:"fail,omitempty"`
-	Servers Addrs  `json:"servers"`
-	TTL     uint32 `json:"ttl"`
-	Serial  uint32 `json:"serial"`
+	Fail    bool  `json:"fail,omitempty"`
+	Servers Addrs `json:"servers"`
+	// Near is Servers one server at a time, where each is, so a visitor is answered with the nearest; empty answers
+	// every one of Servers. It names exactly the addresses of Servers, so geography never adds a server health left out.
+	Near   []Place `json:"near,omitempty"`
+	TTL    uint32  `json:"ttl"`
+	Serial uint32  `json:"serial"`
+}
+
+// Place is one server of an answer and where it is, in degrees.
+type Place struct {
+	Addrs
+	Lat float64 `json:"lat"`
+	Lon float64 `json:"lon"`
 }
 
 // Addrs are one server's or one set's IPv4 and IPv6 addresses.
@@ -114,6 +125,7 @@ type zone struct {
 	ns      []nameServer
 	fail    bool
 	servers addrSet
+	near    []place
 	ttl     uint32
 	serial  uint32
 }
@@ -161,6 +173,9 @@ func compile(t *Table) (*compiled, error) {
 		if z.servers, err = parseAddrs(raw.Servers); err != nil {
 			return nil, fmt.Errorf("zone %s: %w", name, err)
 		}
+		if z.near, err = compileNear(raw.Near, z.servers); err != nil {
+			return nil, fmt.Errorf("zone %s: %w", name, err)
+		}
 		for i, ns := range raw.NameServers {
 			a, err := parseAddrs(ns)
 			if err != nil {
@@ -185,6 +200,45 @@ func compile(t *Table) (*compiled, error) {
 		c.zones[name] = z
 	}
 	return c, nil
+}
+
+// compileNear checks that the places name exactly the servers of the answer, each once, on the globe.
+func compileNear(raw []Place, servers addrSet) ([]place, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	if len(raw) > maxAddrs {
+		return nil, fmt.Errorf("at most %d places", maxAddrs)
+	}
+	want := map[netip.Addr]bool{}
+	for _, a := range append(append([]netip.Addr{}, servers.v4...), servers.v6...) {
+		want[a] = true
+	}
+	seen := map[netip.Addr]bool{}
+	out := make([]place, 0, len(raw))
+	for i, r := range raw {
+		if math.IsNaN(r.Lat) || math.IsNaN(r.Lon) || r.Lat < -90 || r.Lat > 90 || r.Lon < -180 || r.Lon > 180 {
+			return nil, fmt.Errorf("place %d is off the globe", i+1)
+		}
+		a, err := parseAddrs(r.Addrs)
+		if err != nil {
+			return nil, fmt.Errorf("place %d: %w", i+1, err)
+		}
+		if len(a.v4)+len(a.v6) == 0 {
+			return nil, fmt.Errorf("place %d has no address", i+1)
+		}
+		for _, ip := range append(append([]netip.Addr{}, a.v4...), a.v6...) {
+			if !want[ip] || seen[ip] {
+				return nil, fmt.Errorf("place %d names %s, which the answer does not, or twice", i+1, ip)
+			}
+			seen[ip] = true
+		}
+		out = append(out, place{addrs: a, at: Point{Lat: r.Lat, Lon: r.Lon}})
+	}
+	if len(seen) != len(want) {
+		return nil, errors.New("the places leave out a server of the answer")
+	}
+	return out, nil
 }
 
 // CheckTable refuses a table the name server would refuse, with the reason.

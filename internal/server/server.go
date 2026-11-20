@@ -149,6 +149,8 @@ var Capabilities = []string{
 	"cluster.answers.certificates",
 	// SetClusterZone: the cluster's DNS zone, answered by an unprivileged process on port 53 (ADR-0049).
 	"dns.zone",
+	// SetGeoTable and ClusterZoneServer's place: the name server answers a visitor with the servers nearest it.
+	"dns.geo",
 }
 
 // AgentVersion is the version this agent reports over Hello.

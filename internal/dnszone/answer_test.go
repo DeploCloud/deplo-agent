@@ -54,7 +54,7 @@ func addrsIn(rrs []dns.RR) []string {
 
 func TestReply_namesEveryServer(t *testing.T) {
 	c := mustCompile(t, testTable())
-	r := c.reply(query("SHOP-example-com.go.example.com.", dns.TypeA), true)
+	r := c.reply(query("SHOP-example-com.go.example.com.", dns.TypeA), true, visitor{})
 	if r.Rcode != dns.RcodeSuccess || !r.Authoritative || r.RecursionAvailable {
 		t.Fatalf("rcode %d aa %v ra %v", r.Rcode, r.Authoritative, r.RecursionAvailable)
 	}
@@ -68,7 +68,7 @@ func TestReply_namesEveryServer(t *testing.T) {
 	if r.Question[0].Name != "SHOP-example-com.go.example.com." {
 		t.Fatalf("question %q", r.Question[0].Name)
 	}
-	r = c.reply(query("go.example.com.", dns.TypeAAAA), true)
+	r = c.reply(query("go.example.com.", dns.TypeAAAA), true, visitor{})
 	if got := strings.Join(addrsIn(r.Answer), " "); got != "2001:db8::1" {
 		t.Fatalf("AAAA at the apex: %s", got)
 	}
@@ -78,7 +78,7 @@ func TestReply_shufflesTheServers(t *testing.T) {
 	c := mustCompile(t, testTable())
 	firsts := map[string]bool{}
 	for range 200 {
-		r := c.reply(query("shop-example-com.go.example.com.", dns.TypeA), true)
+		r := c.reply(query("shop-example-com.go.example.com.", dns.TypeA), true, visitor{})
 		firsts[r.Answer[0].(*dns.A).A.String()] = true
 	}
 	if len(firsts) < 2 {
@@ -88,23 +88,23 @@ func TestReply_shufflesTheServers(t *testing.T) {
 
 func TestReply_zoneRecords(t *testing.T) {
 	c := mustCompile(t, testTable())
-	r := c.reply(query("go.example.com.", dns.TypeNS), true)
+	r := c.reply(query("go.example.com.", dns.TypeNS), true, visitor{})
 	if len(r.Answer) != 2 || r.Answer[0].(*dns.NS).Ns != "ns1.go.example.com." || r.Answer[0].Header().Ttl != nsTTL {
 		t.Fatalf("NS: %v", r.Answer)
 	}
 	if got := strings.Join(addrsIn(r.Extra), " "); got != "2001:db8::1 203.0.113.1 203.0.113.2" {
 		t.Fatalf("glue: %s", got)
 	}
-	r = c.reply(query("go.example.com.", dns.TypeSOA), true)
+	r = c.reply(query("go.example.com.", dns.TypeSOA), true, visitor{})
 	soa, ok := r.Answer[0].(*dns.SOA)
 	if !ok || soa.Ns != "ns1.go.example.com." || soa.Serial != 7 || soa.Minttl != negTTL {
 		t.Fatalf("SOA: %v", r.Answer)
 	}
-	r = c.reply(query("ns2.go.example.com.", dns.TypeA), true)
+	r = c.reply(query("ns2.go.example.com.", dns.TypeA), true, visitor{})
 	if got := strings.Join(addrsIn(r.Answer), " "); got != "203.0.113.2" {
 		t.Fatalf("ns2: %s", got)
 	}
-	r = c.reply(query("ns2.go.example.com.", dns.TypeAAAA), true)
+	r = c.reply(query("ns2.go.example.com.", dns.TypeAAAA), true, visitor{})
 	if r.Rcode != dns.RcodeSuccess || len(r.Answer) != 0 || len(r.Ns) != 1 {
 		t.Fatalf("ns2 has no IPv6: rcode %d %v %v", r.Rcode, r.Answer, r.Ns)
 	}
@@ -130,7 +130,7 @@ func TestReply_nothingElse(t *testing.T) {
 		{"go.example.com.", dns.TypeIXFR, dns.RcodeRefused, 0, false},
 	}
 	for _, tc := range cases {
-		r := c.reply(query(tc.name, tc.qtype), true)
+		r := c.reply(query(tc.name, tc.qtype), true, visitor{})
 		if r.Rcode != tc.rcode || len(r.Answer) != tc.answer || r.Authoritative != tc.aa {
 			t.Errorf("%s %s: rcode %d answers %d aa %v", tc.name, dns.TypeToString[tc.qtype], r.Rcode, len(r.Answer), r.Authoritative)
 		}
@@ -147,14 +147,14 @@ func TestReply_nothingElse(t *testing.T) {
 
 func TestReply_noANY(t *testing.T) {
 	c := mustCompile(t, testTable())
-	r := c.reply(query("shop-example-com.go.example.com.", dns.TypeANY), true)
+	r := c.reply(query("shop-example-com.go.example.com.", dns.TypeANY), true, visitor{})
 	if len(r.Answer) != 1 {
 		t.Fatalf("ANY: %v", r.Answer)
 	}
 	if h, ok := r.Answer[0].(*dns.HINFO); !ok || h.Cpu != "RFC8482" {
 		t.Fatalf("ANY: %v", r.Answer)
 	}
-	r = c.reply(query("go.example.com.", dns.TypeANY), true)
+	r = c.reply(query("go.example.com.", dns.TypeANY), true, visitor{})
 	if len(r.Answer) != 1 || len(r.Extra) != 0 {
 		t.Fatalf("ANY at the apex: %v %v", r.Answer, r.Extra)
 	}
@@ -165,13 +165,13 @@ func TestReply_failAnswersServfail(t *testing.T) {
 	tb.Zones[0].Fail = true
 	c := mustCompile(t, tb)
 	for _, q := range []uint16{dns.TypeA, dns.TypeNS, dns.TypeSOA} {
-		r := c.reply(query("shop-example-com.go.example.com.", q), true)
+		r := c.reply(query("shop-example-com.go.example.com.", q), true, visitor{})
 		if r.Rcode != dns.RcodeServerFailure || len(r.Answer) != 0 {
 			t.Fatalf("%s: rcode %d %v", dns.TypeToString[q], r.Rcode, r.Answer)
 		}
 	}
 	var none *compiled
-	if r := none.reply(query("shop-example-com.go.example.com.", dns.TypeA), true); r.Rcode != dns.RcodeServerFailure {
+	if r := none.reply(query("shop-example-com.go.example.com.", dns.TypeA), true, visitor{}); r.Rcode != dns.RcodeServerFailure {
 		t.Fatalf("no table yet: rcode %d", r.Rcode)
 	}
 }
@@ -180,23 +180,23 @@ func TestReply_otherClassesAndOpcodes(t *testing.T) {
 	c := mustCompile(t, testTable())
 	q := query("version.bind.", dns.TypeTXT)
 	q.Question[0].Qclass = dns.ClassCHAOS
-	if r := c.reply(q, true); r.Rcode != dns.RcodeRefused {
+	if r := c.reply(q, true, visitor{}); r.Rcode != dns.RcodeRefused {
 		t.Fatalf("CHAOS: rcode %d", r.Rcode)
 	}
 	q = query("go.example.com.", dns.TypeSOA)
 	q.Opcode = dns.OpcodeUpdate
-	if r := c.reply(q, true); r.Rcode != dns.RcodeNotImplemented {
+	if r := c.reply(q, true, visitor{}); r.Rcode != dns.RcodeNotImplemented {
 		t.Fatalf("UPDATE: rcode %d", r.Rcode)
 	}
 	q = query("go.example.com.", dns.TypeSOA)
 	q.Question = append(q.Question, q.Question[0])
-	if r := c.reply(q, true); r.Rcode != dns.RcodeFormatError {
+	if r := c.reply(q, true, visitor{}); r.Rcode != dns.RcodeFormatError {
 		t.Fatalf("two questions: rcode %d", r.Rcode)
 	}
 	q = query("go.example.com.", dns.TypeSOA)
 	q.SetEdns0(4096, false)
 	q.IsEdns0().SetVersion(1)
-	r := c.reply(q, true)
+	r := c.reply(q, true, visitor{})
 	if _, err := r.Pack(); err != nil || r.Rcode != dns.RcodeBadVers {
 		t.Fatalf("EDNS version 1: rcode %d %v", r.Rcode, err)
 	}
@@ -223,7 +223,7 @@ func itoa(i int) string {
 
 func TestReply_truncatesOverUDP(t *testing.T) {
 	c := mustCompile(t, bigTable())
-	r := c.reply(query("shop-example-com.go.example.com.", dns.TypeAAAA), true)
+	r := c.reply(query("shop-example-com.go.example.com.", dns.TypeAAAA), true, visitor{})
 	raw, err := r.Pack()
 	if err != nil {
 		t.Fatal(err)
@@ -233,7 +233,7 @@ func TestReply_truncatesOverUDP(t *testing.T) {
 	}
 	q := query("shop-example-com.go.example.com.", dns.TypeAAAA)
 	q.SetEdns0(65000, false)
-	r = c.reply(q, true)
+	r = c.reply(q, true, visitor{})
 	raw, _ = r.Pack()
 	if !r.Truncated || len(raw) > maxUDP {
 		t.Fatalf("a resolver offering 65000: truncated %v, %d bytes", r.Truncated, len(raw))
@@ -241,7 +241,7 @@ func TestReply_truncatesOverUDP(t *testing.T) {
 	if opt := r.IsEdns0(); opt == nil || opt.UDPSize() != maxUDP {
 		t.Fatalf("the answer offers %v", opt)
 	}
-	r = c.reply(query("shop-example-com.go.example.com.", dns.TypeAAAA), false)
+	r = c.reply(query("shop-example-com.go.example.com.", dns.TypeAAAA), false, visitor{})
 	if r.Truncated || len(r.Answer) != 60 {
 		t.Fatalf("over TCP: truncated %v, %d answers", r.Truncated, len(r.Answer))
 	}

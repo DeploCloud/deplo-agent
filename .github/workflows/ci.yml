@@ -66,6 +66,8 @@ jobs:
           grep -q -- '--- PASS: TestProcess_hasNoneOfTheAgentsPrivileges' "$RUNNER_TEMP/dnszone.log"
       - name: Fuzz the name server's packet path
         run: go test ./internal/dnszone -run '^$' -fuzz '^FuzzReply$' -fuzztime 30s
+      - name: Fuzz the client subnet a resolver sends
+        run: go test ./internal/dnszone -run '^$' -fuzz '^FuzzClientSubnet$' -fuzztime 30s
       - name: Verify it builds static for both target arches
         run: |
           set -euo pipefail
@@ -87,6 +89,8 @@ jobs:
           sparse-checkout: |
             lib/deploy/answer-routes.golden.json
             lib/deploy/cluster-zone.golden.json
+            lib/geo/geo-table.golden.bin
+            lib/geo/geo-lookups.golden.json
           sparse-checkout-cone-mode: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -105,3 +109,11 @@ jobs:
         env:
           CGO_ENABLED: "0"
           DEPLO_REPO: ${{ github.workspace }}/panel
+      # The location table the panel's release builds (ADR-0049 phase 2), reduced from the same small CSV.
+      - name: This agent reads the panel's location table
+        run: |
+          if [ ! -f panel/lib/geo/geo-table.golden.bin ]; then echo "the panel has no location table yet"; exit 0; fi
+          cp panel/lib/geo/geo-table.golden.bin panel/lib/geo/geo-lookups.golden.json internal/dnszone/testdata/
+          go test ./internal/dnszone -run 'TestGeo_thePanelsTableParses' -count=1 -v
+        env:
+          CGO_ENABLED: "0"

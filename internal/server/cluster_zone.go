@@ -1,16 +1,21 @@
 package server
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
+	"math"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -38,6 +43,10 @@ type zoneMember struct {
 	V4          []string `json:"v4,omitempty"`
 	V6          []string `json:"v6,omitempty"`
 	Emptying    bool     `json:"emptying,omitempty"`
+	// Where it is (phase 2), when Deplo knows.
+	Located bool    `json:"located,omitempty"`
+	Lat     float64 `json:"lat,omitempty"`
+	Lon     float64 `json:"lon,omitempty"`
 }
 
 type zoneEntry struct {
@@ -62,9 +71,12 @@ type zoneFile struct {
 }
 
 type clusterZones struct {
-	s        *Service
-	mu       sync.Mutex
-	st       zoneFile
+	s  *Service
+	mu sync.Mutex
+	st zoneFile
+	// geo is the digest of the location table on disk, "" for none; geoRead says it was looked at.
+	geo      string
+	geoRead  bool
 	sup      *dnszone.Supervisor
 	verdicts map[string]dnszone.Verdict
 	sent     []byte
@@ -155,6 +167,13 @@ func validateZone(req *pb.SetClusterZoneRequest) (*zoneCluster, error) {
 			return nil, fmt.Errorf("at most %d addresses for one server", maxZoneAddresses)
 		}
 		m := zoneMember{Fingerprint: fp, Emptying: srv.GetEmptying()}
+		if srv.GetLocated() {
+			lat, lon := srv.GetLatitude(), srv.GetLongitude()
+			if math.IsNaN(lat) || math.IsNaN(lon) || lat < -90 || lat > 90 || lon < -180 || lon > 180 {
+				return nil, fmt.Errorf("server %s is placed off the globe", fp)
+			}
+			m.Located, m.Lat, m.Lon = true, lat, lon
+		}
 		for _, raw := range srv.GetAddresses() {
 			a, ok := zoneAddr(raw)
 			if !ok {
@@ -219,10 +238,56 @@ func (c *zoneCluster) tableZones(v dnszone.Verdict) []dnszone.Zone {
 	for _, fp := range c.NameServers {
 		ns = append(ns, c.addrsOf(fp))
 	}
+	near := c.near(v)
 	out := make([]dnszone.Zone, 0, len(c.Zones))
 	for _, e := range c.Zones {
 		out = append(out, dnszone.Zone{Name: e.Name, Names: e.Names, NameServers: ns, Fail: v.State == dnszone.StateFail,
-			Servers: v.Addrs, TTL: c.TTL, Serial: c.Serial})
+			Servers: v.Addrs, Near: near, TTL: c.TTL, Serial: c.Serial})
+	}
+	return out
+}
+
+// near is the servers of a verdict one by one, where each is; none unless every one of them has a place, since a
+// server with none cannot be ranked and leaving it out would be a guess.
+func (c *zoneCluster) near(v dnszone.Verdict) []dnszone.Place {
+	if v.State == dnszone.StateFail || len(v.Servers) == 0 {
+		return nil
+	}
+	want := map[string]bool{}
+	for _, a := range append(append([]string{}, v.Addrs.V4...), v.Addrs.V6...) {
+		want[a] = true
+	}
+	byFP := map[string]zoneMember{}
+	for _, m := range c.Members {
+		byFP[m.Fingerprint] = m
+	}
+	var out []dnszone.Place
+	named := 0
+	for _, fp := range v.Servers {
+		m, ok := byFP[fp]
+		if !ok || !m.Located {
+			return nil
+		}
+		p := dnszone.Place{Lat: m.Lat, Lon: m.Lon}
+		for _, a := range m.V4 {
+			if want[a] {
+				p.V4 = append(p.V4, a)
+			}
+		}
+		for _, a := range m.V6 {
+			if want[a] {
+				p.V6 = append(p.V6, a)
+			}
+		}
+		if len(p.V4)+len(p.V6) == 0 {
+			return nil
+		}
+		named += len(p.V4) + len(p.V6)
+		out = append(out, p)
+	}
+	// The last agreed set may name addresses a server has since changed: then it is answered whole, as agreed.
+	if named != len(want) {
+		return nil
 	}
 	return out
 }
@@ -275,7 +340,68 @@ func (s *Service) SetClusterZone(_ context.Context, req *pb.SetClusterZoneReques
 	if v, ok := z.verdicts[id]; ok {
 		resp.State, resp.Answering, resp.Heard = v.State, v.Servers, int32(v.Heard)
 	}
+	resp.GeoSha256 = z.geoLocked()
 	return resp, nil
+}
+
+func (z *clusterZones) geoFile() string { return filepath.Join(z.s.agentDir, "dns-geo.bin") }
+
+// geoLocked is the digest of the location table on disk, read once; "" when there is none or it does not hold together.
+func (z *clusterZones) geoLocked() string {
+	if z.geoRead {
+		return z.geo
+	}
+	z.geoRead = true
+	raw, err := os.ReadFile(z.geoFile())
+	if err != nil {
+		return ""
+	}
+	g, err := dnszone.ParseGeo(raw)
+	if err != nil {
+		log.Printf("deplo-agent: the location table in %s is refused: %v", z.geoFile(), err)
+		return ""
+	}
+	z.geo = g.Digest()
+	return z.geo
+}
+
+// SetGeoTable keeps the location table Deplo's release carries and has the name server read it; see proto/agent.proto.
+func (s *Service) SetGeoTable(_ context.Context, req *pb.SetGeoTableRequest) (*pb.SetGeoTableResponse, error) {
+	if s.agentDir == "" {
+		return nil, status.Error(codes.FailedPrecondition, "this server agent has no directory to keep a location table in")
+	}
+	if len(req.GetTableGz()) > dnszone.MaxGeoBytes {
+		return nil, status.Error(codes.InvalidArgument, "the location table is too large")
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(req.GetTableGz()))
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "the location table is not gzip: %v", err)
+	}
+	raw, err := io.ReadAll(io.LimitReader(zr, dnszone.MaxGeoBytes+1))
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "the location table does not unpack: %v", err)
+	}
+	g, err := dnszone.ParseGeo(raw)
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+	if !strings.EqualFold(g.Digest(), req.GetSha256()) {
+		return nil, status.Errorf(codes.InvalidArgument, "the location table is %s, not %s as sent", g.Digest(), req.GetSha256())
+	}
+	z := s.zones()
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	if z.geoLocked() != g.Digest() {
+		if err := writeFileAtomic(z.geoFile(), raw, 0o600); err != nil {
+			return nil, status.Errorf(codes.Internal, "keeping the location table: %v", err)
+		}
+		z.geo = g.Digest()
+		log.Printf("deplo-agent: the cluster's name server places visitors with location table %d (%s)", g.Release(), g.Digest()[:12])
+		if z.sup != nil {
+			z.sup.Reload()
+		}
+	}
+	return &pb.SetGeoTableResponse{Sha256: g.Digest(), Release: g.Release()}, nil
 }
 
 // ensureLocked runs the name server and its loop while any cluster has a zone here, and stops them when none has.
@@ -304,6 +430,7 @@ func (z *clusterZones) ensureLocked() {
 		Path: exe, Args: []string{"dns"}, Port: 53,
 		Root:    filepath.Join(z.s.agentDir, "dns-root"),
 		PIDFile: filepath.Join(z.s.agentDir, "dns.pid"),
+		GeoPath: z.geoFile(),
 		Logf:    func(f string, a ...any) { log.Printf("deplo-agent: "+f, a...) },
 	}
 	if z.s.zoneConfig != nil {

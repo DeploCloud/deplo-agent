@@ -214,6 +214,10 @@ service Agent {
   // time; no zones stops it answering for the cluster. Kept on disk, so it answers with Deplo down.
   rpc SetClusterZone(SetClusterZoneRequest) returns (SetClusterZoneResponse);
 
+  // Hand this server the location table its name server places visitors with (ADR-0049 phase 2), as
+  // Deplo's release carries it; gated on Hello "dns.geo". Kept on disk; no server fetches one itself.
+  rpc SetGeoTable(SetGeoTableRequest) returns (SetGeoTableResponse);
+
   // ---- BACKUPS: dump/restore a database or project to/from a DESTINATION, plus the
   // affordances the control plane needs (connectivity check + object delete).
   // StoreTarget - a directory on THIS host's filesystem.
@@ -2701,6 +2705,11 @@ message ClusterZoneServer {
   repeated string addresses = 2;
   // Being emptied: it leaves the answers and still counts toward the majority.
   bool emptying = 3;
+  // Where it is, in degrees, when Deplo knows (ADR-0049 phase 2): a visitor is answered with the
+  // servers nearest it, when every server of the answer has a place. An older agent ignores them.
+  bool located = 4;
+  double latitude = 5;
+  double longitude = 6;
 }
 
 message SetClusterZoneResponse {
@@ -2715,6 +2724,20 @@ message SetClusterZoneResponse {
   repeated string answering = 4;
   // How many members it hears, itself included.
   int32 heard = 5;
+  // The location table it places visitors with, by the SHA-256 of the table; empty when it holds none.
+  string geo_sha256 = 6;
+}
+
+message SetGeoTableRequest {
+  // The table, gzip-compressed, and the SHA-256 of the table itself, not of the compressed bytes.
+  bytes table_gz = 1;
+  string sha256 = 2;
+}
+
+message SetGeoTableResponse {
+  string sha256 = 1;
+  // DB-IP's release it was built from, YYYYMMDD.
+  uint32 release = 2;
 }
 
 // ---- REPLICATION OF APP DATA ----
