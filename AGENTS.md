@@ -31,6 +31,9 @@ control plane never touches a Docker socket; everything host-coupled arrives her
   decides the majority; the process only answers. CI runs its lockdown test as root and fuzzes its packet path.
   Phase 2: the location table (`geo.go`, built by the panel's release from DB-IP) reaches the process as a descriptor
   opened for reading, never a path; `testdata/geo-table.golden.bin` is the panel's own reduction and must keep parsing.
+  Phase 3: the proxy's DNS-01 checks call `internal/server/dns_challenge.go`, which listens inside the proxy's own network
+  and asks a secret only the proxy reads; the TXT goes to every member over the private network (`cluster_zone_cert.go`),
+  which takes it only from the member Deplo names as that check's owner. CI runs that listener's test as root.
 - `proto/agent.proto` - the wire contract, owned here.
 - `gen/` - generated. Never hand-edit; `make proto` owns it.
 

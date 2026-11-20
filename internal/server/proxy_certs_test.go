@@ -213,7 +213,7 @@ func TestProxyCerts_mergeKeepsTheNewerPairAndTheRestOfTheStore(t *testing.T) {
 
 	st, _ := readACMEStore(h.store)
 	m := storeMerge{keep: []proxyCert{mustCert(t, newC, newK), mustCert(t, stale, staleK)}, drop: []string{"away.example.com"}}
-	if !m.apply(st, "letsencrypt") {
+	if changed, _ := m.apply(st, proxyACME{Resolver: "letsencrypt"}); !changed {
 		t.Fatal("the store did not change")
 	}
 	if err := st.write(h.store); err != nil {

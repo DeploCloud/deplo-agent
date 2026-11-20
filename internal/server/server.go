@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -151,6 +152,8 @@ var Capabilities = []string{
 	"dns.zone",
 	// SetGeoTable and ClusterZoneServer's place: the name server answers a visitor with the servers nearest it.
 	"dns.geo",
+	// Certificate checks over DNS answered by the cluster's own zone, and the zone's own certificate (ADR-0049 phase 3).
+	"dns.challenge",
 }
 
 // AgentVersion is the version this agent reports over Hello.
@@ -228,6 +231,13 @@ type Service struct {
 	zone       *clusterZones
 	zoneHeard  func() (map[string]time.Time, time.Time)
 	zoneConfig func(*dnszone.Config)
+	// zoneView is what the proxy's store and routes file need of the zones' certificates; see cluster_zone_cert.go.
+	zoneView atomic.Pointer[zoneCertView]
+	// The certificate checks' endpoint for this server's proxy; tests replace where it listens and the proxy's log.
+	chalOnce   sync.Once
+	chal       *challengeEndpoint
+	chalListen func() (net.Listener, uint64, error)
+	proxyLogs  func(ctx context.Context, since time.Time) (string, error)
 }
 
 type stackLock struct {

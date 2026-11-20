@@ -16,6 +16,8 @@ const (
 	maxUDP = 1232
 	// maxTCP is a whole DNS message.
 	maxTCP = dns.MaxMsgSize
+	// txtTTL is short: a check that is tried again carries a new value, which a resolver must not miss.
+	txtTTL = 5
 )
 
 // visitor is who asks: the address the query came from, and the location table to place it with.
@@ -165,10 +167,18 @@ func (z *zone) records(qname string, qtype uint16, at where) (exists bool, answe
 			return true, nil, nil
 		}
 	}
+	if vals, ok := z.txt[qname]; ok && qtype == dns.TypeTXT {
+		out := make([]dns.RR, 0, len(vals))
+		for _, v := range vals {
+			out = append(out, &dns.TXT{Hdr: hdr(qname, dns.TypeTXT, txtTTL), Txt: []string{v}})
+		}
+		return true, out, nil
+	}
 	if z.names[qname] {
 		return true, z.serverRecords(qname, qtype, at), nil
 	}
-	return z.inner[qname], nil, nil
+	_, isTXT := z.txt[qname]
+	return z.inner[qname] || isTXT, nil, nil
 }
 
 func (z *zone) serverRecords(qname string, qtype uint16, at where) []dns.RR {

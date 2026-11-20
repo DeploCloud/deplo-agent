@@ -276,3 +276,82 @@ func TestCompile_refusesWhatDoesNotHoldTogether(t *testing.T) {
 		t.Error("no table: accepted")
 	}
 }
+
+func txtTable() *Table {
+	tb := testTable()
+	tb.Zones[0].TXT = []TXT{
+		{Name: "_acme-challenge.go.example.com", Values: []string{"apex-value", "wildcard-value"}},
+		{Name: "_acme-challenge.deep.x.go.example.com", Values: []string{"deep-value"}},
+	}
+	return tb
+}
+
+func txtsIn(rrs []dns.RR) []string {
+	var out []string
+	for _, rr := range rrs {
+		if v, ok := rr.(*dns.TXT); ok {
+			out = append(out, strings.Join(v.Txt, ""))
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func TestReply_answersACertificateCheck(t *testing.T) {
+	c := mustCompile(t, txtTable())
+	r := c.reply(query("_ACME-challenge.go.example.com.", dns.TypeTXT), true, visitor{})
+	if r.Rcode != dns.RcodeSuccess || !r.Authoritative {
+		t.Fatalf("rcode %d aa %v", r.Rcode, r.Authoritative)
+	}
+	if got := strings.Join(txtsIn(r.Answer), " "); got != "apex-value wildcard-value" {
+		t.Fatalf("TXT: %s", got)
+	}
+	if r.Answer[0].Header().Ttl != txtTTL {
+		t.Fatalf("ttl %d", r.Answer[0].Header().Ttl)
+	}
+	// The check's name has no address, and a name between it and the zone exists with nothing.
+	if r := c.reply(query("_acme-challenge.go.example.com.", dns.TypeA), true, visitor{}); r.Rcode != dns.RcodeSuccess || len(r.Answer) != 0 {
+		t.Fatalf("A of a check: rcode %d, %d answers", r.Rcode, len(r.Answer))
+	}
+	if r := c.reply(query("x.go.example.com.", dns.TypeA), true, visitor{}); r.Rcode != dns.RcodeSuccess || len(r.Answer) != 0 {
+		t.Fatalf("a name above a deep check: rcode %d", r.Rcode)
+	}
+	// A server's name has no TXT, and a check that is not there is no name at all.
+	if r := c.reply(query("go.example.com.", dns.TypeTXT), true, visitor{}); r.Rcode != dns.RcodeSuccess || len(r.Answer) != 0 {
+		t.Fatalf("TXT of a server's name: rcode %d, %d answers", r.Rcode, len(r.Answer))
+	}
+	if r := c.reply(query("_acme-challenge.shop-example-com.go.example.com.", dns.TypeTXT), true, visitor{}); r.Rcode != dns.RcodeNameError {
+		t.Fatalf("a check not under way: rcode %d", r.Rcode)
+	}
+}
+
+func TestReply_aServerThatHearsTooFewAnswersNoCheck(t *testing.T) {
+	tb := txtTable()
+	tb.Zones[0].Fail = true
+	c := mustCompile(t, tb)
+	if r := c.reply(query("_acme-challenge.go.example.com.", dns.TypeTXT), true, visitor{}); r.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("rcode %d", r.Rcode)
+	}
+}
+
+func TestCompile_takesOnlyCertificateChecksInsideTheZone(t *testing.T) {
+	bad := [][]TXT{
+		{{Name: "go.example.com", Values: []string{"v"}}},
+		{{Name: "www.go.example.com", Values: []string{"v"}}},
+		{{Name: "_acme-challenge.other.com", Values: []string{"v"}}},
+		{{Name: "_acme-challenge.go.example.com", Values: nil}},
+		{{Name: "_acme-challenge.go.example.com", Values: []string{`a"b`}}},
+		{{Name: "_acme-challenge.go.example.com", Values: []string{strings.Repeat("v", 256)}}},
+		{{Name: "_acme-challenge.go.example.com", Values: []string{"v"}}, {Name: "_ACME-challenge.go.example.com", Values: []string{"w"}}},
+	}
+	for i, txt := range bad {
+		tb := testTable()
+		tb.Zones[0].TXT = txt
+		if err := CheckTable(tb); err == nil {
+			t.Errorf("table %d was taken", i)
+		}
+	}
+	if err := CheckTable(txtTable()); err != nil {
+		t.Fatal(err)
+	}
+}

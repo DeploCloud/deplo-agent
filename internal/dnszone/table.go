@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"net/netip"
+	"slices"
 	"strings"
 
 	"github.com/miekg/dns"
@@ -19,6 +20,10 @@ const (
 	maxNames       = 8192
 	maxNameServers = 4
 	maxAddrs       = 64
+	// A certificate check record (ADR-0049 phase 3): a name per domain at most, a few values each.
+	maxTXTNames  = 4096
+	maxTXTValues = 8
+	maxTXTLen    = 255
 	// MaxTableBytes bounds one table on the wire between the agent and the process.
 	MaxTableBytes = 8 << 20
 )
@@ -41,10 +46,22 @@ type Zone struct {
 	Servers Addrs `json:"servers"`
 	// Near is Servers one server at a time, where each is, so a visitor is answered with the nearest; empty answers
 	// every one of Servers. It names exactly the addresses of Servers, so geography never adds a server health left out.
-	Near   []Place `json:"near,omitempty"`
-	TTL    uint32  `json:"ttl"`
-	Serial uint32  `json:"serial"`
+	Near []Place `json:"near,omitempty"`
+	// TXT are the certificate checks under way: "_acme-challenge." names inside the zone. Fail answers them SERVFAIL
+	// too, so a check is read on the bigger side of a split only.
+	TXT    []TXT  `json:"txt,omitempty"`
+	TTL    uint32 `json:"ttl"`
+	Serial uint32 `json:"serial"`
 }
+
+// TXT is one certificate check's record: the name and the values a certificate authority reads there.
+type TXT struct {
+	Name   string   `json:"name"`
+	Values []string `json:"values"`
+}
+
+// ChallengeLabel is the first label of every name a TXT may have.
+const ChallengeLabel = "_acme-challenge."
 
 // Place is one server of an answer and where it is, in degrees.
 type Place struct {
@@ -126,6 +143,7 @@ type zone struct {
 	fail    bool
 	servers addrSet
 	near    []place
+	txt     map[string][]string
 	ttl     uint32
 	serial  uint32
 }
@@ -169,7 +187,8 @@ func compile(t *Table) (*compiled, error) {
 		if raw.TTL == 0 || raw.TTL > 86400 {
 			return nil, fmt.Errorf("zone %s: a TTL of %d s", name, raw.TTL)
 		}
-		z := &zone{name: name, names: map[string]bool{}, inner: map[string]bool{}, fail: raw.Fail, ttl: raw.TTL, serial: raw.Serial}
+		z := &zone{name: name, names: map[string]bool{}, inner: map[string]bool{}, txt: map[string][]string{}, fail: raw.Fail,
+			ttl: raw.TTL, serial: raw.Serial}
 		if z.servers, err = parseAddrs(raw.Servers); err != nil {
 			return nil, fmt.Errorf("zone %s: %w", name, err)
 		}
@@ -192,14 +211,64 @@ func compile(t *Table) (*compiled, error) {
 				return nil, fmt.Errorf("%s is not inside zone %s", n, name)
 			}
 			z.names[n] = true
-			// Every name between it and the zone exists too, with nothing of its own.
-			for p := parent(n); p != "" && p != name && dns.IsSubDomain(name, p); p = parent(p) {
-				z.inner[p] = true
-			}
+			z.addInner(n)
+		}
+		if err := z.compileTXT(raw.TXT); err != nil {
+			return nil, err
 		}
 		c.zones[name] = z
 	}
 	return c, nil
+}
+
+// addInner marks every name between n and the zone as existing, with nothing of its own.
+func (z *zone) addInner(n string) {
+	for p := parent(n); p != "" && p != z.name && dns.IsSubDomain(z.name, p); p = parent(p) {
+		z.inner[p] = true
+	}
+}
+
+// compileTXT takes only certificate check records inside the zone, each name once.
+func (z *zone) compileTXT(raw []TXT) error {
+	if len(raw) > maxTXTNames {
+		return fmt.Errorf("zone %s: at most %d check records", z.name, maxTXTNames)
+	}
+	for _, t := range raw {
+		n, err := Name(t.Name)
+		if err != nil {
+			return err
+		}
+		if !strings.HasPrefix(n, ChallengeLabel) || !dns.IsSubDomain(z.name, n) || n == z.name {
+			return fmt.Errorf("%s is not a certificate check of zone %s", n, z.name)
+		}
+		if _, dup := z.txt[n]; dup {
+			return fmt.Errorf("%s is listed twice", n)
+		}
+		if len(t.Values) == 0 || len(t.Values) > maxTXTValues {
+			return fmt.Errorf("%s: 1 to %d values", n, maxTXTValues)
+		}
+		for _, v := range t.Values {
+			if !TXTValue(v) {
+				return fmt.Errorf("%s: a value is not a check's", n)
+			}
+		}
+		z.txt[n] = slices.Clone(t.Values)
+		z.addInner(n)
+	}
+	return nil
+}
+
+// TXTValue says whether v is what a check record holds: printable ASCII, no quote or backslash, at most 255 bytes.
+func TXTValue(v string) bool {
+	if v == "" || len(v) > maxTXTLen {
+		return false
+	}
+	for _, r := range v {
+		if r < 0x21 || r > 0x7e || r == '"' || r == '\\' {
+			return false
+		}
+	}
+	return true
 }
 
 // compileNear checks that the places name exactly the servers of the answer, each once, on the globe.

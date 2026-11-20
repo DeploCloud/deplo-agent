@@ -195,21 +195,56 @@ func (st *acmeStore) write(path string) error {
 type storeMerge struct {
 	keep []proxyCert
 	drop []string
+	// A zone's certificate (ADR-0049): protect is the name sets this server renews, never taken out; dropSets are
+	// those it only holds, which go back to being files; covered names lose a certificate of their own.
+	protect  [][]string
+	dropSets [][]string
+	covered  map[string]bool
+	// dns names get their certificate over DNS, so a pair of theirs goes under that resolver when it has one.
+	dns map[string]bool
 }
 
-func (m storeMerge) empty() bool { return len(m.keep) == 0 && len(m.drop) == 0 }
+func (m storeMerge) empty() bool {
+	return len(m.keep) == 0 && len(m.drop) == 0 && len(m.dropSets) == 0 && len(m.covered) == 0
+}
 
-// apply keeps each pair unless the store holds a newer one for the same names, and takes out every entry for a
-// dropped name that no kept pair covers. It reports whether the store changed.
-func (m storeMerge) apply(st *acmeStore, resolver string) bool {
+// drops says whether a store entry goes at the proxy's next start.
+func (m storeMerge) drops(c proxyCert) bool {
+	if slices.ContainsFunc(m.protect, func(n []string) bool { return sameNames(n, c.Names) }) {
+		return false
+	}
+	if slices.ContainsFunc(m.dropSets, func(n []string) bool { return sameNames(n, c.Names) }) {
+		return true
+	}
+	if len(c.Names) > 0 && !slices.ContainsFunc(c.Names, func(n string) bool { return !m.covered[n] }) {
+		return true
+	}
+	return slices.ContainsFunc(m.drop, c.covers) && !slices.ContainsFunc(m.keep, func(k proxyCert) bool { return sameNames(k.Names, c.Names) })
+}
+
+// resolverOf is the resolver a new entry goes under: the one its names get their certificate from.
+func (m storeMerge) resolverOf(c proxyCert, acme proxyACME) string {
+	if acme.Resolvers[zoneResolver] && len(c.Names) > 0 && !slices.ContainsFunc(c.Names, func(n string) bool { return !m.dns[n] }) {
+		return zoneResolver
+	}
+	return acme.Resolver
+}
+
+// apply keeps each pair unless the store holds a newer one for the same names, and takes out every entry drops
+// names. It reports whether the store changed, and the zone certificates it took out.
+func (m storeMerge) apply(st *acmeStore, acme proxyACME) (bool, []proxyCert) {
 	changed := false
+	var gone []proxyCert
 	for _, name := range st.order {
 		list := st.entries(name)
 		kept := list[:0:0]
 		for _, e := range list {
 			c, err := parseProxyCert(string(e.Certificate), string(e.Key))
-			if err == nil && slices.ContainsFunc(m.drop, c.covers) && !slices.ContainsFunc(m.keep, func(k proxyCert) bool { return sameNames(k.Names, c.Names) }) {
+			if err == nil && m.drops(c) {
 				changed = true
+				if slices.ContainsFunc(m.dropSets, func(n []string) bool { return sameNames(n, c.Names) }) {
+					gone = append(gone, c)
+				}
 				continue
 			}
 			kept = append(kept, e)
@@ -241,10 +276,11 @@ func (m storeMerge) apply(st *acmeStore, resolver string) bool {
 		var e acmeEntry
 		e.Domain.Main, e.Domain.SANs = k.Names[0], slices.Clone(k.Names[1:])
 		e.Certificate, e.Key, e.Store = []byte(k.Cert), []byte(k.Key), "default"
+		resolver := m.resolverOf(k, acme)
 		st.setEntries(resolver, append(st.entries(resolver), e))
 		changed = true
 	}
-	return changed
+	return changed, gone
 }
 
 // proxyACME is where this server's proxy keeps its ACME store, which resolver Deplo's routers name, and how long
@@ -253,13 +289,15 @@ type proxyACME struct {
 	Store    string
 	Resolver string
 	Duration time.Duration
+	// Resolvers is every resolver the proxy is configured with.
+	Resolvers map[string]bool
 }
 
 var storageFlag = regexp.MustCompile(`^--certificatesresolvers\.([^.=]+)\.acme\.storage=(.+)$`)
 var durationFlag = regexp.MustCompile(`^--certificatesresolvers\.([^.=]+)\.acme\.certificatesduration=(\d+)$`)
 
 func readProxyACME(composePath string) (proxyACME, error) {
-	out := proxyACME{Resolver: "letsencrypt", Duration: 2160 * time.Hour}
+	out := proxyACME{Resolver: "letsencrypt", Duration: 2160 * time.Hour, Resolvers: map[string]bool{}}
 	raw, err := os.ReadFile(composePath)
 	if err != nil {
 		return out, err
@@ -287,7 +325,12 @@ func readProxyACME(composePath string) (proxyACME, error) {
 		}
 		inside := ""
 		for _, f := range flags {
-			if m := storageFlag.FindStringSubmatch(f); m != nil && inside == "" {
+			m := storageFlag.FindStringSubmatch(f)
+			if m == nil {
+				continue
+			}
+			out.Resolvers[m[1]] = true
+			if inside == "" {
 				out.Resolver, inside = m[1], m[2]
 			}
 		}

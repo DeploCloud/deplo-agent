@@ -18,6 +18,7 @@ func FuzzReply(f *testing.F) {
 		query("go.example.com.", dns.TypeANY),
 		query("nothing.go.example.com.", dns.TypeAAAA),
 		query("example.org.", dns.TypeA),
+		query("_acme-challenge.near.example.com.", dns.TypeTXT),
 	} {
 		raw, _ := q.Pack()
 		f.Add(raw)
@@ -31,6 +32,7 @@ func FuzzReply(f *testing.F) {
 	tb.Zones = append(tb.Zones, geoTable().Zones[0])
 	tb.Zones[1].Name = "near.example.com"
 	tb.Zones[1].Names = []string{"shop.near.example.com"}
+	tb.Zones[1].TXT = []TXT{{Name: "_acme-challenge.near.example.com", Values: []string{"apex-value", "wildcard-value"}}}
 	c, err := compile(tb)
 	if err != nil {
 		f.Fatal(err)
