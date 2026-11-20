@@ -683,6 +683,7 @@ func (s *Service) tendZoneCerts(now time.Time) {
 	}
 	if len(renews) > 0 {
 		s.readZoneOrders(now, renews)
+		s.settleZoneAuthz(now, renews)
 	}
 	// An order whose wait is over may go again.
 	z.mu.Lock()
