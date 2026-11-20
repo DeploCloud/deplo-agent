@@ -1,14 +1,18 @@
 package server
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
+	"math"
 	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -20,6 +24,7 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/bootstrap"
 	"github.com/DeploCloud/deplo-agent/internal/dnszone"
+	"github.com/DeploCloud/deplo-agent/internal/dnszone/geotest"
 )
 
 var (
@@ -329,6 +334,150 @@ func TestZone_refusesATableThatDoesNotHoldTogether(t *testing.T) {
 func TestZone_helloSaysItCanAnswerForAZone(t *testing.T) {
 	if !slices.Contains(Capabilities, "dns.zone") {
 		t.Fatal("Hello does not say dns.zone")
+	}
+	if !slices.Contains(Capabilities, "dns.geo") {
+		t.Fatal("Hello does not say dns.geo")
+	}
+}
+
+// placed is zoneRequest with a in Milan, b in New York and c in Tokyo.
+func placed() *pb.SetClusterZoneRequest {
+	req := zoneRequest()
+	for i, p := range []geotest.Place{geotest.Milan, geotest.NewYork, geotest.Tokyo} {
+		req.Servers[i].Located, req.Servers[i].Latitude, req.Servers[i].Longitude = true, p.Lat, p.Lon
+	}
+	return req
+}
+
+func geoRequest(t *testing.T, raw []byte) *pb.SetGeoTableRequest {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	_, _ = zw.Write(raw)
+	_ = zw.Close()
+	g, err := dnszone.ParseGeo(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &pb.SetGeoTableRequest{TableGz: buf.Bytes(), Sha256: g.Digest()}
+}
+
+// lookupFrom asks for the A records as a resolver for a client in subnet does, in the order they come.
+func lookupFrom(addr, name, subnet string) string {
+	c := &dns.Client{Timeout: 500 * time.Millisecond}
+	m := new(dns.Msg)
+	m.SetQuestion(name, dns.TypeA)
+	m.SetEdns0(1232, false)
+	p := netip.MustParsePrefix(subnet)
+	m.IsEdns0().Option = append(m.IsEdns0().Option, &dns.EDNS0_SUBNET{Code: dns.EDNS0SUBNET, Family: 1,
+		SourceNetmask: uint8(p.Bits()), Address: net.IP(p.Addr().AsSlice())})
+	r, _, err := c.Exchange(m, addr)
+	if err != nil {
+		return "error: " + err.Error()
+	}
+	if r.Rcode != dns.RcodeSuccess {
+		return dns.RcodeToString[r.Rcode]
+	}
+	var out []string
+	for _, rr := range r.Answer {
+		out = append(out, rr.(*dns.A).A.String())
+	}
+	return strings.Join(out, " ")
+}
+
+func TestZone_aVisitorIsAnsweredWithTheNearestHealthyServers(t *testing.T) {
+	heard := &fakeHeard{}
+	heard.set(zfp1, zfp2)
+	dir := t.TempDir()
+	s := zoneService(t, dir, heard)
+	resp := setZone(t, s, placed())
+	if resp.GetGeoSha256() != "" {
+		t.Fatalf("no table yet, and it says %q", resp.GetGeoSha256())
+	}
+	addr := listening(t, resp)
+	settled(s)
+	q := func(subnet string) func() string {
+		return func() string { return lookupFrom(addr, "shop-example-com.go.example.com.", subnet) }
+	}
+	// No location table: every healthy server, whoever asks.
+	until(t, 5*time.Second, "203.0.113.1 203.0.113.2 203.0.113.3", func() string { return lookup(addr, "shop-example-com.go.example.com.") })
+
+	got, err := s.SetGeoTable(context.Background(), geoRequest(t, geotest.World()))
+	if err != nil || got.GetRelease() != 20261101 {
+		t.Fatalf("%v %v", got, err)
+	}
+	until(t, 5*time.Second, "203.0.113.3 203.0.113.1", q(geotest.TokyoV4))
+	until(t, time.Second, "203.0.113.1 203.0.113.2", q(geotest.MilanV4))
+	until(t, time.Second, "203.0.113.2 203.0.113.1", q(geotest.NewYorkV4))
+	if r := setZone(t, s, placed()); r.GetGeoSha256() != got.GetSha256() {
+		t.Fatalf("it says it holds %q, not %q", r.GetGeoSha256(), got.GetSha256())
+	}
+
+	// Tokyo's server falls silent: health wins, and a visitor in Tokyo gets the next nearest, still two.
+	heard.set(zfp1)
+	until(t, 3*time.Second, "203.0.113.1 203.0.113.2", q(geotest.TokyoV4))
+	heard.set(zfp1, zfp2)
+	until(t, 3*time.Second, "203.0.113.3 203.0.113.1", q(geotest.TokyoV4))
+
+	// One server with no place: nothing to rank it by, so every healthy server again.
+	req := placed()
+	req.Servers[1].Located = false
+	setZone(t, s, req)
+	until(t, 3*time.Second, "3", func() string { return strconv.Itoa(len(strings.Fields(q(geotest.TokyoV4)()))) })
+
+	// A new run of the agent answers with the table it kept, Deplo down.
+	stopZones(s)
+	writeZoneFile(t, dir)
+	again := zoneService(t, dir, heard)
+	resp = setZone(t, again, placed())
+	if resp.GetGeoSha256() != got.GetSha256() {
+		t.Fatalf("after a restart it holds %q", resp.GetGeoSha256())
+	}
+	settled(again)
+	until(t, 5*time.Second, "203.0.113.3 203.0.113.1", func() string {
+		return lookupFrom(listening(t, resp), "shop-example-com.go.example.com.", geotest.TokyoV4)
+	})
+}
+
+func TestZone_refusesALocationTableThatDoesNotHoldTogether(t *testing.T) {
+	s := zoneService(t, t.TempDir(), &fakeHeard{})
+	good := geoRequest(t, geotest.World())
+	damaged := geotest.World()
+	damaged[50] ^= 1
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	_, _ = zw.Write(damaged)
+	_ = zw.Close()
+	bad := map[string]*pb.SetGeoTableRequest{
+		"not gzip":        {TableGz: geotest.World(), Sha256: good.Sha256},
+		"another digest":  {TableGz: good.TableGz, Sha256: strings.Repeat("0", 64)},
+		"a damaged table": {TableGz: buf.Bytes(), Sha256: good.Sha256},
+		"empty":           {},
+	}
+	for what, req := range bad {
+		if _, err := s.SetGeoTable(context.Background(), req); err == nil {
+			t.Errorf("%s: accepted", what)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(s.agentDir, "dns-geo.bin")); err == nil {
+		t.Fatal("a refused table was kept")
+	}
+	if _, err := s.SetGeoTable(context.Background(), good); err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ := os.ReadFile(filepath.Join(s.agentDir, "dns-geo.bin")); string(raw) != string(geotest.World()) {
+		t.Fatal("the table on disk is not the one sent")
+	}
+	for what, mutate := range map[string]func(*pb.SetClusterZoneRequest){
+		"a latitude of 91":    func(r *pb.SetClusterZoneRequest) { r.Servers[0].Latitude = 91 },
+		"a longitude of -181": func(r *pb.SetClusterZoneRequest) { r.Servers[1].Longitude = -181 },
+		"a latitude of NaN":   func(r *pb.SetClusterZoneRequest) { r.Servers[2].Latitude = math.NaN() },
+	} {
+		req := placed()
+		mutate(req)
+		if _, err := validateZone(req); err == nil {
+			t.Errorf("%s: accepted", what)
+		}
 	}
 }
 

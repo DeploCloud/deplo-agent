@@ -29,6 +29,8 @@ control plane never touches a Docker socket; everything host-coupled arrives her
 - `internal/dnszone/` - the cluster's name server (ADR-0049): `deplo-agent dns`, started by `internal/server/cluster_zone.go`
   as `nobody`, chrooted and on a network of its own, fed only the answer table over stdin. The agent binds port 53 and
   decides the majority; the process only answers. CI runs its lockdown test as root and fuzzes its packet path.
+  Phase 2: the location table (`geo.go`, built by the panel's release from DB-IP) reaches the process as a descriptor
+  opened for reading, never a path; `testdata/geo-table.golden.bin` is the panel's own reduction and must keep parsing.
 - `proto/agent.proto` - the wire contract, owned here.
 - `gen/` - generated. Never hand-edit; `make proto` owns it.
 

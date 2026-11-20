@@ -35,6 +35,8 @@ type Config struct {
 	Addresses func() []netip.Addr
 	// PIDFile names the running process, so the next run of the agent ends one an earlier run left behind.
 	PIDFile string
+	// GeoPath is the location table, handed to every process started, open for reading only; none when missing.
+	GeoPath string
 	Logf    func(string, ...any)
 }
 
@@ -202,6 +204,23 @@ func (s *Supervisor) SetTable(t *Table) error {
 	return nil
 }
 
+// Reload starts the process again, so it reads the location table anew; the sockets stay open meanwhile.
+func (s *Supervisor) Reload() { signal(s.restart) }
+
+func (s *Supervisor) openGeo() *os.File {
+	if s.cfg.GeoPath == "" {
+		return nil
+	}
+	f, err := os.Open(s.cfg.GeoPath)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			s.cfg.Logf("dns: the location table cannot be read (%v); every healthy server is answered", err)
+		}
+		return nil
+	}
+	return f
+}
+
 // Close stops the process and closes every socket.
 func (s *Supervisor) Close() {
 	s.once.Do(func() { close(s.stop) })
@@ -264,12 +283,17 @@ func (s *Supervisor) runOnce() (restarted bool, err error) {
 	sort.Slice(addrs, func(i, j int) bool { return addrs[i].Less(addrs[j]) })
 	var files []*os.File
 	var kinds []string
+	if geo := s.openGeo(); geo != nil {
+		// The process holds it only open for reading: it can read the table and nothing else of the agent's directory.
+		defer geo.Close()
+		files, kinds = append(files, geo), append(kinds, "g")
+	}
 	for _, a := range addrs {
 		files = append(files, s.socks[a].udp, s.socks[a].tcp)
 		kinds = append(kinds, "u", "t")
 	}
 	s.mu.Unlock()
-	if len(files) == 0 {
+	if len(addrs) == 0 {
 		select {
 		case <-s.stop:
 		case <-s.restart:

@@ -18,8 +18,31 @@ const (
 	maxTCP = dns.MaxMsgSize
 )
 
+// visitor is who asks: the address the query came from, and the location table to place it with.
+type visitor struct {
+	from netip.Addr
+	geo  *Geo
+}
+
+// where places the visitor: by the client subnet a resolver sent, else by the resolver's own address.
+type where struct {
+	at Point
+	ok bool
+	// bySubnet: the place, or the lack of one, came from the client subnet, so the answer holds for that subnet only.
+	bySubnet bool
+}
+
+func (v visitor) place(s *subnet) where {
+	if s != nil && s.prefix.Bits() > 0 {
+		at, ok := v.geo.Locate(s.prefix.Addr())
+		return where{at: at, ok: ok, bySubnet: true}
+	}
+	at, ok := v.geo.Locate(v.from)
+	return where{at: at, ok: ok}
+}
+
 // reply is the answer to one query; udp bounds its size and sets TC past it.
-func (c *compiled) reply(req *dns.Msg, udp bool) *dns.Msg {
+func (c *compiled) reply(req *dns.Msg, udp bool, v visitor) *dns.Msg {
 	resp := new(dns.Msg)
 	if req.Opcode != dns.OpcodeQuery {
 		return resp.SetRcode(req, dns.RcodeNotImplemented)
@@ -31,6 +54,7 @@ func (c *compiled) reply(req *dns.Msg, udp bool) *dns.Msg {
 	resp.RecursionAvailable = false
 	resp.Compress = true
 	size := 512
+	var sub *subnet
 	if opt := req.IsEdns0(); opt != nil {
 		resp.SetEdns0(maxUDP, false)
 		if opt.Version() != 0 {
@@ -38,64 +62,81 @@ func (c *compiled) reply(req *dns.Msg, udp bool) *dns.Msg {
 			return resp
 		}
 		size = max(512, min(int(opt.UDPSize()), maxUDP))
+		var bad bool
+		if sub, bad = clientSubnet(req); bad {
+			resp.Rcode = dns.RcodeFormatError
+			return resp
+		}
 	}
 	if !udp {
 		size = maxTCP
 	}
-	c.answer(resp, req.Question[0])
+	tailored := c.answer(resp, req.Question[0], v.place(sub))
+	if sub != nil {
+		// RFC 7871: the subnet comes back, with the scope the answer holds for; 0 is every client.
+		scope := uint8(0)
+		if tailored {
+			scope = uint8(sub.prefix.Bits())
+		}
+		opt := resp.IsEdns0()
+		opt.Option = append(opt.Option, answerSubnet(sub, scope))
+	}
 	resp.Truncate(size)
 	return resp
 }
 
-// answer fills resp for one question; resp is already a reply to it.
-func (c *compiled) answer(resp *dns.Msg, q dns.Question) {
+// answer fills resp for one question; resp is already a reply to it. tailored is an answer that depends on the
+// client subnet the visitor was placed by.
+func (c *compiled) answer(resp *dns.Msg, q dns.Question, at where) (tailored bool) {
 	if c == nil {
 		resp.Rcode = dns.RcodeServerFailure
-		return
+		return false
 	}
 	if q.Qclass != dns.ClassINET && q.Qclass != dns.ClassANY {
 		resp.Rcode = dns.RcodeRefused
-		return
+		return false
 	}
 	qname := dns.CanonicalName(q.Name)
 	z := c.zoneFor(qname)
 	if z == nil {
 		// Authoritative only: nothing outside the zones, and no recursion.
 		resp.Rcode = dns.RcodeRefused
-		return
+		return false
 	}
 	if z.fail {
 		resp.Rcode = dns.RcodeServerFailure
-		return
+		return false
 	}
 	resp.Authoritative = true
 	switch q.Qtype {
 	case dns.TypeAXFR, dns.TypeIXFR:
 		resp.Authoritative = false
 		resp.Rcode = dns.RcodeRefused
-		return
+		return false
 	}
-	exists, answer, extra := z.records(qname, q.Qtype)
+	exists, answer, extra := z.records(qname, q.Qtype, at)
 	if !exists {
 		resp.Rcode = dns.RcodeNameError
 		resp.Ns = []dns.RR{z.soa(negTTL)}
-		return
+		return false
 	}
 	if q.Qtype == dns.TypeANY {
 		// RFC 8482: one small record, never everything the name has.
 		resp.Answer = []dns.RR{&dns.HINFO{Hdr: hdr(qname, dns.TypeHINFO, z.ttl), Cpu: "RFC8482"}}
-		return
+		return false
 	}
+	tailored = at.bySubnet && len(z.near) > 0 && z.names[qname] && (q.Qtype == dns.TypeA || q.Qtype == dns.TypeAAAA)
 	if len(answer) == 0 {
 		resp.Ns = []dns.RR{z.soa(negTTL)}
-		return
+		return tailored
 	}
 	resp.Answer = answer
 	resp.Extra = append(resp.Extra, extra...)
+	return tailored
 }
 
 // records is what qname holds of qtype, and the glue an NS answer carries; exists is false for NXDOMAIN.
-func (z *zone) records(qname string, qtype uint16) (exists bool, answer, extra []dns.RR) {
+func (z *zone) records(qname string, qtype uint16, at where) (exists bool, answer, extra []dns.RR) {
 	if qname == z.name {
 		switch qtype {
 		case dns.TypeSOA:
@@ -109,7 +150,7 @@ func (z *zone) records(qname string, qtype uint16) (exists bool, answer, extra [
 			return true, answer, extra
 		}
 		if z.names[qname] {
-			return true, z.serverRecords(qname, qtype), nil
+			return true, z.serverRecords(qname, qtype, at), nil
 		}
 		return true, nil, nil
 	}
@@ -125,19 +166,38 @@ func (z *zone) records(qname string, qtype uint16) (exists bool, answer, extra [
 		}
 	}
 	if z.names[qname] {
-		return true, z.serverRecords(qname, qtype), nil
+		return true, z.serverRecords(qname, qtype, at), nil
 	}
 	return z.inner[qname], nil, nil
 }
 
-func (z *zone) serverRecords(qname string, qtype uint16) []dns.RR {
-	switch qtype {
-	case dns.TypeA:
-		return addrRecords(qname, z.servers.v4, z.ttl, true)
-	case dns.TypeAAAA:
-		return addrRecords(qname, z.servers.v6, z.ttl, true)
+func (z *zone) serverRecords(qname string, qtype uint16, at where) []dns.RR {
+	if qtype != dns.TypeA && qtype != dns.TypeAAAA {
+		return nil
 	}
-	return nil
+	v6 := qtype == dns.TypeAAAA
+	if len(z.near) == 0 || !at.ok {
+		// Nowhere to place the visitor, or nothing to place the servers by: every healthy server, never a guess.
+		if v6 {
+			return addrRecords(qname, z.servers.v6, z.ttl, true)
+		}
+		return addrRecords(qname, z.servers.v4, z.ttl, true)
+	}
+	var of []place
+	for _, p := range z.near {
+		if v6 && len(p.addrs.v6) > 0 || !v6 && len(p.addrs.v4) > 0 {
+			of = append(of, p)
+		}
+	}
+	var out []dns.RR
+	for _, p := range nearest(of, at.at) {
+		if v6 {
+			out = append(out, addrRecords(qname, p.addrs.v6, z.ttl, false)...)
+		} else {
+			out = append(out, addrRecords(qname, p.addrs.v4, z.ttl, false)...)
+		}
+	}
+	return out
 }
 
 // addrRecords are A or AAAA records; shuffled, so resolvers spread visitors over the servers.

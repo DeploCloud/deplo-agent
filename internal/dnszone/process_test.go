@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+
+	"github.com/DeploCloud/deplo-agent/internal/dnszone/geotest"
 )
 
 // The test binary is also the name server process the supervisor starts: the role says which part it plays.
@@ -36,6 +38,8 @@ type probeReport struct {
 	UID, GID int
 	Groups   []int
 	Reached  []string
+	// ReadGeo: it read the location table it was handed, as the name server must.
+	ReadGeo bool
 }
 
 func probe() int {
@@ -65,6 +69,27 @@ func probe() int {
 	}
 	try("tcp "+os.Getenv("PROBE_TCP"), err)
 	try("write its root", os.WriteFile("/planted", []byte("x"), 0o644))
+	// The location table: handed open for reading, so it reads it and can neither write it nor open it by its path.
+	for i, k := range strings.Split(os.Getenv(EnvSockets), ",") {
+		if k != "g" {
+			continue
+		}
+		f := os.NewFile(uintptr(3+i), "geo")
+		head := make([]byte, 8)
+		if n, err := f.ReadAt(head, 0); err == nil && n == 8 && string(head) == geoMagic {
+			r.ReadGeo = true
+		}
+		_, err := f.WriteAt([]byte("x"), 0)
+		try("write the location table", err)
+		try("truncate the location table", f.Truncate(0))
+	}
+	if p := os.Getenv("PROBE_GEO"); p != "" {
+		g, err := os.OpenFile(p, os.O_RDWR, 0)
+		if err == nil {
+			g.Close()
+		}
+		try("open "+p, err)
+	}
 	raw, _ := json.Marshal(r)
 	fmt.Fprintf(os.Stderr, "PROBE %s\n", raw)
 	_, _ = io.Copy(io.Discard, os.Stdin)
@@ -107,13 +132,19 @@ func eventually(t *testing.T, within time.Duration, what string, ok func() bool)
 
 func supervise(t *testing.T, role string, env ...string) (*Supervisor, *logs) {
 	t.Helper()
+	return superviseWith(t, role, "", env...)
+}
+
+// superviseWith hands the process the location table at geo too.
+func superviseWith(t *testing.T, role, geo string, env ...string) (*Supervisor, *logs) {
+	t.Helper()
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
 	l := &logs{}
 	s := Start(Config{
-		Path: exe, Env: append([]string{roleEnv + "=" + role}, env...),
+		Path: exe, Env: append([]string{roleEnv + "=" + role}, env...), GeoPath: geo,
 		Root:      filepath.Join(t.TempDir(), "root"),
 		Addresses: func() []netip.Addr { return []netip.Addr{netip.MustParseAddr("127.0.0.1")} },
 		Logf:      l.logf,
@@ -278,7 +309,13 @@ func TestProcess_hasNoneOfTheAgentsPrivileges(t *testing.T) {
 		c.Close()
 	}
 
-	s, l := supervise(t, "probe", "PROBE_SOCK="+sockPath, "PROBE_SECRET="+secret, "PROBE_TCP="+tcp.Addr().String())
+	// The location table, kept as the agent keeps it: root's alone.
+	geo := filepath.Join(dir, "dns-geo.bin")
+	if err := os.WriteFile(geo, geotest.World(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, l := superviseWith(t, "probe", geo, "PROBE_SOCK="+sockPath, "PROBE_SECRET="+secret,
+		"PROBE_TCP="+tcp.Addr().String(), "PROBE_GEO="+geo)
 	eventually(t, 10*time.Second, "the probe's report", func() bool { return l.find("dns: PROBE ") != "" })
 	var r probeReport
 	if err := json.Unmarshal([]byte(l.find("dns: PROBE ")), &r); err != nil {
@@ -290,17 +327,24 @@ func TestProcess_hasNoneOfTheAgentsPrivileges(t *testing.T) {
 	if len(r.Reached) != 0 {
 		t.Fatalf("the name server reached %v", r.Reached)
 	}
+	if !r.ReadGeo {
+		t.Fatal("the name server could not read the location table it was handed")
+	}
+	if raw, _ := os.ReadFile(geo); string(raw) != string(geotest.World()) {
+		t.Fatal("the location table changed")
+	}
 	if _, err := os.Stat(filepath.Join(s.cfg.Root, "planted")); err == nil {
 		t.Fatal("the name server wrote into its root")
 	}
 
-	// The real name server, as the agent starts it.
-	s, _ = supervise(t, "serve")
+	// The real name server, as the agent starts it, placing visitors with the table.
+	s, _ = superviseWith(t, "serve", geo)
 	addr := listeningAt(t, s)
-	if err := s.SetTable(testTable()); err != nil {
+	if err := s.SetTable(geoTable()); err != nil {
 		t.Fatal(err)
 	}
 	eventually(t, 5*time.Second, "an answer", func() bool { return answers(addr, "udp") == 3 })
+	eventually(t, 5*time.Second, "Milan first", func() bool { return nearestFrom(addr, geotest.MilanV4) == "203.0.113.1 203.0.113.2" })
 	pid := s.PID()
 	st := statusOf(t, pid)
 	for k, want := range map[string]string{"Uid": "65534 65534 65534 65534", "Gid": "65534 65534 65534 65534",
@@ -321,4 +365,52 @@ func TestProcess_hasNoneOfTheAgentsPrivileges(t *testing.T) {
 	if len(entries) != 1 || entries[0].Name() != "deplo-agent" {
 		t.Errorf("its root holds %v", entries)
 	}
+}
+
+// nearestFrom asks for the A records as a resolver for a client in subnet does, and says them in the order given.
+func nearestFrom(addr, subnet string) string {
+	c := &dns.Client{Timeout: 500 * time.Millisecond}
+	r, _, err := c.Exchange(withSubnet(query("shop-example-com.go.example.com.", dns.TypeA), subnet), addr)
+	if err != nil {
+		return "error: " + err.Error()
+	}
+	if r.Rcode != dns.RcodeSuccess {
+		return dns.RcodeToString[r.Rcode]
+	}
+	return inOrder(r.Answer)
+}
+
+func TestSupervisor_placesVisitorsWithTheTableItIsHanded(t *testing.T) {
+	geo := filepath.Join(t.TempDir(), "dns-geo.bin")
+	s, _ := superviseWith(t, "serve", geo)
+	addr := listeningAt(t, s)
+	if err := s.SetTable(geoTable()); err != nil {
+		t.Fatal(err)
+	}
+	// No table yet: every server, the nearest unknown.
+	eventually(t, 5*time.Second, "every server", func() bool { return answers(addr, "udp") == 3 })
+	if got := nearestFrom(addr, geotest.MilanV4); len(strings.Fields(got)) != 3 {
+		t.Fatalf("no table: %s", got)
+	}
+	// The agent keeps a table and has the process read it: visitors are placed.
+	if err := os.WriteFile(geo, geotest.World(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.Reload()
+	eventually(t, 5*time.Second, "Milan first", func() bool { return nearestFrom(addr, geotest.MilanV4) == "203.0.113.1 203.0.113.2" })
+	if got := nearestFrom(addr, geotest.TokyoV4); got != "203.0.113.3 203.0.113.1" {
+		t.Fatalf("from Tokyo: %s", got)
+	}
+	// From this machine, with no subnet and an address the table places nowhere: every server.
+	if n := answers(addr, "udp"); n != 3 {
+		t.Fatalf("an unplaced resolver: %d", n)
+	}
+	// A damaged table is refused by the process, which goes on answering every server.
+	raw := geotest.World()
+	raw[40] ^= 1
+	if err := os.WriteFile(geo, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s.Reload()
+	eventually(t, 5*time.Second, "every server again", func() bool { return len(strings.Fields(nearestFrom(addr, geotest.MilanV4))) == 3 })
 }

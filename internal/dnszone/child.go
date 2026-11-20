@@ -11,7 +11,8 @@ import (
 	"time"
 )
 
-// EnvSockets names the sockets the process is handed, one letter per descriptor from 3: "u" UDP, "t" TCP.
+// EnvSockets names what the process is handed, one letter per descriptor from 3: "u" UDP, "t" TCP, "g" the location
+// table, open for reading only.
 const EnvSockets = "DEPLO_DNS_SOCKETS"
 
 // Main is `deplo-agent dns`: it answers on the sockets it was handed, from the tables read on stdin, until stdin ends.
@@ -25,12 +26,20 @@ func Main(stdin io.Reader, stderr io.Writer) int {
 		logf("cannot lock the process down: %v", err)
 		return 2
 	}
-	udp, tcp, err := inherited(os.Getenv(EnvSockets))
+	udp, tcp, geo, err := inherited(os.Getenv(EnvSockets))
 	if err != nil {
 		logf("%v", err)
 		return 2
 	}
 	srv := NewServer()
+	if geo != nil {
+		g, err := readGeo(geo)
+		if err != nil {
+			logf("the location table is refused, every healthy server is answered: %v", err)
+		} else {
+			srv.SetGeo(g)
+		}
+	}
 	srv.Serve(udp, tcp)
 	defer srv.Shutdown()
 
@@ -57,40 +66,57 @@ func Main(stdin io.Reader, stderr io.Writer) int {
 	return 0
 }
 
-// inherited turns the descriptors from 3 on into sockets.
-func inherited(kinds string) ([]net.PacketConn, []net.Listener, error) {
+// inherited turns the descriptors from 3 on into sockets, and the location table when one is handed.
+func inherited(kinds string) ([]net.PacketConn, []net.Listener, *os.File, error) {
 	var udp []net.PacketConn
 	var tcp []net.Listener
+	var geo *os.File
 	for i, k := range strings.Split(kinds, ",") {
 		if k == "" {
 			continue
 		}
 		f := os.NewFile(uintptr(3+i), "dns-"+k)
 		if f == nil {
-			return nil, nil, fmt.Errorf("socket %d is missing", i)
+			return nil, nil, nil, fmt.Errorf("descriptor %d is missing", i)
 		}
 		switch k {
 		case "u":
 			pc, err := net.FilePacketConn(f)
 			if err != nil {
-				return nil, nil, fmt.Errorf("socket %d: %v", i, err)
+				return nil, nil, nil, fmt.Errorf("socket %d: %v", i, err)
 			}
 			udp = append(udp, pc)
 		case "t":
 			ln, err := net.FileListener(f)
 			if err != nil {
-				return nil, nil, fmt.Errorf("socket %d: %v", i, err)
+				return nil, nil, nil, fmt.Errorf("socket %d: %v", i, err)
 			}
 			tcp = append(tcp, ln)
+		case "g":
+			if geo != nil {
+				return nil, nil, nil, fmt.Errorf("descriptor %d: a second location table", i)
+			}
+			geo = f
+			continue
 		default:
-			return nil, nil, fmt.Errorf("socket %d: unknown kind %q", i, k)
+			return nil, nil, nil, fmt.Errorf("descriptor %d: unknown kind %q", i, k)
 		}
 		_ = f.Close()
 	}
 	if len(udp)+len(tcp) == 0 {
-		return nil, nil, fmt.Errorf("no socket to answer on")
+		return nil, nil, nil, fmt.Errorf("no socket to answer on")
 	}
-	return udp, tcp, nil
+	return udp, tcp, geo, nil
+}
+
+// readGeo reads the location table it was handed, at most MaxGeoBytes of it, and lets the descriptor go.
+func readGeo(f *os.File) (*Geo, error) {
+	defer f.Close()
+	raw, err := io.ReadAll(io.LimitReader(f, MaxGeoBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	return ParseGeo(raw)
 }
 
 // report says once a minute how many answers the rate limit held back, when any.

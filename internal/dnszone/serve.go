@@ -22,6 +22,7 @@ const (
 // Server answers from the latest table on the sockets it is handed.
 type Server struct {
 	table   atomic.Pointer[compiled]
+	geo     atomic.Pointer[Geo]
 	lim     *limiter
 	mu      sync.Mutex
 	servers []*dns.Server
@@ -42,6 +43,9 @@ func (s *Server) SetTable(t *Table) error {
 	s.table.Store(c)
 	return nil
 }
+
+// SetGeo is the location table visitors are placed with; nil answers every healthy server.
+func (s *Server) SetGeo(g *Geo) { s.geo.Store(g) }
 
 // Serve answers on every socket until Shutdown.
 func (s *Server) Serve(udp []net.PacketConn, tcp []net.Listener) {
@@ -103,7 +107,7 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 			return
 		}
 	}
-	_ = w.WriteMsg(s.table.Load().reply(req, udp))
+	_ = w.WriteMsg(s.table.Load().reply(req, udp, visitor{from: addrOf(w.RemoteAddr()), geo: s.geo.Load()}))
 }
 
 func addrOf(a net.Addr) netip.Addr {
