@@ -50,6 +50,7 @@
     {
       "zone": "go.example.com",
       "renew": true,
+      "order": true,
       "sha256": "abababababababababababababababababababababababababababababababab",
       "covered": ["go.example.com"]
     }
