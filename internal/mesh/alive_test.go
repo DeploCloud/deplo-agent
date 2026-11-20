@@ -265,3 +265,34 @@ func startWithKey(t *testing.T, key Key, fp, addr string, port uint16) side {
 	t.Cleanup(func() { m.Close() })
 	return side{m: m, key: key, fp: fp}
 }
+
+func TestMesh_heardSaysWhenEachPeerWasLastAlive(t *testing.T) {
+	a, b := start(t, nil, fpA, "fdde:9100::a"), start(t, nil, fpB, "fdde:9100::b")
+	if time.Since(a.m.Started()) > time.Minute {
+		t.Fatalf("started %v", a.m.Started())
+	}
+	connect(t, a, b, true)
+	waitHeard(t, a, b)
+	at, ok := a.m.Heard()[fpB]
+	if !ok || time.Since(at) > 3*time.Second {
+		t.Fatalf("b heard at %v (%v)", at, ok)
+	}
+	// b stops: the time a heard it last stays where it was, so a name server can tell how long it has been silent.
+	b.m.Close()
+	time.Sleep(2*aliveEvery + 500*time.Millisecond)
+	if last := a.m.Heard()[fpB]; time.Since(last) < 2*aliveEvery {
+		t.Fatalf("b still heard %v ago after it stopped", time.Since(last))
+	}
+	// A peer taken off the network is forgotten.
+	if err := a.m.SetPeers(nil); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(3 * aliveEvery)
+	for time.Now().Before(deadline) {
+		if _, still := a.m.Heard()[fpB]; !still {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("a peer taken off the network was still listed as heard")
+}

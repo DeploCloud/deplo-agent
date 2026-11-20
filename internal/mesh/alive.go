@@ -226,8 +226,10 @@ func (m *Mesh) listenAlive() error {
 // heard records a peer's run. A run heard for the first time ends every stream another run answered.
 func (m *Mesh) heard(fp string, incarnation uint64) {
 	m.aliveMu.Lock()
+	now := time.Now()
 	was, known := m.lives[fp]
-	m.lives[fp] = liveness{incarnation: incarnation, at: time.Now()}
+	m.lives[fp] = liveness{incarnation: incarnation, at: now}
+	m.heardAt[fp] = now
 	m.aliveMu.Unlock()
 	if known && was.incarnation == incarnation {
 		return
@@ -256,6 +258,11 @@ func (m *Mesh) sayAlive(now time.Time) {
 	}
 	var quiet []string
 	m.aliveMu.Lock()
+	for fp := range m.heardAt {
+		if _, still := addrs[fp]; !still {
+			delete(m.heardAt, fp)
+		}
+	}
 	for fp, l := range m.lives {
 		if _, still := addrs[fp]; !still {
 			delete(m.lives, fp)

@@ -102,8 +102,11 @@ type Mesh struct {
 	aliveAt     time.Time
 	aliveMu     sync.Mutex
 	lives       map[string]liveness
-	connsMu     sync.Mutex
-	conns       map[string]map[*tracked]bool
+	// heardAt outlives lives' reaping: a name server's removal time may be longer than aliveDeadAfter.
+	heardAt map[string]time.Time
+	started time.Time
+	connsMu sync.Mutex
+	conns   map[string]map[*tracked]bool
 }
 
 type pathInfo struct {
@@ -194,6 +197,8 @@ func Start(cfg Config) (*Mesh, error) {
 		stop:        make(chan struct{}),
 		incarnation: newIncarnation(),
 		lives:       map[string]liveness{},
+		heardAt:     map[string]time.Time{},
+		started:     time.Now(),
 		conns:       map[string]map[*tracked]bool{},
 	}
 	m.bind = newBind(m)
@@ -220,6 +225,20 @@ func Start(cfg Config) (*Mesh, error) {
 	}()
 	return m, nil
 }
+
+// Heard is when each peer was last heard alive, by certificate fingerprint; one never heard is absent.
+func (m *Mesh) Heard() map[string]time.Time {
+	m.aliveMu.Lock()
+	defer m.aliveMu.Unlock()
+	out := make(map[string]time.Time, len(m.heardAt))
+	for fp, at := range m.heardAt {
+		out[fp] = at
+	}
+	return out
+}
+
+// Started is when this run of the network began.
+func (m *Mesh) Started() time.Time { return m.started }
 
 // PublicKey is what peers know this server by.
 func (m *Mesh) PublicKey() Key { return m.pub }

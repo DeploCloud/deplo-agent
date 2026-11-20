@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/DeploCloud/deplo-agent/internal/dnszone"
 )
 
 // realDockerEnv opts a run into the tests that drive a real Docker daemon. CI sets it; nobody sets it by accident.
@@ -14,6 +16,10 @@ const realDockerEnv = "DEPLO_AGENT_TEST_REAL_DOCKER"
 // Without the opt-in every docker call of the package is aimed at a socket that does not exist, so a test that
 // forgot its fake reaches no daemon: this suite has destroyed live state on a production host before.
 func TestMain(m *testing.M) {
+	// The test binary is also the cluster's name server process, as the agent's binary is.
+	if len(os.Args) > 1 && os.Args[1] == "dns" {
+		os.Exit(dnszone.Main(os.Stdin, os.Stderr))
+	}
 	buildStepCgroupDir = ""
 	if os.Getenv(realDockerEnv) != "1" {
 		os.Setenv("DOCKER_HOST", "unix:///nonexistent/deplo-agent-test.sock")

@@ -207,6 +207,13 @@ service Agent {
   // it off with no peers. The full set each time; it answers with its key and how each peer is reached.
   rpc SetClusterNetwork(SetClusterNetworkRequest) returns (SetClusterNetworkResponse);
 
+  // ---- THE CLUSTER'S DNS ZONE (ADR-0049, Hello capability "dns.zone") ----
+
+  // Hand this member the DNS zones delegated to its cluster. It answers for them on port 53 from an
+  // unprivileged process, naming the members it hears over the private network. The full set each
+  // time; no zones stops it answering for the cluster. Kept on disk, so it answers with Deplo down.
+  rpc SetClusterZone(SetClusterZoneRequest) returns (SetClusterZoneResponse);
+
   // ---- BACKUPS: dump/restore a database or project to/from a DESTINATION, plus the
   // affordances the control plane needs (connectivity check + object delete).
   // StoreTarget - a directory on THIS host's filesystem.
@@ -2662,6 +2669,52 @@ message ClusterNetworkPeerState {
   // The host:port a direct path uses.
   string endpoint = 3;
   int64 last_handshake_unix = 4;
+}
+
+// ---- THE CLUSTER'S DNS ZONE ----
+
+message SetClusterZoneRequest {
+  string cluster_id = 1;
+  // The certificate of the server this is sent to, as its member entry names it.
+  string self_fingerprint = 2;
+  repeated ClusterZone zones = 3;
+  // Every member of the cluster.
+  repeated ClusterZoneServer servers = 4;
+  // ns1 to ns4 of every zone, in that order, by member certificate.
+  repeated string name_servers = 5;
+  // How long resolvers keep an answer (10 to 300 s), and how long a member may be silent before it
+  // leaves the answers (5 to 60 s); 0 is the default, 30 s and 10 s.
+  uint32 answer_ttl_seconds = 6;
+  uint32 drop_after_seconds = 7;
+}
+
+message ClusterZone {
+  // The zone itself, "go.example.com".
+  string name = 1;
+  // The names answered with the cluster's healthy servers; the zone itself may be one.
+  repeated string names = 2;
+}
+
+message ClusterZoneServer {
+  string fingerprint = 1;
+  // Its public addresses, IPv4 and IPv6, as the answers name it.
+  repeated string addresses = 2;
+  // Being emptied: it leaves the answers and still counts toward the majority.
+  bool emptying = 3;
+}
+
+message SetClusterZoneResponse {
+  // Where this server answers, "address:53".
+  repeated string listening = 1;
+  // Why it answers on none of its addresses, or not on all of them.
+  string problem = 2;
+  // "answer", "stale" (exactly half heard: the last agreed set), "fail" (fewer than half: SERVFAIL)
+  // or "warming" (just started).
+  string state = 3;
+  // The members it names now, by certificate.
+  repeated string answering = 4;
+  // How many members it hears, itself included.
+  int32 heard = 5;
 }
 
 // ---- REPLICATION OF APP DATA ----

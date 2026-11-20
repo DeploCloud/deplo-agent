@@ -26,6 +26,9 @@ control plane never touches a Docker socket; everything host-coupled arrives her
   (`internal/wire`) and `lease/` (`internal/lease`). Change both sides in one go, new fields with
   `omitempty`; `copies_test.go` fails when they drift and a `deplo-cluster` checkout sits beside this repo.
 - `internal/capture/` - the deployment screenshot browser (see below).
+- `internal/dnszone/` - the cluster's name server (ADR-0049): `deplo-agent dns`, started by `internal/server/cluster_zone.go`
+  as `nobody`, chrooted and on a network of its own, fed only the answer table over stdin. The agent binds port 53 and
+  decides the majority; the process only answers. CI runs its lockdown test as root and fuzzes its packet path.
 - `proto/agent.proto` - the wire contract, owned here.
 - `gen/` - generated. Never hand-edit; `make proto` owns it.
 
