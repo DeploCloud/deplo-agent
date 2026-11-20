@@ -83,6 +83,7 @@ type clusterZones struct {
 	txt map[string]map[string]txtState
 	// certs is how each zone's certificate went on this server's proxy, by zone.
 	certs map[string]*zoneCertRun
+	authz map[string]*zoneAuthzRun
 	// seq numbers this server's own record sets, seqs the last one taken from each member; tended is the last
 	// look at the zones' certificates.
 	seq    int64
