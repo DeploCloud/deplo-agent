@@ -202,10 +202,19 @@ type storeMerge struct {
 	covered  map[string]bool
 	// dns names get their certificate over DNS, so a pair of theirs goes under that resolver when it has one.
 	dns map[string]bool
+	// misfiled is the store's pairs under a resolver their names no longer get their certificate from (#273).
+	misfiled []proxyCert
 }
 
 func (m storeMerge) empty() bool {
-	return len(m.keep) == 0 && len(m.drop) == 0 && len(m.dropSets) == 0 && len(m.covered) == 0
+	return len(m.keep) == 0 && len(m.drop) == 0 && len(m.dropSets) == 0 && len(m.covered) == 0 && len(m.misfiled) == 0
+}
+
+// misfiledUnder says whether an entry under resolver renews the other way its names are checked now: over HTTP
+// while they are checked over DNS, or the other way round.
+func (m storeMerge) misfiledUnder(resolver string, c proxyCert, acme proxyACME) bool {
+	to := m.resolverOf(c, acme)
+	return to != resolver && (to == zoneResolver || resolver == zoneResolver)
 }
 
 // drops says whether a store entry goes at the proxy's next start.
@@ -279,6 +288,34 @@ func (m storeMerge) apply(st *acmeStore, acme proxyACME) (bool, []proxyCert) {
 		resolver := m.resolverOf(k, acme)
 		st.setEntries(resolver, append(st.entries(resolver), e))
 		changed = true
+	}
+	// An entry renews through the resolver that holds it: one whose names changed how they are checked moves.
+	for _, name := range slices.Clone(st.order) {
+		list := st.entries(name)
+		kept := list[:0:0]
+		for _, e := range list {
+			c, err := parseProxyCert(string(e.Certificate), string(e.Key))
+			if err != nil || !m.misfiledUnder(name, c, acme) {
+				kept = append(kept, e)
+				continue
+			}
+			to := m.resolverOf(c, acme)
+			dest := slices.DeleteFunc(st.entries(to), func(o acmeEntry) bool {
+				oc, err := parseProxyCert(string(o.Certificate), string(o.Key))
+				return err == nil && sameNames(oc.Names, c.Names) && !oc.NotAfter.After(c.NotAfter)
+			})
+			if !slices.ContainsFunc(dest, func(o acmeEntry) bool {
+				oc, err := parseProxyCert(string(o.Certificate), string(o.Key))
+				return err == nil && sameNames(oc.Names, c.Names)
+			}) {
+				dest = append(dest, e)
+			}
+			st.setEntries(to, dest)
+			changed = true
+		}
+		if len(kept) != len(list) {
+			st.setEntries(name, kept)
+		}
 	}
 	return changed, gone
 }

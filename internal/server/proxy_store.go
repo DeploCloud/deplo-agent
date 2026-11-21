@@ -149,6 +149,17 @@ func (f *forwarders) storePlan(ctx context.Context) storeMerge {
 		m.covered = zv.covered
 	}
 	m.dns = zv.dns
+	if acme, err := readProxyACME(f.s.traefikCompose()); err == nil {
+		if st, err := readACMEStore(acme.Store); err == nil {
+			for _, name := range st.order {
+				for _, e := range st.entries(name) {
+					if c, err := parseProxyCert(string(e.Certificate), string(e.Key)); err == nil && !m.drops(c) && m.misfiledUnder(name, c, acme) {
+						m.misfiled = append(m.misfiled, c)
+					}
+				}
+			}
+		}
+	}
 	return m
 }
 
@@ -314,7 +325,7 @@ func (s *Service) mergeStore(ctx context.Context, path string, plan storeMerge) 
 		fmt.Fprintf(os.Stderr, "deplo-agent: proxy certificates: could not rewrite the routes file: %v\n", err)
 	}
 	var hosts []string
-	for _, c := range plan.keep {
+	for _, c := range append(slices.Clone(plan.keep), plan.misfiled...) {
 		hosts = append(hosts, c.Names...)
 	}
 	return hosts
@@ -417,8 +428,10 @@ var renewRetry = time.Hour
 
 func (s *Service) restartForRenewal(ctx context.Context, now time.Time) {
 	f := s.forwarders()
-	// Only a pair of an App that runs here goes into the store; one that does not is pruned instead.
-	files := f.storePlan(ctx).keep
+	// Only a pair of an App that runs here goes into the store; one that does not is pruned instead. A stored pair
+	// whose names are now checked another way moves before its window too.
+	plan := f.storePlan(ctx)
+	files := append(slices.Clone(plan.keep), plan.misfiled...)
 	if len(files) == 0 {
 		return
 	}

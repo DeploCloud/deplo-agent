@@ -214,3 +214,51 @@ func TestProxyHold_runsOncePerBootBeforeDockerAndNeverHoldsItUp(t *testing.T) {
 		t.Fatal("a failed hold would keep Docker from starting")
 	}
 }
+
+// #273: a name whose _acme-challenge CNAME now points into the zone renews over DNS from its next renewal, and back
+// over HTTP once the CNAME is gone; neither move restarts the proxy before the quiet hour ahead of the window.
+func TestProxyCerts_aStoredPairMovesToTheWayItsNamesAreCheckedNow(t *testing.T) {
+	h := zoneCertHost(t)
+	compose := strings.Replace(proxyCompose, "    volumes:\n",
+		"      - --certificatesresolvers.deplo-dns.acme.storage=/acme/acme.json\n    volumes:\n", 1)
+	if err := os.WriteFile(h.s.traefikCompose(), []byte(compose), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 21, 10, 0, 0, 0, time.Local)
+	c, k := testPair(t, now.Add(48*time.Hour), shopNames...)
+	h.putUnder(t, "letsencrypt", c, k, shopNames...)
+	req := certRequest(nil)
+	for _, n := range shopNames {
+		at := "_acme-challenge." + strings.ReplaceAll(n, ".", "-") + ".go.example.com"
+		req.Challenges = append(req.Challenges, &pb.ClusterZoneChallenge{Asked: "_acme-challenge." + n, At: at, OwnerFingerprint: zfp0})
+	}
+	setZone(t, h.s, req)
+	if got := h.s.forwarders().storePlan(context.Background()).misfiled; len(got) != 1 {
+		t.Fatalf("misfiled %v, want the shop's pair", got)
+	}
+	deadline := mustCert(t, c, k).NotAfter.Add(-renewBefore(time.Hour))
+	at, urgent := restartAt(now, deadline, 4)
+	if urgent || !at.After(now) {
+		t.Fatalf("the move is due at %v (urgent %v)", at, urgent)
+	}
+	h.s.restartForRenewal(context.Background(), now)
+	h.s.restartForRenewal(context.Background(), at.Add(-time.Minute))
+	if h.applied != 0 {
+		t.Fatal("the proxy restarted outside the quiet hour before the window")
+	}
+	h.s.restartForRenewal(context.Background(), at)
+	if h.applied != 1 || len(h.storeNames(t, "letsencrypt")) != 0 || len(h.storeNames(t, zoneResolver)) != 1 {
+		t.Fatalf("restarts %d, over HTTP %v, over DNS %v", h.applied, h.storeNames(t, "letsencrypt"), h.storeNames(t, zoneResolver))
+	}
+	h.s.restartForRenewal(context.Background(), at.Add(2*time.Hour))
+	if h.applied != 1 {
+		t.Fatal("the proxy restarted again with nothing left to move")
+	}
+
+	// The CNAME is gone: the same pair goes back under the resolver that checks over HTTP.
+	setZone(t, h.s, certRequest(nil))
+	h.s.restartForRenewal(context.Background(), at.Add(renewRetry))
+	if h.applied != 2 || len(h.storeNames(t, "letsencrypt")) != 1 || len(h.storeNames(t, zoneResolver)) != 0 {
+		t.Fatalf("restarts %d, over HTTP %v, over DNS %v", h.applied, h.storeNames(t, "letsencrypt"), h.storeNames(t, zoneResolver))
+	}
+}
