@@ -3,8 +3,11 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -23,39 +26,51 @@ type volumeHold struct {
 	start   time.Time
 	once    sync.Once
 	held    time.Duration
+	// healthy are the containers whose health check passed before the pause: a deploy waits for them to pass again.
+	healthy []string
+	// leave lets a deploy of the App start again.
+	leave func()
 }
+
+// holdRecoverWait bounds how long a hold waits, after the pause, for a health check a paused container failed.
+var holdRecoverWait = 2 * time.Minute
 
 func (s *Service) holdJournalDir() string { return filepath.Join(s.dataBase, "backup-holds") }
 
-// holdVolumes pauses every running container that mounts one of vols. It returns nil, nil when none does.
-func (s *Service) holdVolumes(ctx context.Context, vols []string) (*volumeHold, error) {
-	seen := map[string]bool{}
-	var ids []string
-	for _, v := range vols {
-		if v == "" {
-			continue
-		}
-		res, err := dockercli.Run(ctx, holdStepTimeout, "ps", "-q", "--no-trunc", "--filter", "status=running", "--filter", "volume="+v)
-		if err != nil {
-			return nil, err
-		}
-		for _, id := range strings.Fields(res.Stdout) {
-			if !seen[id] {
-				seen[id] = true
-				ids = append(ids, id)
-			}
-		}
+// holdVolumes pauses every running container of slug that mounts one of vols, once no deploy of slug is under way.
+// It returns nil, nil when none runs.
+func (s *Service) holdVolumes(ctx context.Context, slug string, vols []string, logf func(string)) (*volumeHold, error) {
+	ids, err := runningOn(ctx, vols)
+	if err != nil || len(ids) == 0 {
+		return nil, err
 	}
-	if len(ids) == 0 {
-		return nil, nil
+	// Only when something runs: a caller that stopped the stack under its lock never waits on a deploy that wants it.
+	leave, waited, err := s.gate.enter(ctx, slug, true, appGateWait, func() {
+		logf(fmt.Sprintf("A deploy of this app is under way, so the backup waits for it to finish before pausing the app (%s at most).", spoken(appGateWait)))
+	})
+	if errors.Is(err, errGateWait) {
+		return nil, &holdError{msg: fmt.Sprintf("a deploy of this app was still under way after %s. The next backup tries again", spoken(appGateWait))}
 	}
-	h := &volumeHold{s: s, ids: ids, start: time.Now()}
+	if err != nil {
+		return nil, err
+	}
+	if waited > 0 {
+		logf(fmt.Sprintf("Waited %s for the deploy to finish.", spoken(waited)))
+	}
+	// Read again: the deploy may have replaced every container.
+	if ids, err = runningOn(ctx, vols); err != nil || len(ids) == 0 {
+		leave()
+		return nil, err
+	}
+	h := &volumeHold{s: s, ids: ids, start: time.Now(), leave: leave, healthy: withHealth(ctx, ids, "healthy")}
 	if err := os.MkdirAll(s.holdJournalDir(), 0o700); err != nil {
+		leave()
 		return nil, err
 	}
 	h.journal = filepath.Join(s.holdJournalDir(), time.Now().UTC().Format("20060102T150405.000000000")+".json")
 	b, _ := json.Marshal(ids)
 	if err := os.WriteFile(h.journal, b, 0o600); err != nil {
+		leave()
 		return nil, err
 	}
 	for _, id := range ids {
@@ -78,6 +93,28 @@ func (s *Service) holdVolumes(ctx context.Context, vols []string) (*volumeHold, 
 	return h, nil
 }
 
+// runningOn lists the running containers that mount one of vols.
+func runningOn(ctx context.Context, vols []string) ([]string, error) {
+	seen := map[string]bool{}
+	var ids []string
+	for _, v := range vols {
+		if v == "" {
+			continue
+		}
+		res, err := dockercli.Run(ctx, holdStepTimeout, "ps", "-q", "--no-trunc", "--filter", "status=running", "--filter", "volume="+v)
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range strings.Fields(res.Stdout) {
+			if !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
+			}
+		}
+	}
+	return ids, nil
+}
+
 type holdError struct{ msg string }
 
 func (e *holdError) Error() string {
@@ -93,14 +130,57 @@ func (h *volumeHold) release() time.Duration {
 		h.held = time.Since(h.start)
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), 2*time.Minute)
 		defer cancel()
-		if unpauseAll(ctx, h.ids) {
-			for _, id := range h.ids {
-				h.s.markHeld(id, false)
-			}
-			_ = os.Remove(h.journal)
+		if !unpauseAll(ctx, h.ids) {
+			h.done()
+			return
 		}
+		_ = os.Remove(h.journal)
+		if len(h.healthy) == 0 {
+			h.ended()
+			return
+		}
+		// A paused container fails its health check: until it passes again, a deploy that depends on it would fail.
+		go func() {
+			deadline := time.Now().Add(holdRecoverWait)
+			for time.Now().Before(deadline) && len(withHealth(context.Background(), h.healthy, "unhealthy", "starting")) > 0 {
+				time.Sleep(500 * time.Millisecond)
+			}
+			h.ended()
+		}()
 	})
 	return h.held
+}
+
+// ended counts nothing as held any more and lets a deploy in.
+func (h *volumeHold) ended() {
+	for _, id := range h.ids {
+		h.s.markHeld(id, false)
+	}
+	h.done()
+}
+
+func (h *volumeHold) done() {
+	if h.leave != nil {
+		h.leave()
+	}
+}
+
+// withHealth is the containers whose health check reads one of states.
+func withHealth(ctx context.Context, ids []string, states ...string) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	res, err := dockercli.Run(ctx, holdStepTimeout, append([]string{"inspect", "-f", "{{.Id}} {{if .State.Health}}{{.State.Health.Status}}{{end}}"}, ids...)...)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(res.Stdout, "\n") {
+		if f := strings.Fields(line); len(f) == 2 && slices.Contains(states, f[1]) {
+			out = append(out, f[0])
+		}
+	}
+	return out
 }
 
 // unpauseAll reports whether every container is running again (one that is gone counts).

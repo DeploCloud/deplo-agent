@@ -214,6 +214,8 @@ type Service struct {
 
 	heldMu sync.Mutex
 	held   map[string]bool
+	// gate keeps a deploy and a backup's pause of the same App apart; see app_gate.go.
+	gate appGate
 
 	restartOnce sync.Once
 	rw          *restartWatcher
@@ -687,6 +689,11 @@ func (s *Service) Reroute(ctx context.Context, req *pb.RerouteRequest) (*pb.Stac
 	if err := validateSlug(slug); err != nil {
 		return nil, err
 	}
+	leave, _, gerr := s.gate.enter(ctx, slug, false, appGateWait, nil)
+	if gerr != nil {
+		return &pb.StackResult{Ok: false, Error: fmt.Sprintf("this app was still paused by a backup after %s: %v", spoken(appGateWait), gerr)}, nil
+	}
+	defer leave()
 	done, ok := s.lockToStart(slug)
 	if !ok {
 		return nil, status.Error(codes.FailedPrecondition, awaitingLeader)

@@ -44,7 +44,7 @@ func (s *Service) backupProject(ctx context.Context, p *pb.ProjectDescriptor, de
 }
 
 func (s *Service) writeProjectArchive(ctx context.Context, p *pb.ProjectDescriptor, tw *tar.Writer, e *bkEmitter) error {
-	hold, herr := s.holdVolumes(ctx, p.GetVolumeNames())
+	hold, herr := s.holdVolumes(ctx, p.GetSlug(), p.GetVolumeNames(), func(text string) { e.log("info", text) })
 	if herr != nil {
 		return herr
 	}

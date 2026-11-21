@@ -251,6 +251,11 @@ func (s *Service) runDeployBody(ctx context.Context, req *pb.DeployRequest, cont
 		e.result(false, admitErr.Error(), "")
 		return
 	}
+	leave, ok := s.waitForBackup(ctx, slug, e)
+	if !ok {
+		return
+	}
+	defer leave()
 	// The live container keeps serving until a copy of the new version is up beside it.
 	standIn := false
 	// A stack's stand-in is judged by the deploy's ready check, so one without it swaps in place.
