@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
@@ -16,6 +17,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -602,4 +604,46 @@ func TestRun_givesUpOnARedirectThatNeverEnds(t *testing.T) {
 	if got := hits.Load(); got > int32(len(waits())+1)*maxRedirects {
 		t.Fatalf("%d requests over %d attempts: the redirects were not bounded", got, len(waits()))
 	}
+}
+
+// gRPC reads a link until it ends and then closes it; this stands in for it.
+func drain(c net.Conn) {
+	go func() {
+		_, _ = io.Copy(io.Discard, c)
+		_ = c.Close()
+	}()
+}
+
+func TestRun_aLinkRefusedAsACopyIsNotedForTheInstallerAndClearedOnceTaken(t *testing.T) {
+	fakeWaits(t)
+	certPath, _ := agentCert(t)
+	marker := filepath.Join(t.TempDir(), CopiedMarker)
+	srv, links := door(t, doorOpts{})
+	var logged sync.Map
+	logf := func(format string, args ...any) { logged.Store(fmt.Sprintf(format, args...), true) }
+	l, _ := run(t, Config{Addresses: pair(t, srv.URL, ""), CertFile: certPath, CopiedFile: marker, Logf: logf})
+
+	drain(accept(t, l))
+	refused := nextLink(t, links)
+	_ = refused.ws.Close(CopiedStatus, "identity in use")
+	waitFor(t, "the copy note", func() bool {
+		b, err := os.ReadFile(marker)
+		return err == nil && strings.Contains(string(b), "another machine is using this server's identity")
+	})
+	said := false
+	logged.Range(func(k, _ any) bool {
+		said = said || strings.Contains(k.(string), "run the install command of a new server on it")
+		return true
+	})
+	if !said {
+		t.Fatal("the agent's log does not say what to do with the copy")
+	}
+
+	// The original went away and this machine's link is taken: it is the server now, not a copy.
+	drain(accept(t, l))
+	nextLink(t, links)
+	waitFor(t, "the copy note to go", func() bool {
+		_, err := os.Stat(marker)
+		return os.IsNotExist(err)
+	})
 }

@@ -86,13 +86,25 @@ func Over(addr net.Addr) bool {
 	return addr != nil && addr.Network() == linkAddr{}.Network()
 }
 
+// CopiedStatus is the panel refusing a link because another machine holds this identity (ADR-0050).
+const CopiedStatus websocket.StatusCode = 4003
+
+// CopiedMarker, in the agent's directory, says the panel refused this machine as a copy: the installer reads it.
+const CopiedMarker = "identity-in-use"
+
+// ErrCopied is a link the panel closed because another machine uses this server's identity.
+var ErrCopied = errors.New("another machine is using this server's identity, so Deplo refused this one. " +
+	"If this machine is a copy of another server, run the install command of a new server on it")
+
 // Config is where to link and how the agent names itself there.
 type Config struct {
 	// Addresses is the saved pair: each attempt dials its primary, then its fallback.
 	Addresses *Store
 	// CertFile is the agent's leaf; its sha256 names the server at the door, read per dial so a renewal counts.
 	CertFile string
-	Logf     func(format string, args ...any)
+	// CopiedFile is where the agent says it was refused as a copy; empty keeps no such note.
+	CopiedFile string
+	Logf       func(format string, args ...any)
 }
 
 // Run keeps one link open to the saved pair until ctx ends or l is closed; with no primary it waits for one.
@@ -184,6 +196,7 @@ func (cfg Config) serve(ctx context.Context, l *Listener, ws *websocket.Conn, ad
 	linkCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	c := &conn{Conn: websocket.NetConn(linkCtx, ws, websocket.MessageBinary), closed: make(chan struct{})}
+	cfg.noteCopied(false)
 	select {
 	case l.conns <- c:
 	case <-l.closed:
@@ -199,6 +212,10 @@ func (cfg Config) serve(ctx context.Context, l *Listener, ws *websocket.Conn, ad
 	go ping(linkCtx, ws, unanswered)
 	select {
 	case <-c.closed:
+		if c.status() == CopiedStatus {
+			cfg.noteCopied(true)
+			return 0, ErrCopied
+		}
 		return time.Since(started), errors.New("link closed")
 	case err := <-unanswered:
 		ws.CloseNow()
@@ -325,11 +342,42 @@ func fingerprint(certFile string) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
+// noteCopied keeps, or clears once a link is taken, the note that the panel refused this machine as a copy.
+func (cfg Config) noteCopied(on bool) {
+	if cfg.CopiedFile == "" {
+		return
+	}
+	if !on {
+		_ = os.Remove(cfg.CopiedFile)
+		return
+	}
+	_ = os.WriteFile(cfg.CopiedFile, []byte(ErrCopied.Error()+"\n"), 0o600)
+}
+
 // conn is one link as grpc.Server sees it; closed fires once gRPC is done with it.
 type conn struct {
 	net.Conn
 	once   sync.Once
 	closed chan struct{}
+	mu     sync.Mutex
+	code   websocket.StatusCode
+}
+
+// Read remembers the close code the panel ended the link with.
+func (c *conn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if code := websocket.CloseStatus(err); code != -1 {
+		c.mu.Lock()
+		c.code = code
+		c.mu.Unlock()
+	}
+	return n, err
+}
+
+func (c *conn) status() websocket.StatusCode {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.code
 }
 
 func (c *conn) Close() error {
