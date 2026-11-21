@@ -39,7 +39,7 @@ func lateDocker(t *testing.T, appRuns bool, connectorRuns bool, services ...stri
 case "$*" in
 "inspect -f {{.State.Running}} "*) cat $D/running ;;
 "inspect -f {{json .Config.Labels}} "*) echo '{}' ;;
-"inspect -f {{len .Mounts}} "*) echo 0 ;;
+"inspect -f {{range .Mounts}}"*) : ;;
 "image inspect "*) echo null ;;
 "ps -q "*"label=com.docker.compose.service="*) cat $D/connector ;;
 "ps -q "*) cat $D/running | grep -q true && echo abc ;;
