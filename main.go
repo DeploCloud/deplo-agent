@@ -40,6 +40,10 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "proxy-hold" {
 		os.Exit(proxyHold(os.Args[2:]))
 	}
+	// The same binary, mounted into a container as the health check its proxy waits for (deplo#281).
+	if len(os.Args) > 1 && os.Args[1] == "probe" {
+		os.Exit(server.Probe(os.Args[2:]))
+	}
 	// The same binary, mounted into a name forwarder's container (#200).
 	if len(os.Args) > 1 && os.Args[1] == "forward" {
 		os.Exit(forwarder.Main(os.Args[2:], os.Stderr))
@@ -123,6 +127,9 @@ func main() {
 
 	srv := newGRPCServer(certMgr)
 	svc := server.New(*stackDir, *buildTmpDir, *dataDir, *dataBase)
+	if err := svc.PlaceProbe(); err != nil {
+		fmt.Fprintf(os.Stderr, "deplo-agent: could not place the health check probe: %v\n", err)
+	}
 	svc.SetAgentDir(*agentDir)
 	svc.StartRestartWatch(context.Background())
 	svc.StartCluster()

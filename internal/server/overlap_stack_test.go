@@ -63,7 +63,7 @@ case "$*" in
 "inspect -f {{json .Config.Labels}} "*) shift 3; for id; do cat $D/labels/$id 2>/dev/null || echo '{}'; echo; done ;;
 "inspect -f {\"id\""*) shift 3; for id; do
     if [ -f $D/live-up ] && [ -f $D/swapped/$id ]; then cat $D/swapped/$id; else cat $D/sample/$id; fi; echo; done ;;
-"inspect -f {{len .Mounts}} "*) echo 0 ;;
+"inspect -f {{range .Mounts}}"*) : ;;
 "image inspect "*) echo null ;;
 *" config --images"*) echo acme/web:2 ;;
 *" config --format json"*) echo '{"services":{}}' ;;

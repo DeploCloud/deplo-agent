@@ -31,7 +31,7 @@ for last; do :; done
 case "$*" in
 "inspect -f {{.State.Running}} "*) cat $D/running/$last 2>/dev/null || echo false ;;
 "inspect -f {{json .Config.Labels}} "*) cat $D/labels/$last 2>/dev/null || echo '{}' ;;
-"inspect -f {{len .Mounts}} "*) cat $D/mounts/$last 2>/dev/null || echo 0 ;;
+"inspect -f {{range .Mounts}}"*) [ "$(cat $D/mounts/$last 2>/dev/null || echo 0)" = 0 ] || echo m ;;
 "image inspect "*) echo null ;;
 esac
 exit 0`)

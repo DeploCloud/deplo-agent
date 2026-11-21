@@ -156,6 +156,8 @@ var Capabilities = []string{
 	"dns.challenge",
 	// A name's own certificate over DNS renewed by one server and held by every other as a file (#228).
 	"dns.certificates",
+	// The health check is this binary, mounted from the stack directory's .deplo-probe: no shell in the image (deplo#281).
+	"deploy.probe",
 }
 
 // AgentVersion is the version this agent reports over Hello.

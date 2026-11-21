@@ -145,10 +145,11 @@ func (s *Service) removeStandIn(slug string, e *emitter) {
 	_ = os.Remove(s.stackPath(slug + standInSuffix))
 }
 
-// hasStorage: the container mounts a volume or a folder, which the stand-in shares with it.
+// hasStorage: the container mounts a volume or a folder, which the stand-in shares with it. The probe is no storage.
 func hasStorage(ctx context.Context, container string) bool {
-	res, err := dockercli.Run(ctx, 15*time.Second, "inspect", "-f", "{{len .Mounts}}", container)
-	return err == nil && res.Code == 0 && strings.TrimSpace(res.Stdout) != "0"
+	res, err := dockercli.Run(ctx, 15*time.Second, "inspect", "-f",
+		`{{range .Mounts}}{{if ne .Destination "`+probeDir+`"}}m{{end}}{{end}}`, container)
+	return err == nil && res.Code == 0 && strings.TrimSpace(res.Stdout) != ""
 }
 
 // sameProjectRoutes is sameRoutes over every container of two compose projects, started or only created.
