@@ -96,10 +96,12 @@ type clusterZones struct {
 	geoRead  bool
 	sup      *dnszone.Supervisor
 	verdicts map[string]dnszone.Verdict
-	sent     []byte
-	since    time.Time
-	stop     chan struct{}
-	done     chan struct{}
+	// lastHeard and back say when a server was heard again after a silence.
+	lastHeard, back map[string]time.Time
+	sent            []byte
+	since           time.Time
+	stop            chan struct{}
+	done            chan struct{}
 }
 
 func (s *Service) zones() *clusterZones {
@@ -497,6 +499,36 @@ func (z *clusterZones) loop(stop, done chan struct{}, sup *dnszone.Supervisor) {
 	}
 }
 
+// holdLocked is who leaves the answers while still counting: a server heard again after a silence, until it has been
+// heard for the removal time, and this one for the removal time after it starts. A proxy just started answers with
+// its default certificate, then a 502, for a moment (ADR-0049 lab). The caller holds z.mu.
+func (z *clusterZones) holdLocked(now time.Time, heard map[string]time.Time, drop time.Duration, c *zoneCluster) map[string]bool {
+	if z.lastHeard == nil {
+		z.lastHeard, z.back = map[string]time.Time{}, map[string]time.Time{}
+	}
+	hold := map[string]bool{}
+	for _, m := range c.Members {
+		fp := m.Fingerprint
+		if fp == c.Self {
+			continue
+		}
+		if at, ok := heard[fp]; ok {
+			if prev := z.lastHeard[fp]; !prev.IsZero() && at.Sub(prev) >= drop {
+				z.back[fp] = at
+			}
+			z.lastHeard[fp] = at
+		}
+		if b, ok := z.back[fp]; ok && now.Sub(b) < drop {
+			hold[fp] = true
+		}
+	}
+	// As the others hold it: for the removal time from its start.
+	if now.Sub(z.since) < drop {
+		hold[c.Self] = true
+	}
+	return hold
+}
+
 // heard is when each server of the private network was last heard, and when this server's network started.
 func (s *Service) heard() (map[string]time.Time, time.Time) {
 	if s.zoneHeard != nil {
@@ -535,7 +567,7 @@ func (z *clusterZones) pushLocked(now time.Time) {
 		for _, m := range c.Members {
 			members = append(members, dnszone.Member{Fingerprint: m.Fingerprint, Addrs: dnszone.Addrs{V4: m.V4, V6: m.V6}, Emptying: m.Emptying})
 		}
-		v := dnszone.Decide(members, c.Self, heard, now, drop, now.Before(since.Add(drop)), c.Last)
+		v := dnszone.DecideHolding(members, c.Self, heard, now, drop, now.Before(since.Add(drop)), c.Last, z.holdLocked(now, heard, drop, c))
 		if v.Agreed != nil {
 			c.Last, agreed = v.Agreed, true
 		}

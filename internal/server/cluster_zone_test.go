@@ -238,8 +238,9 @@ func TestZone_answersFromDiskAfterARestartWithDeploDown(t *testing.T) {
 	if len(addrs) != 1 {
 		t.Fatalf("listening on %v", addrs)
 	}
-	// Just started and hearing nobody yet: it answers what it last agreed on, rather than nothing.
-	until(t, 5*time.Second, "203.0.113.1 203.0.113.2 203.0.113.3", func() string { return lookup(addrs[0], "shop-example-com.go.example.com.") })
+	// Just started and hearing nobody yet: it answers what it last agreed on, rather than nothing, but for itself:
+	// for the removal time a server just started is named by nobody, itself included.
+	until(t, 5*time.Second, "203.0.113.2 203.0.113.3", func() string { return lookup(addrs[0], "shop-example-com.go.example.com.") })
 }
 
 // writeZoneFile is what an agent keeps on disk for cl1 once it has agreed on all three servers.

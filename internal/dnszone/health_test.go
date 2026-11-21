@@ -128,3 +128,27 @@ func TestDecide_warmingAnswersTheLastAgreedSet(t *testing.T) {
 		t.Fatalf("one server: %+v", v)
 	}
 }
+
+// A server just back, or this one before its proxy serves, counts for the majority but is named by no answer.
+func TestDecideHolding_aHeldServerCountsButIsNamedNowhere(t *testing.T) {
+	now := time.Now()
+	m := members(3)
+	hold := map[string]bool{"s2": true}
+	v := DecideHolding(m, "s0", heardFrom(now, "s1", "s2"), now, 10*time.Second, false, nil, hold)
+	if v.State != StateAnswer || v.Heard != 3 || !slices.Equal(v.Servers, []string{"s0", "s1"}) ||
+		!slices.Equal(v.Addrs.V4, []string{"203.0.113.1", "203.0.113.2"}) {
+		t.Fatalf("verdict %+v", v)
+	}
+	// Starting, it answers the last agreed set without the held one.
+	last := &Agreed{Servers: []string{"s0", "s1", "s2"}, Addrs: Addrs{V4: []string{"203.0.113.1", "203.0.113.2", "203.0.113.3"}}}
+	v = DecideHolding(m, "s0", heardFrom(now, "s1", "s2"), now, 10*time.Second, true, last, map[string]bool{"s0": true})
+	if v.State != StateWarming || !slices.Equal(v.Servers, []string{"s1", "s2"}) ||
+		!slices.Equal(v.Addrs.V4, []string{"203.0.113.2", "203.0.113.3"}) {
+		t.Fatalf("warming %+v", v)
+	}
+	// Holding every server it agreed on would answer nothing: it answers the set as it was.
+	v = DecideHolding(m, "s0", heardFrom(now, "s1", "s2"), now, 10*time.Second, true, last, map[string]bool{"s0": true, "s1": true, "s2": true})
+	if !slices.Equal(v.Addrs.V4, last.Addrs.V4) {
+		t.Fatalf("all held %+v", v)
+	}
+}
