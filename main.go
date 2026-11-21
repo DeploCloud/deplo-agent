@@ -36,6 +36,10 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "dns" {
 		os.Exit(dnszone.Main(os.Stdin, os.Stderr))
 	}
+	// The same binary, run once per boot before Docker starts the proxy (#266).
+	if len(os.Args) > 1 && os.Args[1] == "proxy-hold" {
+		os.Exit(proxyHold(os.Args[2:]))
+	}
 	// The same binary, mounted into a name forwarder's container (#200).
 	if len(os.Args) > 1 && os.Args[1] == "forward" {
 		os.Exit(forwarder.Main(os.Args[2:], os.Stderr))
@@ -125,6 +129,7 @@ func main() {
 	svc.StartClusterMember()
 	svc.StartClusterNetwork()
 	svc.StartClusterZone()
+	svc.EnsureProxyHold()
 	if certMgr != nil {
 		svc.EnableCertRenewal(certMgr)
 	}
@@ -295,4 +300,22 @@ func portFromAddr(addr string) int {
 		return 9443
 	}
 	return port
+}
+
+// proxyHold moves the certificates the cluster may have moved out of the proxy's store; it never fails the boot.
+func proxyHold(args []string) int {
+	fs := flag.NewFlagSet("proxy-hold", flag.ContinueOnError)
+	dir := fs.String("agent-dir", "", "the agent's directory")
+	if fs.Parse(args) != nil || *dir == "" {
+		return 2
+	}
+	n, err := server.ProxyHold(*dir)
+	if err != nil {
+		log.Printf("deplo-agent: proxy-hold: %v", err)
+		return 0
+	}
+	if n > 0 {
+		log.Printf("deplo-agent: proxy-hold: %d certificates wait as files until the cluster says they are still this server's", n)
+	}
+	return 0
 }

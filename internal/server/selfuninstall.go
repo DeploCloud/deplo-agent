@@ -63,6 +63,13 @@ func (s *Service) applyUninstall(ctx context.Context, exe string) (*pb.SelfUnins
 		log.Printf("deplo-agent: self-uninstall: %v (continuing)", err)
 	}
 
+	if err := runSystemctl(ctx, "disable", proxyHoldUnit); err != nil && !errors.Is(err, errNoSystemd) {
+		log.Printf("deplo-agent: self-uninstall: %v (continuing)", err)
+	}
+	if err := os.Remove(proxyHoldUnitPath); err == nil {
+		removed = append(removed, proxyHoldUnitPath)
+	}
+
 	if err := os.Remove(agentUnitPath); err == nil {
 		removed = append(removed, agentUnitPath)
 	} else if !os.IsNotExist(err) {

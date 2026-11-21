@@ -51,9 +51,9 @@ func waitExit(t *testing.T, exited func() bool) {
 
 func unitAt(t *testing.T, path string) {
 	t.Helper()
-	orig := agentUnitPath
-	agentUnitPath = path
-	t.Cleanup(func() { agentUnitPath = orig })
+	orig, hold := agentUnitPath, proxyHoldUnitPath
+	agentUnitPath, proxyHoldUnitPath = path, filepath.Join(filepath.Dir(path), proxyHoldUnit)
+	t.Cleanup(func() { agentUnitPath, proxyHoldUnitPath = orig, hold })
 }
 
 // The whole footprint goes: unit, state dir, binary, and the process then exits on its own rather than being stopped (which would kill it mid-removal).
@@ -72,6 +72,9 @@ func TestSelfUninstall_removesUnitStateAndBinary(t *testing.T) {
 		t.Fatal(err)
 	}
 	unitAt(t, unit)
+	if err := os.WriteFile(proxyHoldUnitPath, []byte("[Unit]"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	verbs := stubSystemctl(t, nil)
 	exited := captureExit(t)
 
@@ -85,17 +88,17 @@ func TestSelfUninstall_removesUnitStateAndBinary(t *testing.T) {
 	if !resp.GetStopping() {
 		t.Error("response does not say the agent is stopping")
 	}
-	if len(resp.GetRemoved()) != 3 {
-		t.Errorf("removed = %v, want the unit, the state dir and the binary", resp.GetRemoved())
+	if len(resp.GetRemoved()) != 4 {
+		t.Errorf("removed = %v, want both units, the state dir and the binary", resp.GetRemoved())
 	}
-	for _, p := range []string{unit, agentDir, exe} {
+	for _, p := range []string{unit, proxyHoldUnitPath, agentDir, exe} {
 		if _, err := os.Stat(p); !os.IsNotExist(err) {
 			t.Errorf("%s still exists after the uninstall", p)
 		}
 	}
 	got := verbs()
-	if len(got) != 2 || got[0] != "disable" || got[1] != "daemon-reload" {
-		t.Errorf("systemctl verbs = %v, want [disable daemon-reload]", got)
+	if len(got) != 3 || got[0] != "disable" || got[1] != "disable" || got[2] != "daemon-reload" {
+		t.Errorf("systemctl verbs = %v, want [disable disable daemon-reload]", got)
 	}
 	if exited() {
 		t.Error("the process exited before the response could be flushed")

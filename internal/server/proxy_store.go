@@ -112,7 +112,11 @@ func (f *forwarders) storePlan(ctx context.Context) storeMerge {
 				continue
 			}
 			if here {
-				running = append(running, a.Routes.hosts()...)
+				// Only once a lease heard since this agent started places it here: a copy left running after a move
+				// would renew a certificate the cluster no longer asks of this server (#266).
+				if f.placedHere(cluster, a.AppID) {
+					running = append(running, a.Routes.hosts()...)
+				}
 				continue
 			}
 			// Only an App the leader runs elsewhere: one stopped on its own server keeps its certificate.
@@ -135,7 +139,7 @@ func (f *forwarders) storePlan(ctx context.Context) storeMerge {
 		}
 	}
 	for zone := range zv.zones {
-		if zv.renew[zone] {
+		if zv.renew[zone] || zv.unsure[zone] {
 			m.protect = append(m.protect, zoneCertNames(zone))
 		} else {
 			m.dropSets = append(m.dropSets, zoneCertNames(zone))
@@ -162,11 +166,15 @@ func (f *forwarders) pruneFiles(ctx context.Context, now time.Time) {
 	runs := f.ops().runs
 	var gone []proxyCert
 	for _, c := range files {
+		zone := f.s.currentZoneView().zoneOf(c)
 		if !c.NotAfter.After(now) {
-			gone = append(gone, c)
+			// Kept while a copy of its App left running here may still ask for it: the file is what stops the order.
+			if zone != "" || !f.staleCopyRuns(ctx, answers, c) {
+				gone = append(gone, c)
+			}
 			continue
 		}
-		if zone := f.s.currentZoneView().zoneOf(c); zone != "" {
+		if zone != "" {
 			// A zone's certificate stays while the zone has one, whichever App runs here.
 			if !f.s.currentZoneView().held[zone] {
 				gone = append(gone, c)
@@ -191,6 +199,31 @@ func (f *forwarders) pruneFiles(ctx context.Context, now time.Time) {
 			fmt.Fprintf(os.Stderr, "deplo-agent: proxy certificates: could not rewrite the routes file: %v\n", err)
 		}
 	}
+}
+
+// placedHere says whether a lease heard since this agent started places the App here, with no return under way.
+func (f *forwarders) placedHere(cluster, appID string) bool {
+	here, _ := f.s.leaseGuard().answerHolders(cluster, appID)
+	return here
+}
+
+// staleCopyRuns says whether the App a pair serves runs here although no current lease places it here.
+func (f *forwarders) staleCopyRuns(ctx context.Context, answers []answer, c proxyCert) bool {
+	runs := f.ops().runs
+	if runs == nil {
+		return false
+	}
+	f.mu.Lock()
+	cluster := f.st.Cluster
+	f.mu.Unlock()
+	for _, a := range answers {
+		if a.Routes == nil || !slices.ContainsFunc(c.Names, func(h string) bool { return slices.Contains(a.Routes.hosts(), h) }) {
+			continue
+		}
+		here, err := runs(ctx, a.AppID)
+		return err == nil && here && !f.placedHere(cluster, a.AppID)
+	}
+	return false
 }
 
 // keepAsFiles puts pairs in the routes file, each unless a file as new already covers the same names.

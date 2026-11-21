@@ -69,6 +69,8 @@ type zoneCluster struct {
 	Challenges []zoneChallenge `json:"challenges,omitempty"`
 	Certs      []zoneCertRole  `json:"certs,omitempty"`
 	pairs      map[string]proxyCert
+	// heard says Deplo sent it since this agent started: a role read back from disk may have moved meanwhile.
+	heard bool
 }
 
 type zoneFile struct {
@@ -342,6 +344,7 @@ func (s *Service) SetClusterZone(_ context.Context, req *pb.SetClusterZoneReques
 		if old == nil || !sameShape(old, c) {
 			c.Serial = max(uint32(time.Now().Unix()), c.Serial+1)
 		}
+		c.heard = true
 		z.st.Clusters[id] = c
 	}
 	z.save()
