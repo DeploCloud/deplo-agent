@@ -92,6 +92,7 @@ type zoneCertView struct {
 	zones   map[string]bool // every zone answered here, bare
 	held    map[string]bool // zones with a certificate of their own
 	renew   map[string]bool // zones this server renews
+	unsure  map[string]bool // zones whose renewer Deplo has not named since this agent started
 	order   map[string]bool // zones whose certificate this server's proxy may order now
 	covered map[string]bool // hostnames a zone's certificate serves
 	dns     map[string]bool // hostnames whose own certificate comes over DNS
@@ -524,7 +525,7 @@ func (z *clusterZones) takeTXTLocked(cluster, sender string, body txtBody, now t
 // publishViewLocked replaces what the proxy's store and routes file read of the zones' certificates.
 func (z *clusterZones) publishViewLocked() {
 	v := &zoneCertView{zones: map[string]bool{}, held: map[string]bool{}, renew: map[string]bool{}, order: map[string]bool{},
-		covered: map[string]bool{}, dns: map[string]bool{}}
+		unsure: map[string]bool{}, covered: map[string]bool{}, dns: map[string]bool{}}
 	now := time.Now()
 	for _, c := range z.st.Clusters {
 		for _, e := range c.Zones {
@@ -540,6 +541,11 @@ func (z *clusterZones) publishViewLocked() {
 			v.dns[zn], v.dns["*."+zn] = true, true
 			for _, h := range r.Covered {
 				v.covered[h] = true
+			}
+			// Back from a power cut, it may no longer renew it: nothing is renewed nor dropped until Deplo says (#266).
+			if !c.heard {
+				v.unsure[zn] = true
+				continue
 			}
 			if !r.Renew {
 				continue
@@ -667,7 +673,7 @@ func (s *Service) tendZoneCerts(now time.Time) {
 			want = want || ch.Owner == c.Self
 		}
 		for _, r := range c.Certs {
-			if r.Renew {
+			if r.Renew && c.heard {
 				renews[bare(r.Zone)] = true
 			}
 		}

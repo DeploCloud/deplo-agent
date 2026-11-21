@@ -109,6 +109,8 @@ func newProxyHost(t *testing.T) *proxyHost {
 	settle := certSettle
 	certSettle = 0
 	t.Cleanup(func() { stopProxy, certSettle = old, settle })
+	// The leader runs the App here, as a lease heard since this agent started says.
+	h.placedOn(t, "srv_a")
 	return h
 }
 
