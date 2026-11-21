@@ -138,11 +138,11 @@ func (f *forwarders) storePlan(ctx context.Context) storeMerge {
 			m.keep = append(m.keep, c)
 		}
 	}
-	for zone := range zv.zones {
-		if zv.renew[zone] || zv.unsure[zone] {
-			m.protect = append(m.protect, zoneCertNames(zone))
+	for key, names := range zv.sets {
+		if zv.renew[key] || zv.unsure[key] {
+			m.protect = append(m.protect, names)
 		} else {
-			m.dropSets = append(m.dropSets, zoneCertNames(zone))
+			m.dropSets = append(m.dropSets, names)
 		}
 	}
 	if len(zv.covered) > 0 {

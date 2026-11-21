@@ -154,6 +154,8 @@ var Capabilities = []string{
 	"dns.geo",
 	// Certificate checks over DNS answered by the cluster's own zone, and the zone's own certificate (ADR-0049 phase 3).
 	"dns.challenge",
+	// A name's own certificate over DNS renewed by one server and held by every other as a file (#228).
+	"dns.certificates",
 }
 
 // AgentVersion is the version this agent reports over Hello.

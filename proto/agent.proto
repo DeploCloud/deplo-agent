@@ -2722,6 +2722,9 @@ message ClusterZoneCertificate {
   string key_pem = 6;
   // The hostnames it serves: a certificate of their own leaves this server's proxy.
   repeated string covered = 7;
+  // A name's own certificate over DNS, in the zone its check points into: its names, each one of the
+  // request's checks. Empty for the zone's own (Hello dns.certificates; an older agent refuses it).
+  repeated string names = 8;
 }
 
 message ClusterZone {
@@ -2775,6 +2778,8 @@ message ClusterZoneCertificateState {
   int64 error_at_unix_ms = 7;
   // The proxy is asked to order it now.
   bool ordering = 8;
+  // The names of a name's own certificate, as Deplo sent them; empty for the zone's.
+  repeated string names = 9;
 }
 
 message SetGeoTableRequest {

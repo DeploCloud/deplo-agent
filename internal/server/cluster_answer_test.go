@@ -181,6 +181,23 @@ func TestAnswers_fallBackToAnotherServerThatRunsTheApp(t *testing.T) {
 	}
 }
 
+// Load balancing runs the App on every server (#228): each server a visitor reaches serves them from its own copy.
+func TestAnswers_anAppOnEveryServerIsServedByTheCopyAVisitorReached(t *testing.T) {
+	a, b, fa, fb, members := answerPair(t)
+	bothAnswer(t, a, b, members)
+	two := []lease.Entry{appEntry("srvA"), {Kind: "app", ID: "prj1", Replica: 1, Member: "srvB", Slug: "shop"}}
+	placeOn(t, a, "srvA", two...)
+	placeOn(t, b, "srvB", two...)
+	for i := 0; i < 5; i++ {
+		if got := askPort(t, fa.spec(t, answerAlias), shopTLS); got != "proxy-a:PING" {
+			t.Fatalf("a visitor of A was served by %q", got)
+		}
+		if got := askPort(t, fb.spec(t, answerAlias), shopTLS); got != "proxy-b:PING" {
+			t.Fatalf("a visitor of B was served by %q", got)
+		}
+	}
+}
+
 // A failover placed the App on B, which is still starting it: the visitor's connection waits for it.
 func TestAnswers_waitForTheAppToBeReady(t *testing.T) {
 	quickAnswers(t, 5*time.Second)

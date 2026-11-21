@@ -59,11 +59,12 @@ func (s *Service) settleZoneAuthz(now time.Time, renews map[string]bool) {
 		return
 	}
 	z := s.zones()
+	sets := s.currentZoneView().sets
 	for zone := range renews {
 		sum := ""
 		for _, e := range st.entries(zoneResolver) {
 			c, err := parseProxyCert(string(e.Certificate), string(e.Key))
-			if err == nil && sameNames(c.Names, zoneCertNames(zone)) && c.NotAfter.After(now) {
+			if err == nil && len(sets[zone]) > 0 && sameNames(c.Names, sets[zone]) && c.NotAfter.After(now) {
 				sum = c.Sum
 			}
 		}
@@ -87,7 +88,7 @@ func (s *Service) settleZoneAuthz(now time.Time, renews map[string]bool) {
 		go func(zone, sum string) {
 			ctx, cancel := context.WithTimeout(context.Background(), zoneAuthzTimeout)
 			defer cancel()
-			n, err := s.closeZoneAuthzFor(ctx, compose, st, zone)
+			n, err := s.closeZoneAuthzFor(ctx, compose, st, sets[zone])
 			z.mu.Lock()
 			run.busy = false
 			if err != nil {
@@ -97,15 +98,15 @@ func (s *Service) settleZoneAuthz(now time.Time, renews map[string]bool) {
 			}
 			z.mu.Unlock()
 			if err != nil {
-				log.Printf("deplo-agent: could not close the certificate checks of %s after its renewal: %v", zone, err)
+				log.Printf("deplo-agent: could not close the certificate checks of %s after its renewal: %v", strings.Join(sets[zone], ", "), err)
 			} else if n > 0 {
-				log.Printf("deplo-agent: closed %d certificate checks of %s after its renewal", n, zone)
+				log.Printf("deplo-agent: closed %d certificate checks of %s after its renewal", n, strings.Join(sets[zone], ", "))
 			}
 		}(zone, sum)
 	}
 }
 
-func (s *Service) closeZoneAuthzFor(ctx context.Context, compose string, st *acmeStore, zone string) (int, error) {
+func (s *Service) closeZoneAuthzFor(ctx context.Context, compose string, st *acmeStore, names []string) (int, error) {
 	var acct proxyAccount
 	raw, ok := st.resolvers[zoneResolver]["Account"]
 	if !ok || json.Unmarshal(raw, &acct) != nil || acct.Registration.URI == "" {
@@ -120,7 +121,7 @@ func (s *Service) closeZoneAuthzFor(ctx context.Context, compose string, st *acm
 		return 0, err
 	}
 	return closeZoneAuthz(ctx, &acme.Client{Key: key, KID: acme.KeyID(acct.Registration.URI), DirectoryURL: dir, HTTPClient: hc,
-		UserAgent: "deplo-agent"}, zoneCertNames(zone))
+		UserAgent: "deplo-agent"}, names)
 }
 
 // closeAuthorizations asks for an order of the names, which brings back every authorization the CA would reuse,
