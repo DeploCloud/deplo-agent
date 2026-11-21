@@ -24,6 +24,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
@@ -513,5 +514,32 @@ func TestServeAgent_keepsItsPortWhenAskedToCloseItOverThatPort(t *testing.T) {
 		t.Fatalf("a restart no longer listens: %v, %v", lis, err)
 	} else {
 		lis.Close()
+	}
+}
+
+// The panel's door holds the link's mTLS session itself and speaks plain HTTP/2 inside it (deplo ADR-0050).
+func TestServeAgent_answersADoorThatHoldsTheTLSSessionItself(t *testing.T) {
+	a := startAgent(t)
+	l := nextLinked(t, a.links)
+	cfg := a.pki.panelTLS(t, nil)
+	cfg.NextProtos = []string{"h2"}
+	session := tls.Client(l.conn, cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := session.HandshakeContext(ctx); err != nil {
+		t.Fatalf("handshake: %v", err)
+	}
+	if got := session.ConnectionState().NegotiatedProtocol; got != "h2" {
+		t.Fatalf("ALPN = %q, want h2", got)
+	}
+	cc, err := grpc.NewClient("passthrough:///agent-link",
+		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) { return session, nil }),
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cc.Close() })
+	if resp := hello(t, pb.NewAgentClient(cc)); resp.GetContractVersion() != pb.ContractVersion_CONTRACT_VERSION_V1 {
+		t.Fatalf("contract = %v", resp.GetContractVersion())
 	}
 }

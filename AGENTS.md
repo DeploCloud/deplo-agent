@@ -17,6 +17,8 @@ control plane never touches a Docker socket; everything host-coupled arrives her
 - `internal/dockercli/`, `internal/hostmetrics/`, `internal/hostinfo/`, `internal/s3client/`,
   `internal/safepath/`, `internal/bootstrap/`, `internal/netguard/` - leaf helpers.
 - `internal/link/` - the agent link: the WebSocket the agent opens to its panel and serves gRPC on.
+  The panel's door holds the mTLS session and pins this agent's key (deplo ADR-0050); a link it closes with
+  4003 means another machine uses this identity, noted as `identity-in-use` for `install-agent.sh`.
 - `internal/mesh/` - the cluster's private network (ADR-0047): WireGuard in userspace on its own network
   stack, a transport that takes a direct UDP path when a peer proves one and a relay stream when none
   answers. It never touches the host's interfaces, routes or firewall. `internal/server/cluster_mesh.go`
