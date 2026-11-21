@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -260,7 +261,8 @@ func linkConfig(insecure bool, agentDir, certFile string) (*link.Config, error) 
 		return nil, nil
 	}
 	a, err := linkAddresses(agentDir)
-	return &link.Config{Addresses: link.NewStore(agentDir, a), CertFile: certFile, Logf: log.Printf}, err
+	return &link.Config{Addresses: link.NewStore(agentDir, a), CertFile: certFile,
+		CopiedFile: filepath.Join(agentDir, link.CopiedMarker), Logf: log.Printf}, err
 }
 
 // linkAddresses is the saved pair; an agent enrolled before the agent link saves its install URL once.
