@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -53,19 +55,32 @@ func newProbeRun(t *testing.T, slug string) *probeRun {
 	if err := s.PlaceProbe(); err != nil {
 		t.Fatal(err)
 	}
-	name := "deplo-" + slug
 	t.Cleanup(func() {
 		ctx := context.Background()
-		for _, p := range []string{name, name + standInSuffix} {
-			if ids := projectIDs(ctx, p); len(ids) > 0 {
-				_, _ = dockercli.Run(ctx, 60*time.Second, append([]string{"rm", "-f"}, ids...)...)
-			}
-			_, _ = dockercli.Run(ctx, 20*time.Second, "network", "rm", p+"_default")
-		}
 		_, _ = dockercli.Run(ctx, 20*time.Second, "network", "disconnect", "-f", testNetwork, traefikContainer)
 		_, _ = dockercli.Run(ctx, 20*time.Second, "network", "rm", testNetwork)
 	})
-	return &probeRun{t, s, slug}
+	r := &probeRun{t, s, slug}
+	t.Cleanup(r.remove)
+	return r
+}
+
+// beside is another App on the same server, so its containers mount the same probe folder.
+func (r *probeRun) beside(slug string) *probeRun {
+	o := &probeRun{r.t, r.s, slug}
+	r.t.Cleanup(o.remove)
+	return o
+}
+
+func (r *probeRun) remove() {
+	ctx := context.Background()
+	name := "deplo-" + r.slug
+	for _, p := range []string{name, name + standInSuffix} {
+		if ids := projectIDs(ctx, p); len(ids) > 0 {
+			_, _ = dockercli.Run(ctx, 60*time.Second, append([]string{"rm", "-f"}, ids...)...)
+		}
+		_, _ = dockercli.Run(ctx, 20*time.Second, "network", "rm", p+"_default")
+	}
 }
 
 func projectIDs(ctx context.Context, project string) []string {
@@ -153,5 +168,107 @@ func TestE2E_ProbeFailsAnAppThatNeverListensAtTheSameDeadline(t *testing.T) {
 		if d < timeout || d > timeout+15*time.Second {
 			t.Fatalf("failed after %s and %s, want both at the %s deadline", took[0], took[1], timeout)
 		}
+	}
+}
+
+// End-to-end (real docker): a self-update renames the next release over the agent's binary and the restarted agent
+// places it, never writing a file a check may be running. An App deployed before the update and one deployed
+// after both keep passing.
+func TestE2E_ProbeKeepsPassingAcrossASelfUpdate(t *testing.T) {
+	older := newProbeRun(t, "deplo-agent-test-probe-update")
+	newer := older.beside("deplo-agent-test-probe-update2")
+	ctx := context.Background()
+	built, err := captureExe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(t.TempDir(), "deplo-agent")
+	if err := copyExecutable(built, exe); err != nil {
+		t.Fatal(err)
+	}
+	agentBinaryAt(t, exe)
+	if err := older.s.PlaceProbe(); err != nil {
+		t.Fatal(err)
+	}
+
+	const image = "traefik/whoami:v1.10.3"
+	up := func(r *probeRun) string {
+		name := "deplo-" + r.slug
+		// Checked every second, so the older App runs checks while the binary is swapped and right after.
+		stack := strings.Replace(probeStack(name, image, `["--port", "8080"]`, r.probeHost(), agentProbeTest(8080)),
+			"interval: 30s", "interval: 1s", 1)
+		if res, log, _ := r.deploy(image, stack, "", 8080, 2*time.Minute); !res.GetReady() {
+			t.Fatalf("%s: %v; log:\n%s", name, res, log)
+		}
+		ids := projectIDs(ctx, name)
+		if len(ids) != 1 {
+			t.Fatalf("%s: containers %v", name, ids)
+		}
+		return ids[0]
+	}
+	old := up(older)
+
+	// The next release: the same program, other bytes.
+	next, err := os.ReadFile(built)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next = append(next, 0)
+	stubDownload(t, next, nil)
+	captureReexec(t)
+	if _, err := older.s.applyUpdate(ctx, exe, &pb.SelfUpdateRequest{
+		Version: "999.0.0", Binaries: binariesFor("https://example/deplo-agent", sha256Hex(next)),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	swapped := time.Now()
+	// What the restarted agent does first.
+	if err := older.s.PlaceProbe(); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(older.probeHost(), probeFile)); string(b) != string(next) {
+		t.Fatal("the probe folder does not hold the update")
+	}
+
+	fresh := up(newer)
+	for _, id := range []string{old, fresh} {
+		passesChecksSince(t, id, swapped)
+	}
+}
+
+// passesChecksSince waits for a check of container id that started after since, and fails on any failed check.
+func passesChecksSince(t *testing.T, id string, since time.Time) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		res, err := dockercli.Run(context.Background(), 15*time.Second, "inspect", "-f", "{{json .State.Health}}", id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var h struct {
+			Status string
+			Log    []struct {
+				Start    time.Time
+				ExitCode int
+				Output   string
+			}
+		}
+		if err := json.Unmarshal([]byte(res.Stdout), &h); err != nil {
+			t.Fatalf("health of %s: %v: %s", id, err, res.Stdout)
+		}
+		after := false
+		for _, l := range h.Log {
+			if l.ExitCode != 0 {
+				t.Fatalf("a check of %s failed at %s: exit %d %q", id, l.Start, l.ExitCode, l.Output)
+			}
+			after = after || l.Start.After(since)
+		}
+		if after && h.Status == "healthy" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no passing check of %s since the update: %s", id, res.Stdout)
+		}
+		time.Sleep(500 * time.Millisecond)
 	}
 }
