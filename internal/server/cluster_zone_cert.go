@@ -59,13 +59,33 @@ type zoneChallenge struct {
 	Owner string `json:"owner"`
 }
 
-// zoneCertRole is this server's part in one zone's certificate. Zone is the canonical zone name.
+// zoneCertRole is this server's part in one certificate of a zone: the zone's own, or a name's own when Names is
+// set (#228). Zone is the canonical zone name.
 type zoneCertRole struct {
 	Zone    string   `json:"zone"`
+	Names   []string `json:"names,omitempty"`
 	Renew   bool     `json:"renew,omitempty"`
 	Order   bool     `json:"order,omitempty"`
 	Sum     string   `json:"sum,omitempty"`
 	Covered []string `json:"covered,omitempty"`
+}
+
+// set is the names the role's certificate covers.
+func (r zoneCertRole) set() []string {
+	if len(r.Names) > 0 {
+		return r.Names
+	}
+	return zoneCertNames(r.Zone)
+}
+
+// key names the certificate among the zones': the bare zone for its own, "=" and its names for a name's.
+func (r zoneCertRole) key() string {
+	if len(r.Names) == 0 {
+		return bare(r.Zone)
+	}
+	x := slices.Clone(r.Names)
+	slices.Sort(x)
+	return "=" + strings.Join(slices.Compact(x), ",")
 }
 
 // txtState is the records one member set: name to value to when it was first set.
@@ -88,14 +108,16 @@ type zoneCertRun struct {
 }
 
 // zoneCertView is what the proxy's store and routes file need of the zones' certificates, kept whole and replaced.
+// Certificates are keyed as zoneCertRole.key names them.
 type zoneCertView struct {
-	zones   map[string]bool // every zone answered here, bare
-	held    map[string]bool // zones with a certificate of their own
-	renew   map[string]bool // zones this server renews
-	unsure  map[string]bool // zones whose renewer Deplo has not named since this agent started
-	order   map[string]bool // zones whose certificate this server's proxy may order now
-	covered map[string]bool // hostnames a zone's certificate serves
-	dns     map[string]bool // hostnames whose own certificate comes over DNS
+	zones   map[string]bool     // every zone answered here, bare
+	sets    map[string][]string // every certificate of the zones answered here, and its names
+	held    map[string]bool     // certificates Deplo said exist
+	renew   map[string]bool     // certificates this server renews
+	unsure  map[string]bool     // certificates whose renewer Deplo has not named since this agent started
+	order   map[string]bool     // certificates this server's proxy may order now
+	covered map[string]bool     // hostnames a zone's certificate serves
+	dns     map[string]bool     // hostnames whose own certificate comes over DNS
 }
 
 func bare(n string) string { return strings.TrimSuffix(n, ".") }
@@ -103,14 +125,14 @@ func bare(n string) string { return strings.TrimSuffix(n, ".") }
 // zoneCertNames is the name set of a zone's certificate.
 func zoneCertNames(zone string) []string { z := bare(zone); return []string{z, "*." + z} }
 
-// zoneOf is the zone a pair is the certificate of, or "".
+// zoneOf is the key of the zones' certificate a pair is, or "".
 func (v *zoneCertView) zoneOf(c proxyCert) string {
-	if v == nil || len(c.Names) != 2 {
+	if v == nil {
 		return ""
 	}
-	for z := range v.zones {
-		if sameNames(c.Names, zoneCertNames(z)) {
-			return z
+	for k, names := range v.sets {
+		if sameNames(c.Names, names) {
+			return k
 		}
 	}
 	return ""
@@ -172,10 +194,20 @@ func validateZoneCerts(req *pb.SetClusterZoneRequest, c *zoneCluster, members ma
 		if err != nil {
 			return err
 		}
-		if !zones[zone] || slices.ContainsFunc(c.Certs, func(r zoneCertRole) bool { return r.Zone == zone }) {
-			return fmt.Errorf("the certificate of %s is not one zone of the cluster's", bare(zone))
-		}
 		role := zoneCertRole{Zone: zone, Renew: zc.GetRenew(), Order: zc.GetOrder(), Sum: strings.ToLower(zc.GetSha256())}
+		// A name's own certificate: each name one this cluster checks, at a name of this zone.
+		for _, h := range zc.GetNames() {
+			n, err := dnszone.Name(h)
+			if err != nil || !slices.ContainsFunc(c.Challenges, func(ch zoneChallenge) bool {
+				return ch.Asked == dnszone.ChallengeLabel+n && dns.IsSubDomain(zone, ch.At)
+			}) {
+				return fmt.Errorf("%q is not a name the cluster checks in zone %s", h, bare(zone))
+			}
+			role.Names = append(role.Names, bare(n))
+		}
+		if !zones[zone] || slices.ContainsFunc(c.Certs, func(r zoneCertRole) bool { return r.key() == role.key() }) {
+			return fmt.Errorf("the certificate of %s is not one zone of the cluster's", strings.Join(role.set(), ", "))
+		}
 		if role.Sum != "" && !sumPattern.MatchString(role.Sum) {
 			return errors.New("a zone certificate's digest is not a SHA-256")
 		}
@@ -194,13 +226,13 @@ func validateZoneCerts(req *pb.SetClusterZoneRequest, c *zoneCluster, members ma
 			if err != nil {
 				return err
 			}
-			if !sameNames(pc.Names, zoneCertNames(zone)) || pc.Sum != role.Sum {
-				return fmt.Errorf("the certificate sent for %s is not that zone's", bare(zone))
+			if !sameNames(pc.Names, role.set()) || pc.Sum != role.Sum {
+				return fmt.Errorf("the certificate sent for %s is not its own", strings.Join(role.set(), ", "))
 			}
 			if c.pairs == nil {
 				c.pairs = map[string]proxyCert{}
 			}
-			c.pairs[zone] = pc
+			c.pairs[role.key()] = pc
 		}
 		c.Certs = append(c.Certs, role)
 	}
@@ -524,21 +556,25 @@ func (z *clusterZones) takeTXTLocked(cluster, sender string, body txtBody, now t
 
 // publishViewLocked replaces what the proxy's store and routes file read of the zones' certificates.
 func (z *clusterZones) publishViewLocked() {
-	v := &zoneCertView{zones: map[string]bool{}, held: map[string]bool{}, renew: map[string]bool{}, order: map[string]bool{},
-		unsure: map[string]bool{}, covered: map[string]bool{}, dns: map[string]bool{}}
+	v := &zoneCertView{zones: map[string]bool{}, sets: map[string][]string{}, held: map[string]bool{}, renew: map[string]bool{},
+		order: map[string]bool{}, unsure: map[string]bool{}, covered: map[string]bool{}, dns: map[string]bool{}}
 	now := time.Now()
 	for _, c := range z.st.Clusters {
 		for _, e := range c.Zones {
 			v.zones[bare(e.Name)] = true
+			v.sets[bare(e.Name)] = zoneCertNames(e.Name)
 		}
 		for _, ch := range c.Challenges {
 			v.dns[bare(strings.TrimPrefix(ch.Asked, dnszone.ChallengeLabel))] = true
 		}
 		for _, r := range c.Certs {
-			zn := bare(r.Zone)
+			zn := r.key()
+			v.sets[zn] = r.set()
 			v.held[zn] = true
 			// Its pair comes over DNS too, so one taken over goes in the store under the resolver that renews it.
-			v.dns[zn], v.dns["*."+zn] = true, true
+			for _, n := range r.set() {
+				v.dns[n] = true
+			}
 			for _, h := range r.Covered {
 				v.covered[h] = true
 			}
@@ -621,20 +657,21 @@ func (f *forwarders) zoneRoutersLocked() map[string]answerHTTPRouter {
 		if !valid(store, zone) && (!v.order[zone] || valid(f.files, zone)) {
 			continue
 		}
+		names := v.sets[zone]
 		out[zoneRouterName(zone)] = answerHTTPRouter{Rule: zoneRouterRule, EntryPoints: []string{answerEntrypoint},
 			Service: "noop@internal", Priority: 1,
-			TLS: &answerRouterTLS{CertResolver: zoneResolver, Domains: []answerTLSDomain{{Main: zone, SANs: []string{"*." + zone}}}}}
+			TLS: &answerRouterTLS{CertResolver: zoneResolver, Domains: []answerTLSDomain{{Main: names[0], SANs: names[1:]}}}}
 	}
 	return out
 }
 
-// bestZonePair is the newest valid certificate of a zone this server holds, in its store or as a file.
+// bestZonePair is the newest valid certificate of a zone (by key) this server holds, in its store or as a file.
 func (s *Service) bestZonePair(zone string, now time.Time) *proxyCert {
 	v := s.currentZoneView()
 	f := s.forwarders()
 	var best *proxyCert
 	for _, c := range append(f.storeCerts(), f.installedCerts()...) {
-		if c.NotAfter.After(now) && v.zoneOf(c) == bare(zone) && (best == nil || c.NotAfter.After(best.NotAfter)) {
+		if c.NotAfter.After(now) && v.zoneOf(c) == zone && (best == nil || c.NotAfter.After(best.NotAfter)) {
 			best = &c
 		}
 	}
@@ -645,15 +682,15 @@ func (s *Service) bestZonePair(zone string, now time.Time) *proxyCert {
 func (z *clusterZones) certStatesLocked(c *zoneCluster, now time.Time) []*pb.ClusterZoneCertificateState {
 	var out []*pb.ClusterZoneCertificateState
 	for _, r := range c.Certs {
-		st := &pb.ClusterZoneCertificateState{Zone: bare(r.Zone)}
-		best := z.s.bestZonePair(r.Zone, now)
+		st := &pb.ClusterZoneCertificateState{Zone: bare(r.Zone), Names: r.Names}
+		best := z.s.bestZonePair(r.key(), now)
 		if best != nil {
 			st.Sha256, st.NotAfterUnixMs = best.Sum, best.NotAfter.UnixMilli()
 			if best.Sum != r.Sum {
 				st.CertPem, st.KeyPem = best.Cert, best.Key
 			}
 		}
-		run := z.certs[bare(r.Zone)]
+		run := z.certs[r.key()]
 		if run != nil && run.err != "" && (best == nil || best.Sum == run.sum) {
 			st.Error, st.ErrorAtUnixMs = run.err, run.errAt.UnixMilli()
 		}
@@ -674,7 +711,7 @@ func (s *Service) tendZoneCerts(now time.Time) {
 		}
 		for _, r := range c.Certs {
 			if r.Renew && c.heard {
-				renews[bare(r.Zone)] = true
+				renews[r.key()] = true
 			}
 		}
 	}
@@ -736,7 +773,7 @@ func (s *Service) readZoneOrders(now time.Time, renews map[string]bool) {
 		if run.err != "" && sum != run.sum {
 			run.err, run.failures, run.retryAt, changed = "", 0, time.Time{}, true
 		}
-		msg, ok := zoneOrderError(logs, zone)
+		msg, ok := zoneOrderError(logs, z.s.currentZoneView().sets[zone])
 		if !ok {
 			continue
 		}
@@ -746,7 +783,7 @@ func (s *Service) readZoneOrders(now time.Time, renews map[string]bool) {
 			run.failures++
 			changed = true
 		}
-		log.Printf("deplo-agent: the proxy could not get the certificate of zone %s: %s", zone, msg)
+		log.Printf("deplo-agent: the proxy could not get the certificate of %s: %s", strings.Join(z.s.currentZoneView().sets[zone], ", "), msg)
 	}
 	if changed {
 		z.publishViewLocked()
@@ -769,13 +806,31 @@ func (s *Service) readProxyLog(since time.Time) (string, error) {
 	return res.Stdout + "\n" + res.Stderr, nil
 }
 
-var ansiCode = regexp.MustCompile("\x1b\\[[0-9;]*m")
+var (
+	ansiCode   = regexp.MustCompile("\x1b\\[[0-9;]*m")
+	domainsLog = regexp.MustCompile(`domains=(\[[^\]]*\])`)
+	// Traefik prints a renewal's Domain with %v or %+v: {go.example.com [*.go.example.com]}, or with field names.
+	domainLog  = regexp.MustCompile(`ACME certificate: \{([^}]*)\}`)
+	domainBits = strings.NewReplacer("Main:", "", "SANs:", "", "[", " ", "]", " ")
+)
 
-// zoneOrderError is the last failed order or renewal of a zone's certificate in the proxy's log, as it said it.
-func zoneOrderError(logs, zone string) (string, bool) {
+// loggedDomains is the names a proxy's log line says it ordered or renewed.
+func loggedDomains(line string) []string {
+	var out []string
+	if m := domainsLog.FindStringSubmatch(line); m != nil && json.Unmarshal([]byte(m[1]), &out) == nil {
+		return out
+	}
+	if m := domainLog.FindStringSubmatch(line); m != nil {
+		return strings.Fields(domainBits.Replace(m[1]))
+	}
+	return nil
+}
+
+// zoneOrderError is the last failed order or renewal of the certificate of names in the proxy's log, as it said it.
+func zoneOrderError(logs string, names []string) (string, bool) {
 	var found string
 	for _, line := range strings.Split(ansiCode.ReplaceAllString(logs, ""), "\n") {
-		if !strings.Contains(line, "providerName="+zoneResolver+".acme") || !strings.Contains(line, "*."+zone) ||
+		if len(names) == 0 || !strings.Contains(line, "providerName="+zoneResolver+".acme") || !sameNames(loggedDomains(line), names) ||
 			!(strings.Contains(line, "Unable to obtain ACME certificate") || strings.Contains(line, "Error renewing ACME certificate")) {
 			continue
 		}

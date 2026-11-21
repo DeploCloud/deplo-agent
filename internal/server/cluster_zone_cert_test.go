@@ -538,8 +538,16 @@ func TestZoneCert_aFailedOrderIsSaidAndTriedAgainLater(t *testing.T) {
 	if orderRouter(routesOf(t, h)) == nil {
 		t.Fatal("the router did not come back")
 	}
-	if msg, ok := zoneOrderError(line, "other.example.com"); ok {
+	if msg, ok := zoneOrderError(line, zoneCertNames("other.example.com")); ok {
 		t.Fatalf("another zone's error was read: %s", msg)
+	}
+	if msg, ok := zoneOrderError(line, []string{"go.example.com"}); ok {
+		t.Fatalf("the zone's error was read as the apex's own: %s", msg)
+	}
+	renewal := "\x1b[31mERR\x1b[0m Error renewing ACME certificate: {go.example.com [*.go.example.com]} \x1b[36merror=\x1b[0m\"acme: error: 403\" " +
+		"\x1b[36mproviderName=\x1b[0mdeplo-dns.acme"
+	if _, ok := zoneOrderError(renewal, zoneNames()); !ok {
+		t.Fatal("a failed renewal was not read")
 	}
 }
 
