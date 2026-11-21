@@ -42,13 +42,20 @@ type Verdict struct {
 // Decide is the majority rule of ADR-0049: heard is when each member was last heard, self is always heard.
 func Decide(members []Member, self string, heard map[string]time.Time, now time.Time, dropAfter time.Duration,
 	warming bool, last *Agreed) Verdict {
+	return DecideHolding(members, self, heard, now, dropAfter, warming, last, nil)
+}
+
+// DecideHolding is Decide with servers held out of every answer, the last agreed set's included, while they still
+// count: one just back, or this one until its proxy serves (a moment of its proxy's default certificate otherwise).
+func DecideHolding(members []Member, self string, heard map[string]time.Time, now time.Time, dropAfter time.Duration,
+	warming bool, last *Agreed, hold map[string]bool) Verdict {
 	v := Verdict{Of: len(members)}
 	var healthy []Member
 	for _, m := range members {
 		at, ok := heard[m.Fingerprint]
 		if m.Fingerprint == self || ok && now.Sub(at) < dropAfter {
 			v.Heard++
-			if !m.Emptying {
+			if !m.Emptying && !hold[m.Fingerprint] {
 				healthy = append(healthy, m)
 			}
 		}
@@ -59,6 +66,9 @@ func Decide(members []Member, self string, heard map[string]time.Time, now time.
 			return v
 		}
 		v.State, v.Servers, v.Addrs = state, last.Servers, last.Addrs
+		if kept, addrs := withoutHeld(last, members, hold); len(kept) > 0 {
+			v.Servers, v.Addrs = kept, addrs
+		}
 		return v
 	}
 	switch {
@@ -89,6 +99,42 @@ func Decide(members []Member, self string, heard map[string]time.Time, now time.
 		v.Agreed = &Agreed{Servers: v.Servers, Addrs: v.Addrs}
 	}
 	return v
+}
+
+// withoutHeld is the last agreed set less the servers held out, by their addresses; nil when nothing is held.
+func withoutHeld(last *Agreed, members []Member, hold map[string]bool) ([]string, Addrs) {
+	if len(hold) == 0 {
+		return nil, Addrs{}
+	}
+	gone := map[string]bool{}
+	for _, m := range members {
+		if hold[m.Fingerprint] {
+			for _, a := range append(append([]string(nil), m.Addrs.V4...), m.Addrs.V6...) {
+				gone[a] = true
+			}
+		}
+	}
+	var servers []string
+	for _, fp := range last.Servers {
+		if !hold[fp] {
+			servers = append(servers, fp)
+		}
+	}
+	var out Addrs
+	for _, a := range last.Addrs.V4 {
+		if !gone[a] {
+			out.V4 = append(out.V4, a)
+		}
+	}
+	for _, a := range last.Addrs.V6 {
+		if !gone[a] {
+			out.V6 = append(out.V6, a)
+		}
+	}
+	if len(out.V4)+len(out.V6) == 0 {
+		return nil, Addrs{}
+	}
+	return servers, out
 }
 
 func sameStrings(a, b []string) bool {
