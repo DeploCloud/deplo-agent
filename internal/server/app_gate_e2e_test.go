@@ -4,6 +4,7 @@ import (
 	"context"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -50,6 +51,11 @@ func newGateRun(t *testing.T, slug string) *gateRun {
 }
 
 func (r *gateRun) deploy(appBoot string) (*pb.DeployResult, string) {
+	return r.deployTelling(appBoot, nil)
+}
+
+// deployTelling deploys, handing each log line to heard as it comes.
+func (r *gateRun) deployTelling(appBoot string, heard func(string)) (*pb.DeployResult, string) {
 	r.t.Helper()
 	var res *pb.DeployResult
 	rec := &e2eBuildRecorder{}
@@ -61,6 +67,9 @@ func (r *gateRun) deploy(appBoot string) (*pb.DeployResult, string) {
 	}, &emitter{send: func(ev *pb.DeployEvent) error {
 		if x := ev.GetResult(); x != nil {
 			res = x
+		}
+		if l := ev.GetLog(); l != nil && heard != nil {
+			heard(l.GetText())
 		}
 		return rec.emitter().send(ev)
 	}})
@@ -89,8 +98,15 @@ func TestE2E_ADeployDuringABackupsPauseWaitsAndSucceeds(t *testing.T) {
 	if err != nil || h == nil {
 		t.Fatalf("hold: %v (volume %q)", err, r.volume())
 	}
+	// The pause ends only once the deploy is waiting at it, and the paused database has failed its check.
+	waiting := make(chan struct{})
+	var once sync.Once
 	health := make(chan string, 1)
 	go func() {
+		select {
+		case <-waiting:
+		case <-time.After(3 * time.Minute):
+		}
 		deadline := time.Now().Add(8 * time.Second)
 		seen := r.dbHealth()
 		for time.Now().Before(deadline) && !strings.HasSuffix(seen, "unhealthy") {
@@ -100,8 +116,11 @@ func TestE2E_ADeployDuringABackupsPauseWaitsAndSucceeds(t *testing.T) {
 		health <- seen
 		h.release()
 	}()
-	time.Sleep(500 * time.Millisecond)
-	res, log := r.deploy(boot)
+	res, log := r.deployTelling(boot, func(line string) {
+		if strings.HasPrefix(line, "A backup of this app has paused it") {
+			once.Do(func() { close(waiting) })
+		}
+	})
 	seen := <-health
 	if !res.GetReady() {
 		t.Fatalf("the deploy during the pause failed: %v (database while paused: %q); log:\n%s", res, seen, log)
