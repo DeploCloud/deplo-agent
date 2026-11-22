@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
+	"github.com/DeploCloud/deplo-agent/internal/bootstrap"
 	"github.com/DeploCloud/deplo-agent/internal/clusterlink/wire"
 	"github.com/DeploCloud/deplo-agent/internal/mesh"
 )
@@ -250,4 +252,39 @@ func TestNetwork_theClusterSetLastOwnsAKeyBothName(t *testing.T) {
 		t.Fatalf("the key is under the stale certificate: has %v, stale %v", m.Has(fpB), m.Has(stale))
 	}
 	eventually(t, "a direct path under the current certificate", func() bool { return pathFrom(a, fpB) == mesh.PathDirect })
+}
+
+// A network file from before setAt names no time: the cluster this server is a member of owns a key both name, so
+// the first start after the update reaches every member under its current certificate.
+func TestNetwork_aFileFromBeforeSetAtPutsTheMembersClusterFirst(t *testing.T) {
+	dir := t.TempDir()
+	m := bootstrap.Paths(dir)
+	for _, p := range []string{m.CertPath, m.KeyPath, m.CAPath} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	own, _ := mesh.NewPrivateKey()
+	peer, _ := mesh.NewPrivateKey()
+	pub, _ := peer.Public()
+	current, stale := strings.Repeat("b", 64), strings.Repeat("c", 64)
+	file := meshFile{PrivateKey: own.String(), Address: tunnelAddr(1), Clusters: map[string][]meshPeerEntry{
+		"cl0": {{Fingerprint: stale, PublicKey: pub.String(), Address: tunnelAddr(3)}},
+		"cl1": {{Fingerprint: current, PublicKey: pub.String(), Address: tunnelAddr(2)}},
+	}}
+	raw, _ := json.Marshal(file)
+	if err := os.WriteFile(filepath.Join(dir, "cluster-mesh.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cluster-member.json"), []byte(`{"member":true,"cluster":"cl1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := New(t.TempDir(), t.TempDir(), "/", "")
+	s.SetAgentDir(dir)
+	s.StartClusterNetwork()
+	t.Cleanup(func() { s.network().mu.Lock(); s.network().stopLocked(); s.network().mu.Unlock() })
+	nw := s.network().current()
+	if nw == nil || !nw.Has(current) || nw.Has(stale) {
+		t.Fatalf("the key went to the stale cluster: current %v", nw != nil && nw.Has(current))
+	}
 }
