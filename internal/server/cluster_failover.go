@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"google.golang.org/protobuf/encoding/protojson"
@@ -126,6 +127,9 @@ func (s *Service) restoreAfterStart(ctx context.Context, slug string, req *pb.Re
 func (s *Service) startFromBundle(ctx context.Context, st *lease.Start) error {
 	if st.Slug == "" || st.ComposeYAML == "" {
 		return errors.New("the bundle holds no stack to start")
+	}
+	if missing := s.certsMissing(st.ProjectID, st.Certificates, time.Now()); len(missing) > 0 {
+		return fmt.Errorf("this server holds no valid certificate for %s yet", strings.Join(missing, ", "))
 	}
 	restore, err := failoverRestore(st)
 	if err != nil {

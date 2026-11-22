@@ -2684,6 +2684,8 @@ message SetClusterNetworkRequest {
   // This server's own address inside the tunnel.
   string address = 2;
   repeated ClusterNetworkPeer peers = 3;
+  // This server's network key when it must be replaced first, since a caught copy holds it (Hello network.rekey).
+  string retire_public_key = 4;
 }
 
 message ClusterNetworkPeer {

@@ -207,6 +207,11 @@ func (s *Service) SetClusterNetwork(_ context.Context, req *pb.SetClusterNetwork
 		n.st.SetAt[req.GetClusterId()] = time.Now().UnixNano()
 		n.st.Address = self.String()
 	}
+	// A caught copy holds this key: a new one, and the mesh starts over under it, so the copy is heard by nobody.
+	if old := req.GetRetirePublicKey(); old != "" && n.publicKeyLocked() == old {
+		n.st.PrivateKey = ""
+		n.stopLocked()
+	}
 	if n.st.PrivateKey == "" {
 		k, err := mesh.NewPrivateKey()
 		if err != nil {
@@ -356,13 +361,17 @@ func closeMesh(m *mesh.Mesh) {
 	m.Close()
 }
 
-func (n *clusterNetwork) responseLocked() *pb.SetClusterNetworkResponse {
-	resp := &pb.SetClusterNetworkResponse{Addresses: hostAddresses()}
+func (n *clusterNetwork) publicKeyLocked() string {
 	if key, err := mesh.ParseKey(n.st.PrivateKey); err == nil {
 		if pub, err := key.Public(); err == nil {
-			resp.PublicKey = pub.String()
+			return pub.String()
 		}
 	}
+	return ""
+}
+
+func (n *clusterNetwork) responseLocked() *pb.SetClusterNetworkResponse {
+	resp := &pb.SetClusterNetworkResponse{Addresses: hostAddresses(), PublicKey: n.publicKeyLocked()}
 	if n.m == nil {
 		return resp
 	}

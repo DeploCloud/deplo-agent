@@ -635,7 +635,15 @@ func (z *clusterZones) pushLocked(now time.Time) {
 		for _, m := range c.Members {
 			members = append(members, dnszone.Member{Fingerprint: m.Fingerprint, Addrs: dnszone.Addrs{V4: m.V4, V6: m.V6}, Emptying: m.Emptying})
 		}
-		v := dnszone.DecideHolding(members, c.Self, heard, now, drop, now.Before(since.Add(drop)), c.Last, z.holdLocked(now, heard, drop, c))
+		warming, hold := now.Before(since.Add(drop)), z.holdLocked(now, heard, drop, c)
+		v := dnszone.DecideHolding(members, c.Self, heard, now, drop, warming, c.Last, hold)
+		if gone, ok := z.s.leaseGuard().led(id, now, drop); ok {
+			out := map[string]bool{}
+			for _, fp := range gone {
+				out[fp] = true
+			}
+			v = dnszone.DecideLed(members, out, c.Self, heard, now, drop, warming, c.Last, hold)
+		}
 		if v.Agreed != nil {
 			c.Last, agreed = v.Agreed, true
 		}
