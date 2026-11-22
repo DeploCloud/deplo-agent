@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -52,6 +53,8 @@ type zoneMember struct {
 type zoneEntry struct {
 	Name  string   `json:"name"`
 	Names []string `json:"names"`
+	// Homes: the member that runs each name's App, by certificate, when it runs on one server at a time.
+	Homes map[string]string `json:"homes,omitempty"`
 }
 
 // zoneCluster is what Deplo said for one cluster, and the last set this server agreed on for it.
@@ -235,6 +238,19 @@ func validateZone(req *pb.SetClusterZoneRequest) (*zoneCluster, error) {
 			}
 			e.Names = append(e.Names, cn)
 		}
+		for _, h := range raw.GetHomes() {
+			cn, err := dnszone.Name(h.GetName())
+			if err != nil {
+				return nil, err
+			}
+			if !slices.Contains(e.Names, cn) || !seen[h.GetFingerprint()] || e.Homes[cn] != "" {
+				return nil, fmt.Errorf("the home of %s is not one member for one of the zone's names", cn)
+			}
+			if e.Homes == nil {
+				e.Homes = map[string]string{}
+			}
+			e.Homes[cn] = h.GetFingerprint()
+		}
 		c.Zones = append(c.Zones, e)
 	}
 	if err := validateZoneCerts(req, c, seen); err != nil {
@@ -266,7 +282,41 @@ func (c *zoneCluster) tableZones(v dnszone.Verdict, txt map[string]txtState) []d
 	out := make([]dnszone.Zone, 0, len(c.Zones))
 	for _, e := range c.Zones {
 		out = append(out, dnszone.Zone{Name: e.Name, Names: e.Names, NameServers: ns, Fail: v.State == dnszone.StateFail,
-			Servers: v.Addrs, Near: near, TXT: c.records(e.Name, txt), TTL: c.TTL, Serial: c.Serial})
+			Servers: v.Addrs, Near: near, Homes: c.homes(e, v), TXT: c.records(e.Name, txt), TTL: c.TTL, Serial: c.Serial})
+	}
+	return out
+}
+
+// homes are a zone's names answered with their App's server first, while that server is one the verdict names.
+func (c *zoneCluster) homes(e zoneEntry, v dnszone.Verdict) []dnszone.Home {
+	if v.State == dnszone.StateFail || len(e.Homes) == 0 {
+		return nil
+	}
+	want := map[string]bool{}
+	for _, a := range append(append([]string{}, v.Addrs.V4...), v.Addrs.V6...) {
+		want[a] = true
+	}
+	var out []dnszone.Home
+	for _, n := range e.Names {
+		fp := e.Homes[n]
+		if fp == "" || !slices.Contains(v.Servers, fp) {
+			continue
+		}
+		h := dnszone.Home{Name: n}
+		a := c.addrsOf(fp)
+		for _, ip := range a.V4 {
+			if want[ip] {
+				h.V4 = append(h.V4, ip)
+			}
+		}
+		for _, ip := range a.V6 {
+			if want[ip] {
+				h.V6 = append(h.V6, ip)
+			}
+		}
+		if len(h.V4)+len(h.V6) > 0 {
+			out = append(out, h)
+		}
 	}
 	return out
 }

@@ -2757,6 +2757,16 @@ message ClusterZone {
   string name = 1;
   // The names answered with the cluster's healthy servers; the zone itself may be one.
   repeated string names = 2;
+  // A name whose App runs on one server at a time is answered with that server first, then the other healthy
+  // servers nearest first (Hello "dns.home"). Health still wins: a home not healthy is answered as if not named.
+  repeated ClusterZoneHome homes = 3;
+}
+
+message ClusterZoneHome {
+  // One of the zone's names.
+  string name = 1;
+  // The member that runs its App, by certificate.
+  string fingerprint = 2;
 }
 
 message ClusterZoneServer {

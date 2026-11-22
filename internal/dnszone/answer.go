@@ -3,6 +3,7 @@ package dnszone
 import (
 	"math/rand/v2"
 	"net/netip"
+	"slices"
 
 	"github.com/miekg/dns"
 )
@@ -186,26 +187,34 @@ func (z *zone) serverRecords(qname string, qtype uint16, at where) []dns.RR {
 		return nil
 	}
 	v6 := qtype == dns.TypeAAAA
+	of := func(a addrSet) []netip.Addr {
+		if v6 {
+			return a.v6
+		}
+		return a.v4
+	}
+	// The server that runs the name's App first, so a visitor does not detour through another one.
+	home := of(z.homes[qname])
+	atHome := func(a netip.Addr) bool { return slices.Contains(home, a) }
+	out := addrRecords(qname, home, z.ttl, false)
 	if len(z.near) == 0 || !at.ok {
 		// Nowhere to place the visitor, or nothing to place the servers by: every healthy server, never a guess.
-		if v6 {
-			return addrRecords(qname, z.servers.v6, z.ttl, true)
+		var rest []netip.Addr
+		for _, a := range of(z.servers) {
+			if !atHome(a) {
+				rest = append(rest, a)
+			}
 		}
-		return addrRecords(qname, z.servers.v4, z.ttl, true)
+		return append(out, addrRecords(qname, rest, z.ttl, true)...)
 	}
-	var of []place
+	var ranked []place
 	for _, p := range z.near {
-		if v6 && len(p.addrs.v6) > 0 || !v6 && len(p.addrs.v4) > 0 {
-			of = append(of, p)
+		if len(of(p.addrs)) > 0 && !slices.ContainsFunc(of(p.addrs), atHome) {
+			ranked = append(ranked, p)
 		}
 	}
-	var out []dns.RR
-	for _, p := range nearest(of, at.at) {
-		if v6 {
-			out = append(out, addrRecords(qname, p.addrs.v6, z.ttl, false)...)
-		} else {
-			out = append(out, addrRecords(qname, p.addrs.v4, z.ttl, false)...)
-		}
+	for _, p := range nearest(ranked, at.at) {
+		out = append(out, addrRecords(qname, of(p.addrs), z.ttl, false)...)
 	}
 	return out
 }

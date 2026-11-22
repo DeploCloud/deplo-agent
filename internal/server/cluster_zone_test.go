@@ -513,3 +513,47 @@ func TestZone_thePanelsRequestPasses(t *testing.T) {
 		t.Fatalf("this agent refuses what the panel renders today: %v", err)
 	}
 }
+
+func TestZone_aNameIsAnsweredWithItsAppsServerFirstWhileItIsHealthy(t *testing.T) {
+	heard := &fakeHeard{}
+	heard.set(zfp1, zfp2)
+	s := zoneService(t, t.TempDir(), heard)
+	req := placed()
+	req.Zones[0].Homes = []*pb.ClusterZoneHome{{Name: "Shop-example-com.go.example.com", Fingerprint: zfp2}}
+	resp := setZone(t, s, req)
+	addr := listening(t, resp)
+	settled(s)
+	if _, err := s.SetGeoTable(context.Background(), geoRequest(t, geotest.World())); err != nil {
+		t.Fatal(err)
+	}
+	shop := func() string { return lookupFrom(addr, "shop-example-com.go.example.com.", geotest.MilanV4) }
+	until(t, 5*time.Second, "203.0.113.3 203.0.113.1 203.0.113.2", shop)
+	// The zone's other name is load-balanced: nearest first.
+	until(t, time.Second, "203.0.113.1 203.0.113.2", func() string {
+		return lookupFrom(addr, "go.example.com.", geotest.MilanV4)
+	})
+	// Its server falls silent: health wins, and the answer is nearest first, still two.
+	heard.set(zfp1)
+	until(t, 3*time.Second, "203.0.113.1 203.0.113.2", shop)
+	heard.set(zfp1, zfp2)
+	until(t, 3*time.Second, "203.0.113.3 203.0.113.1 203.0.113.2", shop)
+	// The App moved: Deplo pushes the new home.
+	req.Zones[0].Homes[0].Fingerprint = zfp1
+	setZone(t, s, req)
+	until(t, 3*time.Second, "203.0.113.2 203.0.113.1 203.0.113.3", shop)
+
+	for what, mutate := range map[string]func(*pb.SetClusterZoneRequest){
+		"a name not in the zone": func(r *pb.SetClusterZoneRequest) { r.Zones[0].Homes[0].Name = "x.go.example.com" },
+		"a server not a member":  func(r *pb.SetClusterZoneRequest) { r.Zones[0].Homes[0].Fingerprint = strings.Repeat("d", 64) },
+		"two homes": func(r *pb.SetClusterZoneRequest) {
+			r.Zones[0].Homes = append(r.Zones[0].Homes, &pb.ClusterZoneHome{Name: "shop-example-com.go.example.com", Fingerprint: zfp0})
+		},
+	} {
+		bad := placed()
+		bad.Zones[0].Homes = []*pb.ClusterZoneHome{{Name: "shop-example-com.go.example.com", Fingerprint: zfp2}}
+		mutate(bad)
+		if _, err := validateZone(bad); err == nil {
+			t.Errorf("%s: accepted", what)
+		}
+	}
+}
