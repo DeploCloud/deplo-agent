@@ -404,23 +404,36 @@ func (n *clusterNetwork) relayDial(ctx context.Context, fingerprint string) (net
 // serveMesh carries a peer's packets that came through a relay, for a server on this one's network only.
 func (s *Service) serveMesh(from wire.Party, c net.Conn) {
 	m := s.network().current()
-	if m == nil || !m.Has(from.Fingerprint) {
+	name := ""
+	if m != nil {
+		for _, fp := range append([]string{from.Fingerprint}, from.Previous...) {
+			if m.Has(fp) {
+				name = fp
+				break
+			}
+		}
+	}
+	if name == "" {
 		_ = wire.WriteHeader(c, wire.VerbErr, "not on this network")
 		return
 	}
 	if wire.WriteHeader(c, wire.VerbOK, "") != nil {
 		return
 	}
-	m.ServeRelay(from.Fingerprint, c)
+	m.ServeRelay(name, c)
 }
 
 // networkDial is the party's way through the tunnel; it fails at once for a server that is not on it.
 func (s *Service) networkDial(ctx context.Context, to wire.Party) (net.Conn, error) {
 	m := s.network().current()
-	if m == nil || !m.Has(to.Fingerprint) {
+	if m == nil {
 		return nil, errors.New("not on this cluster's network")
 	}
-	return m.Dial(ctx, to.Fingerprint, meshStreamPort)
+	name, ok := s.meshName(m.Has, to.Fingerprint)
+	if !ok {
+		return nil, errors.New("not on this cluster's network")
+	}
+	return m.Dial(ctx, name, meshStreamPort)
 }
 
 // openDoorLocked lets the leader this agent supervises reach the network; only root can open the socket.
@@ -472,13 +485,17 @@ func (n *clusterNetwork) doorConn(c net.Conn) {
 		c.Close()
 	case meshDoorDial:
 		to, err := wire.ParseParty(arg)
-		if err != nil || !m.Has(to.Fingerprint) {
+		name, ok := "", false
+		if err == nil {
+			name, ok = n.s.meshName(m.Has, to.Fingerprint)
+		}
+		if !ok {
 			_ = wire.WriteHeader(c, wire.VerbErr, "not on this network")
 			c.Close()
 			return
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), wire.HeaderTimeout)
-		up, err := m.Dial(ctx, to.Fingerprint, meshStreamPort)
+		up, err := m.Dial(ctx, name, meshStreamPort)
 		cancel()
 		if err != nil {
 			_ = wire.WriteHeader(c, wire.VerbErr, "not answering")

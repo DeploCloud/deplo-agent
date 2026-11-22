@@ -137,6 +137,8 @@ var Capabilities = []string{
 	"cluster.standby",
 	"cluster.replicas",
 	"cluster.network",
+	// SetClusterRotations: a peer that rotated its key is still reached, and still known, by its old one (ADR-0050).
+	"cluster.rotation",
 	"cluster.forwarders.services",
 	"cluster.forwarders.answers",
 	"cluster.supervise",
@@ -231,6 +233,10 @@ type Service struct {
 	// The cluster's private network; see cluster_mesh.go.
 	netOnce sync.Once
 	cnet    *clusterNetwork
+
+	// The key rotations Deplo announced for the cluster's servers; see cluster_rotations.go.
+	rotOnce sync.Once
+	rot     *clusterRotations
 
 	// The cluster's DNS zone; see cluster_zone.go. Tests replace what the network heard and how the process starts.
 	zoneOnce   sync.Once

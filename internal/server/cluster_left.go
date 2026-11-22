@@ -33,7 +33,7 @@ var ageMagic = []byte("age-encryption.org/v1\n")
 
 // accepts says whether a member may send this one that file: only what the leader of a cluster this agent
 // holds a live lease of named, for that sender's certificate.
-func (g *leaseGuard) accepts(from, key string) (lease.Store, bool) {
+func (g *leaseGuard) accepts(from wire.Party, key string) (lease.Store, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	now := g.now()
@@ -42,7 +42,7 @@ func (g *leaseGuard) accepts(from, key string) (lease.Store, bool) {
 			continue
 		}
 		for _, st := range g.stores[id] {
-			if key != "" && st.ObjectKey == key && st.From == from {
+			if key != "" && st.ObjectKey == key && from.Is(st.From) {
 				return st, true
 			}
 		}
@@ -120,7 +120,7 @@ func (r *leftReader) end() error {
 
 // receiveLeft keeps an archive another member sends, in this host's backup store.
 func (s *Service) receiveLeft(from wire.Party, c net.Conn, key string) {
-	st, ok := s.leaseGuard().accepts(from.Fingerprint, key)
+	st, ok := s.leaseGuard().accepts(from, key)
 	if !ok {
 		_ = wire.WriteHeader(c, wire.VerbErr, "this server was not told to keep that")
 		return

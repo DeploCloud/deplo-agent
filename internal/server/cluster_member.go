@@ -259,9 +259,10 @@ func (s *Service) runParty(m *clusterMember, member bool) {
 			return s.relayURLs(readClusterState(dir).Relay, extra)
 		},
 		// The leader's lease order, or another member's image copy; any other stream is closed unanswered.
-		Accept: s.acceptClusterStream,
-		Direct: s.networkDial,
-		Logf:   func(f string, a ...any) { fmt.Fprintf(os.Stderr, "deplo-agent: "+f+"\n", a...) },
+		Accept:    s.acceptClusterStream,
+		Direct:    s.networkDial,
+		Rotations: s.rotations().all,
+		Logf:      func(f string, a ...any) { fmt.Fprintf(os.Stderr, "deplo-agent: "+f+"\n", a...) },
 	})
 	m.cancel, m.party, m.forMember = cancel, p, member
 	go p.Run(ctx)

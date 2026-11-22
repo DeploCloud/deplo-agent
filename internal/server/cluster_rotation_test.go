@@ -4,6 +4,8 @@ package server
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/pem"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
+	"github.com/DeploCloud/deplo-agent/internal/bootstrap"
 	"github.com/DeploCloud/deplo-agent/internal/clusterlink/lease"
 	"github.com/DeploCloud/deplo-agent/internal/clusterlink/testpki"
 	"github.com/DeploCloud/deplo-agent/internal/clusterlink/wire"
@@ -61,11 +64,17 @@ type rotationCluster struct {
 	a, b     *Service
 	fpA, fpB string
 	vol      string
-	fb       *fakeFwdHost
+	fa, fb   *fakeFwdHost
 	nsB      string
 }
 
 const rotationApp = "prj_1"
+
+// rotationPlacement is what the leader says runs where: the App and db-shop on a, db-two on b.
+func rotationPlacement() []lease.Entry {
+	return []lease.Entry{{Kind: "app", ID: rotationApp, Member: "srv_a", Slug: "web", SingleWriter: true}, dbEntry("srv_a"),
+		{Kind: "database", ID: "db2", Member: "srv_b", Slug: "db-two", SingleWriter: true}}
+}
 
 func newRotationCluster(t *testing.T, direct bool) *rotationCluster {
 	t.Helper()
@@ -77,17 +86,17 @@ func newRotationCluster(t *testing.T, direct bool) *rotationCluster {
 	}
 	c.fpB = id.Fingerprint
 	joinNetwork(t, a, b, c.fpA, c.fpB, direct)
-	fa := newFakeFwdHost()
-	c.fb = newFakeFwdHost()
-	a.fwdOps, b.fwdOps = fa.ops(), c.fb.ops()
-	port := backend(t, "on-a")
+	c.fa, c.fb = newFakeFwdHost(), newFakeFwdHost()
+	a.fwdOps, b.fwdOps = c.fa.ops(), c.fb.ops()
+	onA, onB := backend(t, "on-a"), backend(t, "on-b")
+	held := []*pb.ClusterHeldName{hold(onA), {Network: envNet, Kind: "database", WorkloadId: "db2", Name: "db-two", Port: onB}}
 	members := []*pb.ClusterForwarderMember{{ServerId: "srv_a", Fingerprint: c.fpA}, {ServerId: "srv_b", Fingerprint: c.fpB}}
-	apply(t, b, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members, Hold: []*pb.ClusterHeldName{hold(port)}})
-	apply(t, a, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members, Hold: []*pb.ClusterHeldName{hold(port)},
-		Serve: []*pb.ClusterServedName{{Network: envNet, Kind: "database", WorkloadId: "db1", Port: port, SourceFingerprints: []string{c.fpB}}}})
-	app := lease.Entry{Kind: "app", ID: rotationApp, Member: "srv_a", Slug: "web", SingleWriter: true}
-	placeOn(t, a, "srv_a", app, dbEntry("srv_a"))
-	placeOn(t, b, "srv_b", app, dbEntry("srv_a"))
+	apply(t, b, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members, Hold: held,
+		Serve: []*pb.ClusterServedName{{Network: envNet, Kind: "database", WorkloadId: "db2", Port: onB, SourceFingerprints: []string{c.fpA}}}})
+	apply(t, a, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members, Hold: held,
+		Serve: []*pb.ClusterServedName{{Network: envNet, Kind: "database", WorkloadId: "db1", Port: onA, SourceFingerprints: []string{c.fpB}}}})
+	placeOn(t, a, "srv_a", rotationPlacement()...)
+	placeOn(t, b, "srv_b", rotationPlacement()...)
 	for _, s := range []*Service{a, b} {
 		s.zoneConfig = func(cfg *dnszone.Config) {
 			cfg.Port = 0
@@ -123,9 +132,11 @@ func (c *rotationCluster) reaches(when string, b *Service, fpA string, fb *fakeF
 	t := c.t
 	t.Helper()
 	eventually(t, when+": the private network to reach a", func() bool { return pathFrom(b, fpA) != mesh.PathNone })
-	eventually(t, when+": b to hold a's database's name", func() bool { return firstSpec(fb).Dir != "" })
-	if got := ask(t, firstSpec(fb)); got != "on-a:PING" {
-		t.Fatalf("%s: a's database answered %q", when, got)
+	if got := ask(t, fb.spec(t, "db-shop")); got != "on-a:PING" {
+		t.Fatalf("%s: a's database answered b with %q", when, got)
+	}
+	if got := ask(t, c.fa.spec(t, "db-two")); got != "on-b:PING" {
+		t.Fatalf("%s: b's database answered a with %q", when, got)
 	}
 	rotationWrites++
 	want := []byte{byte('0' + rotationWrites)}
@@ -148,29 +159,43 @@ func (c *rotationCluster) reaches(when string, b *Service, fpA string, fb *fakeF
 	})
 }
 
-func firstSpec(h *fakeFwdHost) forwardSpec {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	for _, s := range h.specs {
-		return s
-	}
-	return forwardSpec{}
-}
-
-// rotate gives a a new key, as an installed rotation does, and Deplo tells the relay and a itself. b hears nothing.
-func (c *rotationCluster) rotate() string {
+// announce is the first half of a rotation of a's key: Deplo signs the next certificate and hands it to every
+// server of the cluster and to the relay before a installs it (ADR-0050).
+func (c *rotationCluster) announce() *wire.Identity {
 	t := c.t
 	t.Helper()
-	next := c.ca.Provision(t, c.a.agentDir, "member").Fingerprint
-	relayOf[c.a].Allow(wire.Party{Fingerprint: next, Role: wire.RoleMember})
+	next := c.ca.Leaf(t, "member")
+	for _, s := range []*Service{c.a, c.b} {
+		if _, err := s.SetClusterRotations(context.Background(), &pb.SetClusterRotationsRequest{ClusterId: "cl1",
+			Rotations: []*pb.ClusterKeyRotation{{From: c.fpA, To: next.Fingerprint}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	relayOf[c.a].Allow(wire.Party{Fingerprint: next.Fingerprint, Role: wire.RoleMember})
+	return next
+}
+
+// promote installs the next key on a and Deplo promotes it: the relay forgets the old one, and a is handed tables
+// that name it by the new one.
+func (c *rotationCluster) promote(next *wire.Identity) {
+	t := c.t
+	t.Helper()
+	key, err := x509.MarshalPKCS8PrivateKey(next.Cert.PrivateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := bootstrap.Paths(c.a.agentDir)
+	if os.WriteFile(m.KeyPath, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: key}), 0o600) != nil ||
+		os.WriteFile(m.CertPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: next.Cert.Certificate[0]}), 0o600) != nil {
+		t.Fatal("install the next key")
+	}
 	relayOf[c.a].Forget(wire.Party{Fingerprint: c.fpA, Role: wire.RoleMember})
-	members := []*pb.ClusterForwarderMember{{ServerId: "srv_a", Fingerprint: next}, {ServerId: "srv_b", Fingerprint: c.fpB}}
+	members := []*pb.ClusterForwarderMember{{ServerId: "srv_a", Fingerprint: next.Fingerprint}, {ServerId: "srv_b", Fingerprint: c.fpB}}
 	if _, err := c.a.SetClusterReplicas(context.Background(), &pb.SetClusterReplicasRequest{ClusterId: "cl1", Members: members,
 		Entries: []*pb.ClusterReplicaEntry{{AppId: rotationApp, Slug: "web", VolumeNames: []string{"deplo-web-data"}}}}); err != nil {
 		t.Fatal(err)
 	}
-	setZone(t, c.a, c.zoneRequest(next, next))
-	return next
+	setZone(t, c.a, c.zoneRequest(next.Fingerprint, next.Fingerprint))
 }
 
 // bootAgain starts a server from what its disk holds, as the agent does after a power cut.
@@ -196,8 +221,9 @@ func TestRotation_aMemberBackWhileDeploIsDownReachesTheMemberThatRotated(t *test
 	for _, direct := range []bool{false, true} {
 		t.Run(map[bool]string{false: "relay", true: "direct"}[direct], func(t *testing.T) {
 			c := newRotationCluster(t, direct)
+			next := c.announce()
 			powerOff(c.b)
-			c.rotate()
+			c.promote(next)
 			// Deplo is down from here on: nothing is handed to anyone.
 			c.comeBack()
 		})
@@ -219,6 +245,6 @@ func (c *rotationCluster) comeBack() {
 	b := bootAgain(t, c.b, fb)
 	l, _ := b.zone.sup.Listening()
 	c.nsB = listening(t, &pb.SetClusterZoneResponse{Listening: l})
-	placeOn(t, b, "srv_b", lease.Entry{Kind: "app", ID: rotationApp, Member: "srv_a", Slug: "web", SingleWriter: true}, dbEntry("srv_a"))
+	placeOn(t, b, "srv_b", rotationPlacement()...)
 	c.reaches("back while Deplo is down", b, c.fpA, fb)
 }

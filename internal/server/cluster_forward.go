@@ -576,7 +576,7 @@ func (f *forwarders) authorize(from wire.Party, network, kind, id, service strin
 	}
 	inCluster := false
 	for _, fp := range st.Members {
-		if fp == from.Fingerprint {
+		if from.Is(fp) {
 			inCluster = true
 		}
 	}
@@ -589,7 +589,7 @@ func (f *forwarders) authorize(from wire.Party, network, kind, id, service strin
 	for _, e := range st.Serve {
 		if e.Network == network && e.Kind == kind && e.ID == id && e.Service == service {
 			for _, fp := range e.Sources {
-				if fp == from.Fingerprint {
+				if from.Is(fp) {
 					return e, true
 				}
 			}

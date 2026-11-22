@@ -43,7 +43,10 @@ type Config struct {
 	Transport func() *http.Transport
 	// Direct reaches a party through the cluster's network instead of a relay; the peer's Answer takes it.
 	Direct func(ctx context.Context, to wire.Party) (net.Conn, error)
-	Logf   func(format string, args ...any)
+	// Rotations are the key rotations Deplo announced: a peer dialed by an old certificate may answer with its new
+	// one, and one that answers with a new one is also the peer its old one named (ADR-0050).
+	Rotations func() []wire.Rotation
+	Logf      func(format string, args ...any)
 }
 
 // Party keeps one connection to every relay it knows.
@@ -59,6 +62,18 @@ func New(cfg Config) *Party {
 		cfg.Logf = func(string, ...any) {}
 	}
 	return &Party{cfg: cfg, up: map[string]*yamux.Session{}}
+}
+
+func (p *Party) rotations() []wire.Rotation {
+	if p.cfg.Rotations == nil {
+		return nil
+	}
+	return p.cfg.Rotations()
+}
+
+// pins are the certificates a stream to `to` may answer with: its own, and the ones Deplo said replace it.
+func (p *Party) pins(to wire.Party) []string {
+	return append(wire.Successors(p.rotations(), to.Fingerprint), to.Fingerprint)
 }
 
 // Connected is how many relays hold a connection from this party.
@@ -153,7 +168,7 @@ func (p *Party) hold(ctx context.Context, relay string) error {
 	defer stop()
 	nc := websocket.NetConn(cctx, ws, websocket.MessageBinary)
 	defer nc.Close()
-	tc := tls.Client(nc, id.ClientConfig(""))
+	tc := tls.Client(nc, id.ClientConfig())
 	if err := tc.HandshakeContext(dctx); err != nil {
 		return err
 	}
@@ -215,6 +230,8 @@ func (p *Party) Answer(st net.Conn) {
 		return
 	}
 	st.SetReadDeadline(time.Time{})
+	// Only older certificates: a table that already names the new one never takes a retired one again.
+	from.Previous = wire.Predecessors(p.rotations(), from.Fingerprint)
 	p.cfg.Accept(from, tc)
 }
 
@@ -291,7 +308,7 @@ func (p *Party) dialDirect(ctx context.Context, to wire.Party) (net.Conn, error)
 		c.Close()
 		return nil, err
 	}
-	tc := tls.Client(c, id.ClientConfig(to.Fingerprint))
+	tc := tls.Client(c, id.ClientConfig(p.pins(to)...))
 	if err := tc.HandshakeContext(ctx); err != nil {
 		c.Close()
 		return nil, err
@@ -315,18 +332,22 @@ func (p *Party) DialRelay(ctx context.Context, to wire.Party) (net.Conn, error) 
 	if len(links) == 0 {
 		return nil, errors.New("no relay is connected")
 	}
+	// A peer that rotated its key is on the relay under its new certificate only.
+	pins := p.pins(to)
 	var last error
 	for _, m := range links {
-		c, err := p.dialVia(ctx, m, id, to)
-		if err == nil {
-			return c, nil
+		for _, fp := range pins {
+			c, err := p.dialVia(ctx, m, id, wire.Party{Fingerprint: fp, Role: to.Role}, pins)
+			if err == nil {
+				return c, nil
+			}
+			last = err
 		}
-		last = err
 	}
 	return nil, last
 }
 
-func (p *Party) dialVia(ctx context.Context, m *yamux.Session, id *wire.Identity, to wire.Party) (net.Conn, error) {
+func (p *Party) dialVia(ctx context.Context, m *yamux.Session, id *wire.Identity, to wire.Party, pins []string) (net.Conn, error) {
 	st, err := m.OpenStream()
 	if err != nil {
 		return nil, err
@@ -348,7 +369,7 @@ func (p *Party) dialVia(ctx context.Context, m *yamux.Session, id *wire.Identity
 		}
 		return nil, err
 	}
-	tc := tls.Client(st, id.ClientConfig(to.Fingerprint))
+	tc := tls.Client(st, id.ClientConfig(pins...))
 	if err := tc.HandshakeContext(ctx); err != nil {
 		st.Close()
 		return nil, err

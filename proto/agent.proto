@@ -207,6 +207,13 @@ service Agent {
   // it off with no peers. The full set each time; it answers with its key and how each peer is reached.
   rpc SetClusterNetwork(SetClusterNetworkRequest) returns (SetClusterNetworkResponse);
 
+  // ---- KEY ROTATIONS (ADR-0050, Hello capability "cluster.rotation") ----
+
+  // Hand this server the key rotations of its cluster's servers: a peer its tables name by `from` may
+  // now present `to`, and is still that peer. Deplo hands them before a rotated key is installed, so
+  // a server off when it is promoted still reaches it. The full set each time; none forgets them.
+  rpc SetClusterRotations(SetClusterRotationsRequest) returns (SetClusterRotationsResponse);
+
   // ---- THE CLUSTER'S DNS ZONE (ADR-0049, Hello capability "dns.zone") ----
 
   // Hand this member the DNS zones delegated to its cluster. It answers for them on port 53 from an
@@ -2676,6 +2683,24 @@ message ClusterNetworkPeerState {
   // The host:port a direct path uses.
   string endpoint = 3;
   int64 last_handshake_unix = 4;
+}
+
+// ---- KEY ROTATIONS ----
+
+message ClusterKeyRotation {
+  // Certificate fingerprints, lowercase hex sha256.
+  string from = 1;
+  string to = 2;
+}
+
+message SetClusterRotationsRequest {
+  string cluster_id = 1;
+  repeated ClusterKeyRotation rotations = 2;
+}
+
+message SetClusterRotationsResponse {
+  // How many rotations this server now holds for the cluster.
+  int32 rotations = 1;
 }
 
 // ---- THE CLUSTER'S DNS ZONE ----

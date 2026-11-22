@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"time"
 )
@@ -37,10 +38,52 @@ const (
 type Party struct {
 	Fingerprint string `json:"fingerprint"`
 	Role        Role   `json:"role"`
+	// Previous are the certificates this one replaced in a key rotation, newest first; never on the wire.
+	Previous []string `json:"-"`
 }
 
 // Key is the party's name on the wire.
 func (p Party) Key() string { return p.Fingerprint + "/" + string(p.Role) }
+
+// Is says whether a table naming fp means this party: fp is its certificate, or one it replaced.
+func (p Party) Is(fp string) bool { return fp == p.Fingerprint || slices.Contains(p.Previous, fp) }
+
+// Rotation is a key rotation Deplo announced (ADR-0050): a party known by From may present To instead.
+type Rotation struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+// Successors are the certificates that replace fp, newest first.
+func Successors(rs []Rotation, fp string) []string { return walk(rs, fp, true) }
+
+// Predecessors are the certificates fp replaced, newest first.
+func Predecessors(rs []Rotation, fp string) []string { return walk(rs, fp, false) }
+
+func walk(rs []Rotation, fp string, forward bool) []string {
+	var out []string
+	seen := map[string]bool{fp: true}
+	for at := fp; ; {
+		next := ""
+		for _, r := range rs {
+			if forward && r.From == at {
+				next = r.To
+			} else if !forward && r.To == at {
+				next = r.From
+			}
+		}
+		if next == "" || seen[next] {
+			break
+		}
+		seen[next] = true
+		at = next
+		out = append(out, next)
+	}
+	if forward {
+		slices.Reverse(out)
+	}
+	return out
+}
 
 // Valid reports whether p names a certificate fingerprint and a known role.
 func (p Party) Valid() bool {
@@ -145,7 +188,7 @@ func PEMFingerprint(file string) (string, error) {
 }
 
 // verify checks the peer's chain leads to the instance's CA for any use: agent certificates are issued for servers and serve as clients here.
-func (id *Identity) verify(pin string) func([][]byte, [][]*x509.Certificate) error {
+func (id *Identity) verify(pins []string) func([][]byte, [][]*x509.Certificate) error {
 	return func(raw [][]byte, _ [][]*x509.Certificate) error {
 		if len(raw) == 0 {
 			return errors.New("the peer sent no certificate")
@@ -165,7 +208,7 @@ func (id *Identity) verify(pin string) func([][]byte, [][]*x509.Certificate) err
 		}); err != nil {
 			return fmt.Errorf("the peer's certificate is not from this instance: %w", err)
 		}
-		if pin != "" && Fingerprint(raw[0]) != pin {
+		if len(pins) > 0 && !slices.Contains(pins, Fingerprint(raw[0])) {
 			return errors.New("the peer's certificate is not the one expected")
 		}
 		return nil
@@ -175,14 +218,14 @@ func (id *Identity) verify(pin string) func([][]byte, [][]*x509.Certificate) err
 // ServerName is a name every certificate of the instance carries: the CA says who may answer, the pin says which one.
 const ServerName = "localhost"
 
-// ClientConfig dials a peer; with a pin, only that exact certificate passes.
-func (id *Identity) ClientConfig(pin string) *tls.Config {
+// ClientConfig dials a peer; with pins, only those exact certificates pass.
+func (id *Identity) ClientConfig(pins ...string) *tls.Config {
 	return &tls.Config{
 		MinVersion:            tls.VersionTLS13,
 		Certificates:          []tls.Certificate{id.Cert},
 		RootCAs:               id.Roots,
 		ServerName:            ServerName,
-		VerifyPeerCertificate: id.verify(pin),
+		VerifyPeerCertificate: id.verify(slices.DeleteFunc(slices.Clone(pins), func(p string) bool { return p == "" })),
 	}
 }
 
@@ -192,7 +235,7 @@ func (id *Identity) ServerConfig() *tls.Config {
 		MinVersion:            tls.VersionTLS13,
 		Certificates:          []tls.Certificate{id.Cert},
 		ClientAuth:            tls.RequireAnyClientCert,
-		VerifyPeerCertificate: id.verify(""),
+		VerifyPeerCertificate: id.verify(nil),
 	}
 }
 

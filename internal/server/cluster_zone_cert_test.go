@@ -21,6 +21,7 @@ import (
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/bootstrap"
+	"github.com/DeploCloud/deplo-agent/internal/clusterlink/wire"
 	"github.com/DeploCloud/deplo-agent/internal/dnszone"
 )
 
@@ -235,16 +236,16 @@ func TestChallenge_aMemberTakesOnlyTheChecksItsSenderOwnsInThatCluster(t *testin
 		{"a cluster it does not answer for", "cl9", p.fpA, "_acme-challenge.go.example.com."},
 		{"a name that is not a check", "cl1", p.fpA, "app.go.example.com."},
 	} {
-		if err := z.takeTXTLocked(c.cluster, c.sender, body(c.name), time.Now()); err == nil {
+		if err := z.takeTXTLocked(c.cluster, wire.Party{Fingerprint: c.sender}, body(c.name), time.Now()); err == nil {
 			t.Errorf("%s was taken", c.why)
 		}
 	}
-	if err := z.takeTXTLocked("cl1", p.fpA, body("_acme-challenge.go.example.com."), time.Now()); err != nil {
+	if err := z.takeTXTLocked("cl1", wire.Party{Fingerprint: p.fpA}, body("_acme-challenge.go.example.com."), time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	// An older set arriving after a newer one changes nothing.
 	old := txtBody{Seq: 1, TXT: map[string][]string{}}
-	if err := z.takeTXTLocked("cl1", p.fpA, old, time.Now()); err != nil || len(z.txt["cl1"][p.fpA]) != 1 {
+	if err := z.takeTXTLocked("cl1", wire.Party{Fingerprint: p.fpA}, old, time.Now()); err != nil || len(z.txt["cl1"][p.fpA]) != 1 {
 		t.Fatalf("an older set replaced a newer one: %v", err)
 	}
 }

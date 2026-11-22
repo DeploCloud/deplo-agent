@@ -85,11 +85,11 @@ func (s *Service) ExpectClusterImage(_ context.Context, req *pb.ExpectClusterIma
 }
 
 // takeExpected uses up the entry for ref when that member is the one Deplo named, and says how many releases stay.
-func (s *Service) takeExpected(from, ref string) (keep int, ok bool) {
+func (s *Service) takeExpected(from wire.Party, ref string) (keep int, ok bool) {
 	s.expectedMu.Lock()
 	defer s.expectedMu.Unlock()
 	e, known := s.expected[ref]
-	if !known || e.from != from || time.Now().After(e.until) {
+	if !known || !from.Is(e.from) || time.Now().After(e.until) {
 		return 0, false
 	}
 	delete(s.expected, ref)
@@ -249,7 +249,7 @@ func (s *Service) acceptMemberStream(from wire.Party, c net.Conn) {
 // receiveImage takes an image only for an entry Deplo handed this member: the sender's own keep is not read.
 func (s *Service) receiveImage(from wire.Party, c net.Conn, arg string) {
 	refArg, _, _ := strings.Cut(arg, " ")
-	keep, ok := s.takeExpected(from.Fingerprint, refArg)
+	keep, ok := s.takeExpected(from, refArg)
 	if !ok || validateClusterImageRef(refArg) != nil {
 		_ = wire.WriteHeader(c, wire.VerbErr, "this server was not told to expect that image")
 		return

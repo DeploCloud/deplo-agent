@@ -63,6 +63,7 @@ const (
 	Agent_SetClusterReplicas_FullMethodName    = "/deplo.agent.v1.Agent/SetClusterReplicas"
 	Agent_ClusterReplicaStatus_FullMethodName  = "/deplo.agent.v1.Agent/ClusterReplicaStatus"
 	Agent_SetClusterNetwork_FullMethodName     = "/deplo.agent.v1.Agent/SetClusterNetwork"
+	Agent_SetClusterRotations_FullMethodName   = "/deplo.agent.v1.Agent/SetClusterRotations"
 	Agent_SetClusterZone_FullMethodName        = "/deplo.agent.v1.Agent/SetClusterZone"
 	Agent_SetGeoTable_FullMethodName           = "/deplo.agent.v1.Agent/SetGeoTable"
 	Agent_Backup_FullMethodName                = "/deplo.agent.v1.Agent/Backup"
@@ -249,6 +250,10 @@ type AgentClient interface {
 	// Put this server on a cluster's private network with every other server of the cluster, or take
 	// it off with no peers. The full set each time; it answers with its key and how each peer is reached.
 	SetClusterNetwork(ctx context.Context, in *SetClusterNetworkRequest, opts ...grpc.CallOption) (*SetClusterNetworkResponse, error)
+	// Hand this server the key rotations of its cluster's servers: a peer its tables name by `from` may
+	// now present `to`, and is still that peer. Deplo hands them before a rotated key is installed, so
+	// a server off when it is promoted still reaches it. The full set each time; none forgets them.
+	SetClusterRotations(ctx context.Context, in *SetClusterRotationsRequest, opts ...grpc.CallOption) (*SetClusterRotationsResponse, error)
 	// Hand this member the DNS zones delegated to its cluster. It answers for them on port 53 from an
 	// unprivileged process, naming the members it hears over the private network. The full set each
 	// time; no zones stops it answering for the cluster. Kept on disk, so it answers with Deplo down.
@@ -874,6 +879,16 @@ func (c *agentClient) SetClusterNetwork(ctx context.Context, in *SetClusterNetwo
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(SetClusterNetworkResponse)
 	err := c.cc.Invoke(ctx, Agent_SetClusterNetwork_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) SetClusterRotations(ctx context.Context, in *SetClusterRotationsRequest, opts ...grpc.CallOption) (*SetClusterRotationsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetClusterRotationsResponse)
+	err := c.cc.Invoke(ctx, Agent_SetClusterRotations_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1559,6 +1574,10 @@ type AgentServer interface {
 	// Put this server on a cluster's private network with every other server of the cluster, or take
 	// it off with no peers. The full set each time; it answers with its key and how each peer is reached.
 	SetClusterNetwork(context.Context, *SetClusterNetworkRequest) (*SetClusterNetworkResponse, error)
+	// Hand this server the key rotations of its cluster's servers: a peer its tables name by `from` may
+	// now present `to`, and is still that peer. Deplo hands them before a rotated key is installed, so
+	// a server off when it is promoted still reaches it. The full set each time; none forgets them.
+	SetClusterRotations(context.Context, *SetClusterRotationsRequest) (*SetClusterRotationsResponse, error)
 	// Hand this member the DNS zones delegated to its cluster. It answers for them on port 53 from an
 	// unprivileged process, naming the members it hears over the private network. The full set each
 	// time; no zones stops it answering for the cluster. Kept on disk, so it answers with Deplo down.
@@ -1822,6 +1841,9 @@ func (UnimplementedAgentServer) ClusterReplicaStatus(context.Context, *ClusterRe
 }
 func (UnimplementedAgentServer) SetClusterNetwork(context.Context, *SetClusterNetworkRequest) (*SetClusterNetworkResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetClusterNetwork not implemented")
+}
+func (UnimplementedAgentServer) SetClusterRotations(context.Context, *SetClusterRotationsRequest) (*SetClusterRotationsResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetClusterRotations not implemented")
 }
 func (UnimplementedAgentServer) SetClusterZone(context.Context, *SetClusterZoneRequest) (*SetClusterZoneResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetClusterZone not implemented")
@@ -2593,6 +2615,24 @@ func _Agent_SetClusterNetwork_Handler(srv interface{}, ctx context.Context, dec 
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(AgentServer).SetClusterNetwork(ctx, req.(*SetClusterNetworkRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_SetClusterRotations_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetClusterRotationsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).SetClusterRotations(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_SetClusterRotations_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).SetClusterRotations(ctx, req.(*SetClusterRotationsRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -3500,6 +3540,10 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SetClusterNetwork",
 			Handler:    _Agent_SetClusterNetwork_Handler,
+		},
+		{
+			MethodName: "SetClusterRotations",
+			Handler:    _Agent_SetClusterRotations_Handler,
 		},
 		{
 			MethodName: "SetClusterZone",
