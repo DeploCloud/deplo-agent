@@ -445,7 +445,7 @@ func (s *Service) serveReplica(from wire.Party, c net.Conn, arg string) {
 	}
 	known := false
 	for _, fp := range tab.Members {
-		known = known || fp == from.Fingerprint
+		known = known || from.Is(fp)
 	}
 	refuse := func(why string) { _ = wire.WriteHeader(c, wire.VerbErr, why) }
 	if tab.Cluster == "" || cluster != tab.Cluster || entry == nil || !known || from.Role != wire.RoleMember {

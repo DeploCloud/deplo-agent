@@ -677,7 +677,7 @@ func (f *forwarders) authorizeAnswer(from wire.Party, network, appID string) boo
 	}
 	inCluster := false
 	for _, fp := range st.Members {
-		inCluster = inCluster || fp == from.Fingerprint
+		inCluster = inCluster || from.Is(fp)
 	}
 	here, _ := f.s.leaseGuard().answerHolders(st.Cluster, appID)
 	return inCluster && here

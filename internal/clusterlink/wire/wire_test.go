@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/tls"
 	"net"
+	"slices"
 	"strings"
 	"testing"
 
@@ -114,5 +115,22 @@ func TestHeadersConsumeOneLineOnly(t *testing.T) {
 	long := bytes.NewReader(bytes.Repeat([]byte("a"), 1000))
 	if _, _, err := wire.ReadHeader(long); err == nil {
 		t.Fatal("an endless header was read")
+	}
+}
+
+func TestRotation_successorsAndPredecessorsFollowTheChainNewestFirst(t *testing.T) {
+	a, b, c := strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64)
+	rs := []wire.Rotation{{From: a, To: b}, {From: b, To: c}}
+	if got := wire.Successors(rs, a); !slices.Equal(got, []string{c, b}) {
+		t.Fatalf("successors of a: %v", got)
+	}
+	if got := wire.Predecessors(rs, c); !slices.Equal(got, []string{b, a}) {
+		t.Fatalf("predecessors of c: %v", got)
+	}
+	if got := wire.Successors([]wire.Rotation{{From: a, To: b}, {From: b, To: a}}, a); !slices.Equal(got, []string{b}) {
+		t.Fatalf("a loop: %v", got)
+	}
+	if p := (wire.Party{Fingerprint: b, Previous: wire.Predecessors(rs, b)}); !p.Is(a) || p.Is(c) {
+		t.Fatalf("%+v", p)
 	}
 }

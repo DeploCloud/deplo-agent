@@ -593,7 +593,7 @@ func (g *leaseGuard) Serve(from wire.Party, c net.Conn) {
 	cluster := ""
 	if g.leader != nil {
 		var leaders []string
-		if cluster, leaders = g.leader(); !slices.Contains(leaders, from.Fingerprint) {
+		if cluster, leaders = g.leader(); !slices.ContainsFunc(leaders, from.Is) {
 			return
 		}
 	}

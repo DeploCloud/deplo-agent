@@ -112,6 +112,18 @@ func (f *Relay) Allow(p wire.Party) {
 	f.mu.Unlock()
 }
 
+// Forget takes a party off the cluster and cuts its connection, as a roster without it does.
+func (f *Relay) Forget(p wire.Party) {
+	f.mu.Lock()
+	delete(f.allow, p.Key())
+	live := f.live[p.Key()]
+	delete(f.live, p.Key())
+	f.mu.Unlock()
+	if live != nil {
+		live.Close()
+	}
+}
+
 // Misdirect hands streams for `name` to whoever holds `to`: a relay that lies about who is on the other end.
 func (f *Relay) Misdirect(name, to wire.Party) {
 	f.mu.Lock()

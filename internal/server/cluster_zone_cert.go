@@ -491,7 +491,7 @@ func (s *Service) receiveTXT(from wire.Party, c net.Conn, cluster string) {
 	z := s.zones()
 	z.mu.Lock()
 	now := time.Now()
-	err := z.takeTXTLocked(cluster, from.Fingerprint, body, now)
+	err := z.takeTXTLocked(cluster, from, body, now)
 	if err == nil {
 		z.pushLocked(now)
 	}
@@ -515,14 +515,17 @@ func served(ctx context.Context, sup *dnszone.Supervisor) {
 	_ = sup.Served(ctx)
 }
 
-func (z *clusterZones) takeTXTLocked(cluster, sender string, body txtBody, now time.Time) error {
+func (z *clusterZones) takeTXTLocked(cluster string, from wire.Party, body txtBody, now time.Time) error {
 	c := z.st.Clusters[cluster]
 	if c == nil {
 		return errors.New("this server answers for no zone of that cluster")
 	}
-	if sender == c.Self || !slices.ContainsFunc(c.Members, func(m zoneMember) bool { return m.Fingerprint == sender }) {
+	// The sender as this zone names it, which a key rotation may have left on its previous certificate.
+	i := slices.IndexFunc(c.Members, func(m zoneMember) bool { return from.Is(m.Fingerprint) })
+	if i < 0 || c.Members[i].Fingerprint == c.Self {
 		return errors.New("the sender is not a server of the cluster")
 	}
+	sender := c.Members[i].Fingerprint
 	owns := map[string]bool{}
 	for _, ch := range c.Challenges {
 		if ch.Owner == sender {
