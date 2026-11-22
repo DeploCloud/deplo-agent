@@ -292,3 +292,47 @@ func TestSettlePanel_freshAgentStampsAtOnce(t *testing.T) {
 		t.Fatal("the same Deplo's state was set aside")
 	}
 }
+
+// eu-1..3 after agent 0.5.3-canary.31: settled, with the lab's supervision of Apps that have no container here
+// still kept, and a volume Deplo made outside compose not listed.
+func TestSettlePanel_aSettledAgentDropsAnotherDeplosSupervision(t *testing.T) {
+	dir, panel := panelDir(t)
+	if err := writeStamp(dir, panel); err != nil {
+		t.Fatal(err)
+	}
+	to := filepath.Join(dir, setAsideRoot, "20261122T181159Z")
+	writeJSON(t, filepath.Join(to, "cluster-lease.json"), map[string]any{
+		theirCluster: map[string]any{"placement": []map[string]any{{"slug": "volw"}, {"slug": "notes"}, {"slug": "fise"}}},
+	})
+	writeJSON(t, filepath.Join(to, setAsideLeft), []map[string]string{{"kind": "container", "name": "deplo-notes", "app": "notes"}})
+	writeJSON(t, filepath.Join(dir, "cluster-lease.json"), map[string]any{
+		ourCluster: map[string]any{"placement": []map[string]any{{"slug": "fise"}}},
+	})
+	writeJSON(t, filepath.Join(dir, "cluster-supervise.json"), map[string]any{
+		"kept":    map[string]any{"volw": map[string]string{"volw": "unless-stopped"}},
+		"stopped": map[string]any{"volw": []string{""}, "fise": []string{""}},
+	})
+	stubHost(t, []appObject{{"container", "deplo-notes", "notes"}, {"volume", "deplo-volw_data", ""},
+		{"volume", "deplo-fise_db", "fise"}, {"volume", "4cd4c49e", ""}})
+
+	s := New(t.TempDir(), t.TempDir(), "/", "")
+	s.SetAgentDir(dir)
+	s.SettlePanel()
+	sup := readJSON(t, filepath.Join(dir, "cluster-supervise.json"))
+	if sup["kept"] != nil || sup["stopped"].(map[string]any)["volw"] != nil || sup["stopped"].(map[string]any)["fise"] == nil {
+		t.Fatalf("supervision kept: %v", sup)
+	}
+	if g := readJSON(t, filepath.Join(to, "cluster-supervise.json")); g["kept"].(map[string]any)["volw"] == nil {
+		t.Fatalf("the other Deplo's supervision was not set aside: %v", g)
+	}
+	onlySetAside(t, dir)
+
+	_, _, left := s.lastSetAside(context.Background())
+	names := map[string]bool{}
+	for _, l := range left {
+		names[l.GetName()] = true
+	}
+	if len(left) != 2 || !names["deplo-notes"] || !names["deplo-volw_data"] {
+		t.Fatalf("left: %v", left)
+	}
+}

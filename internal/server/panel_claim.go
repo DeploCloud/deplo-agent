@@ -125,6 +125,7 @@ func (s *Service) SettlePanel() {
 	case claim != nil:
 		a = judgeClaim(dir, claim)
 	case stamp == panel:
+		settleSupervise(dir)
 		return
 	case hasPanelState(dir):
 		// Written before agents kept a stamp: this Deplo's claim says which of it is its own.
@@ -273,7 +274,7 @@ func (s *Service) setAside(ctx context.Context, a aside, now time.Time) (string,
 				return "", fmt.Errorf("%s: %w", k.file, err)
 			}
 		}
-		if err := splitSupervise(dir, to, left); err != nil {
+		if err := splitSupervise(dir, to, theirSlugs(dir)); err != nil {
 			return "", err
 		}
 	}
@@ -350,8 +351,17 @@ func splitClusters(path, dst string, keys []string, foreign map[string]bool) err
 	return writeFileAtomic(path, kept, 0o600)
 }
 
+// settleSupervise sets aside, on every start, what the agent still keeps of the Apps another Deplo's leases placed.
+func settleSupervise(dir string) {
+	if to := newestSetAside(dir); to != "" {
+		if err := splitSupervise(dir, to, theirSlugs(dir)); err != nil {
+			log.Printf("deplo-agent: could not set aside another Deplo's supervision: %v", err)
+		}
+	}
+}
+
 // splitSupervise sets aside what the agent kept of another Deplo's Apps, so it never sets their restart policy again.
-func splitSupervise(dir, to string, left []*pb.LeftWorkload) error {
+func splitSupervise(dir, to string, theirs map[string]bool) error {
 	path := filepath.Join(dir, "cluster-supervise.json")
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -364,10 +374,11 @@ func splitSupervise(dir, to string, left []*pb.LeftWorkload) error {
 	if json.Unmarshal(raw, &st) != nil {
 		return nil
 	}
-	theirs := map[string]bool{}
-	for _, l := range left {
-		theirs[l.GetApp()] = true
+	dst := filepath.Join(to, "cluster-supervise.json")
+	if raw, err := os.ReadFile(dst); err == nil {
+		_ = json.Unmarshal(raw, &gone)
 	}
+	moved := false
 	for slug, v := range st.Kept {
 		if theirs[slug] {
 			if gone.Kept == nil {
@@ -375,6 +386,7 @@ func splitSupervise(dir, to string, left []*pb.LeftWorkload) error {
 			}
 			gone.Kept[slug] = v
 			delete(st.Kept, slug)
+			moved = true
 		}
 	}
 	for slug, v := range st.Stopped {
@@ -384,13 +396,14 @@ func splitSupervise(dir, to string, left []*pb.LeftWorkload) error {
 			}
 			gone.Stopped[slug] = v
 			delete(st.Stopped, slug)
+			moved = true
 		}
 	}
-	if gone.Kept == nil && gone.Stopped == nil {
+	if !moved {
 		return nil
 	}
 	out, _ := json.Marshal(gone)
-	if err := writeFileAtomic(filepath.Join(to, "cluster-supervise.json"), out, 0o600); err != nil {
+	if err := writeFileAtomic(dst, out, 0o600); err != nil {
 		return err
 	}
 	kept, _ := json.Marshal(st)
@@ -431,14 +444,82 @@ func dockerAppObjects(ctx context.Context) ([]appObject, error) {
 	if err != nil || vs.Code != 0 {
 		return nil, errors.New("list the volumes")
 	}
+	// Every volume: one Deplo made outside compose carries no project, only its stack's name.
 	for _, line := range strings.Split(vs.Stdout, "\n") {
-		if f := strings.Split(line, "\t"); len(f) == 2 {
-			if slug, ok := strings.CutPrefix(f[1], "deplo-"); ok && slug != "" {
-				out = append(out, appObject{"volume", f[0], slug})
-			}
+		if f := strings.Split(line, "\t"); len(f) == 2 && f[0] != "" {
+			slug, _ := strings.CutPrefix(f[1], "deplo-")
+			out = append(out, appObject{"volume", f[0], slug})
 		}
 	}
 	return out, nil
+}
+
+// slugOf is which of slugs an object belongs to: its compose project's, or a volume named after the stack.
+func slugOf(o appObject, slugs map[string]bool) (string, bool) {
+	if o.app != "" && slugs[o.app] {
+		return o.app, true
+	}
+	if o.kind == "volume" {
+		for slug := range slugs {
+			if strings.HasPrefix(o.name, "deplo-"+slug+"_") || strings.HasPrefix(o.name, "deplo-"+slug+"-") {
+				return slug, true
+			}
+		}
+	}
+	return "", false
+}
+
+// placementSlugs is the Apps a lease file places, of the clusters keep says yes to.
+func placementSlugs(path string, keep func(cluster string) bool, into map[string]bool) {
+	for id, raw := range readTop(path) {
+		var l struct {
+			Placement []struct {
+				Slug string `json:"slug"`
+			} `json:"placement"`
+		}
+		if keep(id) && json.Unmarshal(raw, &l) == nil {
+			for _, p := range l.Placement {
+				if p.Slug != "" {
+					into[p.Slug] = true
+				}
+			}
+		}
+	}
+}
+
+// theirSlugs is the Apps the leases another Deplo left placed, and this Deplo's leases do not.
+func theirSlugs(dir string) map[string]bool {
+	theirs, ours := map[string]bool{}, map[string]bool{}
+	all := func(string) bool { return true }
+	leases, _ := filepath.Glob(filepath.Join(dir, setAsideRoot, "*", "cluster-lease.json"))
+	for _, f := range leases {
+		placementSlugs(f, all, theirs)
+	}
+	placementSlugs(filepath.Join(dir, "cluster-lease.json"), all, ours)
+	for slug := range ours {
+		delete(theirs, slug)
+	}
+	return theirs
+}
+
+func newestSetAside(dir string) string {
+	names := setAsideNames(dir)
+	if len(names) == 0 {
+		return ""
+	}
+	return filepath.Join(dir, setAsideRoot, names[len(names)-1])
+}
+
+func setAsideNames(dir string) []string {
+	entries, _ := os.ReadDir(filepath.Join(dir, setAsideRoot))
+	var names []string
+	for _, e := range entries {
+		if _, err := time.Parse("20060102T150405Z", e.Name()); err == nil && e.IsDir() {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 // leftApps is another Deplo's App containers and volumes on this host: every stack's when that Deplo wrote all of
@@ -449,33 +530,30 @@ func leftApps(ctx context.Context, dir string, a aside) []*pb.LeftWorkload {
 		log.Printf("deplo-agent: could not list the Apps another Deplo left: %v", err)
 		return nil
 	}
-	theirs := map[string]bool{}
-	if !a.all {
-		top := readTop(filepath.Join(dir, "cluster-lease.json"))
-		ours := map[string]bool{}
-		for id, raw := range top {
-			var l struct {
-				Placement []struct {
-					Slug string `json:"slug"`
-				} `json:"placement"`
-			}
-			_ = json.Unmarshal(raw, &l)
-			for _, p := range l.Placement {
-				if a.clusters[id] {
-					theirs[p.Slug] = true
-				} else {
-					ours[p.Slug] = true
-				}
+	lease := filepath.Join(dir, "cluster-lease.json")
+	theirs, ours := map[string]bool{}, map[string]bool{}
+	if a.all {
+		for _, o := range objs {
+			if o.app != "" {
+				theirs[o.app] = true
 			}
 		}
+		placementSlugs(lease, func(string) bool { return true }, theirs)
+	} else {
+		placementSlugs(lease, func(id string) bool { return a.clusters[id] }, theirs)
+		placementSlugs(lease, func(id string) bool { return !a.clusters[id] }, ours)
 		for slug := range ours {
 			delete(theirs, slug)
 		}
 	}
+	return matching(objs, theirs)
+}
+
+func matching(objs []appObject, slugs map[string]bool) []*pb.LeftWorkload {
 	out := []*pb.LeftWorkload{}
 	for _, o := range objs {
-		if a.all || theirs[o.app] {
-			out = append(out, &pb.LeftWorkload{Kind: o.kind, Name: o.name, App: o.app})
+		if slug, ok := slugOf(o, slugs); ok {
+			out = append(out, &pb.LeftWorkload{Kind: o.kind, Name: o.name, App: slug})
 		}
 	}
 	return out
@@ -484,17 +562,10 @@ func leftApps(ctx context.Context, dir string, a aside) []*pb.LeftWorkload {
 // lastSetAside is the newest set-aside folder, its time, and what every one listed that is still on this host.
 func (s *Service) lastSetAside(ctx context.Context) (string, int64, []*pb.LeftWorkload) {
 	root := filepath.Join(s.agentDir, setAsideRoot)
-	entries, _ := os.ReadDir(root)
-	var names []string
-	for _, e := range entries {
-		if _, err := time.Parse("20060102T150405Z", e.Name()); err == nil && e.IsDir() {
-			names = append(names, e.Name())
-		}
-	}
+	names := setAsideNames(s.agentDir)
 	if len(names) == 0 {
 		return "", 0, nil
 	}
-	sort.Strings(names)
 	last := names[len(names)-1]
 	at, _ := time.Parse("20060102T150405Z", last)
 	var list []*pb.LeftWorkload
@@ -511,6 +582,12 @@ func (s *Service) lastSetAside(ctx context.Context) (string, int64, []*pb.LeftWo
 		}
 	}
 	if objs, err := listAppObjects(ctx); err == nil {
+		for _, l := range matching(objs, theirSlugs(s.agentDir)) {
+			if k := l.GetKind() + "/" + l.GetName(); !seen[k] {
+				seen[k] = true
+				list = append(list, l)
+			}
+		}
 		here := map[string]bool{}
 		for _, o := range objs {
 			here[o.kind+"/"+o.name] = true
