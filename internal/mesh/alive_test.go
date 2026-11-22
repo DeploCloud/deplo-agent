@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 )
@@ -295,4 +296,56 @@ func TestMesh_heardSaysWhenEachPeerWasLastAlive(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatal("a peer taken off the network was still listed as heard")
+}
+
+// Decision H (22 Nov 2026): any two of three that are up hear each other, whatever the third does, and a peer's
+// new address never stops the hearing a name server counts its majority from.
+func TestMesh_twoOfThreeKeepHearingEachOtherThroughAnAddressChange(t *testing.T) {
+	fpC := strings.Repeat("c", 64)
+	a, b, c := start(t, nil, fpA, "fdde:9100::a"), start(t, nil, fpB, "fdde:9100::b"), start(t, nil, fpC, "fdde:9100::c")
+	// a still holds b and c under certificates of a Deplo they left, with the same keys, as eu-2 did; the cluster
+	// Deplo set last comes first (peersLocked).
+	staleB, staleC := b.as(true), c.as(true)
+	staleB.Fingerprint, staleB.Address = strings.Repeat("d", 64), netip.MustParseAddr("fdde:9100::d")
+	staleC.Fingerprint, staleC.Address = strings.Repeat("e", 64), netip.MustParseAddr("fdde:9100::e")
+	for _, s := range []struct {
+		m     side
+		peers []Peer
+	}{{a, []Peer{b.as(true), c.as(true), staleB, staleC}}, {b, []Peer{a.as(true), c.as(true)}}, {c, []Peer{a.as(true), b.as(true)}}} {
+		if err := s.m.m.SetPeers(s.peers); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hears := func(m side, fps ...string) bool {
+		got := m.m.Heard()
+		for _, fp := range fps {
+			if at, ok := got[fp]; !ok || time.Since(at) > 6*time.Second {
+				return false
+			}
+		}
+		return true
+	}
+	eventually(t, 10*time.Second, func() bool { return hears(a, fpB, fpC) && hears(b, fpA, fpC) && hears(c, fpA, fpB) })
+	c.m.Close()
+	// b's address changes: a now knows it only at its IPv6 loopback, as after a new prefix.
+	moved := b.as(true)
+	moved.Endpoints = []netip.AddrPort{netip.AddrPortFrom(netip.MustParseAddr("::1"), b.m.Port())}
+	if err := a.m.SetPeers([]Peer{moved, c.as(true), staleB}); err != nil {
+		t.Fatal(err)
+	}
+	for end := time.Now().Add(8 * time.Second); time.Now().Before(end); time.Sleep(250 * time.Millisecond) {
+		if !hears(a, fpB) || !hears(b, fpA) {
+			t.Fatalf("a and b stopped hearing each other: a %v, b %v", a.m.Heard(), b.m.Heard())
+		}
+	}
+}
+
+func eventually(t *testing.T, within time.Duration, ok func() bool) {
+	t.Helper()
+	for end := time.Now().Add(within); time.Now().Before(end); time.Sleep(100 * time.Millisecond) {
+		if ok() {
+			return
+		}
+	}
+	t.Fatal("not within", within)
 }
