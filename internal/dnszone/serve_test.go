@@ -72,10 +72,11 @@ func TestServer_aLongAnswerFallsBackToTCP(t *testing.T) {
 	}
 }
 
-func TestServer_noTableYetAnswersServfail(t *testing.T) {
+func TestServer_noTableYetAnswersNothing(t *testing.T) {
 	s, addr := serveLocal(t, nil)
-	if r := exchange(t, "udp", addr, query("shop-example-com.go.example.com.", dns.TypeA)); r.Rcode != dns.RcodeServerFailure {
-		t.Fatalf("rcode %d", r.Rcode)
+	c := &dns.Client{Net: "udp", Timeout: 300 * time.Millisecond}
+	if r, _, err := c.Exchange(query("shop-example-com.go.example.com.", dns.TypeA), addr); err == nil {
+		t.Fatalf("answered rcode %d before any table", r.Rcode)
 	}
 	if err := s.SetTable(testTable()); err != nil {
 		t.Fatal(err)
