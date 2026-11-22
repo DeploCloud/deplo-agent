@@ -44,6 +44,8 @@ var (
 	// pingInterval stays under common proxy idle timeouts; gRPC keepalives stop when no call is open.
 	pingInterval = 20 * time.Second
 	pongTimeout  = 10 * time.Second
+	// takenAfter is how long a link stays up before it has passed the panel's checks, a copy's among them.
+	takenAfter = 10 * time.Second
 	// healthyAfter is how long a link has to last before the next reconnect starts from minBackoff.
 	healthyAfter = 30 * time.Second
 )
@@ -196,7 +198,6 @@ func (cfg Config) serve(ctx context.Context, l *Listener, ws *websocket.Conn, ad
 	linkCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	c := &conn{Conn: websocket.NetConn(linkCtx, ws, websocket.MessageBinary), closed: make(chan struct{})}
-	cfg.noteCopied(false)
 	select {
 	case l.conns <- c:
 	case <-l.closed:
@@ -210,19 +211,26 @@ func (cfg Config) serve(ctx context.Context, l *Listener, ws *websocket.Conn, ad
 	started := time.Now()
 	unanswered := make(chan error, 1)
 	go ping(linkCtx, ws, unanswered)
-	select {
-	case <-c.closed:
-		if c.status() == CopiedStatus {
-			cfg.noteCopied(true)
-			return 0, ErrCopied
+	taken := time.NewTimer(takenAfter)
+	defer taken.Stop()
+	for {
+		select {
+		case <-taken.C:
+			// The panel kept it: this machine is the server, not a copy.
+			cfg.noteCopied(false)
+		case <-c.closed:
+			if c.status() == CopiedStatus {
+				cfg.noteCopied(true)
+				return 0, ErrCopied
+			}
+			return time.Since(started), errors.New("link closed")
+		case err := <-unanswered:
+			ws.CloseNow()
+			return time.Since(started), err
+		case <-ctx.Done():
+			ws.Close(websocket.StatusGoingAway, "agent stopping")
+			return time.Since(started), ctx.Err()
 		}
-		return time.Since(started), errors.New("link closed")
-	case err := <-unanswered:
-		ws.CloseNow()
-		return time.Since(started), err
-	case <-ctx.Done():
-		ws.Close(websocket.StatusGoingAway, "agent stopping")
-		return time.Since(started), ctx.Err()
 	}
 }
 
