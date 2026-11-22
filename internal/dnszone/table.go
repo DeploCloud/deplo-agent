@@ -47,6 +47,9 @@ type Zone struct {
 	// Near is Servers one server at a time, where each is, so a visitor is answered with the nearest; empty answers
 	// every one of Servers. It names exactly the addresses of Servers, so geography never adds a server health left out.
 	Near []Place `json:"near,omitempty"`
+	// Homes are the names answered with one server first, the one that runs their App: only healthy servers, by
+	// addresses of Servers, so a home never adds a server health left out.
+	Homes []Home `json:"homes,omitempty"`
 	// TXT are the certificate checks under way: "_acme-challenge." names inside the zone. Fail answers them SERVFAIL
 	// too, so a check is read on the bigger side of a split only.
 	TXT    []TXT  `json:"txt,omitempty"`
@@ -58,6 +61,12 @@ type Zone struct {
 type TXT struct {
 	Name   string   `json:"name"`
 	Values []string `json:"values"`
+}
+
+// Home is a name answered with this server first, then the others.
+type Home struct {
+	Name string `json:"name"`
+	Addrs
 }
 
 // ChallengeLabel is the first label of every name a TXT may have.
@@ -143,6 +152,7 @@ type zone struct {
 	fail    bool
 	servers addrSet
 	near    []place
+	homes   map[string]addrSet
 	txt     map[string][]string
 	ttl     uint32
 	serial  uint32
@@ -216,6 +226,9 @@ func compile(t *Table) (*compiled, error) {
 		if err := z.compileTXT(raw.TXT); err != nil {
 			return nil, err
 		}
+		if err := z.compileHomes(raw.Homes); err != nil {
+			return nil, err
+		}
 		c.zones[name] = z
 	}
 	return c, nil
@@ -254,6 +267,44 @@ func (z *zone) compileTXT(raw []TXT) error {
 		}
 		z.txt[n] = slices.Clone(t.Values)
 		z.addInner(n)
+	}
+	return nil
+}
+
+// compileHomes takes a home only for a name of the zone, each once, by addresses the answer names.
+func (z *zone) compileHomes(raw []Home) error {
+	if len(raw) > maxNamesInZone {
+		return fmt.Errorf("zone %s: at most %d homes", z.name, maxNamesInZone)
+	}
+	healthy := map[netip.Addr]bool{}
+	for _, a := range append(append([]netip.Addr{}, z.servers.v4...), z.servers.v6...) {
+		healthy[a] = true
+	}
+	z.homes = map[string]addrSet{}
+	for _, h := range raw {
+		n, err := Name(h.Name)
+		if err != nil {
+			return err
+		}
+		if !z.names[n] {
+			return fmt.Errorf("zone %s: %s has a home but is not one of its names", z.name, n)
+		}
+		if _, dup := z.homes[n]; dup {
+			return fmt.Errorf("zone %s: %s has two homes", z.name, n)
+		}
+		a, err := parseAddrs(h.Addrs)
+		if err != nil {
+			return fmt.Errorf("zone %s, home of %s: %w", z.name, n, err)
+		}
+		if len(a.v4)+len(a.v6) == 0 {
+			return fmt.Errorf("zone %s: the home of %s has no address", z.name, n)
+		}
+		for _, ip := range append(append([]netip.Addr{}, a.v4...), a.v6...) {
+			if !healthy[ip] {
+				return fmt.Errorf("zone %s: the home of %s names %s, which the answer does not", z.name, n, ip)
+			}
+		}
+		z.homes[n] = a
 	}
 	return nil
 }

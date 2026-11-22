@@ -158,6 +158,8 @@ var Capabilities = []string{
 	"dns.challenge",
 	// A name's own certificate over DNS renewed by one server and held by every other as a file (#228).
 	"dns.certificates",
+	// ClusterZone.homes: a name whose App runs on one server is answered with that server first (ADR-0049).
+	"dns.home",
 	// The health check is this binary, mounted from the stack directory's .deplo-probe: no shell in the image (deplo#281).
 	"deploy.probe",
 }

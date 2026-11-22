@@ -13637,7 +13637,10 @@ type ClusterZone struct {
 	// The zone itself, "go.example.com".
 	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	// The names answered with the cluster's healthy servers; the zone itself may be one.
-	Names         []string `protobuf:"bytes,2,rep,name=names,proto3" json:"names,omitempty"`
+	Names []string `protobuf:"bytes,2,rep,name=names,proto3" json:"names,omitempty"`
+	// A name whose App runs on one server at a time is answered with that server first, then the other healthy
+	// servers nearest first (Hello "dns.home"). Health still wins: a home not healthy is answered as if not named.
+	Homes         []*ClusterZoneHome `protobuf:"bytes,3,rep,name=homes,proto3" json:"homes,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -13686,6 +13689,67 @@ func (x *ClusterZone) GetNames() []string {
 	return nil
 }
 
+func (x *ClusterZone) GetHomes() []*ClusterZoneHome {
+	if x != nil {
+		return x.Homes
+	}
+	return nil
+}
+
+type ClusterZoneHome struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// One of the zone's names.
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// The member that runs its App, by certificate.
+	Fingerprint   string `protobuf:"bytes,2,opt,name=fingerprint,proto3" json:"fingerprint,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ClusterZoneHome) Reset() {
+	*x = ClusterZoneHome{}
+	mi := &file_agent_proto_msgTypes[182]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ClusterZoneHome) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ClusterZoneHome) ProtoMessage() {}
+
+func (x *ClusterZoneHome) ProtoReflect() protoreflect.Message {
+	mi := &file_agent_proto_msgTypes[182]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ClusterZoneHome.ProtoReflect.Descriptor instead.
+func (*ClusterZoneHome) Descriptor() ([]byte, []int) {
+	return file_agent_proto_rawDescGZIP(), []int{182}
+}
+
+func (x *ClusterZoneHome) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *ClusterZoneHome) GetFingerprint() string {
+	if x != nil {
+		return x.Fingerprint
+	}
+	return ""
+}
+
 type ClusterZoneServer struct {
 	state       protoimpl.MessageState `protogen:"open.v1"`
 	Fingerprint string                 `protobuf:"bytes,1,opt,name=fingerprint,proto3" json:"fingerprint,omitempty"`
@@ -13704,7 +13768,7 @@ type ClusterZoneServer struct {
 
 func (x *ClusterZoneServer) Reset() {
 	*x = ClusterZoneServer{}
-	mi := &file_agent_proto_msgTypes[182]
+	mi := &file_agent_proto_msgTypes[183]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13716,7 +13780,7 @@ func (x *ClusterZoneServer) String() string {
 func (*ClusterZoneServer) ProtoMessage() {}
 
 func (x *ClusterZoneServer) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[182]
+	mi := &file_agent_proto_msgTypes[183]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13729,7 +13793,7 @@ func (x *ClusterZoneServer) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClusterZoneServer.ProtoReflect.Descriptor instead.
 func (*ClusterZoneServer) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{182}
+	return file_agent_proto_rawDescGZIP(), []int{183}
 }
 
 func (x *ClusterZoneServer) GetFingerprint() string {
@@ -13797,7 +13861,7 @@ type SetClusterZoneResponse struct {
 
 func (x *SetClusterZoneResponse) Reset() {
 	*x = SetClusterZoneResponse{}
-	mi := &file_agent_proto_msgTypes[183]
+	mi := &file_agent_proto_msgTypes[184]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13809,7 +13873,7 @@ func (x *SetClusterZoneResponse) String() string {
 func (*SetClusterZoneResponse) ProtoMessage() {}
 
 func (x *SetClusterZoneResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[183]
+	mi := &file_agent_proto_msgTypes[184]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13822,7 +13886,7 @@ func (x *SetClusterZoneResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetClusterZoneResponse.ProtoReflect.Descriptor instead.
 func (*SetClusterZoneResponse) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{183}
+	return file_agent_proto_rawDescGZIP(), []int{184}
 }
 
 func (x *SetClusterZoneResponse) GetListening() []string {
@@ -13896,7 +13960,7 @@ type ClusterZoneCertificateState struct {
 
 func (x *ClusterZoneCertificateState) Reset() {
 	*x = ClusterZoneCertificateState{}
-	mi := &file_agent_proto_msgTypes[184]
+	mi := &file_agent_proto_msgTypes[185]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -13908,7 +13972,7 @@ func (x *ClusterZoneCertificateState) String() string {
 func (*ClusterZoneCertificateState) ProtoMessage() {}
 
 func (x *ClusterZoneCertificateState) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[184]
+	mi := &file_agent_proto_msgTypes[185]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -13921,7 +13985,7 @@ func (x *ClusterZoneCertificateState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClusterZoneCertificateState.ProtoReflect.Descriptor instead.
 func (*ClusterZoneCertificateState) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{184}
+	return file_agent_proto_rawDescGZIP(), []int{185}
 }
 
 func (x *ClusterZoneCertificateState) GetZone() string {
@@ -13998,7 +14062,7 @@ type SetGeoTableRequest struct {
 
 func (x *SetGeoTableRequest) Reset() {
 	*x = SetGeoTableRequest{}
-	mi := &file_agent_proto_msgTypes[185]
+	mi := &file_agent_proto_msgTypes[186]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14010,7 +14074,7 @@ func (x *SetGeoTableRequest) String() string {
 func (*SetGeoTableRequest) ProtoMessage() {}
 
 func (x *SetGeoTableRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[185]
+	mi := &file_agent_proto_msgTypes[186]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14023,7 +14087,7 @@ func (x *SetGeoTableRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetGeoTableRequest.ProtoReflect.Descriptor instead.
 func (*SetGeoTableRequest) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{185}
+	return file_agent_proto_rawDescGZIP(), []int{186}
 }
 
 func (x *SetGeoTableRequest) GetTableGz() []byte {
@@ -14051,7 +14115,7 @@ type SetGeoTableResponse struct {
 
 func (x *SetGeoTableResponse) Reset() {
 	*x = SetGeoTableResponse{}
-	mi := &file_agent_proto_msgTypes[186]
+	mi := &file_agent_proto_msgTypes[187]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14063,7 +14127,7 @@ func (x *SetGeoTableResponse) String() string {
 func (*SetGeoTableResponse) ProtoMessage() {}
 
 func (x *SetGeoTableResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[186]
+	mi := &file_agent_proto_msgTypes[187]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14076,7 +14140,7 @@ func (x *SetGeoTableResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetGeoTableResponse.ProtoReflect.Descriptor instead.
 func (*SetGeoTableResponse) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{186}
+	return file_agent_proto_rawDescGZIP(), []int{187}
 }
 
 func (x *SetGeoTableResponse) GetSha256() string {
@@ -14105,7 +14169,7 @@ type SetClusterReplicasRequest struct {
 
 func (x *SetClusterReplicasRequest) Reset() {
 	*x = SetClusterReplicasRequest{}
-	mi := &file_agent_proto_msgTypes[187]
+	mi := &file_agent_proto_msgTypes[188]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14117,7 +14181,7 @@ func (x *SetClusterReplicasRequest) String() string {
 func (*SetClusterReplicasRequest) ProtoMessage() {}
 
 func (x *SetClusterReplicasRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[187]
+	mi := &file_agent_proto_msgTypes[188]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14130,7 +14194,7 @@ func (x *SetClusterReplicasRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetClusterReplicasRequest.ProtoReflect.Descriptor instead.
 func (*SetClusterReplicasRequest) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{187}
+	return file_agent_proto_rawDescGZIP(), []int{188}
 }
 
 func (x *SetClusterReplicasRequest) GetClusterId() string {
@@ -14169,7 +14233,7 @@ type ClusterReplicaEntry struct {
 
 func (x *ClusterReplicaEntry) Reset() {
 	*x = ClusterReplicaEntry{}
-	mi := &file_agent_proto_msgTypes[188]
+	mi := &file_agent_proto_msgTypes[189]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14181,7 +14245,7 @@ func (x *ClusterReplicaEntry) String() string {
 func (*ClusterReplicaEntry) ProtoMessage() {}
 
 func (x *ClusterReplicaEntry) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[188]
+	mi := &file_agent_proto_msgTypes[189]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14194,7 +14258,7 @@ func (x *ClusterReplicaEntry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClusterReplicaEntry.ProtoReflect.Descriptor instead.
 func (*ClusterReplicaEntry) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{188}
+	return file_agent_proto_rawDescGZIP(), []int{189}
 }
 
 func (x *ClusterReplicaEntry) GetAppId() string {
@@ -14234,7 +14298,7 @@ type SetClusterReplicasResponse struct {
 
 func (x *SetClusterReplicasResponse) Reset() {
 	*x = SetClusterReplicasResponse{}
-	mi := &file_agent_proto_msgTypes[189]
+	mi := &file_agent_proto_msgTypes[190]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14246,7 +14310,7 @@ func (x *SetClusterReplicasResponse) String() string {
 func (*SetClusterReplicasResponse) ProtoMessage() {}
 
 func (x *SetClusterReplicasResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[189]
+	mi := &file_agent_proto_msgTypes[190]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14259,7 +14323,7 @@ func (x *SetClusterReplicasResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetClusterReplicasResponse.ProtoReflect.Descriptor instead.
 func (*SetClusterReplicasResponse) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{189}
+	return file_agent_proto_rawDescGZIP(), []int{190}
 }
 
 func (x *SetClusterReplicasResponse) GetEntries() int32 {
@@ -14277,7 +14341,7 @@ type ClusterReplicaStatusRequest struct {
 
 func (x *ClusterReplicaStatusRequest) Reset() {
 	*x = ClusterReplicaStatusRequest{}
-	mi := &file_agent_proto_msgTypes[190]
+	mi := &file_agent_proto_msgTypes[191]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14289,7 +14353,7 @@ func (x *ClusterReplicaStatusRequest) String() string {
 func (*ClusterReplicaStatusRequest) ProtoMessage() {}
 
 func (x *ClusterReplicaStatusRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[190]
+	mi := &file_agent_proto_msgTypes[191]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14302,7 +14366,7 @@ func (x *ClusterReplicaStatusRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClusterReplicaStatusRequest.ProtoReflect.Descriptor instead.
 func (*ClusterReplicaStatusRequest) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{190}
+	return file_agent_proto_rawDescGZIP(), []int{191}
 }
 
 type ClusterReplicaStatusResponse struct {
@@ -14314,7 +14378,7 @@ type ClusterReplicaStatusResponse struct {
 
 func (x *ClusterReplicaStatusResponse) Reset() {
 	*x = ClusterReplicaStatusResponse{}
-	mi := &file_agent_proto_msgTypes[191]
+	mi := &file_agent_proto_msgTypes[192]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14326,7 +14390,7 @@ func (x *ClusterReplicaStatusResponse) String() string {
 func (*ClusterReplicaStatusResponse) ProtoMessage() {}
 
 func (x *ClusterReplicaStatusResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[191]
+	mi := &file_agent_proto_msgTypes[192]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14339,7 +14403,7 @@ func (x *ClusterReplicaStatusResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClusterReplicaStatusResponse.ProtoReflect.Descriptor instead.
 func (*ClusterReplicaStatusResponse) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{191}
+	return file_agent_proto_rawDescGZIP(), []int{192}
 }
 
 func (x *ClusterReplicaStatusResponse) GetReplicas() []*ClusterReplicaState {
@@ -14372,7 +14436,7 @@ type ClusterReplicaState struct {
 
 func (x *ClusterReplicaState) Reset() {
 	*x = ClusterReplicaState{}
-	mi := &file_agent_proto_msgTypes[192]
+	mi := &file_agent_proto_msgTypes[193]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14384,7 +14448,7 @@ func (x *ClusterReplicaState) String() string {
 func (*ClusterReplicaState) ProtoMessage() {}
 
 func (x *ClusterReplicaState) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[192]
+	mi := &file_agent_proto_msgTypes[193]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14397,7 +14461,7 @@ func (x *ClusterReplicaState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClusterReplicaState.ProtoReflect.Descriptor instead.
 func (*ClusterReplicaState) Descriptor() ([]byte, []int) {
-	return file_agent_proto_rawDescGZIP(), []int{192}
+	return file_agent_proto_rawDescGZIP(), []int{193}
 }
 
 func (x *ClusterReplicaState) GetAppId() string {
@@ -14482,7 +14546,7 @@ type HostPathChunk_Header struct {
 
 func (x *HostPathChunk_Header) Reset() {
 	*x = HostPathChunk_Header{}
-	mi := &file_agent_proto_msgTypes[194]
+	mi := &file_agent_proto_msgTypes[195]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14494,7 +14558,7 @@ func (x *HostPathChunk_Header) String() string {
 func (*HostPathChunk_Header) ProtoMessage() {}
 
 func (x *HostPathChunk_Header) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[194]
+	mi := &file_agent_proto_msgTypes[195]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14547,7 +14611,7 @@ type VolumeChunk_Header struct {
 
 func (x *VolumeChunk_Header) Reset() {
 	*x = VolumeChunk_Header{}
-	mi := &file_agent_proto_msgTypes[195]
+	mi := &file_agent_proto_msgTypes[196]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14559,7 +14623,7 @@ func (x *VolumeChunk_Header) String() string {
 func (*VolumeChunk_Header) ProtoMessage() {}
 
 func (x *VolumeChunk_Header) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[195]
+	mi := &file_agent_proto_msgTypes[196]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14601,7 +14665,7 @@ type FilesChunk_Header struct {
 
 func (x *FilesChunk_Header) Reset() {
 	*x = FilesChunk_Header{}
-	mi := &file_agent_proto_msgTypes[196]
+	mi := &file_agent_proto_msgTypes[197]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14613,7 +14677,7 @@ func (x *FilesChunk_Header) String() string {
 func (*FilesChunk_Header) ProtoMessage() {}
 
 func (x *FilesChunk_Header) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[196]
+	mi := &file_agent_proto_msgTypes[197]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14654,7 +14718,7 @@ type ImageChunk_Header struct {
 
 func (x *ImageChunk_Header) Reset() {
 	*x = ImageChunk_Header{}
-	mi := &file_agent_proto_msgTypes[197]
+	mi := &file_agent_proto_msgTypes[198]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14666,7 +14730,7 @@ func (x *ImageChunk_Header) String() string {
 func (*ImageChunk_Header) ProtoMessage() {}
 
 func (x *ImageChunk_Header) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[197]
+	mi := &file_agent_proto_msgTypes[198]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14703,7 +14767,7 @@ type StoreChunk_Header struct {
 
 func (x *StoreChunk_Header) Reset() {
 	*x = StoreChunk_Header{}
-	mi := &file_agent_proto_msgTypes[201]
+	mi := &file_agent_proto_msgTypes[202]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14715,7 +14779,7 @@ func (x *StoreChunk_Header) String() string {
 func (*StoreChunk_Header) ProtoMessage() {}
 
 func (x *StoreChunk_Header) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[201]
+	mi := &file_agent_proto_msgTypes[202]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -14766,7 +14830,7 @@ type RestoreChunk_Header struct {
 
 func (x *RestoreChunk_Header) Reset() {
 	*x = RestoreChunk_Header{}
-	mi := &file_agent_proto_msgTypes[202]
+	mi := &file_agent_proto_msgTypes[203]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -14778,7 +14842,7 @@ func (x *RestoreChunk_Header) String() string {
 func (*RestoreChunk_Header) ProtoMessage() {}
 
 func (x *RestoreChunk_Header) ProtoReflect() protoreflect.Message {
-	mi := &file_agent_proto_msgTypes[202]
+	mi := &file_agent_proto_msgTypes[203]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -16529,10 +16593,18 @@ var file_agent_proto_rawDesc = []byte{
 	0x6d, 0x12, 0x18, 0x0a, 0x07, 0x63, 0x6f, 0x76, 0x65, 0x72, 0x65, 0x64, 0x18, 0x07, 0x20, 0x03,
 	0x28, 0x09, 0x52, 0x07, 0x63, 0x6f, 0x76, 0x65, 0x72, 0x65, 0x64, 0x12, 0x14, 0x0a, 0x05, 0x6e,
 	0x61, 0x6d, 0x65, 0x73, 0x18, 0x08, 0x20, 0x03, 0x28, 0x09, 0x52, 0x05, 0x6e, 0x61, 0x6d, 0x65,
-	0x73, 0x22, 0x37, 0x0a, 0x0b, 0x43, 0x6c, 0x75, 0x73, 0x74, 0x65, 0x72, 0x5a, 0x6f, 0x6e, 0x65,
+	0x73, 0x22, 0x6e, 0x0a, 0x0b, 0x43, 0x6c, 0x75, 0x73, 0x74, 0x65, 0x72, 0x5a, 0x6f, 0x6e, 0x65,
 	0x12, 0x12, 0x0a, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x18, 0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x04,
 	0x6e, 0x61, 0x6d, 0x65, 0x12, 0x14, 0x0a, 0x05, 0x6e, 0x61, 0x6d, 0x65, 0x73, 0x18, 0x02, 0x20,
-	0x03, 0x28, 0x09, 0x52, 0x05, 0x6e, 0x61, 0x6d, 0x65, 0x73, 0x22, 0xc3, 0x01, 0x0a, 0x11, 0x43,
+	0x03, 0x28, 0x09, 0x52, 0x05, 0x6e, 0x61, 0x6d, 0x65, 0x73, 0x12, 0x35, 0x0a, 0x05, 0x68, 0x6f,
+	0x6d, 0x65, 0x73, 0x18, 0x03, 0x20, 0x03, 0x28, 0x0b, 0x32, 0x1f, 0x2e, 0x64, 0x65, 0x70, 0x6c,
+	0x6f, 0x2e, 0x61, 0x67, 0x65, 0x6e, 0x74, 0x2e, 0x76, 0x31, 0x2e, 0x43, 0x6c, 0x75, 0x73, 0x74,
+	0x65, 0x72, 0x5a, 0x6f, 0x6e, 0x65, 0x48, 0x6f, 0x6d, 0x65, 0x52, 0x05, 0x68, 0x6f, 0x6d, 0x65,
+	0x73, 0x22, 0x47, 0x0a, 0x0f, 0x43, 0x6c, 0x75, 0x73, 0x74, 0x65, 0x72, 0x5a, 0x6f, 0x6e, 0x65,
+	0x48, 0x6f, 0x6d, 0x65, 0x12, 0x12, 0x0a, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x18, 0x01, 0x20, 0x01,
+	0x28, 0x09, 0x52, 0x04, 0x6e, 0x61, 0x6d, 0x65, 0x12, 0x20, 0x0a, 0x0b, 0x66, 0x69, 0x6e, 0x67,
+	0x65, 0x72, 0x70, 0x72, 0x69, 0x6e, 0x74, 0x18, 0x02, 0x20, 0x01, 0x28, 0x09, 0x52, 0x0b, 0x66,
+	0x69, 0x6e, 0x67, 0x65, 0x72, 0x70, 0x72, 0x69, 0x6e, 0x74, 0x22, 0xc3, 0x01, 0x0a, 0x11, 0x43,
 	0x6c, 0x75, 0x73, 0x74, 0x65, 0x72, 0x5a, 0x6f, 0x6e, 0x65, 0x53, 0x65, 0x72, 0x76, 0x65, 0x72,
 	0x12, 0x20, 0x0a, 0x0b, 0x66, 0x69, 0x6e, 0x67, 0x65, 0x72, 0x70, 0x72, 0x69, 0x6e, 0x74, 0x18,
 	0x01, 0x20, 0x01, 0x28, 0x09, 0x52, 0x0b, 0x66, 0x69, 0x6e, 0x67, 0x65, 0x72, 0x70, 0x72, 0x69,
@@ -17240,7 +17312,7 @@ func file_agent_proto_rawDescGZIP() []byte {
 }
 
 var file_agent_proto_enumTypes = make([]protoimpl.EnumInfo, 11)
-var file_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 206)
+var file_agent_proto_msgTypes = make([]protoimpl.MessageInfo, 207)
 var file_agent_proto_goTypes = []any{
 	(ContractVersion)(0),                  // 0: deplo.agent.v1.ContractVersion
 	(SourceKind)(0),                       // 1: deplo.agent.v1.SourceKind
@@ -17435,30 +17507,31 @@ var file_agent_proto_goTypes = []any{
 	(*ClusterZoneChallenge)(nil),          // 190: deplo.agent.v1.ClusterZoneChallenge
 	(*ClusterZoneCertificate)(nil),        // 191: deplo.agent.v1.ClusterZoneCertificate
 	(*ClusterZone)(nil),                   // 192: deplo.agent.v1.ClusterZone
-	(*ClusterZoneServer)(nil),             // 193: deplo.agent.v1.ClusterZoneServer
-	(*SetClusterZoneResponse)(nil),        // 194: deplo.agent.v1.SetClusterZoneResponse
-	(*ClusterZoneCertificateState)(nil),   // 195: deplo.agent.v1.ClusterZoneCertificateState
-	(*SetGeoTableRequest)(nil),            // 196: deplo.agent.v1.SetGeoTableRequest
-	(*SetGeoTableResponse)(nil),           // 197: deplo.agent.v1.SetGeoTableResponse
-	(*SetClusterReplicasRequest)(nil),     // 198: deplo.agent.v1.SetClusterReplicasRequest
-	(*ClusterReplicaEntry)(nil),           // 199: deplo.agent.v1.ClusterReplicaEntry
-	(*SetClusterReplicasResponse)(nil),    // 200: deplo.agent.v1.SetClusterReplicasResponse
-	(*ClusterReplicaStatusRequest)(nil),   // 201: deplo.agent.v1.ClusterReplicaStatusRequest
-	(*ClusterReplicaStatusResponse)(nil),  // 202: deplo.agent.v1.ClusterReplicaStatusResponse
-	(*ClusterReplicaState)(nil),           // 203: deplo.agent.v1.ClusterReplicaState
-	nil,                                   // 204: deplo.agent.v1.DeployRequest.EnvEntry
-	(*HostPathChunk_Header)(nil),          // 205: deplo.agent.v1.HostPathChunk.Header
-	(*VolumeChunk_Header)(nil),            // 206: deplo.agent.v1.VolumeChunk.Header
-	(*FilesChunk_Header)(nil),             // 207: deplo.agent.v1.FilesChunk.Header
-	(*ImageChunk_Header)(nil),             // 208: deplo.agent.v1.ImageChunk.Header
-	nil,                                   // 209: deplo.agent.v1.RerouteRequest.EnvEntry
-	nil,                                   // 210: deplo.agent.v1.SelfUpdateRequest.BinariesEntry
-	nil,                                   // 211: deplo.agent.v1.ProjectDescriptor.EnvSnapshotEntry
-	(*StoreChunk_Header)(nil),             // 212: deplo.agent.v1.StoreChunk.Header
-	(*RestoreChunk_Header)(nil),           // 213: deplo.agent.v1.RestoreChunk.Header
-	nil,                                   // 214: deplo.agent.v1.DockerCleanupRequest.KeepPerSlugEntry
-	nil,                                   // 215: deplo.agent.v1.InstallClusterRequest.BinariesEntry
-	nil,                                   // 216: deplo.agent.v1.ReadProxyCertificatesRequest.KnownEntry
+	(*ClusterZoneHome)(nil),               // 193: deplo.agent.v1.ClusterZoneHome
+	(*ClusterZoneServer)(nil),             // 194: deplo.agent.v1.ClusterZoneServer
+	(*SetClusterZoneResponse)(nil),        // 195: deplo.agent.v1.SetClusterZoneResponse
+	(*ClusterZoneCertificateState)(nil),   // 196: deplo.agent.v1.ClusterZoneCertificateState
+	(*SetGeoTableRequest)(nil),            // 197: deplo.agent.v1.SetGeoTableRequest
+	(*SetGeoTableResponse)(nil),           // 198: deplo.agent.v1.SetGeoTableResponse
+	(*SetClusterReplicasRequest)(nil),     // 199: deplo.agent.v1.SetClusterReplicasRequest
+	(*ClusterReplicaEntry)(nil),           // 200: deplo.agent.v1.ClusterReplicaEntry
+	(*SetClusterReplicasResponse)(nil),    // 201: deplo.agent.v1.SetClusterReplicasResponse
+	(*ClusterReplicaStatusRequest)(nil),   // 202: deplo.agent.v1.ClusterReplicaStatusRequest
+	(*ClusterReplicaStatusResponse)(nil),  // 203: deplo.agent.v1.ClusterReplicaStatusResponse
+	(*ClusterReplicaState)(nil),           // 204: deplo.agent.v1.ClusterReplicaState
+	nil,                                   // 205: deplo.agent.v1.DeployRequest.EnvEntry
+	(*HostPathChunk_Header)(nil),          // 206: deplo.agent.v1.HostPathChunk.Header
+	(*VolumeChunk_Header)(nil),            // 207: deplo.agent.v1.VolumeChunk.Header
+	(*FilesChunk_Header)(nil),             // 208: deplo.agent.v1.FilesChunk.Header
+	(*ImageChunk_Header)(nil),             // 209: deplo.agent.v1.ImageChunk.Header
+	nil,                                   // 210: deplo.agent.v1.RerouteRequest.EnvEntry
+	nil,                                   // 211: deplo.agent.v1.SelfUpdateRequest.BinariesEntry
+	nil,                                   // 212: deplo.agent.v1.ProjectDescriptor.EnvSnapshotEntry
+	(*StoreChunk_Header)(nil),             // 213: deplo.agent.v1.StoreChunk.Header
+	(*RestoreChunk_Header)(nil),           // 214: deplo.agent.v1.RestoreChunk.Header
+	nil,                                   // 215: deplo.agent.v1.DockerCleanupRequest.KeepPerSlugEntry
+	nil,                                   // 216: deplo.agent.v1.InstallClusterRequest.BinariesEntry
+	nil,                                   // 217: deplo.agent.v1.ReadProxyCertificatesRequest.KnownEntry
 }
 var file_agent_proto_depIdxs = []int32{
 	0,   // 0: deplo.agent.v1.HelloRequest.contract_version:type_name -> deplo.agent.v1.ContractVersion
@@ -17468,7 +17541,7 @@ var file_agent_proto_depIdxs = []int32{
 	2,   // 4: deplo.agent.v1.DeployRequest.build_kind:type_name -> deplo.agent.v1.BuildKind
 	23,  // 5: deplo.agent.v1.DeployRequest.dockerfile:type_name -> deplo.agent.v1.DockerfileBuild
 	22,  // 6: deplo.agent.v1.DeployRequest.git:type_name -> deplo.agent.v1.GitSource
-	204, // 7: deplo.agent.v1.DeployRequest.env:type_name -> deplo.agent.v1.DeployRequest.EnvEntry
+	205, // 7: deplo.agent.v1.DeployRequest.env:type_name -> deplo.agent.v1.DeployRequest.EnvEntry
 	24,  // 8: deplo.agent.v1.DeployRequest.mounts:type_name -> deplo.agent.v1.MountFile
 	21,  // 9: deplo.agent.v1.DeployRequest.build_spec:type_name -> deplo.agent.v1.BuildSpec
 	25,  // 10: deplo.agent.v1.DeployRequest.registry_auth:type_name -> deplo.agent.v1.RegistryAuth
@@ -17483,15 +17556,15 @@ var file_agent_proto_depIdxs = []int32{
 	35,  // 19: deplo.agent.v1.DeployEvent.result:type_name -> deplo.agent.v1.DeployResult
 	3,   // 20: deplo.agent.v1.PhaseChange.phase:type_name -> deplo.agent.v1.DeployPhase
 	36,  // 21: deplo.agent.v1.DeployResult.source_compose:type_name -> deplo.agent.v1.SourceCompose
-	205, // 22: deplo.agent.v1.HostPathChunk.header:type_name -> deplo.agent.v1.HostPathChunk.Header
+	206, // 22: deplo.agent.v1.HostPathChunk.header:type_name -> deplo.agent.v1.HostPathChunk.Header
 	43,  // 23: deplo.agent.v1.VolumeUsageResponse.volumes:type_name -> deplo.agent.v1.VolumeUsage
-	206, // 24: deplo.agent.v1.VolumeChunk.header:type_name -> deplo.agent.v1.VolumeChunk.Header
-	207, // 25: deplo.agent.v1.FilesChunk.header:type_name -> deplo.agent.v1.FilesChunk.Header
-	208, // 26: deplo.agent.v1.ImageChunk.header:type_name -> deplo.agent.v1.ImageChunk.Header
-	209, // 27: deplo.agent.v1.RerouteRequest.env:type_name -> deplo.agent.v1.RerouteRequest.EnvEntry
+	207, // 24: deplo.agent.v1.VolumeChunk.header:type_name -> deplo.agent.v1.VolumeChunk.Header
+	208, // 25: deplo.agent.v1.FilesChunk.header:type_name -> deplo.agent.v1.FilesChunk.Header
+	209, // 26: deplo.agent.v1.ImageChunk.header:type_name -> deplo.agent.v1.ImageChunk.Header
+	210, // 27: deplo.agent.v1.RerouteRequest.env:type_name -> deplo.agent.v1.RerouteRequest.EnvEntry
 	24,  // 28: deplo.agent.v1.RerouteRequest.mounts:type_name -> deplo.agent.v1.MountFile
-	210, // 29: deplo.agent.v1.SelfUpdateRequest.binaries:type_name -> deplo.agent.v1.SelfUpdateRequest.BinariesEntry
-	211, // 30: deplo.agent.v1.ProjectDescriptor.env_snapshot:type_name -> deplo.agent.v1.ProjectDescriptor.EnvSnapshotEntry
+	211, // 29: deplo.agent.v1.SelfUpdateRequest.binaries:type_name -> deplo.agent.v1.SelfUpdateRequest.BinariesEntry
+	212, // 30: deplo.agent.v1.ProjectDescriptor.env_snapshot:type_name -> deplo.agent.v1.ProjectDescriptor.EnvSnapshotEntry
 	24,  // 31: deplo.agent.v1.ProjectDescriptor.mounts:type_name -> deplo.agent.v1.MountFile
 	4,   // 32: deplo.agent.v1.BackupRequest.kind:type_name -> deplo.agent.v1.BackupKind
 	63,  // 33: deplo.agent.v1.BackupRequest.s3:type_name -> deplo.agent.v1.S3Target
@@ -17514,8 +17587,8 @@ var file_agent_proto_depIdxs = []int32{
 	64,  // 50: deplo.agent.v1.S3DeleteRequest.store:type_name -> deplo.agent.v1.StoreTarget
 	64,  // 51: deplo.agent.v1.ReadStoreFileRequest.store:type_name -> deplo.agent.v1.StoreTarget
 	63,  // 52: deplo.agent.v1.ReadStoreFileRequest.s3:type_name -> deplo.agent.v1.S3Target
-	212, // 53: deplo.agent.v1.StoreChunk.header:type_name -> deplo.agent.v1.StoreChunk.Header
-	213, // 54: deplo.agent.v1.RestoreChunk.header:type_name -> deplo.agent.v1.RestoreChunk.Header
+	213, // 53: deplo.agent.v1.StoreChunk.header:type_name -> deplo.agent.v1.StoreChunk.Header
+	214, // 54: deplo.agent.v1.RestoreChunk.header:type_name -> deplo.agent.v1.RestoreChunk.Header
 	84,  // 55: deplo.agent.v1.AttachInput.open:type_name -> deplo.agent.v1.AttachOpen
 	85,  // 56: deplo.agent.v1.AttachInput.resize:type_name -> deplo.agent.v1.AttachResize
 	87,  // 57: deplo.agent.v1.AttachOutput.exit:type_name -> deplo.agent.v1.AttachExit
@@ -17530,7 +17603,7 @@ var file_agent_proto_depIdxs = []int32{
 	122, // 66: deplo.agent.v1.ProvisionSshUserRequest.users:type_name -> deplo.agent.v1.UserSteps
 	120, // 67: deplo.agent.v1.DeprovisionSshUserRequest.steps:type_name -> deplo.agent.v1.GatewayStep
 	6,   // 68: deplo.agent.v1.DockerCleanupRequest.scopes:type_name -> deplo.agent.v1.CleanupScope
-	214, // 69: deplo.agent.v1.DockerCleanupRequest.keep_per_slug:type_name -> deplo.agent.v1.DockerCleanupRequest.KeepPerSlugEntry
+	215, // 69: deplo.agent.v1.DockerCleanupRequest.keep_per_slug:type_name -> deplo.agent.v1.DockerCleanupRequest.KeepPerSlugEntry
 	6,   // 70: deplo.agent.v1.CleanupScopeResult.scope:type_name -> deplo.agent.v1.CleanupScope
 	128, // 71: deplo.agent.v1.DockerCleanupResponse.results:type_name -> deplo.agent.v1.CleanupScopeResult
 	131, // 72: deplo.agent.v1.ContainerStatsResponse.stats:type_name -> deplo.agent.v1.ContainerStat
@@ -17542,12 +17615,12 @@ var file_agent_proto_depIdxs = []int32{
 	148, // 78: deplo.agent.v1.InventoryImageResponse.packages:type_name -> deplo.agent.v1.ImagePackage
 	149, // 79: deplo.agent.v1.InventoryCandidateResponse.result:type_name -> deplo.agent.v1.InventoryImageResponse
 	8,   // 80: deplo.agent.v1.CaptureScreenshotResponse.outcome:type_name -> deplo.agent.v1.CaptureOutcome
-	215, // 81: deplo.agent.v1.InstallClusterRequest.binaries:type_name -> deplo.agent.v1.InstallClusterRequest.BinariesEntry
+	216, // 81: deplo.agent.v1.InstallClusterRequest.binaries:type_name -> deplo.agent.v1.InstallClusterRequest.BinariesEntry
 	171, // 82: deplo.agent.v1.SetClusterForwardersRequest.members:type_name -> deplo.agent.v1.ClusterForwarderMember
 	172, // 83: deplo.agent.v1.SetClusterForwardersRequest.hold:type_name -> deplo.agent.v1.ClusterHeldName
 	173, // 84: deplo.agent.v1.SetClusterForwardersRequest.serve:type_name -> deplo.agent.v1.ClusterServedName
 	179, // 85: deplo.agent.v1.SetClusterForwardersRequest.answers:type_name -> deplo.agent.v1.ClusterAnswer
-	216, // 86: deplo.agent.v1.ReadProxyCertificatesRequest.known:type_name -> deplo.agent.v1.ReadProxyCertificatesRequest.KnownEntry
+	217, // 86: deplo.agent.v1.ReadProxyCertificatesRequest.known:type_name -> deplo.agent.v1.ReadProxyCertificatesRequest.KnownEntry
 	177, // 87: deplo.agent.v1.ReadProxyCertificatesResponse.certificates:type_name -> deplo.agent.v1.ProxyCertificate
 	180, // 88: deplo.agent.v1.SetClusterForwardersResponse.answer_refusals:type_name -> deplo.agent.v1.ClusterAnswerRefusal
 	175, // 89: deplo.agent.v1.SetClusterForwardersResponse.proxy_restarts:type_name -> deplo.agent.v1.ProxyRestart
@@ -17555,202 +17628,203 @@ var file_agent_proto_depIdxs = []int32{
 	185, // 91: deplo.agent.v1.SetClusterNetworkResponse.peers:type_name -> deplo.agent.v1.ClusterNetworkPeerState
 	186, // 92: deplo.agent.v1.SetClusterRotationsRequest.rotations:type_name -> deplo.agent.v1.ClusterKeyRotation
 	192, // 93: deplo.agent.v1.SetClusterZoneRequest.zones:type_name -> deplo.agent.v1.ClusterZone
-	193, // 94: deplo.agent.v1.SetClusterZoneRequest.servers:type_name -> deplo.agent.v1.ClusterZoneServer
+	194, // 94: deplo.agent.v1.SetClusterZoneRequest.servers:type_name -> deplo.agent.v1.ClusterZoneServer
 	190, // 95: deplo.agent.v1.SetClusterZoneRequest.challenges:type_name -> deplo.agent.v1.ClusterZoneChallenge
 	191, // 96: deplo.agent.v1.SetClusterZoneRequest.certificates:type_name -> deplo.agent.v1.ClusterZoneCertificate
-	195, // 97: deplo.agent.v1.SetClusterZoneResponse.certificates:type_name -> deplo.agent.v1.ClusterZoneCertificateState
-	171, // 98: deplo.agent.v1.SetClusterReplicasRequest.members:type_name -> deplo.agent.v1.ClusterForwarderMember
-	199, // 99: deplo.agent.v1.SetClusterReplicasRequest.entries:type_name -> deplo.agent.v1.ClusterReplicaEntry
-	203, // 100: deplo.agent.v1.ClusterReplicaStatusResponse.replicas:type_name -> deplo.agent.v1.ClusterReplicaState
-	59,  // 101: deplo.agent.v1.SelfUpdateRequest.BinariesEntry.value:type_name -> deplo.agent.v1.ArchBinary
-	64,  // 102: deplo.agent.v1.StoreChunk.Header.store:type_name -> deplo.agent.v1.StoreTarget
-	4,   // 103: deplo.agent.v1.RestoreChunk.Header.kind:type_name -> deplo.agent.v1.BackupKind
-	65,  // 104: deplo.agent.v1.RestoreChunk.Header.database:type_name -> deplo.agent.v1.DatabaseDescriptor
-	66,  // 105: deplo.agent.v1.RestoreChunk.Header.project:type_name -> deplo.agent.v1.ProjectDescriptor
-	59,  // 106: deplo.agent.v1.InstallClusterRequest.BinariesEntry.value:type_name -> deplo.agent.v1.ArchBinary
-	14,  // 107: deplo.agent.v1.Agent.Hello:input_type -> deplo.agent.v1.HelloRequest
-	19,  // 108: deplo.agent.v1.Agent.Metrics:input_type -> deplo.agent.v1.MetricsRequest
-	130, // 109: deplo.agent.v1.Agent.ContainerStats:input_type -> deplo.agent.v1.ContainerStatsRequest
-	133, // 110: deplo.agent.v1.Agent.StreamMetrics:input_type -> deplo.agent.v1.MetricsStreamRequest
-	26,  // 111: deplo.agent.v1.Agent.Deploy:input_type -> deplo.agent.v1.DeployRequest
-	32,  // 112: deplo.agent.v1.Agent.ReattachDeploy:input_type -> deplo.agent.v1.ReattachRequest
-	30,  // 113: deplo.agent.v1.Agent.DeployStream:input_type -> deplo.agent.v1.DeployUpload
-	37,  // 114: deplo.agent.v1.Agent.StopStack:input_type -> deplo.agent.v1.StackRef
-	37,  // 115: deplo.agent.v1.Agent.StartStack:input_type -> deplo.agent.v1.StackRef
-	37,  // 116: deplo.agent.v1.Agent.DestroyStack:input_type -> deplo.agent.v1.StackRef
-	50,  // 117: deplo.agent.v1.Agent.Reroute:input_type -> deplo.agent.v1.RerouteRequest
-	41,  // 118: deplo.agent.v1.Agent.ExportVolume:input_type -> deplo.agent.v1.ExportVolumeRequest
-	45,  // 119: deplo.agent.v1.Agent.ImportVolume:input_type -> deplo.agent.v1.VolumeChunk
-	42,  // 120: deplo.agent.v1.Agent.VolumeUsage:input_type -> deplo.agent.v1.VolumeUsageRequest
-	46,  // 121: deplo.agent.v1.Agent.ExportFiles:input_type -> deplo.agent.v1.ExportFilesRequest
-	47,  // 122: deplo.agent.v1.Agent.ImportFiles:input_type -> deplo.agent.v1.FilesChunk
-	39,  // 123: deplo.agent.v1.Agent.ExportHostPath:input_type -> deplo.agent.v1.ExportHostPathRequest
-	40,  // 124: deplo.agent.v1.Agent.ImportHostPath:input_type -> deplo.agent.v1.HostPathChunk
-	48,  // 125: deplo.agent.v1.Agent.ExportImage:input_type -> deplo.agent.v1.ExportImageRequest
-	49,  // 126: deplo.agent.v1.Agent.ImportImage:input_type -> deplo.agent.v1.ImageChunk
-	37,  // 127: deplo.agent.v1.Agent.ReadStack:input_type -> deplo.agent.v1.StackRef
-	52,  // 128: deplo.agent.v1.Agent.Inspect:input_type -> deplo.agent.v1.InspectRequest
-	54,  // 129: deplo.agent.v1.Agent.CheckPort:input_type -> deplo.agent.v1.CheckPortRequest
-	56,  // 130: deplo.agent.v1.Agent.ProbeHttp:input_type -> deplo.agent.v1.ProbeHttpRequest
-	127, // 131: deplo.agent.v1.Agent.DockerCleanup:input_type -> deplo.agent.v1.DockerCleanupRequest
-	58,  // 132: deplo.agent.v1.Agent.SelfUpdate:input_type -> deplo.agent.v1.SelfUpdateRequest
-	60,  // 133: deplo.agent.v1.Agent.SelfUninstall:input_type -> deplo.agent.v1.SelfUninstallRequest
-	155, // 134: deplo.agent.v1.Agent.InstallCluster:input_type -> deplo.agent.v1.InstallClusterRequest
-	157, // 135: deplo.agent.v1.Agent.RemoveCluster:input_type -> deplo.agent.v1.RemoveClusterRequest
-	159, // 136: deplo.agent.v1.Agent.ClusterStatus:input_type -> deplo.agent.v1.ClusterStatusRequest
-	163, // 137: deplo.agent.v1.Agent.ClusterCall:input_type -> deplo.agent.v1.ClusterCallRequest
-	161, // 138: deplo.agent.v1.Agent.SetClusterMember:input_type -> deplo.agent.v1.SetClusterMemberRequest
-	165, // 139: deplo.agent.v1.Agent.ClusterWatch:input_type -> deplo.agent.v1.ClusterWatchRequest
-	167, // 140: deplo.agent.v1.Agent.CopyClusterImage:input_type -> deplo.agent.v1.CopyClusterImageRequest
-	169, // 141: deplo.agent.v1.Agent.ExpectClusterImage:input_type -> deplo.agent.v1.ExpectClusterImageRequest
-	174, // 142: deplo.agent.v1.Agent.SetClusterForwarders:input_type -> deplo.agent.v1.SetClusterForwardersRequest
-	176, // 143: deplo.agent.v1.Agent.ReadProxyCertificates:input_type -> deplo.agent.v1.ReadProxyCertificatesRequest
-	198, // 144: deplo.agent.v1.Agent.SetClusterReplicas:input_type -> deplo.agent.v1.SetClusterReplicasRequest
-	201, // 145: deplo.agent.v1.Agent.ClusterReplicaStatus:input_type -> deplo.agent.v1.ClusterReplicaStatusRequest
-	182, // 146: deplo.agent.v1.Agent.SetClusterNetwork:input_type -> deplo.agent.v1.SetClusterNetworkRequest
-	187, // 147: deplo.agent.v1.Agent.SetClusterRotations:input_type -> deplo.agent.v1.SetClusterRotationsRequest
-	189, // 148: deplo.agent.v1.Agent.SetClusterZone:input_type -> deplo.agent.v1.SetClusterZoneRequest
-	196, // 149: deplo.agent.v1.Agent.SetGeoTable:input_type -> deplo.agent.v1.SetGeoTableRequest
-	67,  // 150: deplo.agent.v1.Agent.Backup:input_type -> deplo.agent.v1.BackupRequest
-	70,  // 151: deplo.agent.v1.Agent.Restore:input_type -> deplo.agent.v1.RestoreRequest
-	73,  // 152: deplo.agent.v1.Agent.S3Check:input_type -> deplo.agent.v1.S3CheckRequest
-	75,  // 153: deplo.agent.v1.Agent.S3Delete:input_type -> deplo.agent.v1.S3DeleteRequest
-	77,  // 154: deplo.agent.v1.Agent.ReadStoreFile:input_type -> deplo.agent.v1.ReadStoreFileRequest
-	78,  // 155: deplo.agent.v1.Agent.WriteStoreFile:input_type -> deplo.agent.v1.StoreChunk
-	80,  // 156: deplo.agent.v1.Agent.RestoreFrom:input_type -> deplo.agent.v1.RestoreChunk
-	81,  // 157: deplo.agent.v1.Agent.FollowLogs:input_type -> deplo.agent.v1.FollowLogsRequest
-	83,  // 158: deplo.agent.v1.Agent.Attach:input_type -> deplo.agent.v1.AttachInput
-	88,  // 159: deplo.agent.v1.Agent.ListInstances:input_type -> deplo.agent.v1.ListInstancesRequest
-	91,  // 160: deplo.agent.v1.Agent.Exec:input_type -> deplo.agent.v1.ExecRequest
-	93,  // 161: deplo.agent.v1.Agent.ShellLabel:input_type -> deplo.agent.v1.ShellLabelRequest
-	96,  // 162: deplo.agent.v1.Agent.StartJob:input_type -> deplo.agent.v1.StartJobRequest
-	98,  // 163: deplo.agent.v1.Agent.PollJob:input_type -> deplo.agent.v1.PollJobRequest
-	100, // 164: deplo.agent.v1.Agent.KillJob:input_type -> deplo.agent.v1.KillJobRequest
-	104, // 165: deplo.agent.v1.Agent.ListFiles:input_type -> deplo.agent.v1.ListFilesRequest
-	106, // 166: deplo.agent.v1.Agent.ReadFile:input_type -> deplo.agent.v1.ReadFileRequest
-	108, // 167: deplo.agent.v1.Agent.WriteFile:input_type -> deplo.agent.v1.WriteFileRequest
-	109, // 168: deplo.agent.v1.Agent.UploadFile:input_type -> deplo.agent.v1.UploadFileRequest
-	110, // 169: deplo.agent.v1.Agent.CreateDir:input_type -> deplo.agent.v1.CreateDirRequest
-	111, // 170: deplo.agent.v1.Agent.DeleteFile:input_type -> deplo.agent.v1.DeleteFileRequest
-	113, // 171: deplo.agent.v1.Agent.RenameFile:input_type -> deplo.agent.v1.RenameFileRequest
-	114, // 172: deplo.agent.v1.Agent.FilesExist:input_type -> deplo.agent.v1.FilesExistRequest
-	116, // 173: deplo.agent.v1.Agent.StartDev:input_type -> deplo.agent.v1.StartDevRequest
-	117, // 174: deplo.agent.v1.Agent.StopDev:input_type -> deplo.agent.v1.StopDevRequest
-	116, // 175: deplo.agent.v1.Agent.ResetDevWorkspace:input_type -> deplo.agent.v1.StartDevRequest
-	118, // 176: deplo.agent.v1.Agent.TeardownDev:input_type -> deplo.agent.v1.TeardownDevRequest
-	121, // 177: deplo.agent.v1.Agent.EnsureGateway:input_type -> deplo.agent.v1.EnsureGatewayRequest
-	123, // 178: deplo.agent.v1.Agent.ProvisionSshUser:input_type -> deplo.agent.v1.ProvisionSshUserRequest
-	124, // 179: deplo.agent.v1.Agent.DeprovisionSshUser:input_type -> deplo.agent.v1.DeprovisionSshUserRequest
-	125, // 180: deplo.agent.v1.Agent.StartTunnel:input_type -> deplo.agent.v1.TunnelRequest
-	125, // 181: deplo.agent.v1.Agent.GetTunnel:input_type -> deplo.agent.v1.TunnelRequest
-	125, // 182: deplo.agent.v1.Agent.StopTunnel:input_type -> deplo.agent.v1.TunnelRequest
-	11,  // 183: deplo.agent.v1.Agent.RenewalCSR:input_type -> deplo.agent.v1.RenewalCSRRequest
-	13,  // 184: deplo.agent.v1.Agent.InstallRenewedCert:input_type -> deplo.agent.v1.InstallRenewedCertRequest
-	135, // 185: deplo.agent.v1.Agent.HostInfo:input_type -> deplo.agent.v1.HostInfoRequest
-	137, // 186: deplo.agent.v1.Agent.SetTimezone:input_type -> deplo.agent.v1.SetTimezoneRequest
-	138, // 187: deplo.agent.v1.Agent.TraefikConfig:input_type -> deplo.agent.v1.TraefikConfigRequest
-	140, // 188: deplo.agent.v1.Agent.RestartControlPlane:input_type -> deplo.agent.v1.RestartControlPlaneRequest
-	142, // 189: deplo.agent.v1.Agent.UpdateControlPlane:input_type -> deplo.agent.v1.UpdateControlPlaneRequest
-	144, // 190: deplo.agent.v1.Agent.ListWorkloadImages:input_type -> deplo.agent.v1.ListWorkloadImagesRequest
-	147, // 191: deplo.agent.v1.Agent.InventoryImage:input_type -> deplo.agent.v1.InventoryImageRequest
-	150, // 192: deplo.agent.v1.Agent.InventoryCandidate:input_type -> deplo.agent.v1.InventoryCandidateRequest
-	16,  // 193: deplo.agent.v1.Agent.SetLinkAddresses:input_type -> deplo.agent.v1.LinkAddresses
-	17,  // 194: deplo.agent.v1.Agent.StopListening:input_type -> deplo.agent.v1.StopListeningRequest
-	152, // 195: deplo.agent.v1.Agent.CaptureScreenshot:input_type -> deplo.agent.v1.CaptureScreenshotRequest
-	15,  // 196: deplo.agent.v1.Agent.Hello:output_type -> deplo.agent.v1.HelloResponse
-	20,  // 197: deplo.agent.v1.Agent.Metrics:output_type -> deplo.agent.v1.HostMetrics
-	132, // 198: deplo.agent.v1.Agent.ContainerStats:output_type -> deplo.agent.v1.ContainerStatsResponse
-	134, // 199: deplo.agent.v1.Agent.StreamMetrics:output_type -> deplo.agent.v1.MetricsSample
-	31,  // 200: deplo.agent.v1.Agent.Deploy:output_type -> deplo.agent.v1.DeployEvent
-	31,  // 201: deplo.agent.v1.Agent.ReattachDeploy:output_type -> deplo.agent.v1.DeployEvent
-	31,  // 202: deplo.agent.v1.Agent.DeployStream:output_type -> deplo.agent.v1.DeployEvent
-	38,  // 203: deplo.agent.v1.Agent.StopStack:output_type -> deplo.agent.v1.StackResult
-	38,  // 204: deplo.agent.v1.Agent.StartStack:output_type -> deplo.agent.v1.StackResult
-	38,  // 205: deplo.agent.v1.Agent.DestroyStack:output_type -> deplo.agent.v1.StackResult
-	38,  // 206: deplo.agent.v1.Agent.Reroute:output_type -> deplo.agent.v1.StackResult
-	45,  // 207: deplo.agent.v1.Agent.ExportVolume:output_type -> deplo.agent.v1.VolumeChunk
-	38,  // 208: deplo.agent.v1.Agent.ImportVolume:output_type -> deplo.agent.v1.StackResult
-	44,  // 209: deplo.agent.v1.Agent.VolumeUsage:output_type -> deplo.agent.v1.VolumeUsageResponse
-	47,  // 210: deplo.agent.v1.Agent.ExportFiles:output_type -> deplo.agent.v1.FilesChunk
-	38,  // 211: deplo.agent.v1.Agent.ImportFiles:output_type -> deplo.agent.v1.StackResult
-	45,  // 212: deplo.agent.v1.Agent.ExportHostPath:output_type -> deplo.agent.v1.VolumeChunk
-	38,  // 213: deplo.agent.v1.Agent.ImportHostPath:output_type -> deplo.agent.v1.StackResult
-	49,  // 214: deplo.agent.v1.Agent.ExportImage:output_type -> deplo.agent.v1.ImageChunk
-	79,  // 215: deplo.agent.v1.Agent.ImportImage:output_type -> deplo.agent.v1.StoreResult
-	51,  // 216: deplo.agent.v1.Agent.ReadStack:output_type -> deplo.agent.v1.ReadStackResponse
-	53,  // 217: deplo.agent.v1.Agent.Inspect:output_type -> deplo.agent.v1.InspectResponse
-	55,  // 218: deplo.agent.v1.Agent.CheckPort:output_type -> deplo.agent.v1.CheckPortResponse
-	57,  // 219: deplo.agent.v1.Agent.ProbeHttp:output_type -> deplo.agent.v1.ProbeHttpResponse
-	129, // 220: deplo.agent.v1.Agent.DockerCleanup:output_type -> deplo.agent.v1.DockerCleanupResponse
-	62,  // 221: deplo.agent.v1.Agent.SelfUpdate:output_type -> deplo.agent.v1.SelfUpdateResponse
-	61,  // 222: deplo.agent.v1.Agent.SelfUninstall:output_type -> deplo.agent.v1.SelfUninstallResponse
-	156, // 223: deplo.agent.v1.Agent.InstallCluster:output_type -> deplo.agent.v1.InstallClusterResponse
-	158, // 224: deplo.agent.v1.Agent.RemoveCluster:output_type -> deplo.agent.v1.RemoveClusterResponse
-	160, // 225: deplo.agent.v1.Agent.ClusterStatus:output_type -> deplo.agent.v1.ClusterStatusResponse
-	164, // 226: deplo.agent.v1.Agent.ClusterCall:output_type -> deplo.agent.v1.ClusterCallResponse
-	162, // 227: deplo.agent.v1.Agent.SetClusterMember:output_type -> deplo.agent.v1.SetClusterMemberResponse
-	166, // 228: deplo.agent.v1.Agent.ClusterWatch:output_type -> deplo.agent.v1.ClusterWatchLine
-	168, // 229: deplo.agent.v1.Agent.CopyClusterImage:output_type -> deplo.agent.v1.CopyClusterImageResponse
-	170, // 230: deplo.agent.v1.Agent.ExpectClusterImage:output_type -> deplo.agent.v1.ExpectClusterImageResponse
-	181, // 231: deplo.agent.v1.Agent.SetClusterForwarders:output_type -> deplo.agent.v1.SetClusterForwardersResponse
-	178, // 232: deplo.agent.v1.Agent.ReadProxyCertificates:output_type -> deplo.agent.v1.ReadProxyCertificatesResponse
-	200, // 233: deplo.agent.v1.Agent.SetClusterReplicas:output_type -> deplo.agent.v1.SetClusterReplicasResponse
-	202, // 234: deplo.agent.v1.Agent.ClusterReplicaStatus:output_type -> deplo.agent.v1.ClusterReplicaStatusResponse
-	184, // 235: deplo.agent.v1.Agent.SetClusterNetwork:output_type -> deplo.agent.v1.SetClusterNetworkResponse
-	188, // 236: deplo.agent.v1.Agent.SetClusterRotations:output_type -> deplo.agent.v1.SetClusterRotationsResponse
-	194, // 237: deplo.agent.v1.Agent.SetClusterZone:output_type -> deplo.agent.v1.SetClusterZoneResponse
-	197, // 238: deplo.agent.v1.Agent.SetGeoTable:output_type -> deplo.agent.v1.SetGeoTableResponse
-	68,  // 239: deplo.agent.v1.Agent.Backup:output_type -> deplo.agent.v1.BackupEvent
-	71,  // 240: deplo.agent.v1.Agent.Restore:output_type -> deplo.agent.v1.RestoreEvent
-	74,  // 241: deplo.agent.v1.Agent.S3Check:output_type -> deplo.agent.v1.S3CheckResponse
-	76,  // 242: deplo.agent.v1.Agent.S3Delete:output_type -> deplo.agent.v1.S3DeleteResponse
-	78,  // 243: deplo.agent.v1.Agent.ReadStoreFile:output_type -> deplo.agent.v1.StoreChunk
-	79,  // 244: deplo.agent.v1.Agent.WriteStoreFile:output_type -> deplo.agent.v1.StoreResult
-	71,  // 245: deplo.agent.v1.Agent.RestoreFrom:output_type -> deplo.agent.v1.RestoreEvent
-	82,  // 246: deplo.agent.v1.Agent.FollowLogs:output_type -> deplo.agent.v1.LogChunk
-	86,  // 247: deplo.agent.v1.Agent.Attach:output_type -> deplo.agent.v1.AttachOutput
-	90,  // 248: deplo.agent.v1.Agent.ListInstances:output_type -> deplo.agent.v1.ListInstancesResponse
-	92,  // 249: deplo.agent.v1.Agent.Exec:output_type -> deplo.agent.v1.ExecResponse
-	94,  // 250: deplo.agent.v1.Agent.ShellLabel:output_type -> deplo.agent.v1.ShellLabelResponse
-	97,  // 251: deplo.agent.v1.Agent.StartJob:output_type -> deplo.agent.v1.StartJobResponse
-	99,  // 252: deplo.agent.v1.Agent.PollJob:output_type -> deplo.agent.v1.PollJobResponse
-	101, // 253: deplo.agent.v1.Agent.KillJob:output_type -> deplo.agent.v1.KillJobResponse
-	105, // 254: deplo.agent.v1.Agent.ListFiles:output_type -> deplo.agent.v1.ListFilesResponse
-	107, // 255: deplo.agent.v1.Agent.ReadFile:output_type -> deplo.agent.v1.ReadFileResponse
-	103, // 256: deplo.agent.v1.Agent.WriteFile:output_type -> deplo.agent.v1.FileEntryResult
-	103, // 257: deplo.agent.v1.Agent.UploadFile:output_type -> deplo.agent.v1.FileEntryResult
-	103, // 258: deplo.agent.v1.Agent.CreateDir:output_type -> deplo.agent.v1.FileEntryResult
-	112, // 259: deplo.agent.v1.Agent.DeleteFile:output_type -> deplo.agent.v1.DeleteFileResult
-	103, // 260: deplo.agent.v1.Agent.RenameFile:output_type -> deplo.agent.v1.FileEntryResult
-	115, // 261: deplo.agent.v1.Agent.FilesExist:output_type -> deplo.agent.v1.FilesExistResponse
-	31,  // 262: deplo.agent.v1.Agent.StartDev:output_type -> deplo.agent.v1.DeployEvent
-	38,  // 263: deplo.agent.v1.Agent.StopDev:output_type -> deplo.agent.v1.StackResult
-	31,  // 264: deplo.agent.v1.Agent.ResetDevWorkspace:output_type -> deplo.agent.v1.DeployEvent
-	38,  // 265: deplo.agent.v1.Agent.TeardownDev:output_type -> deplo.agent.v1.StackResult
-	38,  // 266: deplo.agent.v1.Agent.EnsureGateway:output_type -> deplo.agent.v1.StackResult
-	38,  // 267: deplo.agent.v1.Agent.ProvisionSshUser:output_type -> deplo.agent.v1.StackResult
-	38,  // 268: deplo.agent.v1.Agent.DeprovisionSshUser:output_type -> deplo.agent.v1.StackResult
-	126, // 269: deplo.agent.v1.Agent.StartTunnel:output_type -> deplo.agent.v1.TunnelStatus
-	126, // 270: deplo.agent.v1.Agent.GetTunnel:output_type -> deplo.agent.v1.TunnelStatus
-	38,  // 271: deplo.agent.v1.Agent.StopTunnel:output_type -> deplo.agent.v1.StackResult
-	12,  // 272: deplo.agent.v1.Agent.RenewalCSR:output_type -> deplo.agent.v1.RenewalCSRResponse
-	38,  // 273: deplo.agent.v1.Agent.InstallRenewedCert:output_type -> deplo.agent.v1.StackResult
-	136, // 274: deplo.agent.v1.Agent.HostInfo:output_type -> deplo.agent.v1.HostInfoResponse
-	136, // 275: deplo.agent.v1.Agent.SetTimezone:output_type -> deplo.agent.v1.HostInfoResponse
-	139, // 276: deplo.agent.v1.Agent.TraefikConfig:output_type -> deplo.agent.v1.TraefikConfigResponse
-	141, // 277: deplo.agent.v1.Agent.RestartControlPlane:output_type -> deplo.agent.v1.RestartControlPlaneResponse
-	143, // 278: deplo.agent.v1.Agent.UpdateControlPlane:output_type -> deplo.agent.v1.UpdateControlPlaneResponse
-	146, // 279: deplo.agent.v1.Agent.ListWorkloadImages:output_type -> deplo.agent.v1.ListWorkloadImagesResponse
-	149, // 280: deplo.agent.v1.Agent.InventoryImage:output_type -> deplo.agent.v1.InventoryImageResponse
-	151, // 281: deplo.agent.v1.Agent.InventoryCandidate:output_type -> deplo.agent.v1.InventoryCandidateResponse
-	16,  // 282: deplo.agent.v1.Agent.SetLinkAddresses:output_type -> deplo.agent.v1.LinkAddresses
-	18,  // 283: deplo.agent.v1.Agent.StopListening:output_type -> deplo.agent.v1.StopListeningResponse
-	153, // 284: deplo.agent.v1.Agent.CaptureScreenshot:output_type -> deplo.agent.v1.CaptureScreenshotResponse
-	196, // [196:285] is the sub-list for method output_type
-	107, // [107:196] is the sub-list for method input_type
-	107, // [107:107] is the sub-list for extension type_name
-	107, // [107:107] is the sub-list for extension extendee
-	0,   // [0:107] is the sub-list for field type_name
+	193, // 97: deplo.agent.v1.ClusterZone.homes:type_name -> deplo.agent.v1.ClusterZoneHome
+	196, // 98: deplo.agent.v1.SetClusterZoneResponse.certificates:type_name -> deplo.agent.v1.ClusterZoneCertificateState
+	171, // 99: deplo.agent.v1.SetClusterReplicasRequest.members:type_name -> deplo.agent.v1.ClusterForwarderMember
+	200, // 100: deplo.agent.v1.SetClusterReplicasRequest.entries:type_name -> deplo.agent.v1.ClusterReplicaEntry
+	204, // 101: deplo.agent.v1.ClusterReplicaStatusResponse.replicas:type_name -> deplo.agent.v1.ClusterReplicaState
+	59,  // 102: deplo.agent.v1.SelfUpdateRequest.BinariesEntry.value:type_name -> deplo.agent.v1.ArchBinary
+	64,  // 103: deplo.agent.v1.StoreChunk.Header.store:type_name -> deplo.agent.v1.StoreTarget
+	4,   // 104: deplo.agent.v1.RestoreChunk.Header.kind:type_name -> deplo.agent.v1.BackupKind
+	65,  // 105: deplo.agent.v1.RestoreChunk.Header.database:type_name -> deplo.agent.v1.DatabaseDescriptor
+	66,  // 106: deplo.agent.v1.RestoreChunk.Header.project:type_name -> deplo.agent.v1.ProjectDescriptor
+	59,  // 107: deplo.agent.v1.InstallClusterRequest.BinariesEntry.value:type_name -> deplo.agent.v1.ArchBinary
+	14,  // 108: deplo.agent.v1.Agent.Hello:input_type -> deplo.agent.v1.HelloRequest
+	19,  // 109: deplo.agent.v1.Agent.Metrics:input_type -> deplo.agent.v1.MetricsRequest
+	130, // 110: deplo.agent.v1.Agent.ContainerStats:input_type -> deplo.agent.v1.ContainerStatsRequest
+	133, // 111: deplo.agent.v1.Agent.StreamMetrics:input_type -> deplo.agent.v1.MetricsStreamRequest
+	26,  // 112: deplo.agent.v1.Agent.Deploy:input_type -> deplo.agent.v1.DeployRequest
+	32,  // 113: deplo.agent.v1.Agent.ReattachDeploy:input_type -> deplo.agent.v1.ReattachRequest
+	30,  // 114: deplo.agent.v1.Agent.DeployStream:input_type -> deplo.agent.v1.DeployUpload
+	37,  // 115: deplo.agent.v1.Agent.StopStack:input_type -> deplo.agent.v1.StackRef
+	37,  // 116: deplo.agent.v1.Agent.StartStack:input_type -> deplo.agent.v1.StackRef
+	37,  // 117: deplo.agent.v1.Agent.DestroyStack:input_type -> deplo.agent.v1.StackRef
+	50,  // 118: deplo.agent.v1.Agent.Reroute:input_type -> deplo.agent.v1.RerouteRequest
+	41,  // 119: deplo.agent.v1.Agent.ExportVolume:input_type -> deplo.agent.v1.ExportVolumeRequest
+	45,  // 120: deplo.agent.v1.Agent.ImportVolume:input_type -> deplo.agent.v1.VolumeChunk
+	42,  // 121: deplo.agent.v1.Agent.VolumeUsage:input_type -> deplo.agent.v1.VolumeUsageRequest
+	46,  // 122: deplo.agent.v1.Agent.ExportFiles:input_type -> deplo.agent.v1.ExportFilesRequest
+	47,  // 123: deplo.agent.v1.Agent.ImportFiles:input_type -> deplo.agent.v1.FilesChunk
+	39,  // 124: deplo.agent.v1.Agent.ExportHostPath:input_type -> deplo.agent.v1.ExportHostPathRequest
+	40,  // 125: deplo.agent.v1.Agent.ImportHostPath:input_type -> deplo.agent.v1.HostPathChunk
+	48,  // 126: deplo.agent.v1.Agent.ExportImage:input_type -> deplo.agent.v1.ExportImageRequest
+	49,  // 127: deplo.agent.v1.Agent.ImportImage:input_type -> deplo.agent.v1.ImageChunk
+	37,  // 128: deplo.agent.v1.Agent.ReadStack:input_type -> deplo.agent.v1.StackRef
+	52,  // 129: deplo.agent.v1.Agent.Inspect:input_type -> deplo.agent.v1.InspectRequest
+	54,  // 130: deplo.agent.v1.Agent.CheckPort:input_type -> deplo.agent.v1.CheckPortRequest
+	56,  // 131: deplo.agent.v1.Agent.ProbeHttp:input_type -> deplo.agent.v1.ProbeHttpRequest
+	127, // 132: deplo.agent.v1.Agent.DockerCleanup:input_type -> deplo.agent.v1.DockerCleanupRequest
+	58,  // 133: deplo.agent.v1.Agent.SelfUpdate:input_type -> deplo.agent.v1.SelfUpdateRequest
+	60,  // 134: deplo.agent.v1.Agent.SelfUninstall:input_type -> deplo.agent.v1.SelfUninstallRequest
+	155, // 135: deplo.agent.v1.Agent.InstallCluster:input_type -> deplo.agent.v1.InstallClusterRequest
+	157, // 136: deplo.agent.v1.Agent.RemoveCluster:input_type -> deplo.agent.v1.RemoveClusterRequest
+	159, // 137: deplo.agent.v1.Agent.ClusterStatus:input_type -> deplo.agent.v1.ClusterStatusRequest
+	163, // 138: deplo.agent.v1.Agent.ClusterCall:input_type -> deplo.agent.v1.ClusterCallRequest
+	161, // 139: deplo.agent.v1.Agent.SetClusterMember:input_type -> deplo.agent.v1.SetClusterMemberRequest
+	165, // 140: deplo.agent.v1.Agent.ClusterWatch:input_type -> deplo.agent.v1.ClusterWatchRequest
+	167, // 141: deplo.agent.v1.Agent.CopyClusterImage:input_type -> deplo.agent.v1.CopyClusterImageRequest
+	169, // 142: deplo.agent.v1.Agent.ExpectClusterImage:input_type -> deplo.agent.v1.ExpectClusterImageRequest
+	174, // 143: deplo.agent.v1.Agent.SetClusterForwarders:input_type -> deplo.agent.v1.SetClusterForwardersRequest
+	176, // 144: deplo.agent.v1.Agent.ReadProxyCertificates:input_type -> deplo.agent.v1.ReadProxyCertificatesRequest
+	199, // 145: deplo.agent.v1.Agent.SetClusterReplicas:input_type -> deplo.agent.v1.SetClusterReplicasRequest
+	202, // 146: deplo.agent.v1.Agent.ClusterReplicaStatus:input_type -> deplo.agent.v1.ClusterReplicaStatusRequest
+	182, // 147: deplo.agent.v1.Agent.SetClusterNetwork:input_type -> deplo.agent.v1.SetClusterNetworkRequest
+	187, // 148: deplo.agent.v1.Agent.SetClusterRotations:input_type -> deplo.agent.v1.SetClusterRotationsRequest
+	189, // 149: deplo.agent.v1.Agent.SetClusterZone:input_type -> deplo.agent.v1.SetClusterZoneRequest
+	197, // 150: deplo.agent.v1.Agent.SetGeoTable:input_type -> deplo.agent.v1.SetGeoTableRequest
+	67,  // 151: deplo.agent.v1.Agent.Backup:input_type -> deplo.agent.v1.BackupRequest
+	70,  // 152: deplo.agent.v1.Agent.Restore:input_type -> deplo.agent.v1.RestoreRequest
+	73,  // 153: deplo.agent.v1.Agent.S3Check:input_type -> deplo.agent.v1.S3CheckRequest
+	75,  // 154: deplo.agent.v1.Agent.S3Delete:input_type -> deplo.agent.v1.S3DeleteRequest
+	77,  // 155: deplo.agent.v1.Agent.ReadStoreFile:input_type -> deplo.agent.v1.ReadStoreFileRequest
+	78,  // 156: deplo.agent.v1.Agent.WriteStoreFile:input_type -> deplo.agent.v1.StoreChunk
+	80,  // 157: deplo.agent.v1.Agent.RestoreFrom:input_type -> deplo.agent.v1.RestoreChunk
+	81,  // 158: deplo.agent.v1.Agent.FollowLogs:input_type -> deplo.agent.v1.FollowLogsRequest
+	83,  // 159: deplo.agent.v1.Agent.Attach:input_type -> deplo.agent.v1.AttachInput
+	88,  // 160: deplo.agent.v1.Agent.ListInstances:input_type -> deplo.agent.v1.ListInstancesRequest
+	91,  // 161: deplo.agent.v1.Agent.Exec:input_type -> deplo.agent.v1.ExecRequest
+	93,  // 162: deplo.agent.v1.Agent.ShellLabel:input_type -> deplo.agent.v1.ShellLabelRequest
+	96,  // 163: deplo.agent.v1.Agent.StartJob:input_type -> deplo.agent.v1.StartJobRequest
+	98,  // 164: deplo.agent.v1.Agent.PollJob:input_type -> deplo.agent.v1.PollJobRequest
+	100, // 165: deplo.agent.v1.Agent.KillJob:input_type -> deplo.agent.v1.KillJobRequest
+	104, // 166: deplo.agent.v1.Agent.ListFiles:input_type -> deplo.agent.v1.ListFilesRequest
+	106, // 167: deplo.agent.v1.Agent.ReadFile:input_type -> deplo.agent.v1.ReadFileRequest
+	108, // 168: deplo.agent.v1.Agent.WriteFile:input_type -> deplo.agent.v1.WriteFileRequest
+	109, // 169: deplo.agent.v1.Agent.UploadFile:input_type -> deplo.agent.v1.UploadFileRequest
+	110, // 170: deplo.agent.v1.Agent.CreateDir:input_type -> deplo.agent.v1.CreateDirRequest
+	111, // 171: deplo.agent.v1.Agent.DeleteFile:input_type -> deplo.agent.v1.DeleteFileRequest
+	113, // 172: deplo.agent.v1.Agent.RenameFile:input_type -> deplo.agent.v1.RenameFileRequest
+	114, // 173: deplo.agent.v1.Agent.FilesExist:input_type -> deplo.agent.v1.FilesExistRequest
+	116, // 174: deplo.agent.v1.Agent.StartDev:input_type -> deplo.agent.v1.StartDevRequest
+	117, // 175: deplo.agent.v1.Agent.StopDev:input_type -> deplo.agent.v1.StopDevRequest
+	116, // 176: deplo.agent.v1.Agent.ResetDevWorkspace:input_type -> deplo.agent.v1.StartDevRequest
+	118, // 177: deplo.agent.v1.Agent.TeardownDev:input_type -> deplo.agent.v1.TeardownDevRequest
+	121, // 178: deplo.agent.v1.Agent.EnsureGateway:input_type -> deplo.agent.v1.EnsureGatewayRequest
+	123, // 179: deplo.agent.v1.Agent.ProvisionSshUser:input_type -> deplo.agent.v1.ProvisionSshUserRequest
+	124, // 180: deplo.agent.v1.Agent.DeprovisionSshUser:input_type -> deplo.agent.v1.DeprovisionSshUserRequest
+	125, // 181: deplo.agent.v1.Agent.StartTunnel:input_type -> deplo.agent.v1.TunnelRequest
+	125, // 182: deplo.agent.v1.Agent.GetTunnel:input_type -> deplo.agent.v1.TunnelRequest
+	125, // 183: deplo.agent.v1.Agent.StopTunnel:input_type -> deplo.agent.v1.TunnelRequest
+	11,  // 184: deplo.agent.v1.Agent.RenewalCSR:input_type -> deplo.agent.v1.RenewalCSRRequest
+	13,  // 185: deplo.agent.v1.Agent.InstallRenewedCert:input_type -> deplo.agent.v1.InstallRenewedCertRequest
+	135, // 186: deplo.agent.v1.Agent.HostInfo:input_type -> deplo.agent.v1.HostInfoRequest
+	137, // 187: deplo.agent.v1.Agent.SetTimezone:input_type -> deplo.agent.v1.SetTimezoneRequest
+	138, // 188: deplo.agent.v1.Agent.TraefikConfig:input_type -> deplo.agent.v1.TraefikConfigRequest
+	140, // 189: deplo.agent.v1.Agent.RestartControlPlane:input_type -> deplo.agent.v1.RestartControlPlaneRequest
+	142, // 190: deplo.agent.v1.Agent.UpdateControlPlane:input_type -> deplo.agent.v1.UpdateControlPlaneRequest
+	144, // 191: deplo.agent.v1.Agent.ListWorkloadImages:input_type -> deplo.agent.v1.ListWorkloadImagesRequest
+	147, // 192: deplo.agent.v1.Agent.InventoryImage:input_type -> deplo.agent.v1.InventoryImageRequest
+	150, // 193: deplo.agent.v1.Agent.InventoryCandidate:input_type -> deplo.agent.v1.InventoryCandidateRequest
+	16,  // 194: deplo.agent.v1.Agent.SetLinkAddresses:input_type -> deplo.agent.v1.LinkAddresses
+	17,  // 195: deplo.agent.v1.Agent.StopListening:input_type -> deplo.agent.v1.StopListeningRequest
+	152, // 196: deplo.agent.v1.Agent.CaptureScreenshot:input_type -> deplo.agent.v1.CaptureScreenshotRequest
+	15,  // 197: deplo.agent.v1.Agent.Hello:output_type -> deplo.agent.v1.HelloResponse
+	20,  // 198: deplo.agent.v1.Agent.Metrics:output_type -> deplo.agent.v1.HostMetrics
+	132, // 199: deplo.agent.v1.Agent.ContainerStats:output_type -> deplo.agent.v1.ContainerStatsResponse
+	134, // 200: deplo.agent.v1.Agent.StreamMetrics:output_type -> deplo.agent.v1.MetricsSample
+	31,  // 201: deplo.agent.v1.Agent.Deploy:output_type -> deplo.agent.v1.DeployEvent
+	31,  // 202: deplo.agent.v1.Agent.ReattachDeploy:output_type -> deplo.agent.v1.DeployEvent
+	31,  // 203: deplo.agent.v1.Agent.DeployStream:output_type -> deplo.agent.v1.DeployEvent
+	38,  // 204: deplo.agent.v1.Agent.StopStack:output_type -> deplo.agent.v1.StackResult
+	38,  // 205: deplo.agent.v1.Agent.StartStack:output_type -> deplo.agent.v1.StackResult
+	38,  // 206: deplo.agent.v1.Agent.DestroyStack:output_type -> deplo.agent.v1.StackResult
+	38,  // 207: deplo.agent.v1.Agent.Reroute:output_type -> deplo.agent.v1.StackResult
+	45,  // 208: deplo.agent.v1.Agent.ExportVolume:output_type -> deplo.agent.v1.VolumeChunk
+	38,  // 209: deplo.agent.v1.Agent.ImportVolume:output_type -> deplo.agent.v1.StackResult
+	44,  // 210: deplo.agent.v1.Agent.VolumeUsage:output_type -> deplo.agent.v1.VolumeUsageResponse
+	47,  // 211: deplo.agent.v1.Agent.ExportFiles:output_type -> deplo.agent.v1.FilesChunk
+	38,  // 212: deplo.agent.v1.Agent.ImportFiles:output_type -> deplo.agent.v1.StackResult
+	45,  // 213: deplo.agent.v1.Agent.ExportHostPath:output_type -> deplo.agent.v1.VolumeChunk
+	38,  // 214: deplo.agent.v1.Agent.ImportHostPath:output_type -> deplo.agent.v1.StackResult
+	49,  // 215: deplo.agent.v1.Agent.ExportImage:output_type -> deplo.agent.v1.ImageChunk
+	79,  // 216: deplo.agent.v1.Agent.ImportImage:output_type -> deplo.agent.v1.StoreResult
+	51,  // 217: deplo.agent.v1.Agent.ReadStack:output_type -> deplo.agent.v1.ReadStackResponse
+	53,  // 218: deplo.agent.v1.Agent.Inspect:output_type -> deplo.agent.v1.InspectResponse
+	55,  // 219: deplo.agent.v1.Agent.CheckPort:output_type -> deplo.agent.v1.CheckPortResponse
+	57,  // 220: deplo.agent.v1.Agent.ProbeHttp:output_type -> deplo.agent.v1.ProbeHttpResponse
+	129, // 221: deplo.agent.v1.Agent.DockerCleanup:output_type -> deplo.agent.v1.DockerCleanupResponse
+	62,  // 222: deplo.agent.v1.Agent.SelfUpdate:output_type -> deplo.agent.v1.SelfUpdateResponse
+	61,  // 223: deplo.agent.v1.Agent.SelfUninstall:output_type -> deplo.agent.v1.SelfUninstallResponse
+	156, // 224: deplo.agent.v1.Agent.InstallCluster:output_type -> deplo.agent.v1.InstallClusterResponse
+	158, // 225: deplo.agent.v1.Agent.RemoveCluster:output_type -> deplo.agent.v1.RemoveClusterResponse
+	160, // 226: deplo.agent.v1.Agent.ClusterStatus:output_type -> deplo.agent.v1.ClusterStatusResponse
+	164, // 227: deplo.agent.v1.Agent.ClusterCall:output_type -> deplo.agent.v1.ClusterCallResponse
+	162, // 228: deplo.agent.v1.Agent.SetClusterMember:output_type -> deplo.agent.v1.SetClusterMemberResponse
+	166, // 229: deplo.agent.v1.Agent.ClusterWatch:output_type -> deplo.agent.v1.ClusterWatchLine
+	168, // 230: deplo.agent.v1.Agent.CopyClusterImage:output_type -> deplo.agent.v1.CopyClusterImageResponse
+	170, // 231: deplo.agent.v1.Agent.ExpectClusterImage:output_type -> deplo.agent.v1.ExpectClusterImageResponse
+	181, // 232: deplo.agent.v1.Agent.SetClusterForwarders:output_type -> deplo.agent.v1.SetClusterForwardersResponse
+	178, // 233: deplo.agent.v1.Agent.ReadProxyCertificates:output_type -> deplo.agent.v1.ReadProxyCertificatesResponse
+	201, // 234: deplo.agent.v1.Agent.SetClusterReplicas:output_type -> deplo.agent.v1.SetClusterReplicasResponse
+	203, // 235: deplo.agent.v1.Agent.ClusterReplicaStatus:output_type -> deplo.agent.v1.ClusterReplicaStatusResponse
+	184, // 236: deplo.agent.v1.Agent.SetClusterNetwork:output_type -> deplo.agent.v1.SetClusterNetworkResponse
+	188, // 237: deplo.agent.v1.Agent.SetClusterRotations:output_type -> deplo.agent.v1.SetClusterRotationsResponse
+	195, // 238: deplo.agent.v1.Agent.SetClusterZone:output_type -> deplo.agent.v1.SetClusterZoneResponse
+	198, // 239: deplo.agent.v1.Agent.SetGeoTable:output_type -> deplo.agent.v1.SetGeoTableResponse
+	68,  // 240: deplo.agent.v1.Agent.Backup:output_type -> deplo.agent.v1.BackupEvent
+	71,  // 241: deplo.agent.v1.Agent.Restore:output_type -> deplo.agent.v1.RestoreEvent
+	74,  // 242: deplo.agent.v1.Agent.S3Check:output_type -> deplo.agent.v1.S3CheckResponse
+	76,  // 243: deplo.agent.v1.Agent.S3Delete:output_type -> deplo.agent.v1.S3DeleteResponse
+	78,  // 244: deplo.agent.v1.Agent.ReadStoreFile:output_type -> deplo.agent.v1.StoreChunk
+	79,  // 245: deplo.agent.v1.Agent.WriteStoreFile:output_type -> deplo.agent.v1.StoreResult
+	71,  // 246: deplo.agent.v1.Agent.RestoreFrom:output_type -> deplo.agent.v1.RestoreEvent
+	82,  // 247: deplo.agent.v1.Agent.FollowLogs:output_type -> deplo.agent.v1.LogChunk
+	86,  // 248: deplo.agent.v1.Agent.Attach:output_type -> deplo.agent.v1.AttachOutput
+	90,  // 249: deplo.agent.v1.Agent.ListInstances:output_type -> deplo.agent.v1.ListInstancesResponse
+	92,  // 250: deplo.agent.v1.Agent.Exec:output_type -> deplo.agent.v1.ExecResponse
+	94,  // 251: deplo.agent.v1.Agent.ShellLabel:output_type -> deplo.agent.v1.ShellLabelResponse
+	97,  // 252: deplo.agent.v1.Agent.StartJob:output_type -> deplo.agent.v1.StartJobResponse
+	99,  // 253: deplo.agent.v1.Agent.PollJob:output_type -> deplo.agent.v1.PollJobResponse
+	101, // 254: deplo.agent.v1.Agent.KillJob:output_type -> deplo.agent.v1.KillJobResponse
+	105, // 255: deplo.agent.v1.Agent.ListFiles:output_type -> deplo.agent.v1.ListFilesResponse
+	107, // 256: deplo.agent.v1.Agent.ReadFile:output_type -> deplo.agent.v1.ReadFileResponse
+	103, // 257: deplo.agent.v1.Agent.WriteFile:output_type -> deplo.agent.v1.FileEntryResult
+	103, // 258: deplo.agent.v1.Agent.UploadFile:output_type -> deplo.agent.v1.FileEntryResult
+	103, // 259: deplo.agent.v1.Agent.CreateDir:output_type -> deplo.agent.v1.FileEntryResult
+	112, // 260: deplo.agent.v1.Agent.DeleteFile:output_type -> deplo.agent.v1.DeleteFileResult
+	103, // 261: deplo.agent.v1.Agent.RenameFile:output_type -> deplo.agent.v1.FileEntryResult
+	115, // 262: deplo.agent.v1.Agent.FilesExist:output_type -> deplo.agent.v1.FilesExistResponse
+	31,  // 263: deplo.agent.v1.Agent.StartDev:output_type -> deplo.agent.v1.DeployEvent
+	38,  // 264: deplo.agent.v1.Agent.StopDev:output_type -> deplo.agent.v1.StackResult
+	31,  // 265: deplo.agent.v1.Agent.ResetDevWorkspace:output_type -> deplo.agent.v1.DeployEvent
+	38,  // 266: deplo.agent.v1.Agent.TeardownDev:output_type -> deplo.agent.v1.StackResult
+	38,  // 267: deplo.agent.v1.Agent.EnsureGateway:output_type -> deplo.agent.v1.StackResult
+	38,  // 268: deplo.agent.v1.Agent.ProvisionSshUser:output_type -> deplo.agent.v1.StackResult
+	38,  // 269: deplo.agent.v1.Agent.DeprovisionSshUser:output_type -> deplo.agent.v1.StackResult
+	126, // 270: deplo.agent.v1.Agent.StartTunnel:output_type -> deplo.agent.v1.TunnelStatus
+	126, // 271: deplo.agent.v1.Agent.GetTunnel:output_type -> deplo.agent.v1.TunnelStatus
+	38,  // 272: deplo.agent.v1.Agent.StopTunnel:output_type -> deplo.agent.v1.StackResult
+	12,  // 273: deplo.agent.v1.Agent.RenewalCSR:output_type -> deplo.agent.v1.RenewalCSRResponse
+	38,  // 274: deplo.agent.v1.Agent.InstallRenewedCert:output_type -> deplo.agent.v1.StackResult
+	136, // 275: deplo.agent.v1.Agent.HostInfo:output_type -> deplo.agent.v1.HostInfoResponse
+	136, // 276: deplo.agent.v1.Agent.SetTimezone:output_type -> deplo.agent.v1.HostInfoResponse
+	139, // 277: deplo.agent.v1.Agent.TraefikConfig:output_type -> deplo.agent.v1.TraefikConfigResponse
+	141, // 278: deplo.agent.v1.Agent.RestartControlPlane:output_type -> deplo.agent.v1.RestartControlPlaneResponse
+	143, // 279: deplo.agent.v1.Agent.UpdateControlPlane:output_type -> deplo.agent.v1.UpdateControlPlaneResponse
+	146, // 280: deplo.agent.v1.Agent.ListWorkloadImages:output_type -> deplo.agent.v1.ListWorkloadImagesResponse
+	149, // 281: deplo.agent.v1.Agent.InventoryImage:output_type -> deplo.agent.v1.InventoryImageResponse
+	151, // 282: deplo.agent.v1.Agent.InventoryCandidate:output_type -> deplo.agent.v1.InventoryCandidateResponse
+	16,  // 283: deplo.agent.v1.Agent.SetLinkAddresses:output_type -> deplo.agent.v1.LinkAddresses
+	18,  // 284: deplo.agent.v1.Agent.StopListening:output_type -> deplo.agent.v1.StopListeningResponse
+	153, // 285: deplo.agent.v1.Agent.CaptureScreenshot:output_type -> deplo.agent.v1.CaptureScreenshotResponse
+	197, // [197:286] is the sub-list for method output_type
+	108, // [108:197] is the sub-list for method input_type
+	108, // [108:108] is the sub-list for extension type_name
+	108, // [108:108] is the sub-list for extension extendee
+	0,   // [0:108] is the sub-list for field type_name
 }
 
 func init() { file_agent_proto_init() }
@@ -17815,7 +17889,7 @@ func file_agent_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: file_agent_proto_rawDesc,
 			NumEnums:      11,
-			NumMessages:   206,
+			NumMessages:   207,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
