@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"fmt"
 	"math"
 	"net"
 	"net/netip"
@@ -556,4 +557,37 @@ func TestZone_aNameIsAnsweredWithItsAppsServerFirstWhileItIsHealthy(t *testing.T
 			t.Errorf("%s: accepted", what)
 		}
 	}
+}
+
+// eu-1..3 (22 Nov 2026) still held a cluster of the Deplo they came from: the ident each name server answers, and the
+// one it tells Deplo, are its own cluster's, never the stale one's, so Deplo's check of port 53 always matches.
+func TestZone_theIdentIsThisServersOwnWhateverClustersItHolds(t *testing.T) {
+	heard := &fakeHeard{}
+	heard.set(zfp1, zfp2)
+	s := zoneService(t, t.TempDir(), heard)
+	if err := os.WriteFile(s.memberFile(), []byte(`{"member":true,"cluster":"cl1"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stale := zoneRequest()
+	stale.ClusterId, stale.SelfFingerprint = "cl0", zfp2
+	stale.Zones[0].Name, stale.Zones[0].Names = "lab.test", []string{"lab.test"}
+	setZone(t, s, stale)
+	addr := listening(t, setZone(t, s, zoneRequest()))
+	want := serverIdent(zfp0)
+	for i := 0; i < 20; i++ {
+		resp, err := s.ProveAddresses(context.Background(), &pb.ProveAddressesRequest{})
+		if err != nil || resp.GetDnsIdent() != want {
+			t.Fatalf("told Deplo %q, want %q (%v)", resp.GetDnsIdent(), want, err)
+		}
+	}
+	until(t, 5*time.Second, want, func() string {
+		c := &dns.Client{Timeout: 500 * time.Millisecond}
+		m := new(dns.Msg)
+		m.SetQuestion("_deplo-server.go.example.com.", dns.TypeTXT)
+		r, _, err := c.Exchange(m, addr)
+		if err != nil || len(r.Answer) != 1 {
+			return fmt.Sprint(err, r)
+		}
+		return r.Answer[0].(*dns.TXT).Txt[0]
+	})
 }

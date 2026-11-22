@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -36,14 +37,34 @@ func serverIdent(fingerprint string) string {
 	return hex.EncodeToString(h[:16])
 }
 
+// zoneIdent is what this server's name server says it is under every zone: its current certificate, hashed. Without
+// one readable, the Self Deplo gave its own cluster's zone, never a cluster another Deplo left behind. The caller
+// holds z.mu.
+func (s *Service) zoneIdent(clusters map[string]*zoneCluster) string {
+	if id, err := s.clusterIdentity(); err == nil && id.Fingerprint != "" {
+		return serverIdent(id.Fingerprint)
+	}
+	if c := clusters[s.loadMember().Cluster]; c != nil {
+		return serverIdent(c.Self)
+	}
+	ids := make([]string, 0, len(clusters))
+	for id := range clusters {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	if len(ids) == 0 {
+		return ""
+	}
+	return serverIdent(clusters[ids[0]].Self)
+}
+
 // ProveAddresses says what tells this server apart; see the RPC's contract in proto/agent.proto.
 func (s *Service) ProveAddresses(ctx context.Context, req *pb.ProveAddressesRequest) (*pb.ProveAddressesResponse, error) {
 	resp := &pb.ProveAddressesResponse{ProxyCertificateSha256: proxyCertificate(ctx)}
 	z := s.zones()
 	z.mu.Lock()
-	for _, c := range z.st.Clusters {
-		resp.DnsIdent = serverIdent(c.Self)
-		break
+	if len(z.st.Clusters) > 0 {
+		resp.DnsIdent = s.zoneIdent(z.st.Clusters)
 	}
 	z.mu.Unlock()
 	if u, err := url.Parse(req.GetEchoUrl()); err == nil && (u.Scheme == "https" || u.Scheme == "http") && u.Host != "" {

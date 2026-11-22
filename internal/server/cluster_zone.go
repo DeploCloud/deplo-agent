@@ -610,11 +610,11 @@ func (z *clusterZones) pushLocked(now time.Time) {
 	taken := map[string]string{}
 	agreed := false
 	z.pruneTXTLocked(now)
+	if len(ids) > 0 {
+		table.Ident = z.s.zoneIdent(z.st.Clusters)
+	}
 	for _, id := range ids {
 		c := z.st.Clusters[id]
-		if table.Ident == "" {
-			table.Ident = serverIdent(c.Self)
-		}
 		drop := time.Duration(c.DropAfter) * time.Second
 		members := make([]dnszone.Member, 0, len(c.Members))
 		for _, m := range c.Members {

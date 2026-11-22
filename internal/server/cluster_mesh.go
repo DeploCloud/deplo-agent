@@ -233,9 +233,14 @@ func (n *clusterNetwork) peersLocked() []mesh.Peer {
 	for id := range n.st.Clusters {
 		ids = append(ids, id)
 	}
+	// A file from before setAt names no time: the cluster this server is a member of goes first then.
+	mine := n.s.loadMember().Cluster
 	sort.Slice(ids, func(i, j int) bool {
 		if a, b := n.st.SetAt[ids[i]], n.st.SetAt[ids[j]]; a != b {
 			return a > b
+		}
+		if (ids[i] == mine) != (ids[j] == mine) {
+			return ids[i] == mine
 		}
 		return ids[i] < ids[j]
 	})
