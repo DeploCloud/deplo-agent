@@ -522,6 +522,14 @@ func leftBehind(pidFile string) int {
 	return pid
 }
 
+// EndLeftBehind ends the name server an earlier run of this agent started, before its zones are set aside.
+func EndLeftBehind(pidFile string) {
+	if pid := leftBehind(pidFile); pid > 0 {
+		endLeftBehind(pid)
+		_ = os.Remove(pidFile)
+	}
+}
+
 func endLeftBehind(pid int) {
 	_ = syscall.Kill(pid, syscall.SIGKILL)
 	var ws syscall.WaitStatus

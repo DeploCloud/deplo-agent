@@ -1,6 +1,8 @@
 package server
 
 import (
+	"crypto/x509"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +23,8 @@ func TestMain(m *testing.M) {
 		os.Exit(dnszone.Main(os.Stdin, os.Stdout, os.Stderr))
 	}
 	buildStepCgroupDir = ""
+	// The tests' certificates come from no public root: only the authority test judges against one.
+	publicRoots = func() (*x509.CertPool, error) { return nil, errors.New("no public roots in the tests") }
 	if os.Getenv(realDockerEnv) != "1" {
 		os.Setenv("DOCKER_HOST", "unix:///nonexistent/deplo-agent-test.sock")
 		os.Unsetenv("DOCKER_CONTEXT")

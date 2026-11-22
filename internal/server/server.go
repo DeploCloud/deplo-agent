@@ -165,6 +165,8 @@ var Capabilities = []string{
 	"dns.home",
 	// The health check is this binary, mounted from the stack directory's .deplo-probe: no shell in the image (deplo#281).
 	"deploy.probe",
+	// ClaimServer: what another Deplo left on this machine is set aside, never loaded (ADR-0050).
+	"panel.claim",
 }
 
 // AgentVersion is the version this agent reports over Hello.
