@@ -79,10 +79,9 @@ func proxyCertificate(ctx context.Context) string {
 // trafficAddress asks Deplo, over one family only, which address this server's traffic arrives from.
 func trafficAddress(ctx context.Context, echo, family string) string {
 	d := &net.Dialer{Timeout: addressTimeout}
+	// The answer is only a candidate: Deplo publishes it once it proves the address reaches this server.
 	tr := &http.Transport{
 		DialContext: func(ctx context.Context, _, addr string) (net.Conn, error) { return d.DialContext(ctx, family, addr) },
-		// The answer is only a candidate: Deplo publishes it once it proves the address reaches this server.
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	}
 	defer tr.CloseIdleConnections()
 	ctx, cancel := context.WithTimeout(ctx, 2*addressTimeout)
