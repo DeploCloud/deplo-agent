@@ -56,3 +56,25 @@ func TestZoneHold_thisServerNamesItselfOnlyAfterTheRemovalTime(t *testing.T) {
 		t.Fatal("held past the removal time from its start")
 	}
 }
+
+// Frozen for longer than the removal time and thawed: it answers as one just started (the last agreed set, itself held),
+// never SERVFAIL from what it heard before nor only itself (found on cluster eu, 22 Nov 2026).
+func TestZoneHold_aServerThawedAfterTheRemovalTimeIsOneJustStarted(t *testing.T) {
+	t0 := time.Now()
+	z := &clusterZones{since: t0.Add(-time.Hour)}
+	c, drop := holdCluster(), 10*time.Second
+	for at := t0; at.Before(t0.Add(4 * time.Second)); at = at.Add(time.Second) {
+		z.wakeLocked(at)
+	}
+	if !z.since.Equal(t0.Add(-time.Hour)) {
+		t.Fatal("a push every second started it again")
+	}
+	thaw := t0.Add(90 * time.Second)
+	z.wakeLocked(thaw)
+	if !z.since.Equal(thaw) {
+		t.Fatalf("since %v after a 87 s gap", z.since)
+	}
+	if h := z.holdLocked(thaw, map[string]time.Time{"fp-b": thaw, "fp-c": thaw}, drop, c); !h["fp-a"] {
+		t.Fatalf("thawed: held %v", h)
+	}
+}
