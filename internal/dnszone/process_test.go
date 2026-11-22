@@ -2,6 +2,7 @@ package dnszone
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,7 +27,7 @@ const roleEnv = "DEPLO_DNS_TEST_ROLE"
 func TestMain(m *testing.M) {
 	switch os.Getenv(roleEnv) {
 	case "serve":
-		os.Exit(Main(os.Stdin, os.Stderr))
+		os.Exit(Main(os.Stdin, os.Stdout, os.Stderr))
 	case "probe":
 		os.Exit(probe())
 	}
@@ -219,6 +220,29 @@ func TestSupervisor_runsTheNameServerAndStartsItAgain(t *testing.T) {
 	// A table that does not hold together is refused before it reaches the process.
 	if err := s.SetTable(&Table{Zones: []Zone{{Name: "x"}}}); err == nil {
 		t.Fatal("a bad table was taken")
+	}
+}
+
+// A check's record must be served the moment the proxy hears it was set: it asks the certificate authority to look then.
+func TestSupervisor_servedReturnsOnceTheProcessAnswersFromTheTable(t *testing.T) {
+	s, _ := supervise(t, "serve")
+	addr := listeningAt(t, s)
+	for i := range 20 {
+		tb := testTable()
+		want := fmt.Sprint("check-", i)
+		tb.Zones[0].TXT = []TXT{{Name: "_acme-challenge.go.example.com", Values: []string{want}}}
+		if err := s.SetTable(tb); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := s.Served(ctx)
+		cancel()
+		if err != nil {
+			t.Fatalf("table %d: %v", i, err)
+		}
+		if got := checkRecord(addr); got != want {
+			t.Fatalf("table %d is served as %q", i, got)
+		}
 	}
 }
 

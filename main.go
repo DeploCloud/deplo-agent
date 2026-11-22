@@ -35,7 +35,7 @@ func main() {
 	}
 	// The same binary, started unprivileged as the cluster's name server (ADR-0049).
 	if len(os.Args) > 1 && os.Args[1] == "dns" {
-		os.Exit(dnszone.Main(os.Stdin, os.Stderr))
+		os.Exit(dnszone.Main(os.Stdin, os.Stdout, os.Stderr))
 	}
 	// The same binary, run once per boot before Docker starts the proxy (#266).
 	if len(os.Args) > 1 && os.Args[1] == "proxy-hold" {

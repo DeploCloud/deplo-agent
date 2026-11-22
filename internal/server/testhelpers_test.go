@@ -18,7 +18,7 @@ const realDockerEnv = "DEPLO_AGENT_TEST_REAL_DOCKER"
 func TestMain(m *testing.M) {
 	// The test binary is also the cluster's name server process, as the agent's binary is.
 	if len(os.Args) > 1 && os.Args[1] == "dns" {
-		os.Exit(dnszone.Main(os.Stdin, os.Stderr))
+		os.Exit(dnszone.Main(os.Stdin, os.Stdout, os.Stderr))
 	}
 	buildStepCgroupDir = ""
 	if os.Getenv(realDockerEnv) != "1" {
