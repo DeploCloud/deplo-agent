@@ -1129,6 +1129,10 @@ message RerouteRequest {
   // Pull every image again before `up`, so a moved tag (a patch release) is picked up.
   // Unset keeps pulling only the missing ones. Advertised as `reroute.pull`.
   bool pull_images = 8;
+  // Only these compose services are brought up, without their dependencies: a routing change
+  // never starts, stops or waits on another service of the App. Empty brings the whole stack up,
+  // as before. Advertised as `reroute.services`.
+  repeated string services = 9;
 }
 
 message ReadStackResponse {
