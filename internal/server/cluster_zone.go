@@ -103,8 +103,10 @@ type clusterZones struct {
 	lastHeard, back map[string]time.Time
 	sent            []byte
 	since           time.Time
-	stop            chan struct{}
-	done            chan struct{}
+	// pushed is the last push: a gap of pausedAfter since then is a server frozen or paused, back as one just started.
+	pushed time.Time
+	stop   chan struct{}
+	done   chan struct{}
 }
 
 func (s *Service) zones() *clusterZones {
@@ -579,6 +581,18 @@ func (z *clusterZones) holdLocked(now time.Time, heard map[string]time.Time, dro
 	return hold
 }
 
+// pausedAfter is the smallest removal time: a server whose own pushes stopped that long heard nobody meanwhile.
+const pausedAfter = 5 * time.Second
+
+// wakeLocked starts this server's removal time again after a gap in its own pushes (frozen, paused, starved): back, it
+// would hear every other server as just back and name only itself, or answer SERVFAIL from what it last heard.
+func (z *clusterZones) wakeLocked(now time.Time) {
+	if !z.pushed.IsZero() && now.Sub(z.pushed) >= pausedAfter {
+		z.since = now
+	}
+	z.pushed = now
+}
+
 // heard is when each server of the private network was last heard, and when this server's network started.
 func (s *Service) heard() (map[string]time.Time, time.Time) {
 	if s.zoneHeard != nil {
@@ -593,6 +607,7 @@ func (s *Service) heard() (map[string]time.Time, time.Time) {
 
 // pushLocked decides how each cluster is answered now and hands the process the table when it changed.
 func (z *clusterZones) pushLocked(now time.Time) {
+	z.wakeLocked(now)
 	if z.sup == nil {
 		return
 	}
