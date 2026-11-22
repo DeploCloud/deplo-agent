@@ -223,6 +223,28 @@ func TestAnswers_waitForTheAppToBeReady(t *testing.T) {
 	}
 }
 
+// The App runs on B but its database fails its health check: waiting would not help, so the visitor reaches B's
+// proxy at once and sees the App's own answer, never a connection held 30 s and closed (fise on eu-1, 22 Nov 2026).
+func TestAnswers_aBrokenAppIsPassedOnAtOnce(t *testing.T) {
+	quickAnswers(t, 5*time.Second)
+	a, b, fa, fb, members := answerPair(t)
+	bothAnswer(t, a, b, members)
+	placeOn(t, a, "srvA", appEntry("srvB"))
+	placeOn(t, b, "srvB", appEntry("srvB"))
+	fb.mu.Lock()
+	fb.broken["prj1"] = true
+	fb.mu.Unlock()
+	for _, via := range []*fakeFwdHost{fa, fb} {
+		start := time.Now()
+		if got := askPort(t, via.spec(t, answerAlias), shopTLS); got != "proxy-b:PING" {
+			t.Fatalf("a broken App's visitor got %q", got)
+		}
+		if waited := time.Since(start); waited > time.Second {
+			t.Fatalf("a broken App's visitor waited %v", waited)
+		}
+	}
+}
+
 func TestAnswers_closeAConnectionNoServerIsReadyFor(t *testing.T) {
 	quickAnswers(t, 400*time.Millisecond)
 	a, b, fa, fb, members := answerPair(t)
@@ -496,6 +518,7 @@ func TestAnswers_readyOnlyWhenEveryContainerIs(t *testing.T) {
 		return fmt.Sprintf(`{"status":"running","started":"%s","health":{"Status":"%s","FailingStreak":%d,"Log":[%s]}}`,
 			ts(at), status, streak, strings.Join(log, ","))
 	}
+	stuck := `{"status":"created","started":"0001-01-01T00:00:00Z","created":"` + ts(at) + `","health":null}`
 	for name, tc := range map[string]struct {
 		lines []string
 		ok    bool
@@ -511,12 +534,16 @@ func TestAnswers_readyOnlyWhenEveryContainerIs(t *testing.T) {
 		"a job that ran beside a healthy one":     {[]string{plain("exited"), health("healthy", 0, 0)}, true, checked, false},
 		"one restarting":                          {[]string{health("healthy", 0, 0), plain("restarting")}, false, time.Time{}, false},
 		"one still being created":                 {[]string{plain("created")}, false, time.Time{}, false},
+		"broken: one never started":               {[]string{plain("running"), stuck}, false, time.Time{}, false},
 		"nothing running":                         {[]string{plain("exited")}, false, time.Time{}, false},
 		"a line docker did not write":             {[]string{"running " + ts(at)}, false, time.Time{}, false},
 	} {
 		r := readinessOf(tc.lines)
 		if r.OK != tc.ok || (r.OK && (!r.Since.Equal(tc.since) || r.Health != tc.unknown)) {
 			t.Errorf("%s: %+v", name, r)
+		}
+		if want := strings.HasPrefix(name, "broken") || strings.Contains(name, "unhealthy"); r.Broken != want {
+			t.Errorf("%s: broken %v, want %v", name, r.Broken, want)
 		}
 	}
 }

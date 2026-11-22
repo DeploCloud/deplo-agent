@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -125,5 +126,41 @@ func TestE2E_ReadyCheckWaitsOutAStackServiceThatCrashesWhileItsDatabaseBoots(t *
 	got, _ := dockercli.Run(ctx, 15*time.Second, "inspect", "-f", "{{.RestartCount}}", "deplo-"+slug+"-app-1")
 	if n := strings.TrimSpace(got.Stdout); n == "0" || n == "" {
 		t.Fatalf("the app never restarted (RestartCount %q): the test proved nothing", n)
+	}
+}
+
+// End-to-end (real docker): an App whose database fails its health check, and whose web service therefore never
+// started, is broken rather than not ready yet: its visitors are passed on, not held (fise on eu-1, 22 Nov 2026).
+func TestE2E_AnAppWhoseDatabaseFailsItsHealthCheckIsBroken(t *testing.T) {
+	ctx := context.Background()
+	if !dockercli.Available(ctx) {
+		t.Skip("docker not available")
+	}
+	project, app := "deplo-agent-test-broken", "prj_e2ebroken"
+	dir := t.TempDir()
+	file := dir + "/compose.yml"
+	yaml := "services:\n" +
+		"  db:\n    image: busybox:1.37\n    command: [\"sleep\", \"600\"]\n    labels: [\"deplo.project=" + app + "\"]\n" +
+		"    healthcheck: {test: [\"CMD\", \"false\"], interval: 1s, retries: 1, timeout: 1s}\n" +
+		"  web:\n    image: busybox:1.37\n    command: [\"sleep\", \"600\"]\n    labels: [\"deplo.project=" + app + "\"]\n" +
+		"    depends_on: {db: {condition: service_healthy}}\n"
+	if err := os.WriteFile(file, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = dockercli.Run(context.Background(), 60*time.Second, "compose", "-p", project, "-f", file, "down", "-t", "1")
+	})
+	// It fails: web waits on a database that never gets healthy.
+	_, _ = dockercli.Run(ctx, 120*time.Second, "compose", "-p", project, "-f", file, "up", "-d")
+	deadline := time.Now().Add(30 * time.Second)
+	var r appReadiness
+	for time.Now().Before(deadline) {
+		if r = appReady(ctx, app); r.Broken {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	if !r.Broken || r.OK {
+		t.Fatalf("readiness %+v, want broken", r)
 	}
 }
