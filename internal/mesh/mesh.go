@@ -249,7 +249,8 @@ func (m *Mesh) Address() netip.Addr { return m.cfg.Address }
 // Port is the UDP port this server answers on.
 func (m *Mesh) Port() uint16 { return m.bind.port() }
 
-// SetPeers replaces the peers. A peer that stays keeps its session; one whose key changed starts over.
+// SetPeers replaces the peers. A peer that stays keeps its session; one whose key changed starts over. A key named
+// twice is the first entry's.
 func (m *Mesh) SetPeers(peers []Peer) error {
 	var ipc strings.Builder
 	m.mu.Lock()
@@ -258,10 +259,14 @@ func (m *Mesh) SetPeers(peers []Peer) error {
 		return net.ErrClosed
 	}
 	seen := map[string]bool{}
+	// One key is one peer, the first entry: WireGuard knows a peer by its key, the bind by the addresses it sends from.
+	keys := map[Key]bool{}
 	for _, np := range peers {
-		if np.Fingerprint == "" || np.PublicKey.IsZero() || np.PublicKey == m.pub || !np.Address.IsValid() || seen[np.Fingerprint] {
+		if np.Fingerprint == "" || np.PublicKey.IsZero() || np.PublicKey == m.pub || !np.Address.IsValid() ||
+			seen[np.Fingerprint] || keys[np.PublicKey] {
 			continue
 		}
+		keys[np.PublicKey] = true
 		p := m.peers[np.Fingerprint]
 		if p != nil && p.PublicKey != np.PublicKey {
 			fmt.Fprintf(&ipc, "public_key=%s\nremove=true\n", p.PublicKey.hex())
@@ -290,7 +295,10 @@ func (m *Mesh) SetPeers(peers []Peer) error {
 	var gone []string
 	for fp, p := range m.peers {
 		if !seen[fp] {
-			fmt.Fprintf(&ipc, "public_key=%s\nremove=true\n", p.PublicKey.hex())
+			// A key that moved to another certificate (a renewal) keeps its session under the new one.
+			if !keys[p.PublicKey] {
+				fmt.Fprintf(&ipc, "public_key=%s\nremove=true\n", p.PublicKey.hex())
+			}
 			m.dropLocked(p)
 			gone = append(gone, fp)
 		}
@@ -317,7 +325,9 @@ func (m *Mesh) SetPeers(peers []Peer) error {
 // dropLocked forgets a peer; the caller holds m.mu.
 func (m *Mesh) dropLocked(p *peer) {
 	delete(m.peers, p.Fingerprint)
-	delete(m.byKey, p.PublicKey)
+	if m.byKey[p.PublicKey] == p {
+		delete(m.byKey, p.PublicKey)
+	}
 	if p.relay != nil {
 		p.relay.c.Close()
 		p.relay = nil

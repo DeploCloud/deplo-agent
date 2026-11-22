@@ -415,6 +415,10 @@ service Agent {
   // Opens a deployment in a throwaway browser that has no network of its own and returns
   // a light and a dark picture of it. Advertised as `screenshot`.
   rpc CaptureScreenshot(CaptureScreenshotRequest) returns (CaptureScreenshotResponse);
+  // What tells this server apart from any other, so Deplo can prove an address reaches it
+  // (ADR-0050): its proxy's certificate on 443, its name server's ident on 53, and the address
+  // its traffic leaves from, per family. Advertised as `address.prove`.
+  rpc ProveAddresses(ProveAddressesRequest) returns (ProveAddressesResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -1129,6 +1133,10 @@ message RerouteRequest {
   // Pull every image again before `up`, so a moved tag (a patch release) is picked up.
   // Unset keeps pulling only the missing ones. Advertised as `reroute.pull`.
   bool pull_images = 8;
+  // Only these compose services are brought up, without their dependencies: a routing change
+  // never starts, stops or waits on another service of the App. Empty brings the whole stack up,
+  // as before. Advertised as `reroute.services`.
+  repeated string services = 9;
 }
 
 message ReadStackResponse {
@@ -2378,6 +2386,23 @@ message InventoryCandidateResponse {
 // ---------------------------------------------------------------------------
 // Deployment screenshots
 // ---------------------------------------------------------------------------
+
+message ProveAddressesRequest {
+  // A URL of Deplo's that answers the caller's own address as text. Asked once over IPv4 and
+  // once over IPv6; empty asks neither.
+  string echo_url = 1;
+}
+
+message ProveAddressesResponse {
+  // sha256 (hex, of the DER) of the certificate the proxy presents on this machine's port 443
+  // for a name no route has. Empty when no proxy answers there.
+  string proxy_certificate_sha256 = 1;
+  // The address this server's traffic leaves from, at most one per family, as echo_url saw it.
+  repeated string traffic_addresses = 2;
+  // The TXT its name server answers for _deplo-server.<zone> in every zone; empty when it
+  // answers none.
+  string dns_ident = 3;
+}
 
 message CaptureScreenshotRequest {
   // http(s)://host[/path] of the deployment. Its host is always dialed at this server's own

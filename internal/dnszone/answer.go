@@ -106,7 +106,8 @@ func (c *compiled) answer(resp *dns.Msg, q dns.Question, at where) (tailored boo
 		resp.Rcode = dns.RcodeRefused
 		return false
 	}
-	if z.fail {
+	// Which server answered is true whatever the server hears: it proves an address, not the cluster's health.
+	if z.fail && qname != ServerLabel+z.name {
 		resp.Rcode = dns.RcodeServerFailure
 		return false
 	}
@@ -154,6 +155,12 @@ func (z *zone) records(qname string, qtype uint16, at where) (exists bool, answe
 		}
 		if z.names[qname] {
 			return true, z.serverRecords(qname, qtype, at), nil
+		}
+		return true, nil, nil
+	}
+	if qname == ServerLabel+z.name && z.ident != "" {
+		if qtype == dns.TypeTXT {
+			return true, []dns.RR{&dns.TXT{Hdr: hdr(qname, dns.TypeTXT, txtTTL), Txt: []string{z.ident}}}, nil
 		}
 		return true, nil, nil
 	}

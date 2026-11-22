@@ -53,6 +53,8 @@ type meshFile struct {
 	Port       uint16                     `json:"port"`
 	Address    string                     `json:"address"`
 	Clusters   map[string][]meshPeerEntry `json:"clusters"`
+	// SetAt is when Deplo last set each cluster (Unix ns): where two clusters name one key, the newer one is right.
+	SetAt map[string]int64 `json:"setAt,omitempty"`
 }
 
 type clusterNetwork struct {
@@ -194,10 +196,15 @@ func (s *Service) SetClusterNetwork(_ context.Context, req *pb.SetClusterNetwork
 	if n.st.Clusters == nil {
 		n.st.Clusters = map[string][]meshPeerEntry{}
 	}
+	if n.st.SetAt == nil {
+		n.st.SetAt = map[string]int64{}
+	}
 	if len(peers) == 0 {
 		delete(n.st.Clusters, req.GetClusterId())
+		delete(n.st.SetAt, req.GetClusterId())
 	} else {
 		n.st.Clusters[req.GetClusterId()] = peers
+		n.st.SetAt[req.GetClusterId()] = time.Now().UnixNano()
 		n.st.Address = self.String()
 	}
 	if n.st.PrivateKey == "" {
@@ -219,13 +226,19 @@ func (s *Service) SetClusterNetwork(_ context.Context, req *pb.SetClusterNetwork
 	return resp, nil
 }
 
-// peersLocked is every server of every cluster this one is in, once each; the caller holds mu.
+// peersLocked is every server of every cluster this one is in, once each, the cluster Deplo set last first: a cluster
+// of a Deplo this server left still names its old certificates, with the same keys. The caller holds mu.
 func (n *clusterNetwork) peersLocked() []mesh.Peer {
 	ids := make([]string, 0, len(n.st.Clusters))
 	for id := range n.st.Clusters {
 		ids = append(ids, id)
 	}
-	sort.Strings(ids)
+	sort.Slice(ids, func(i, j int) bool {
+		if a, b := n.st.SetAt[ids[i]], n.st.SetAt[ids[j]]; a != b {
+			return a > b
+		}
+		return ids[i] < ids[j]
+	})
 	seen := map[string]bool{}
 	var out []mesh.Peer
 	for _, id := range ids {

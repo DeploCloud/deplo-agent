@@ -221,3 +221,30 @@ func TestImageAdmissionNeverExposesLabelValues(t *testing.T) {
 		t.Fatalf("expected rejection without the secret value, got %v", err)
 	}
 }
+
+// A routing change brings up only the services it changed, without their dependencies: a stopped database stays
+// stopped and nothing waits on its health.
+func TestRerouteOfSomeServicesTouchesNothingElse(t *testing.T) {
+	calls := fakeImageDocker(t, []string{"deplo-agent-test-img:1"},
+		map[string]string{"deplo-agent-test-img:1": `{"org.opencontainers.image.source":"x"}`}, nil)
+	s := New(t.TempDir(), t.TempDir(), "/", "")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := s.Reroute(ctx, &pb.RerouteRequest{
+		Slug: "deplo-agent-test-admit", Network: testNetwork, Services: []string{"web"},
+		ComposeYaml: "services:\n  web:\n    image: ${IMG}\n    depends_on: [db]\n  db:\n    image: ${IMG}\n",
+		Env:         map[string]string{"IMG": "deplo-agent-test-img:1"},
+	})
+	if err != nil || !res.GetOk() {
+		t.Fatalf("the routed service must come up: %v %q", err, res.GetError())
+	}
+	got := readCalls(t, calls)
+	if !strings.Contains(got, " up -d --no-deps web") || strings.Contains(got, "--remove-orphans") {
+		t.Fatalf("want only web, without its dependencies, got:\n%s", got)
+	}
+	res, _ = s.Reroute(ctx, &pb.RerouteRequest{Slug: "deplo-agent-test-admit", Network: testNetwork,
+		Services: []string{"--all"}, ComposeYaml: "services:\n  web:\n    image: x\n"})
+	if res.GetOk() {
+		t.Fatal("a flag passed as a service was accepted")
+	}
+}

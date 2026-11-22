@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -124,6 +125,8 @@ var Capabilities = []string{
 	"deploy.replicas",
 	"deploy.spread",
 	"reroute.pull",
+	"reroute.services",
+	"address.prove",
 	"agent-link",
 	"screenshot",
 	"health.restart",
@@ -714,6 +717,9 @@ func (s *Service) Reroute(ctx context.Context, req *pb.RerouteRequest) (*pb.Stac
 	return res, err
 }
 
+// composeServiceName is what compose accepts as a service's name.
+var composeServiceName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$`)
+
 // rerouteLocked is Reroute for a caller that holds the stack's lock.
 func (s *Service) rerouteLocked(ctx context.Context, req *pb.RerouteRequest) (*pb.StackResult, error) {
 	slug := req.GetSlug()
@@ -761,6 +767,20 @@ func (s *Service) rerouteLocked(ctx context.Context, req *pb.RerouteRequest) (*p
 	}
 	if err := s.stripSourceLinks(slug); err != nil {
 		return &pb.StackResult{Ok: false, Error: err.Error()}, nil
+	}
+	if only := req.GetServices(); len(only) > 0 {
+		for _, svc := range only {
+			if !composeServiceName.MatchString(svc) {
+				return &pb.StackResult{Ok: false, Error: fmt.Sprintf("%q is not a compose service", svc)}, nil
+			}
+		}
+		args := append(composeBaseArgs(name, stackFile, envFile, projectDir), "up", "-d", "--no-deps")
+		args = append(append(args, sanitizeComposeArgs(req.GetComposeUpArgs())...), only...)
+		res, err := dockercli.Run(ctx, 120*time.Second, args...)
+		if err != nil {
+			return &pb.StackResult{Ok: false, Error: err.Error()}, nil
+		}
+		return &pb.StackResult{Ok: res.Code == 0, Error: res.Stderr}, nil
 	}
 	held := heldBack(ctx, name, lateServices(req.GetComposeYaml(), nil))
 	composeArgs := withoutLate(composeUpArgs(name, stackFile, envFile, projectDir, false, req.GetComposeUpArgs()), held)

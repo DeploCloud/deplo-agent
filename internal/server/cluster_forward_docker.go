@@ -227,7 +227,7 @@ func appReady(ctx context.Context, appID string) appReadiness {
 	if err != nil || res.Code != 0 || len(ids) == 0 {
 		return appReadiness{}
 	}
-	args := append([]string{"inspect", "--format", `{"status":{{json .State.Status}},"started":{{json .State.StartedAt}},` +
+	args := append([]string{"inspect", "--format", `{"status":{{json .State.Status}},"started":{{json .State.StartedAt}},"created":{{json .Created}},` +
 		`"health":{{if .State.Health}}{{json .State.Health}}{{else}}null{{end}}}`}, ids...)
 	res, err = dockercli.Run(ctx, 10*time.Second, args...)
 	if err != nil || res.Code != 0 {
@@ -239,6 +239,7 @@ func appReady(ctx context.Context, appID string) appReadiness {
 type containerState struct {
 	Status  string    `json:"status"`
 	Started time.Time `json:"started"`
+	Created time.Time `json:"created"`
 	Health  *struct {
 		Status        string
 		FailingStreak int
@@ -250,10 +251,12 @@ type containerState struct {
 }
 
 // readinessOf is the rule appReady applies, one container per line. A container without a health check counts
-// from its start; one with a check from the oldest check docker keeps, when every one kept passed.
+// from its start; one with a check from the oldest check docker keeps, when every one kept passed. One whose check
+// fails, or one created answerStuck ago and never started (its dependency never came up), makes the App broken.
 func readinessOf(lines []string) appReadiness {
 	var r appReadiness
-	running := false
+	// starting: something will still change by itself; broken: something will not, whatever comes next.
+	running, broken, starting := false, false, false
 	later := func(t time.Time) {
 		if t.After(r.Since) {
 			r.Since = t
@@ -268,8 +271,16 @@ func readinessOf(lines []string) appReadiness {
 		case "exited", "dead":
 			continue
 		case "running":
+		case "created":
+			if !c.Created.IsZero() && time.Since(c.Created) >= answerStuck {
+				broken = true
+			} else {
+				starting = true
+			}
+			continue
 		default:
-			return appReadiness{}
+			starting = true
+			continue
 		}
 		running = true
 		h := c.Health
@@ -277,8 +288,13 @@ func readinessOf(lines []string) appReadiness {
 			later(c.Started)
 			continue
 		}
+		if h.Status == "unhealthy" {
+			broken = true
+			continue
+		}
 		if h.Status != "healthy" {
-			return appReadiness{}
+			starting = true
+			continue
 		}
 		passed := h.FailingStreak == 0 && len(h.Log) > 0
 		for _, l := range h.Log {
@@ -290,7 +306,13 @@ func readinessOf(lines []string) appReadiness {
 			r.Health = true
 		}
 	}
-	r.OK = running
+	if broken && running {
+		return appReadiness{Broken: true}
+	}
+	if !running || starting {
+		return appReadiness{}
+	}
+	r.OK = true
 	return r
 }
 

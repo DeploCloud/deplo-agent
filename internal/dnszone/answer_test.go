@@ -355,3 +355,20 @@ func TestCompile_takesOnlyCertificateChecksInsideTheZone(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Which server answered, for Deplo's check of an address: in every zone, even one that answers SERVFAIL.
+func TestReply_saysWhichServerAnswered(t *testing.T) {
+	tb := testTable()
+	tb.Ident = "0123abcd"
+	for _, fail := range []bool{false, true} {
+		tb.Zones[0].Fail = fail
+		r := mustCompile(t, tb).reply(query("_deplo-server.go.example.com.", dns.TypeTXT), true, visitor{})
+		if r.Rcode != dns.RcodeSuccess || len(r.Answer) != 1 || r.Answer[0].(*dns.TXT).Txt[0] != "0123abcd" {
+			t.Fatalf("fail %v: %v", fail, r)
+		}
+	}
+	tb.Ident = "not hex"
+	if _, err := compile(tb); err == nil {
+		t.Fatal("an ident that is not hex was taken")
+	}
+}

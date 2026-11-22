@@ -344,3 +344,53 @@ func TestMesh_closingWhileAPeerStillSendsToIt(t *testing.T) {
 		b.m.Close()
 	}
 }
+
+// A server another Deplo once had in a cluster keeps that cluster's table: the same machines, under the certificates
+// they had there, with the same tunnel keys. One key is one peer, the first entry: a second one under another
+// certificate stole the first one's tunnel address and the answers to its probes, so the two ends fell quiet.
+func TestMesh_oneKeyNamedTwiceIsOnePeer(t *testing.T) {
+	a, b := start(t, nil, fpA, "fdde:9100::a"), start(t, nil, fpB, "fdde:9100::b")
+	stale := b.as(true)
+	stale.Fingerprint, stale.Address = strings.Repeat("c", 64), netip.MustParseAddr("fdde:9100::c")
+	if err := a.m.SetPeers([]Peer{b.as(true), stale}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.m.SetPeers([]Peer{a.as(true)}); err != nil {
+		t.Fatal(err)
+	}
+	echo(t, b)
+	roundTrip(t, dial(t, a, b), "past the stale entry")
+	waitPath(t, a.m, fpB, PathDirect)
+	if a.m.Has(stale.Fingerprint) {
+		t.Fatal("the stale entry is still a peer")
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := b.m.Heard()[fpA]; ok {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatal("b never heard a")
+}
+
+// A renewed certificate names the same key under a new fingerprint: the tunnel stays up under the new one.
+func TestMesh_aKeyThatMovesToANewCertificateStaysUp(t *testing.T) {
+	a, b := start(t, nil, fpA, "fdde:9100::a"), start(t, nil, fpB, "fdde:9100::b")
+	connect(t, a, b, true)
+	echo(t, b)
+	roundTrip(t, dial(t, a, b), "before the renewal")
+	renewed := b.as(true)
+	renewed.Fingerprint = strings.Repeat("c", 64)
+	if err := a.m.SetPeers([]Peer{renewed}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	c, err := a.m.Dial(ctx, renewed.Fingerprint, servicePort)
+	if err != nil {
+		t.Fatalf("the tunnel did not stay up under the new certificate: %v", err)
+	}
+	defer c.Close()
+	roundTrip(t, c, "after the renewal")
+}

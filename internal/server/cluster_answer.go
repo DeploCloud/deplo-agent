@@ -43,7 +43,9 @@ const (
 var (
 	// answerWait is how long a connection waits for a server that runs the App to be ready, and answerRetry how
 	// often one look, shared by every connection waiting for that App, is taken; vars so tests can shorten them.
-	answerWait  = 30 * time.Second
+	answerWait = 30 * time.Second
+	// answerStuck is how long a container may sit created and never started before its App counts as broken.
+	answerStuck = 30 * time.Second
 	answerRetry = 500 * time.Millisecond
 	// answerSettle is how long an App has been ready before its proxy is sure to route it: Traefik applies a
 	// container change up to 2 s after it happens.
@@ -99,6 +101,7 @@ type answerGate struct {
 // answerReadyCheck is one App's last readiness answer, and the check under way that every caller waits for.
 type answerReadyCheck struct {
 	ok      bool
+	broken  bool
 	until   time.Time
 	pending chan struct{}
 }
@@ -110,6 +113,9 @@ type appReadiness struct {
 	// is healthy with no such check to tell since when: then it counts from the moment it is seen so.
 	Since  time.Time
 	Health bool
+	// Broken: it runs here but waiting will not make it ready, a health check failing or a container that never
+	// started. Its visitors are passed on at once, to the App's own error, rather than held.
+	Broken bool
 }
 
 func answerContainer() string {
@@ -494,7 +500,7 @@ func (f *forwarders) look(appID string) {
 // routeOpen asks, without connecting anyone, whether this server or another that runs the App would answer now.
 func (f *forwarders) routeOpen(ctx context.Context, cluster string, members map[string]string, appID string) bool {
 	here, others := f.s.leaseGuard().answerHolders(cluster, appID)
-	if here && f.ready(ctx, appID) {
+	if here && f.answers(ctx, appID) {
 		return true
 	}
 	h := heldName{Network: answerNetwork, Kind: answerKind, ID: appID, Port: answerTLS}
@@ -518,9 +524,15 @@ func (f *forwarders) reachAnswer(ctx context.Context, cluster string, members ma
 		}
 	}
 	h := heldName{Network: answerNetwork, Kind: answerKind, ID: appID, Port: answerTLS}
-	return f.dialHolders(others, func(member string) (net.Conn, error) {
+	up, via := f.dialHolders(others, func(member string) (net.Conn, error) {
 		return f.dialMember(ctx, members[member], h, port)
 	})
+	if up == nil && here && f.broken(appID) {
+		if up, err := f.dialProxy(ctx, port); err == nil {
+			return up, ""
+		}
+	}
+	return up, via
 }
 
 // dialProxy reaches this server's own proxy on its internal entrypoint, for a domain's TLS (behind the PROXY
@@ -588,6 +600,7 @@ func (f *forwarders) ready(ctx context.Context, appID string) bool {
 			}
 		}
 		rc.ok = r.OK && now.Sub(since) >= answerSettle
+		rc.broken = r.Broken
 		rc.until = now.Add(answerRetry)
 		if rc.ok {
 			rc.until = now.Add(answerReadyFor)
@@ -598,6 +611,19 @@ func (f *forwarders) ready(ctx context.Context, appID string) bool {
 		f.mu.Unlock()
 		return ok
 	}
+}
+
+// broken says whether the App's last readiness check here found it running but broken.
+func (f *forwarders) broken(appID string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	rc := f.readiness[appID]
+	return rc != nil && rc.broken
+}
+
+// answers says whether this server takes the App's visitors now: ready, or broken, so waiting would not help.
+func (f *forwarders) answers(ctx context.Context, appID string) bool {
+	return f.ready(ctx, appID) || f.broken(appID)
 }
 
 // dialHolders tries each member, the one with the fewest connections this agent opened to it first, and counts
@@ -642,7 +668,7 @@ func (f *forwarders) serveAnswerStream(from wire.Party, c net.Conn, network, app
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if !f.ready(ctx, appID) {
+	if !f.answers(ctx, appID) {
 		_ = wire.WriteHeader(c, wire.VerbErr, "not ready")
 		return
 	}

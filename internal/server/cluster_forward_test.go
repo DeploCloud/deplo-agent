@@ -35,11 +35,13 @@ type fakeFwdHost struct {
 	// notReady is each App that is not ready here yet; every other one is. readyCalls counts the checks.
 	notReady   map[string]bool
 	readyCalls int
+	// broken is each App that runs here but fails its health check.
+	broken map[string]bool
 }
 
 func newFakeFwdHost() *fakeFwdHost {
 	return &fakeFwdHost{specs: map[string]forwardSpec{}, running: map[string]string{}, services: map[string]string{},
-		pid: map[string]int{}, notReady: map[string]bool{}}
+		pid: map[string]int{}, notReady: map[string]bool{}, broken: map[string]bool{}}
 }
 
 func (h *fakeFwdHost) ops() forwardOps {
@@ -109,6 +111,9 @@ func (h *fakeFwdHost) ops() forwardOps {
 			h.mu.Lock()
 			defer h.mu.Unlock()
 			h.readyCalls++
+			if h.broken[appID] {
+				return appReadiness{Broken: true}
+			}
 			return appReadiness{OK: !h.notReady[appID], Since: time.Now().Add(-time.Hour)}
 		},
 	}
