@@ -288,3 +288,33 @@ func TestNetwork_aFileFromBeforeSetAtPutsTheMembersClusterFirst(t *testing.T) {
 		t.Fatalf("the key went to the stale cluster: current %v", nw != nil && nw.Has(current))
 	}
 }
+
+// ADR-0050: a caught copy holds the original's network key, so Deplo has the original replace it. Only the key it
+// names is retired, so a request sent twice makes one new key, and the others reach it under the new one.
+func TestNetwork_aRetiredKeyIsReplacedOnceAndTheOthersReachTheNewOne(t *testing.T) {
+	a, b, fa, _, fpA, fpB := memberPair(t)
+	joinNetwork(t, a, b, fpA, fpB, true)
+	old := a.network().current().PublicKey().String()
+	retire := func(key string) *pb.SetClusterNetworkResponse {
+		resp, err := a.SetClusterNetwork(context.Background(), &pb.SetClusterNetworkRequest{ClusterId: "cl1", Address: tunnelAddr(1),
+			Peers:           []*pb.ClusterNetworkPeer{meshPeer(fpB, b.network().current().PublicKey().String(), tunnelAddr(2), uint32(b.network().current().Port()), true)},
+			RetirePublicKey: key})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+	ra := retire(old)
+	if ra.GetPublicKey() == old || a.network().current().PublicKey().String() != ra.GetPublicKey() {
+		t.Fatal("the named key was not replaced")
+	}
+	if again := retire(old); again.GetPublicKey() != ra.GetPublicKey() {
+		t.Fatal("a key that is no longer this server's replaced the new one")
+	}
+	putOnNetwork(t, b, tunnelAddr(2), meshPeer(fpA, ra.GetPublicKey(), tunnelAddr(1), ra.GetPort(), true))
+	forwardDB(t, a, b, fpA, fpB)
+	eventually(t, "a direct path under the new key", func() bool { return pathFrom(a, fpB) == mesh.PathDirect })
+	if got := ask(t, fa.spec(t, "db-shop")); got != "on-b:PING" {
+		t.Fatalf("under the new key it answered %q", got)
+	}
+}

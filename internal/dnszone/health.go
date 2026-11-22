@@ -49,6 +49,24 @@ func Decide(members []Member, self string, heard map[string]time.Time, now time.
 // count: one just back, or this one until its proxy serves (a moment of its proxy's default certificate otherwise).
 func DecideHolding(members []Member, self string, heard map[string]time.Time, now time.Time, dropAfter time.Duration,
 	warming bool, last *Agreed, hold map[string]bool) Verdict {
+	return decide(members, self, heard, now, dropAfter, warming, last, hold, false)
+}
+
+// DecideLed is DecideHolding for a server a leading leader renewed within dropAfter: the members it no longer
+// counts are left out, and exactly half answers, since only one side of a split is led (ADR-0049).
+func DecideLed(members []Member, gone map[string]bool, self string, heard map[string]time.Time, now time.Time,
+	dropAfter time.Duration, warming bool, last *Agreed, hold map[string]bool) Verdict {
+	kept := make([]Member, 0, len(members))
+	for _, m := range members {
+		if !gone[m.Fingerprint] {
+			kept = append(kept, m)
+		}
+	}
+	return decide(kept, self, heard, now, dropAfter, warming, last, hold, true)
+}
+
+func decide(members []Member, self string, heard map[string]time.Time, now time.Time, dropAfter time.Duration,
+	warming bool, last *Agreed, hold map[string]bool, halfIsEnough bool) Verdict {
 	v := Verdict{Of: len(members)}
 	var healthy []Member
 	for _, m := range members {
@@ -80,7 +98,7 @@ func DecideHolding(members []Member, self string, heard map[string]time.Time, no
 	case 2*v.Heard < v.Of:
 		v.State = StateFail
 		return v
-	case 2*v.Heard == v.Of:
+	case 2*v.Heard == v.Of && !halfIsEnough:
 		return fallBack(StateStale)
 	}
 	for _, m := range healthy {

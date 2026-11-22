@@ -152,3 +152,28 @@ func TestDecideHolding_aHeldServerCountsButIsNamedNowhere(t *testing.T) {
 		t.Fatalf("all held %+v", v)
 	}
 }
+
+// ADR-0049, members lost one after another: a member the leading leader no longer counts is out of the count and
+// of every answer, and a led server that hears exactly half answers with what it hears, not the last agreed set.
+func TestDecideLed_aGoneMemberLeavesTheCountAndHalfIsEnough(t *testing.T) {
+	now := time.Now()
+	m := members(3)
+	stale := &Agreed{Servers: []string{"s0", "s1", "s2"}, Addrs: Addrs{V4: []string{"203.0.113.1", "203.0.113.2", "203.0.113.3"}}}
+	// s2 gone past the grace, s1 lost since: alone, s0 would fail; led with s2 out, it is one of two.
+	if v := Decide(m, "s0", heardFrom(now), now, 10*time.Second, false, stale); v.State != StateFail {
+		t.Fatalf("unled: %+v", v)
+	}
+	v := DecideLed(m, map[string]bool{"s2": true}, "s0", heardFrom(now), now, 10*time.Second, false, stale, nil)
+	if v.State != StateAnswer || v.Of != 2 || !slices.Equal(v.Servers, []string{"s0"}) {
+		t.Fatalf("led with s2 gone: %+v", v)
+	}
+	// s2 is never named while gone, even when heard again: it catches up before it hosts.
+	v = DecideLed(m, map[string]bool{"s2": true}, "s0", heardFrom(now, "s1", "s2"), now, 10*time.Second, false, stale, nil)
+	if !slices.Equal(v.Servers, []string{"s0", "s1"}) {
+		t.Fatalf("s2 heard while gone: %+v", v)
+	}
+	// Warming still answers the last agreed set.
+	if v := DecideLed(m, nil, "s0", heardFrom(now), now, 10*time.Second, true, stale, nil); v.State != StateWarming {
+		t.Fatalf("warming: %+v", v)
+	}
+}

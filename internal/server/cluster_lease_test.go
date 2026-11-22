@@ -416,3 +416,20 @@ func TestLease_aLeaseAnOlderAgentWroteIsUnsureForTheLongestLease(t *testing.T) {
 		t.Fatalf("an older agent's lease said %d", *r.Unsure)
 	}
 }
+
+// A name server counts the members the leader no longer counts out only while that leader leads it.
+func TestLease_ledOnlyWhileALeadingLeaderRenewsIt(t *testing.T) {
+	s := newTestService(t)
+	g := s.leaseGuard()
+	if _, ok := g.led("clu_1", time.Now(), 10*time.Second); ok {
+		t.Fatal("led with no lease")
+	}
+	g.Renew(lease.Order{Cluster: "clu_1", Member: "srv_a", Epoch: 1, Gone: []string{"fp_c"}})
+	gone, ok := g.led("clu_1", time.Now(), 10*time.Second)
+	if !ok || !slices.Equal(gone, []string{"fp_c"}) {
+		t.Fatalf("led %v %v", gone, ok)
+	}
+	if _, ok := g.led("clu_1", time.Now().Add(11*time.Second), 10*time.Second); ok {
+		t.Fatal("led by a renewal older than the removal time")
+	}
+}

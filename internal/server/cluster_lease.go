@@ -59,6 +59,8 @@ type clusterLease struct {
 	// Unannounced until when one may because a leader that announces nothing renewed this member.
 	Announced   time.Time `json:"announced,omitempty"`
 	Unannounced time.Time `json:"unannounced,omitempty"`
+	// Gone is what the leader that renewed it no longer counts for a majority (ADR-0049).
+	Gone []string `json:"gone,omitempty"`
 	// cold is a lease that was dead when this agent started after the server itself did: Docker brought every
 	// stack back, so nothing of it runs until the leader speaks. An agent that only restarted fences as usual.
 	cold bool
@@ -361,7 +363,7 @@ func (g *leaseGuard) Renew(o lease.Order) lease.Reply {
 	}
 	delete(g.clusters, unreadableLease)
 	next := &clusterLease{Epoch: o.Epoch, PlacedAt: o.Epoch, Member: o.Member, RenewedAt: g.now(), Boot: bootID(), Placement: o.Placement, heard: true, ExtraSeconds: min(max(o.ExtendSeconds, 0), int(lease.ExtendFor/time.Second)),
-		FenceSeconds: min(max(o.FenceSeconds, 0), int(lease.FenceAfter/time.Second))}
+		FenceSeconds: min(max(o.FenceSeconds, 0), int(lease.FenceAfter/time.Second)), Gone: o.Gone}
 	g.confirmStarts(o)
 	witness(g.clusters[o.Cluster], next, g.now(), o)
 	r := lease.Reply{OK: true, Epoch: o.Epoch, StoppedWithin: int((next.fence() + fenceTakes()).Seconds()), Unsure: next.unsure(g.now())}
@@ -379,6 +381,18 @@ func (g *leaseGuard) Renew(o lease.Order) lease.Reply {
 // relinquishLocked stops every single-writer stack a current lease places on another member and on none of its
 // entries here, whatever the leader meant: a holder loses the right to run when its lease moves (deplo#241). A
 // return removes its own copies, and a stack a start order is bringing up here waits for the leader. Holds g.mu.
+// led says whether a leader that leads renewed this member's lease within d, and which members it no longer counts:
+// only one side of a split is led, so that side's name servers may answer with exactly half.
+func (g *leaseGuard) led(cluster string, now time.Time, d time.Duration) (gone []string, ok bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	c := g.clusters[cluster]
+	if c == nil || c.Fenced || !c.heard || now.Sub(c.RenewedAt) >= d {
+		return nil, false
+	}
+	return slices.Clone(c.Gone), true
+}
+
 func (g *leaseGuard) relinquishLocked(cluster string, c *clusterLease) {
 	if g.relinquish == nil || c.Returning {
 		return

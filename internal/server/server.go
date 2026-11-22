@@ -167,6 +167,10 @@ var Capabilities = []string{
 	"deploy.probe",
 	// ClaimServer: what another Deplo left on this machine is set aside, never loaded (ADR-0050).
 	"panel.claim",
+	// SetClusterNetwork's retire_public_key: a caught copy's network key is replaced with its identity (ADR-0050).
+	"network.rekey",
+	// A failover start refuses while this server holds no valid certificate a domain of the App has (ADR-0049).
+	"failover.certificates",
 }
 
 // AgentVersion is the version this agent reports over Hello.

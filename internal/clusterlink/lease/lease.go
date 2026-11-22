@@ -73,6 +73,9 @@ type Order struct {
 	Keep []Keep `json:"keep,omitempty"`
 	// Stores is, to the member whose disk a destination is on, the archives other members may send it.
 	Stores []Store `json:"stores,omitempty"`
+	// Gone is the certificates of the members gone past the grace that this leader no longer counts for a majority:
+	// they vote and host again once back and caught up (ADR-0049).
+	Gone []string `json:"gone,omitempty"`
 }
 
 // Store is one archive another member of the cluster may send this one, to keep in its own backup store.
