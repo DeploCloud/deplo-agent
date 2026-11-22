@@ -616,6 +616,9 @@ func drain(c net.Conn) {
 
 func TestRun_aLinkRefusedAsACopyIsNotedForTheInstallerAndClearedOnceTaken(t *testing.T) {
 	fakeWaits(t)
+	prev := takenAfter
+	takenAfter = 500 * time.Millisecond
+	t.Cleanup(func() { takenAfter = prev })
 	certPath, _ := agentCert(t)
 	marker := filepath.Join(t.TempDir(), CopiedMarker)
 	srv, links := door(t, doorOpts{})
@@ -630,18 +633,23 @@ func TestRun_aLinkRefusedAsACopyIsNotedForTheInstallerAndClearedOnceTaken(t *tes
 		b, err := os.ReadFile(marker)
 		return err == nil && strings.Contains(string(b), "another machine is using this server's identity")
 	})
-	said := false
-	logged.Range(func(k, _ any) bool {
-		said = said || strings.Contains(k.(string), "run the install command of a new server on it")
-		return true
+	// The note is written as the link ends, the log line once the loop hears why: a moment later.
+	waitFor(t, "the agent's log to say what to do with the copy", func() bool {
+		said := false
+		logged.Range(func(k, _ any) bool {
+			said = said || strings.Contains(k.(string), "run the install command of a new server on it")
+			return true
+		})
+		return said
 	})
-	if !said {
-		t.Fatal("the agent's log does not say what to do with the copy")
-	}
 
-	// The original went away and this machine's link is taken: it is the server now, not a copy.
+	// The next try is up, but the panel has not checked it yet: the note stays for the installer.
 	drain(accept(t, l))
 	nextLink(t, links)
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("the note went as the next link opened: %v", err)
+	}
+	// The original went away and this machine's link is taken: it is the server now, not a copy.
 	waitFor(t, "the copy note to go", func() bool {
 		_, err := os.Stat(marker)
 		return os.IsNotExist(err)
