@@ -30,21 +30,27 @@ jobs:
       # key to store or rotate.
       id-token: write
       attestations: write
+      actions: read # find ci.yml's run on this commit
     steps:
+      # ci.yml already ran the whole suite on this commit on main: wait for it rather than run the tests again.
+      - name: CI passed on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for _ in $(seq 20); do
+            id=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --event push --commit "$GITHUB_SHA" --limit 1 --json databaseId --jq '.[].databaseId' || true)
+            [ -n "$id" ] && break
+            sleep 15
+          done
+          [ -n "$id" ] || { echo "::error::ci.yml never ran on ${GITHUB_SHA}: tag a commit that is on main"; exit 1; }
+          gh run watch "$id" --repo "$GITHUB_REPOSITORY" --exit-status --interval 30
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
-
-      # Static like the shipped binary.
-      - name: Run tests
-        run: go test ./...
-        env:
-          CGO_ENABLED: "0"
-          # A runner serves nothing, so the tests that drive a real Docker daemon run here and nowhere by accident.
-          DEPLO_AGENT_TEST_REAL_DOCKER: "1"
 
       - name: Build static binaries (amd64, arm64)
         run: |

@@ -1,5 +1,5 @@
-# Test + vet on every push and PR. The release workflow re-runs tests before it
-# builds, so a green CI here is the gate for tagging a release.
+# Test + vet on every push and PR. The release workflow builds nothing until this
+# run is green on the tagged commit.
 name: ci
 
 on:
