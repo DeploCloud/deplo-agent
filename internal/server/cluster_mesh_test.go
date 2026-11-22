@@ -225,3 +225,29 @@ func TestNetwork_closesOnlyAfterTheLeaderAndRelayBesideItStop(t *testing.T) {
 		t.Fatal("a network back on a cluster closed when the leader stopped")
 	}
 }
+
+// A cluster of a Deplo this server left names the same machines under their old certificates, with the same keys:
+// the cluster Deplo set last owns each key, so the network reaches the server under the certificate it has now.
+func TestNetwork_theClusterSetLastOwnsAKeyBothName(t *testing.T) {
+	a, b, _, _, fpA, fpB := memberPair(t)
+	for _, s := range []*Service{a, b} {
+		t.Cleanup(func() {
+			for _, id := range []string{"cl0", "cl1"} {
+				_, _ = s.SetClusterNetwork(context.Background(), &pb.SetClusterNetworkRequest{ClusterId: id})
+			}
+		})
+	}
+	stale := strings.Repeat("c", 64)
+	ra := putOnNetwork(t, a, tunnelAddr(1))
+	rb := putOnNetwork(t, b, tunnelAddr(2), meshPeer(fpA, ra.GetPublicKey(), tunnelAddr(1), 0, true))
+	if _, err := a.SetClusterNetwork(context.Background(), &pb.SetClusterNetworkRequest{ClusterId: "cl0", Address: tunnelAddr(1),
+		Peers: []*pb.ClusterNetworkPeer{meshPeer(stale, rb.GetPublicKey(), tunnelAddr(3), rb.GetPort(), true)}}); err != nil {
+		t.Fatal(err)
+	}
+	putOnNetwork(t, a, tunnelAddr(1), meshPeer(fpB, rb.GetPublicKey(), tunnelAddr(2), rb.GetPort(), true))
+	m := a.network().current()
+	if !m.Has(fpB) || m.Has(stale) {
+		t.Fatalf("the key is under the stale certificate: has %v, stale %v", m.Has(fpB), m.Has(stale))
+	}
+	eventually(t, "a direct path under the current certificate", func() bool { return pathFrom(a, fpB) == mesh.PathDirect })
+}
