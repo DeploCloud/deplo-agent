@@ -126,6 +126,7 @@ var Capabilities = []string{
 	"deploy.spread",
 	"reroute.pull",
 	"reroute.services",
+	"address.prove",
 	"agent-link",
 	"screenshot",
 	"health.restart",

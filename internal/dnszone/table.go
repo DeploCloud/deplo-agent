@@ -31,7 +31,13 @@ const (
 // Table is everything the name server process is given: the zones, and how to answer each one now.
 type Table struct {
 	Zones []Zone `json:"zones"`
+	// Ident is answered as the TXT of ServerLabel in every zone: it says which server answered, so Deplo can tell
+	// an address that reaches this one from an address that reaches another.
+	Ident string `json:"ident,omitempty"`
 }
+
+// ServerLabel is the first label of the name that answers which server this is.
+const ServerLabel = "_deplo-server."
 
 // Zone is one zone delegated to a cluster, with the servers to answer its names with now.
 type Zone struct {
@@ -154,6 +160,7 @@ type zone struct {
 	near    []place
 	homes   map[string]addrSet
 	txt     map[string][]string
+	ident   string
 	ttl     uint32
 	serial  uint32
 }
@@ -176,6 +183,9 @@ func compile(t *Table) (*compiled, error) {
 		return nil, fmt.Errorf("at most %d zones", maxZones)
 	}
 	c := &compiled{zones: map[string]*zone{}}
+	if len(t.Ident) > 64 || strings.Trim(t.Ident, "0123456789abcdef") != "" {
+		return nil, errors.New("the server's ident is not hex")
+	}
 	total := 0
 	for _, raw := range t.Zones {
 		name, err := Name(raw.Name)
@@ -198,7 +208,7 @@ func compile(t *Table) (*compiled, error) {
 			return nil, fmt.Errorf("zone %s: a TTL of %d s", name, raw.TTL)
 		}
 		z := &zone{name: name, names: map[string]bool{}, inner: map[string]bool{}, txt: map[string][]string{}, fail: raw.Fail,
-			ttl: raw.TTL, serial: raw.Serial}
+			ttl: raw.TTL, serial: raw.Serial, ident: t.Ident}
 		if z.servers, err = parseAddrs(raw.Servers); err != nil {
 			return nil, fmt.Errorf("zone %s: %w", name, err)
 		}
