@@ -2,6 +2,7 @@ package dnszone
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -57,13 +58,16 @@ type Supervisor struct {
 	socks   map[netip.Addr]*socket
 	problem map[netip.Addr]string
 	table   []byte
-	pid     int
-	noNS    bool
-	notify  chan struct{}
-	restart chan struct{}
-	stop    chan struct{}
-	done    chan struct{}
-	once    sync.Once
+	// gen counts the tables handed in, applied the newest the process acknowledged; served closes at each ack.
+	gen, applied uint64
+	served       chan struct{}
+	pid          int
+	noNS         bool
+	notify       chan struct{}
+	restart      chan struct{}
+	stop         chan struct{}
+	done         chan struct{}
+	once         sync.Once
 }
 
 // Start binds the sockets and starts the process; it keeps it running until Close.
@@ -75,7 +79,7 @@ func Start(cfg Config) *Supervisor {
 		cfg.Addresses = ListenAddresses
 	}
 	s := &Supervisor{cfg: cfg, socks: map[netip.Addr]*socket{}, problem: map[netip.Addr]string{},
-		notify: make(chan struct{}, 1), restart: make(chan struct{}, 1), stop: make(chan struct{}), done: make(chan struct{})}
+		served: make(chan struct{}), notify: make(chan struct{}, 1), restart: make(chan struct{}, 1), stop: make(chan struct{}), done: make(chan struct{})}
 	// After a self-update the process the earlier run started still holds port 53: end it before binding.
 	if pid := leftBehind(cfg.PIDFile); pid > 0 {
 		endLeftBehind(pid)
@@ -199,8 +203,27 @@ func (s *Supervisor) SetTable(t *Table) error {
 	}
 	s.mu.Lock()
 	s.table = raw
+	s.gen++
 	s.mu.Unlock()
 	signal(s.notify)
+	return nil
+}
+
+// Served waits until the process answers from the newest table handed in, or ctx ends.
+func (s *Supervisor) Served(ctx context.Context) error {
+	s.mu.Lock()
+	want := s.gen
+	for s.applied < want {
+		ch := s.served
+		s.mu.Unlock()
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		s.mu.Lock()
+	}
+	s.mu.Unlock()
 	return nil
 }
 
@@ -304,7 +327,7 @@ func (s *Supervisor) runOnce() (restarted bool, err error) {
 	if err != nil {
 		return false, err
 	}
-	cmd, stdin, stderr, err := s.startProcess(path, files, strings.Join(kinds, ","))
+	cmd, stdin, acks, stderr, err := s.startProcess(path, files, strings.Join(kinds, ","))
 	if err != nil {
 		return false, err
 	}
@@ -328,7 +351,7 @@ func (s *Supervisor) runOnce() (restarted bool, err error) {
 	go func() { exited <- cmd.Wait() }()
 	writeDone := make(chan struct{})
 	defer close(writeDone)
-	go s.feed(stdin, cmd, writeDone)
+	go s.feed(stdin, acks, cmd, writeDone)
 
 	select {
 	case err := <-exited:
@@ -342,7 +365,7 @@ func (s *Supervisor) runOnce() (restarted bool, err error) {
 	return restarted, nil
 }
 
-func (s *Supervisor) startProcess(path string, files []*os.File, kinds string) (*exec.Cmd, io.WriteCloser, io.ReadCloser, error) {
+func (s *Supervisor) startProcess(path string, files []*os.File, kinds string) (*exec.Cmd, io.WriteCloser, *os.File, io.ReadCloser, error) {
 	for {
 		cmd := &exec.Cmd{
 			Path:        path,
@@ -354,32 +377,40 @@ func (s *Supervisor) startProcess(path string, files []*os.File, kinds string) (
 		// An os.Pipe of our own, not StdinPipe: its write end takes a deadline, so a stuck process cannot hold the agent.
 		r, stdin, err := os.Pipe()
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
-		cmd.Stdin = r
-		stderr, err := cmd.StderrPipe()
+		acks, ackW, err := os.Pipe()
 		if err != nil {
 			r.Close()
 			stdin.Close()
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
-		err = cmd.Start()
-		r.Close()
+		cmd.Stdin, cmd.Stdout = r, ackW
+		stderr, err := cmd.StderrPipe()
 		if err == nil {
-			return cmd, stdin, stderr, nil
+			err = cmd.Start()
+		}
+		r.Close()
+		ackW.Close()
+		if err == nil {
+			return cmd, stdin, acks, stderr, nil
 		}
 		stdin.Close()
+		acks.Close()
 		if s.noNS || cmd.SysProcAttr.Cloneflags == 0 || !namespaceRefused(err) {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
 		s.noNS = true
 		s.cfg.Logf("dns: this host gives the name server no network of its own (%v); it still runs as nobody, locked in an empty directory", err)
 	}
 }
 
-// feed writes the latest table to the process at start and on every change; a process that stops reading is killed.
-func (s *Supervisor) feed(stdin io.WriteCloser, cmd *exec.Cmd, done <-chan struct{}) {
+// feed writes the latest table to the process at start and on every change; a process that stops reading or
+// acknowledging is killed.
+func (s *Supervisor) feed(stdin io.WriteCloser, acks *os.File, cmd *exec.Cmd, done <-chan struct{}) {
 	defer stdin.Close()
+	defer acks.Close()
+	ack := bufio.NewReader(acks)
 	f, _ := stdin.(*os.File)
 	for first := true; ; first = false {
 		if !first {
@@ -390,7 +421,7 @@ func (s *Supervisor) feed(stdin io.WriteCloser, cmd *exec.Cmd, done <-chan struc
 			}
 		}
 		s.mu.Lock()
-		raw := s.table
+		raw, gen := s.table, s.gen
 		s.mu.Unlock()
 		if raw == nil {
 			continue
@@ -398,11 +429,23 @@ func (s *Supervisor) feed(stdin io.WriteCloser, cmd *exec.Cmd, done <-chan struc
 		if f != nil {
 			_ = f.SetWriteDeadline(time.Now().Add(5 * time.Second))
 		}
-		if _, err := stdin.Write(append(append([]byte{}, raw...), '\n')); err != nil {
+		_ = acks.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, err := stdin.Write(append(append([]byte{}, raw...), '\n'))
+		if err == nil {
+			_, err = ack.ReadString('\n')
+		}
+		if err != nil {
 			s.cfg.Logf("dns: the name server took no table (%v); it is started again", err)
 			_ = cmd.Process.Kill()
 			return
 		}
+		s.mu.Lock()
+		if gen > s.applied {
+			s.applied = gen
+			close(s.served)
+			s.served = make(chan struct{})
+		}
+		s.mu.Unlock()
 	}
 }
 

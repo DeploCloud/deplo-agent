@@ -16,7 +16,8 @@ import (
 const EnvSockets = "DEPLO_DNS_SOCKETS"
 
 // Main is `deplo-agent dns`: it answers on the sockets it was handed, from the tables read on stdin, until stdin ends.
-func Main(stdin io.Reader, stderr io.Writer) int {
+// It writes one line to ack once it took each table, so the agent knows when a record is served.
+func Main(stdin io.Reader, ack, stderr io.Writer) int {
 	logf := func(f string, a ...any) { fmt.Fprintf(stderr, f+"\n", a...) }
 	if os.Getuid() == 0 || os.Geteuid() == 0 {
 		logf("refusing to answer DNS as root")
@@ -58,6 +59,7 @@ func Main(stdin io.Reader, stderr io.Writer) int {
 		if err := srv.SetTable(&t); err != nil {
 			logf("a table refused, the last one stays: %v", err)
 		}
+		_, _ = fmt.Fprintln(ack)
 	}
 	if err := sc.Err(); err != nil {
 		logf("reading tables: %v", err)

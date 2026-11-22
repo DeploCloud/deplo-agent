@@ -345,6 +345,7 @@ func (s *Service) presentTXT(ctx context.Context, fqdn, value string, add bool) 
 	z.setOwnLocked(id, c.Self, at, value, add, now)
 	body, members := z.ownBodyLocked(id, c), c.otherMembers()
 	z.pushLocked(now)
+	sup := z.sup
 	z.mu.Unlock()
 	if !add {
 		go func() {
@@ -354,6 +355,8 @@ func (s *Service) presentTXT(ctx context.Context, fqdn, value string, add bool) 
 		}()
 		return nil
 	}
+	// The proxy asks the certificate authority to look right after this returns.
+	served(ctx, sup)
 	err := s.sendTXT(ctx, id, members, body)
 	if err == nil {
 		return nil
@@ -492,12 +495,24 @@ func (s *Service) receiveTXT(from wire.Party, c net.Conn, cluster string) {
 	if err == nil {
 		z.pushLocked(now)
 	}
+	sup := z.sup
 	z.mu.Unlock()
 	if err != nil {
 		_ = wire.WriteHeader(c, wire.VerbErr, oneLine(err.Error()))
 		return
 	}
+	served(context.Background(), sup)
 	_ = wire.WriteHeader(c, wire.VerbOK, "")
+}
+
+// served waits, for a check's time at most, until this server's name server answers with the records just set.
+func served(ctx context.Context, sup *dnszone.Supervisor) {
+	if sup == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, txtWait)
+	defer cancel()
+	_ = sup.Served(ctx)
 }
 
 func (z *clusterZones) takeTXTLocked(cluster, sender string, body txtBody, now time.Time) error {
