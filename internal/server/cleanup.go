@@ -79,7 +79,7 @@ func (s *Service) DockerCleanup(ctx context.Context, req *pb.DockerCleanupReques
 	}
 	if live := req.GetLiveSlugs(); len(live) > 0 {
 		params.liveSlugs = make(map[string]bool, len(live))
-		for _, slug := range live {
+		for _, slug := range append(live, s.leftSlugs()...) {
 			params.liveSlugs[slug] = true
 		}
 	}

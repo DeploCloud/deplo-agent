@@ -419,6 +419,10 @@ service Agent {
   // (ADR-0050): its proxy's certificate on 443, its name server's ident on 53, and the address
   // its traffic leaves from, per family. Advertised as `address.prove`.
   rpc ProveAddresses(ProveAddressesRequest) returns (ProveAddressesResponse);
+
+  // Which Deplo this server belongs to now (ADR-0050): the agent sets aside what another Deplo left
+  // and restarts to load only this one's state. Advertised as `panel.claim`.
+  rpc ClaimServer(ClaimServerRequest) returns (ClaimServerResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -2899,4 +2903,29 @@ message ClusterReplicaState {
   string error = 8;
   // The member it receives from.
   string from_server_id = 9;
+}
+
+message ClaimServerRequest {
+  // Every cluster this Deplo has, on any server.
+  repeated string cluster_ids = 1;
+  // Whether this Deplo runs a cluster leader or relay on this server.
+  bool cluster_host = 2;
+}
+
+message ClaimServerResponse {
+  // The agent found another Deplo's state and restarts now to set it aside.
+  bool restarting = 1;
+  // The folder the last set-aside went to, and when (Unix ms); empty when nothing ever was.
+  string set_aside = 2;
+  int64 set_aside_at_ms = 3;
+  // Containers and volumes of another Deplo's Apps still on this server, left for its owner.
+  repeated LeftWorkload left = 4;
+}
+
+message LeftWorkload {
+  // "container" or "volume".
+  string kind = 1;
+  string name = 2;
+  // The App's slug on the Deplo that left it.
+  string app = 3;
 }

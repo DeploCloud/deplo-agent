@@ -113,6 +113,7 @@ const (
 	Agent_StopListening_FullMethodName         = "/deplo.agent.v1.Agent/StopListening"
 	Agent_CaptureScreenshot_FullMethodName     = "/deplo.agent.v1.Agent/CaptureScreenshot"
 	Agent_ProveAddresses_FullMethodName        = "/deplo.agent.v1.Agent/ProveAddresses"
+	Agent_ClaimServer_FullMethodName           = "/deplo.agent.v1.Agent/ClaimServer"
 )
 
 // AgentClient is the client API for Agent service.
@@ -393,6 +394,9 @@ type AgentClient interface {
 	// (ADR-0050): its proxy's certificate on 443, its name server's ident on 53, and the address
 	// its traffic leaves from, per family. Advertised as `address.prove`.
 	ProveAddresses(ctx context.Context, in *ProveAddressesRequest, opts ...grpc.CallOption) (*ProveAddressesResponse, error)
+	// Which Deplo this server belongs to now (ADR-0050): the agent sets aside what another Deplo left
+	// and restarts to load only this one's state. Advertised as `panel.claim`.
+	ClaimServer(ctx context.Context, in *ClaimServerRequest, opts ...grpc.CallOption) (*ClaimServerResponse, error)
 }
 
 type agentClient struct {
@@ -1453,6 +1457,16 @@ func (c *agentClient) ProveAddresses(ctx context.Context, in *ProveAddressesRequ
 	return out, nil
 }
 
+func (c *agentClient) ClaimServer(ctx context.Context, in *ClaimServerRequest, opts ...grpc.CallOption) (*ClaimServerResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ClaimServerResponse)
+	err := c.cc.Invoke(ctx, Agent_ClaimServer_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // AgentServer is the server API for Agent service.
 // All implementations must embed UnimplementedAgentServer
 // for forward compatibility.
@@ -1731,6 +1745,9 @@ type AgentServer interface {
 	// (ADR-0050): its proxy's certificate on 443, its name server's ident on 53, and the address
 	// its traffic leaves from, per family. Advertised as `address.prove`.
 	ProveAddresses(context.Context, *ProveAddressesRequest) (*ProveAddressesResponse, error)
+	// Which Deplo this server belongs to now (ADR-0050): the agent sets aside what another Deplo left
+	// and restarts to load only this one's state. Advertised as `panel.claim`.
+	ClaimServer(context.Context, *ClaimServerRequest) (*ClaimServerResponse, error)
 	mustEmbedUnimplementedAgentServer()
 }
 
@@ -2010,6 +2027,9 @@ func (UnimplementedAgentServer) CaptureScreenshot(context.Context, *CaptureScree
 }
 func (UnimplementedAgentServer) ProveAddresses(context.Context, *ProveAddressesRequest) (*ProveAddressesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ProveAddresses not implemented")
+}
+func (UnimplementedAgentServer) ClaimServer(context.Context, *ClaimServerRequest) (*ClaimServerResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ClaimServer not implemented")
 }
 func (UnimplementedAgentServer) mustEmbedUnimplementedAgentServer() {}
 func (UnimplementedAgentServer) testEmbeddedByValue()               {}
@@ -3466,6 +3486,24 @@ func _Agent_ProveAddresses_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Agent_ClaimServer_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ClaimServerRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).ClaimServer(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_ClaimServer_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).ClaimServer(ctx, req.(*ClaimServerRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Agent_ServiceDesc is the grpc.ServiceDesc for Agent service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -3744,6 +3782,10 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ProveAddresses",
 			Handler:    _Agent_ProveAddresses_Handler,
+		},
+		{
+			MethodName: "ClaimServer",
+			Handler:    _Agent_ClaimServer_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
