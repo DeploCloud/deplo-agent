@@ -19,7 +19,43 @@ permissions:
   contents: read
 
 jobs:
+  # A merge whose tree a pull request already tested green has nothing new to check.
+  tested:
+    name: Already tested
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    outputs:
+      skip: ${{ steps.pr.outputs.skip }}
+    steps:
+      - id: pr
+        if: github.event_name == 'push'
+        # A failure here runs every check, never skips one.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          api() { gh api "repos/$GITHUB_REPOSITORY/$1" --jq "$2"; }
+          tree=$(api "commits/$GITHUB_SHA" .commit.tree.sha)
+          skip=false
+          # The head held all of main and is this exact tree, so the pull request's run tested this commit.
+          for head in $(api "commits/$GITHUB_SHA/pulls" '.[] | select(.merged_at) | .head.sha'); do
+            [ "$(api "compare/$BEFORE...$head" .behind_by)" = 0 ] || continue
+            [ "$(api "commits/$head" .commit.tree.sha)" = "$tree" ] || continue
+            run=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --event pull_request --commit "$head" --status success --limit 1 --json databaseId --jq '.[].databaseId')
+            [ -n "$run" ] || continue
+            echo "::notice::pull request run $run already tested this tree green"
+            skip=true
+          done
+          echo "skip=$skip" >> "$GITHUB_OUTPUT"
+
   test:
+    needs: tested
+    # Nothing in it changes between two runs on one commit, so the weekly run leaves it out.
+    if: github.event_name != 'schedule' && needs.tested.outputs.skip != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -40,16 +76,6 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run format:check
       - run: go vet ./...
-      # The agent's gRPC port is reachable by anyone who can open a socket, and
-      # the TLS handshake + client-cert parse happen BEFORE mTLS proves anything,
-      # so a stdlib crypto/tls or crypto/x509 advisory is pre-auth surface here.
-      # `go-version-file: go.mod` above means the `go` directive is also the
-      # toolchain pin: bump it to patch the standard library.
-      # PINNED, not @latest: a new major of the tool can require a newer Go than
-      # the pin above. The advisory database is fetched at run time, so an older
-      # binary still reports today's CVEs.
-      - name: govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
       # Static like the shipped binary.
       - run: go test ./...
         env:
@@ -82,10 +108,33 @@ jobs:
             CGO_ENABLED=0 GOOS=linux GOARCH="${arch}" go build -o /dev/null .
           done
 
+  vulncheck:
+    needs: tested
+    if: needs.tested.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      # The agent's gRPC port is reachable by anyone who can open a socket, and
+      # the TLS handshake + client-cert parse happen BEFORE mTLS proves anything,
+      # so a stdlib crypto/tls or crypto/x509 advisory is pre-auth surface here.
+      # `go-version-file: go.mod` above means the `go` directive is also the
+      # toolchain pin: bump it to patch the standard library.
+      # PINNED, not @latest: a new major of the tool can require a newer Go than
+      # the pin above. The advisory database is fetched at run time, so an older
+      # binary still reports today's CVEs.
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+
   # The answers' routes are a contract with the panel (DeploCloud/deplo, docs/agents/cluster-rollout.md §7): the
   # agent changes first, so the panel's reference may lag this one's, but what the panel renders today must still
   # pass this agent's checks, or every App of a cluster would stop answering everywhere.
   panel-contract:
+    needs: tested
+    if: needs.tested.outputs.skip != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
