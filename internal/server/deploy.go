@@ -345,6 +345,9 @@ func (s *Service) upLocked(ctx context.Context, req *pb.DeployRequest, e *emitte
 	if req.GetBuildKind() == pb.BuildKind_BUILD_KIND_COMPOSE && !s.stripWorkingCopyLinks(req.GetSlug(), e) {
 		return false
 	}
+	if !s.adoptVolumes(ctx, req, e) {
+		return false
+	}
 	composeArgs := composeUpArgs("deplo-"+req.GetSlug(), s.stackPath(req.GetSlug()), envFile, projectDir,
 		req.GetForceRecreate(), req.GetComposeUpArgs())
 	if late := lateServices(req.GetComposeYaml(), req.GetStartAfterReady()); len(late) > 0 {

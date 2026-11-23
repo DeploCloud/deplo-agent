@@ -803,6 +803,19 @@ message DeployRequest {
   // Compose services to start only once the deploy is ready: the stack comes up without them, and a
   // deploy that is not ready never starts them. Advertised as `deploy.start-after-ready`.
   repeated string start_after_ready = 30;
+
+  // Volumes Deplo now names where the image or the compose file left one unnamed: before compose up,
+  // an old unnamed volume at the same place is copied into the named one, which must not exist yet.
+  // Advertised as `volumes.adopt`.
+  repeated VolumeAdoption adopt_volumes = 31;
+}
+
+message VolumeAdoption {
+  // The compose service, and the container path the unnamed volume is mounted at.
+  string service = 1;
+  string target = 2;
+  // The named volume's host name.
+  string volume = 3;
 }
 
 // How the agent decides an app has stopped answering, and when it restarts it.
