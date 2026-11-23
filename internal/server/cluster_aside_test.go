@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -103,7 +105,7 @@ func (d *asideDocker) run(_ context.Context, _ time.Duration, args ...string) (d
 func TestAside_aVolumeIsCopiedToALabelledDatedCopyOnce(t *testing.T) {
 	d := &asideDocker{vols: map[string]bool{"deplo-fise-fise-db-data": true}}
 	at := time.Date(2026, 11, 23, 4, 5, 6, 0, time.UTC)
-	got, err := setAside(context.Background(), d.run, "fise", []string{"deplo-fise-fise-db-data"}, at)
+	got, err := setAside(context.Background(), d.run, "fise", []string{"deplo-fise-fise-db-data"}, "", at)
 	if err != nil || len(got) != 1 || got[0].Volume != "deplo-fise-fise-db-data-aside-20261123T040506Z" || got[0].At != "2026-11-23T04:05:06Z" {
 		t.Fatalf("set aside %+v, %v", got, err)
 	}
@@ -113,8 +115,49 @@ func TestAside_aVolumeIsCopiedToALabelledDatedCopyOnce(t *testing.T) {
 		t.Fatalf("commands:\n%s", all)
 	}
 	d.ran = nil
-	if _, err := setAside(context.Background(), d.run, "fise", []string{"deplo-fise-fise-db-data"}, at); err != nil || strings.Contains(strings.Join(d.ran, "\n"), "cp -a") {
+	if _, err := setAside(context.Background(), d.run, "fise", []string{"deplo-fise-fise-db-data"}, "", at); err != nil || strings.Contains(strings.Join(d.ran, "\n"), "cp -a") {
 		t.Fatalf("a copy made before was made again: %v\n%s", err, strings.Join(d.ran, "\n"))
+	}
+}
+
+func TestAside_theFilesFolderIsSetAsideWithTheVolumes(t *testing.T) {
+	d := &asideDocker{vols: map[string]bool{"deplo-fise-fise-db-data": true}}
+	at := time.Date(2026, 11, 23, 4, 5, 6, 0, time.UTC)
+	files := t.TempDir()
+	got, err := setAside(context.Background(), d.run, "fise", []string{"deplo-fise-fise-db-data"}, files, at)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("set aside %+v, %v: an empty Files folder has nothing to keep", got, err)
+	}
+	if err := os.WriteFile(filepath.Join(files, "upload.png"), []byte("png"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d.ran = nil
+	got, err = setAside(context.Background(), d.run, "fise", []string{"deplo-fise-fise-db-data"}, files, at)
+	if err != nil || len(got) != 2 || got[1].Volume != "deplo-fise.files-aside-20261123T040506Z" || got[1].Of != "deplo-fise.files" {
+		t.Fatalf("set aside %+v, %v", got, err)
+	}
+	all := strings.Join(d.ran, "\n")
+	if !strings.Contains(all, "volume create --label deplo.aside.of=deplo-fise.files --label deplo.aside.at=2026-11-23T04:05:06Z deplo-fise.files-aside-20261123T040506Z") ||
+		!strings.Contains(all, "-v "+files+":/from:ro -v deplo-fise.files-aside-20261123T040506Z:/to") {
+		t.Fatalf("commands:\n%s", all)
+	}
+}
+
+func TestSetAside_aStacksFilesFolderComesWithItsVolumes(t *testing.T) {
+	d := &asideDocker{vols: map[string]bool{}}
+	was := setAsideRun
+	setAsideRun = d.run
+	t.Cleanup(func() { setAsideRun = was })
+	s := &Service{stackDir: t.TempDir()}
+	if err := os.MkdirAll(s.filesRoot("fise"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(s.filesRoot("fise"), "notes.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.SetAside(context.Background(), &pb.SetAsideRequest{Slug: "fise"})
+	if err != nil || len(res.GetCopies()) != 1 || res.GetCopies()[0].GetSetAsideOf() != "deplo-fise.files" {
+		t.Fatalf("copies %v, %v: the Files folder is set aside even with no volume named", res.GetCopies(), err)
 	}
 }
 
