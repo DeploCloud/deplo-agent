@@ -951,6 +951,9 @@ message DeployResult {
   SourceCompose source_compose = 6;
   // The ports the checked container listened on from outside it, for the log.
   repeated int32 listening_ports = 7;
+  // The paths the image this deploy built declares as volumes (VOLUME), read where it was built.
+  // Hello capability `deploy.image-volumes`.
+  repeated string image_volumes = 8;
 }
 
 // A compose file read from the app's source.

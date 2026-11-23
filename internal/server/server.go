@@ -176,6 +176,8 @@ var Capabilities = []string{
 	"cluster.succession",
 	// A returning member sets each moved volume aside under a dated name; VolumeUsage lists them, RemoveSetAside removes one.
 	"volumes.set-aside",
+	// DeployResult.image_volumes: what a built image declares as volumes, read on the server that built it.
+	"deploy.image-volumes",
 }
 
 // AgentVersion is the version this agent reports over Hello.
