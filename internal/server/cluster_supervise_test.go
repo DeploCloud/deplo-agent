@@ -604,3 +604,50 @@ func TestSupervise_advertisesTheFailSafeSupervisor(t *testing.T) {
 		t.Fatal("Hello does not advertise cluster.supervise.failsafe")
 	}
 }
+
+// A container the fence stopped comes back once the lease is back, whatever its restart policy says.
+func TestSupervise_whatTheFenceStoppedComesBackWithTheLease(t *testing.T) {
+	s, clk, fw := supervisedMember(t, nil)
+	fw.cs[writer][0].Policy, fw.cs[writer][0].Label, fw.cs[writer][0].ExitCode = "no", "no", 0
+	fw.cs[writer][0].FinishedAt = clk.Now()
+	s.sup.fencedSince(context.Background(), writer, clk.Now().Add(-time.Second))
+	renewHere(t, s)
+	supervise(t, s)
+	if got := fw.startedIDs(); !slices.Equal(got, []string{"c1"}) {
+		t.Fatalf("started %v, want c1: the fence had stopped it", got)
+	}
+	if len(s.sup.fenced) != 0 {
+		t.Fatalf("still kept as fenced after its start: %v", s.sup.fenced)
+	}
+	// It stops by itself later: its policy "no" holds again.
+	fw.stops("c1", 0)
+	clk.Add(time.Minute)
+	renewHere(t, s)
+	supervise(t, s)
+	if got := fw.startedIDs(); len(got) != 1 {
+		t.Fatalf("started %v: a policy \"no\" container that stopped by itself came back", got)
+	}
+}
+
+// One that exited before the fence began was not the fence's, and one whose lease moved elsewhere stays down.
+func TestSupervise_theFenceKeepsOnlyWhatItStopped(t *testing.T) {
+	s, clk, fw := supervisedMember(t, nil)
+	fw.cs[writer][0].Policy, fw.cs[writer][0].Label, fw.cs[writer][0].ExitCode = "no", "no", 0
+	fw.cs[writer][0].FinishedAt = clk.Now().Add(-time.Hour)
+	s.sup.fencedSince(context.Background(), writer, clk.Now())
+	if len(s.sup.fenced) != 0 {
+		t.Fatalf("kept %v, which exited an hour before the fence", s.sup.fenced)
+	}
+	fw.cs[writer][0].FinishedAt = clk.Now()
+	s.sup.fencedSince(context.Background(), writer, clk.Now())
+	s.sup.unfenced(writer)
+	renewHere(t, s)
+	supervise(t, s)
+	if got := fw.startedIDs(); len(got) != 0 {
+		t.Fatalf("started %v after its lease went elsewhere", got)
+	}
+	raw, _ := os.ReadFile(s.supervisorFile())
+	if strings.Contains(string(raw), "fenced") {
+		t.Fatalf("the fence is still on disk: %s", raw)
+	}
+}
