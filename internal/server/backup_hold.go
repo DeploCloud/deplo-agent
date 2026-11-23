@@ -208,7 +208,6 @@ func unpauseAll(ctx context.Context, ids []string) bool {
 // sweepBackupHolds unpauses what an earlier run of this agent paused for a copy and never released, and says
 // whether it unpaused anything.
 func sweepBackupHolds(dir string) bool {
-	defer removeCopiers()
 	files, _ := filepath.Glob(filepath.Join(dir, "*.json"))
 	for _, f := range files {
 		var ids []string

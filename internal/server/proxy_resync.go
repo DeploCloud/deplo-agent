@@ -86,6 +86,7 @@ func (s *Service) StartProxyResync(ctx context.Context) {
 		w.unknown(time.Now())
 	}
 	go func() {
+		removeCopiers()
 		first := true
 		for ctx.Err() == nil {
 			if !first {
