@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -71,6 +72,8 @@ type replicaRun struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 	from   string
+	// roots are the entry's roots the run receives; a table that names others starts it again.
+	roots  []string
 	status *replica.Status
 	// index is what the copy's files hold, kept across the run's streams.
 	index *replica.Index
@@ -279,7 +282,7 @@ func (r *replicas) reconcile(ctx context.Context) {
 			r.mu.Lock()
 			run := r.runs[e.AppID]
 			r.mu.Unlock()
-			if run != nil && run.from == member {
+			if run != nil && run.from == member && slices.Equal(run.roots, e.roots()) {
 				continue
 			}
 			r.stop(e.AppID, "")
@@ -322,7 +325,7 @@ func (r *replicas) stop(appID, why string) {
 
 func (r *replicas) start(parent context.Context, cluster string, e replicaEntry, member, fingerprint string) {
 	ctx, cancel := context.WithCancel(parent)
-	run := &replicaRun{cancel: cancel, done: make(chan struct{}), from: member, status: &replica.Status{}, index: replica.NewIndex()}
+	run := &replicaRun{cancel: cancel, done: make(chan struct{}), from: member, roots: e.roots(), status: &replica.Status{}, index: replica.NewIndex()}
 	r.mu.Lock()
 	r.runs[e.AppID] = run
 	r.mu.Unlock()

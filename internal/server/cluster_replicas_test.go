@@ -173,3 +173,32 @@ func TestReplica_aWholeCopyThatHearsNothingDialsAgain(t *testing.T) {
 		t.Fatal("a whole copy that heard nothing past the wait kept waiting")
 	}
 }
+
+// cluster eu, 23 Nov 2026: fise got its Volume after its copies had started on files only, and every copy refused
+// the sender for holding "other data" until the receivers were started again with the new roots.
+func TestReplicas_aCopyFollowsATableThatNamesMoreData(t *testing.T) {
+	a, b, vol, _ := replicating(t, true)
+	if err := os.WriteFile(filepath.Join(vol, "data.txt"), []byte("one"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "b to hold a whole copy", func() bool { return replicaStatus(t, b, "prj_1").GetSynced() })
+	req := &pb.SetClusterReplicasRequest{
+		ClusterId: "cl1",
+		Members: []*pb.ClusterForwarderMember{
+			{ServerId: "srv_a", Fingerprint: sourcePrint[a]},
+			{ServerId: "srv_b", Fingerprint: b.replicas().tab.Members["srv_b"]},
+		},
+		Entries: []*pb.ClusterReplicaEntry{{AppId: "prj_1", Slug: "web", VolumeNames: []string{"deplo-web-data", "deplo-web-db-data"}}},
+	}
+	for _, s := range []*Service{a, b} {
+		if _, err := s.SetClusterReplicas(context.Background(), req); err != nil {
+			t.Fatal(err)
+		}
+	}
+	copied := filepath.Join(b.replicas().dir("prj_1"), "volume-deplo-web-db-data", "data.txt")
+	eventually(t, "the new volume to reach b", func() bool {
+		raw, _ := os.ReadFile(copied)
+		st := replicaStatus(t, b, "prj_1")
+		return string(raw) == "one" && st.GetSynced() && st.GetError() == ""
+	})
+}
