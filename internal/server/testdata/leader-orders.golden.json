@@ -76,7 +76,8 @@
       "epoch": 0,
       "placement": null,
       "fenceSeconds": 5,
-      "announces": true
+      "announces": true,
+      "noExtension": true
     }
   },
   {
@@ -113,6 +114,7 @@
       "placement": null,
       "fenceSeconds": 5,
       "announces": true,
+      "noExtension": true,
       "return": true,
       "from": "leader"
     }

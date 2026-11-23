@@ -70,6 +70,9 @@ type Order struct {
 	// Announce says a lease of this cluster may live this many seconds more because of an extension that follows:
 	// kept, to tell a leader that takes over.
 	Announce int `json:"announce,omitempty"`
+	// NoExtension says no lease of this cluster lives on an extension any more: every member took a plain renewal
+	// since, or was silent past the longest one. A member forgets the extensions it heard announced.
+	NoExtension bool `json:"noExtension,omitempty"`
 	// Probe only asks whether this member takes the epoch. It renews nothing and changes nothing else, and a
 	// member that answers refuses every older epoch from then on.
 	Probe bool `json:"probe,omitempty"`
