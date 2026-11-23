@@ -393,6 +393,30 @@ func TestLease_aMemberSaysHowLongAnExtensionMayStillKeepALeaseAlive(t *testing.T
 	}
 }
 
+// The leader says the extension is over once every member took a plain renewal: nothing is unsure any more, and a
+// probe, which renews nothing, ends nothing.
+func TestLease_aLeaderEndsTheExtensionItAnnounced(t *testing.T) {
+	f := newGuard(t)
+	o := orderFor(3)
+	o.Announces, o.Announce = true, 370
+	if r := f.g.Renew(o); *r.Unsure != 370 {
+		t.Fatalf("after an announcement: %d, want 370", *r.Unsure)
+	}
+	o.Announce = 0
+	o.NoExtension = true
+	probe := o
+	probe.Probe = true
+	if r := f.g.Probe(probe); r.Unsure == nil || *r.Unsure != 370 {
+		t.Fatalf("a probe ended the extension: %v", r.Unsure)
+	}
+	if r := f.g.Renew(o); *r.Unsure != 0 {
+		t.Fatalf("the leader said no lease lives on an extension: %d, want 0", *r.Unsure)
+	}
+	if r := f.reopen().Renew(orderFor(3)); *r.Unsure == 0 {
+		t.Fatal("a leader that announces nothing may extend again")
+	}
+}
+
 // A lease file an older agent wrote kept no count: what leaders did meanwhile is unknown.
 func TestLease_aLeaseAnOlderAgentWroteIsUnsureForTheLongestLease(t *testing.T) {
 	f := newGuard(t)

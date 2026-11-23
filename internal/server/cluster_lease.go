@@ -300,6 +300,10 @@ func witness(prev, next *clusterLease, now time.Time, o lease.Order) {
 	if o.Announce > 0 {
 		next.Announced = latest(next.Announced, now.Add(min(time.Duration(o.Announce)*time.Second, lease.AnnouncedAtMost)))
 	}
+	// The leader's word that every member took a plain renewal since: the extension ended with the restart it covered.
+	if o.NoExtension && !o.Probe && o.Announces {
+		next.Announced, next.Unannounced = time.Time{}, time.Time{}
+	}
 }
 
 func latest(a, b time.Time) time.Time {

@@ -1,0 +1,199 @@
+[
+  {
+    "kind": "announce",
+    "order": {
+      "cluster": "clu_1",
+      "member": "srv_a",
+      "epoch": 0,
+      "placement": null,
+      "fenceSeconds": 5,
+      "announces": true,
+      "announce": 370
+    }
+  },
+  {
+    "kind": "extend",
+    "order": {
+      "cluster": "clu_1",
+      "member": "srv_a",
+      "epoch": 0,
+      "placement": null,
+      "extendSeconds": 300,
+      "fenceSeconds": 5,
+      "announces": true
+    }
+  },
+  {
+    "kind": "pre-vote+succeed+named",
+    "order": {
+      "cluster": "clu_1",
+      "member": "srv_a",
+      "epoch": 0,
+      "placement": null,
+      "from": "leader",
+      "preVote": true,
+      "succeed": true
+    }
+  },
+  {
+    "kind": "probe",
+    "order": {
+      "cluster": "clu_1",
+      "member": "srv_a",
+      "epoch": 0,
+      "placement": null,
+      "probe": true
+    }
+  },
+  {
+    "kind": "probe+named",
+    "order": {
+      "cluster": "clu_1",
+      "member": "srv_a",
+      "epoch": 0,
+      "placement": null,
+      "probe": true,
+      "from": "leader"
+    }
+  },
+  {
+    "kind": "probe+succeed+named",
+    "order": {
+      "cluster": "clu_1",
+      "member": "srv_a",
+      "epoch": 0,
+      "placement": null,
+      "probe": true,
+      "from": "leader",
+      "succeed": true
+    }
+  },
+  {
+    "kind": "renewal",
+    "order": {
+      "cluster": "clu_1",
+      "member": "srv_a",
+      "epoch": 0,
+      "placement": null,
+      "fenceSeconds": 5,
+      "announces": true,
+      "noExtension": true
+    }
+  },
+  {
+    "kind": "renewal+named",
+    "order": {
+      "cluster": "clu_1",
+      "member": "srv_a",
+      "epoch": 0,
+      "placement": null,
+      "fenceSeconds": 5,
+      "announces": true,
+      "from": "leader"
+    }
+  },
+  {
+    "kind": "return",
+    "order": {
+      "cluster": "clu_1",
+      "member": "srv_a",
+      "epoch": 0,
+      "placement": null,
+      "extendSeconds": 300,
+      "fenceSeconds": 5,
+      "announces": true,
+      "return": true
+    }
+  },
+  {
+    "kind": "return+named",
+    "order": {
+      "cluster": "clu_1",
+      "member": "srv_a",
+      "epoch": 0,
+      "placement": null,
+      "fenceSeconds": 5,
+      "announces": true,
+      "noExtension": true,
+      "return": true,
+      "from": "leader"
+    }
+  },
+  {
+    "kind": "start",
+    "order": {
+      "cluster": "clu_1",
+      "member": "srv_a",
+      "epoch": 0,
+      "placement": null,
+      "fenceSeconds": 5,
+      "announces": true,
+      "start": {
+        "deploymentId": "",
+        "slug": "web",
+        "projectId": "",
+        "imageRef": "",
+        "composeYaml": "",
+        "network": "",
+        "env": null,
+        "registryAuth": null,
+        "composeUpArgs": null
+      },
+      "return": true
+    }
+  },
+  {
+    "kind": "start-promote",
+    "order": {
+      "cluster": "clu_1",
+      "member": "srv_a",
+      "epoch": 0,
+      "placement": null,
+      "fenceSeconds": 5,
+      "announces": true,
+      "start": {
+        "deploymentId": "",
+        "slug": "web",
+        "projectId": "",
+        "imageRef": "",
+        "composeYaml": "",
+        "network": "",
+        "env": null,
+        "registryAuth": null,
+        "composeUpArgs": null,
+        "promote": {
+          "container": "",
+          "command": null
+        }
+      }
+    }
+  },
+  {
+    "kind": "start-restore",
+    "order": {
+      "cluster": "clu_1",
+      "member": "srv_a",
+      "epoch": 0,
+      "placement": null,
+      "fenceSeconds": 5,
+      "announces": true,
+      "start": {
+        "deploymentId": "",
+        "slug": "web",
+        "projectId": "",
+        "imageRef": "",
+        "composeYaml": "",
+        "network": "",
+        "env": null,
+        "registryAuth": null,
+        "composeUpArgs": null,
+        "restore": {
+          "backupId": "",
+          "takenAt": "",
+          "request": null
+        }
+      },
+      "return": true
+    }
+  }
+]
