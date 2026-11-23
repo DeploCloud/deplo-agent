@@ -115,6 +115,22 @@ func TestSuccession_aMemberNextInLineAsksTheLeaderBesideItToLead(t *testing.T) {
 		{"an extended lease, a planned restart", []string{"srv_a"}, 300, lease.PreVoteFor, nil},
 		{"an extended lease that ran out", []string{"srv_a"}, 300, 6 * time.Minute, []uint64{4}},
 	}
+	// On cluster eu an heir that led and could not renew its own server asked itself again every 10 s, each time at a
+	// newer epoch, and two heirs passed the cluster back and forth (epochs 4 to 34 in two minutes).
+	t.Run("not while the leader beside it holds the epoch", func(t *testing.T) {
+		f := newGuard(t)
+		got := &asks{}
+		f.g.succeed = got.ask
+		o := orderFor(3)
+		o.From, o.Line = "srv_a", []string{"srv_a"}
+		f.g.Renew(o)
+		f.clk.Add(time.Minute)
+		f.g.Check(context.Background())
+		f.g.work.Wait()
+		if e := got.epochs(); len(e) != 0 {
+			t.Fatalf("asked the leader beside it, which holds the epoch, again: %v", e)
+		}
+	})
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newGuard(t)

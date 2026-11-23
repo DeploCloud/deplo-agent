@@ -58,7 +58,9 @@ func (g *leaseGuard) askToLead(ctx context.Context, now time.Time) {
 	for id, c := range g.clusters {
 		k := slices.Index(c.Line, c.Member)
 		wait := lease.PreVoteFor + time.Duration(max(k, 0))*lease.SucceedStagger
-		if k < 0 || c.RenewedAt.IsZero() || g.asking[id] || now.Sub(c.RenewedAt) < wait || c.ExtraSeconds > 0 && !c.ranOut(now) {
+		// The leader beside this server is the one gone silent: asking it again only restarts it at a newer epoch.
+		self := c.Leader != "" && c.Leader == c.Member
+		if k < 0 || self || c.RenewedAt.IsZero() || g.asking[id] || now.Sub(c.RenewedAt) < wait || c.ExtraSeconds > 0 && !c.ranOut(now) {
 			if g.asked[id] != "" && (k < 0 || now.Sub(c.RenewedAt) < wait) {
 				delete(g.asked, id)
 			}
