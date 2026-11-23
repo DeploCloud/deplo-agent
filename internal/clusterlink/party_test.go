@@ -2,6 +2,7 @@ package clusterlink
 
 import (
 	"context"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -184,5 +185,34 @@ func TestPartyChecksTheRelaysCertificateUnlessGivenATransport(t *testing.T) {
 	}
 	if strict.Connected() != 0 {
 		t.Fatal("a party with no transport accepted a certificate nobody issued")
+	}
+}
+
+// eu, 23 Nov 2026: a party the relay does not name was let in and cut off again every few seconds, and the log said
+// "is up" and "connection ended" each time. The same quick end, again and again, is one state, said once.
+func TestARelayThatRefusesAPartyAgainAndAgainIsSaidOnce(t *testing.T) {
+	ca := testpki.New(t)
+	a := ca.Leaf(t, "a")
+	relay := testrelay.New(t, ca.Leaf(t, "relay"))
+	var mu sync.Mutex
+	var logged []string
+	p := New(Config{
+		Role:     wire.RoleMember,
+		Identity: func() (*wire.Identity, error) { return a, nil },
+		Relays:   func() []string { return []string{relay.URL} },
+		Logf: func(format string, args ...any) {
+			mu.Lock()
+			logged = append(logged, fmt.Sprintf(format, args...))
+			mu.Unlock()
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go p.Run(ctx)
+	time.Sleep(3500 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if len(logged) > 2 {
+		t.Fatalf("a party the relay keeps refusing wrote %d lines: %q", len(logged), logged)
 	}
 }
