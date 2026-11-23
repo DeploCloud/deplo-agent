@@ -30,7 +30,7 @@ func memberWithJobs(t *testing.T) (s *Service, clk *fakeClock, running func() bo
 	s = newTestService(t)
 	s.SetAgentDir(t.TempDir())
 	clk = &fakeClock{t: time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)}
-	s.leaseOnce.Do(func() { s.lease = newLeaseGuard(s.leaseFile(), clk.Now, s.fenceStacks) })
+	s.leaseOnce.Do(func() { s.lease = newLeaseGuard(s.leaseFile(), clk.Now, s.fenceStacks); t.Cleanup(s.lease.sync) })
 	return s, clk, func() bool {
 		_, err := os.Stat(mark)
 		return err == nil

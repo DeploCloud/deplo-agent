@@ -19,6 +19,9 @@ type succeedAsk struct {
 	Cluster   string        `json:"cluster"`
 	Epoch     uint64        `json:"epoch"`
 	Placement []lease.Entry `json:"placement"`
+	// Gone and Heard are what the last renewal said, Heard aged to now: the next leader goes on counting from there.
+	Gone  []string         `json:"gone,omitempty"`
+	Heard map[string]int64 `json:"heard,omitempty"`
 }
 
 // refuse says why this member does not take the order's epoch, "" when it does: an older epoch, this epoch from
@@ -27,7 +30,9 @@ func (g *leaseGuard) refuse(c *clusterLease, o lease.Order) string {
 	switch {
 	case c == nil:
 		return ""
-	case o.Epoch < c.Epoch, o.Epoch == c.Epoch && o.From != "" && c.Leader != "" && o.From != c.Leader:
+	// An epoch held by a named leader goes to no other, nor to one that names nobody; an unnamed holder (an older
+	// leader) is taken to be the one that names itself now.
+	case o.Epoch < c.Epoch, o.Epoch == c.Epoch && c.Leader != "" && o.From != c.Leader:
 		return lease.StaleEpoch
 	case o.Succeed && o.Epoch > c.Epoch && !c.RenewedAt.IsZero() && g.now().Sub(c.RenewedAt) < lease.PreVoteFor:
 		return lease.LeaderAlive
@@ -67,7 +72,7 @@ func (g *leaseGuard) askToLead(ctx context.Context, now time.Time) {
 			continue
 		}
 		g.asking[id] = true
-		asks = append(asks, succeedAsk{Cluster: id, Epoch: c.Epoch + uint64(k) + 1, Placement: slices.Clone(c.Placement)})
+		asks = append(asks, succeedAsk{Cluster: id, Epoch: c.Epoch + uint64(k) + 1, Placement: slices.Clone(c.Placement), Gone: slices.Clone(c.Gone), Heard: heardAgo(now, c.Heard)})
 	}
 	g.mu.Unlock()
 	for _, a := range asks {
@@ -89,6 +94,18 @@ func (g *leaseGuard) askToLead(ctx context.Context, now time.Time) {
 			}
 		}()
 	}
+}
+
+// heardAgo is how many milliseconds before now each member was last heard.
+func heardAgo(now time.Time, at map[string]time.Time) map[string]int64 {
+	if at == nil {
+		return nil
+	}
+	out := make(map[string]int64, len(at))
+	for id, t := range at {
+		out[id] = max(now.Sub(t).Milliseconds(), 0)
+	}
+	return out
 }
 
 // askLeaderToLead hands the leader beside this agent what it needs to lead a cluster without Deplo (leader.succeed).

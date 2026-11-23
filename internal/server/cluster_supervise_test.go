@@ -92,6 +92,7 @@ func supervisedMember(t *testing.T, saved map[string]*clusterLease) (*Service, *
 	}
 	s.leaseOnce.Do(func() {
 		s.lease = newLeaseGuard(s.leaseFile(), clk.Now, func(context.Context, []lease.Entry) error { return nil })
+		t.Cleanup(s.lease.sync)
 	})
 	fw := &fakeWriters{cs: map[string][]writerContainer{writer: {{ID: "c1", Name: writer, Service: writer, State: "exited",
 		Policy: "unless-stopped", ExitCode: 255}}}}
@@ -581,6 +582,7 @@ func TestHolders_aLeaseReadBackFromDiskHoldsNothingHere(t *testing.T) {
 		t.Fatal(err)
 	}
 	g := newLeaseGuard(file, clk.Now, func(context.Context, []lease.Entry) error { return nil })
+	t.Cleanup(g.sync)
 	if here, _ := g.holders("clu_1", "app", "prj_1"); here {
 		t.Fatal("a lease read back from disk answers for the copy here")
 	}
