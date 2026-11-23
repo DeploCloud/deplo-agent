@@ -72,10 +72,13 @@ func TestSuccession_anEpochGoesToOneLeaderOnly(t *testing.T) {
 	if r := f.g.Renew(b); r.OK || r.Error != lease.StaleEpoch || r.Epoch != 5 {
 		t.Fatalf("a second leader took the same epoch: %+v", r)
 	}
-	// eu, 23 Nov 2026: Deplo's machine and an heir both took epoch 65. A leader that names no server is refused an
-	// epoch a named one holds; an epoch an unnamed leader holds goes to the one that names itself, once.
-	if r := f.reopen().Renew(orderFor(5)); r.OK || r.Error != lease.StaleEpoch {
-		t.Fatalf("a leader that names no server took the epoch srv_a1 holds: %+v", r)
+	// eu, 23 Nov 2026 (agent canary.40): a leader's start orders name no server, and refusing them stopped every
+	// failover. An order that names nobody is taken at its leader's epoch, and the epoch stays that leader's.
+	if r := f.reopen().Renew(orderFor(5)); !r.OK {
+		t.Fatalf("a leader's order that names no server (a start, or an older leader) was refused: %+v", r)
+	}
+	if r := f.g.Renew(b); r.OK {
+		t.Fatalf("after an unnamed order, a second leader took epoch 5: %+v", r)
 	}
 	g := newGuard(t)
 	if r := g.g.Renew(orderFor(7)); !r.OK {
@@ -92,8 +95,8 @@ func TestSuccession_anEpochGoesToOneLeaderOnly(t *testing.T) {
 	}
 }
 
-// Every order that can give an epoch, in every order from two named leaders and an older one that names nobody: once
-// a named leader holds the epoch, no other is answered for it.
+// Every order that can give an epoch, in every order from two named leaders and one that names nobody (a start
+// order, or an older leader): once a named leader holds the epoch, no other named one is answered for it.
 func TestSuccession_noSequenceOfOrdersGivesOneEpochToTwoLeaders(t *testing.T) {
 	kinds := []string{"renew", "probe", "succeed", "prevote"}
 	send := func(g *leaseGuard, kind, from string) bool {
@@ -131,7 +134,7 @@ func TestSuccession_noSequenceOfOrdersGivesOneEpochToTwoLeaders(t *testing.T) {
 					if !send(f.g, step.kind, step.from) {
 						continue
 					}
-					if holder != "" && step.from != holder {
+					if holder != "" && step.from != "" && step.from != holder {
 						t.Fatalf("%s, %s, %s: epoch 9 went to %q after %q", k1, k2, k3, step.from, holder)
 					}
 					if step.from != "" {
@@ -231,5 +234,26 @@ func TestSuccession_aMemberBackOnLineReadsTheLineItIsGivenNow(t *testing.T) {
 	f.g.work.Wait()
 	if e := got.epochs(); len(e) != 0 {
 		t.Fatalf("a member that is no longer heir asked %v", e)
+	}
+}
+
+// eu, 23 Nov 2026: with agent canary.40 the heir that led eu-3 had its start of memos refused as "stale_epoch" every
+// 31 s for 6 minutes, because the leader names no server on a start order. A start at the leader's epoch is taken.
+func TestSuccession_aStartOrderThatNamesNoServerIsTakenAtItsLeadersEpoch(t *testing.T) {
+	f := newGuard(t)
+	o := orderFor(69)
+	o.From = "srv_heir"
+	if r := f.g.Probe(o); !r.OK {
+		t.Fatalf("the heir's probe got %+v", r)
+	}
+	start := orderFor(69)
+	start.Start = &lease.Start{Slug: "files"}
+	if r := f.g.Renew(start); !r.OK {
+		t.Fatalf("the heir's start order got %+v", r)
+	}
+	other := orderFor(69)
+	other.From = "srv_other"
+	if r := f.g.Renew(other); r.OK {
+		t.Fatalf("after the start, another leader took the heir's epoch: %+v", r)
 	}
 }

@@ -443,7 +443,7 @@ func (g *leaseGuard) Renew(o lease.Order) lease.Reply {
 
 // taking says whether an order hands this member an epoch, or a leader, it does not hold; the caller holds g.mu.
 func taking(c *clusterLease, o lease.Order) bool {
-	return c == nil || c.Epoch != o.Epoch || c.Leader != o.From
+	return c == nil || c.Epoch != o.Epoch || o.From != "" && c.Leader != o.From
 }
 
 func (g *leaseGuard) renew(o lease.Order) (lease.Reply, bool) {
@@ -452,7 +452,13 @@ func (g *leaseGuard) renew(o lease.Order) (lease.Reply, bool) {
 	if c := g.clusters[o.Cluster]; g.refuse(c, o) != "" {
 		return lease.Reply{Error: g.refuse(c, o), Epoch: c.Epoch}, false
 	}
-	taken := taking(g.clusters[o.Cluster], o)
+	prev := g.clusters[o.Cluster]
+	taken := taking(prev, o)
+	from := o.From
+	// An order that names nobody keeps the leader its epoch was given to: one epoch stays one leader's.
+	if from == "" && prev != nil && prev.Epoch == o.Epoch {
+		from = prev.Leader
+	}
 	g.endOlderStarts(o.Cluster, o.Epoch)
 	// The leader's word replaces the stand-in for an unreadable file: what that stopped comes back as held.
 	if u := g.clusters[unreadableLease]; u != nil && g.clusters[o.Cluster] == nil {
@@ -460,7 +466,7 @@ func (g *leaseGuard) renew(o lease.Order) (lease.Reply, bool) {
 	}
 	delete(g.clusters, unreadableLease)
 	next := &clusterLease{Epoch: o.Epoch, PlacedAt: o.Epoch, Member: o.Member, RenewedAt: g.now(), Boot: bootID(), Placement: o.Placement, heard: true, ExtraSeconds: min(max(o.ExtendSeconds, 0), int(lease.ExtendFor/time.Second)),
-		FenceSeconds: min(max(o.FenceSeconds, 0), int(lease.FenceAfter/time.Second)), Gone: o.Gone, Leader: o.From, Line: o.Line, Last: o.Last, Heard: heardAt(g.now(), o.Heard)}
+		FenceSeconds: min(max(o.FenceSeconds, 0), int(lease.FenceAfter/time.Second)), Gone: o.Gone, Leader: from, Line: o.Line, Last: o.Last, Heard: heardAt(g.now(), o.Heard)}
 	g.confirmStarts(o)
 	witness(g.clusters[o.Cluster], next, g.now(), o)
 	r := lease.Reply{OK: true, Epoch: o.Epoch, StoppedWithin: int((next.fence() + fenceTakes()).Seconds()), Unsure: next.unsure(g.now())}
@@ -608,7 +614,7 @@ func (g *leaseGuard) probe(o lease.Order) (lease.Reply, bool) {
 	case c == nil:
 		c = &clusterLease{Epoch: o.Epoch, Member: o.Member, Leader: o.From}
 		g.clusters[o.Cluster] = c
-	default:
+	case o.From != "" || c.Epoch != o.Epoch:
 		c.Epoch, c.Leader = o.Epoch, o.From
 	}
 	witness(nil, c, g.now(), o)

@@ -30,9 +30,9 @@ func (g *leaseGuard) refuse(c *clusterLease, o lease.Order) string {
 	switch {
 	case c == nil:
 		return ""
-	// An epoch held by a named leader goes to no other, nor to one that names nobody; an unnamed holder (an older
-	// leader) is taken to be the one that names itself now.
-	case o.Epoch < c.Epoch, o.Epoch == c.Epoch && c.Leader != "" && o.From != c.Leader:
+	// An epoch held by a named leader goes to no other named one. An order that names nobody is its leader's own
+	// start, promotion or copy back (no leader names itself there), or an older leader's.
+	case o.Epoch < c.Epoch, o.Epoch == c.Epoch && o.From != "" && c.Leader != "" && o.From != c.Leader:
 		return lease.StaleEpoch
 	case o.Succeed && o.Epoch > c.Epoch && !c.RenewedAt.IsZero() && g.now().Sub(c.RenewedAt) < lease.PreVoteFor:
 		return lease.LeaderAlive
