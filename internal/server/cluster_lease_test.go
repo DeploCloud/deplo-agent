@@ -48,11 +48,16 @@ func newGuard(t *testing.T) *guardFixture {
 	t.Helper()
 	f := &guardFixture{clk: &fakeClock{t: time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)}, file: filepath.Join(t.TempDir(), "lease.json")}
 	f.g = f.reopen()
+	// The lease file is written off the lock: the last write ends before the directory goes.
+	t.Cleanup(func() { f.g.sync() })
 	return f
 }
 
 // reopen is the agent starting again: the leases come back from the file.
 func (f *guardFixture) reopen() *leaseGuard {
+	if f.g != nil {
+		f.g.sync()
+	}
 	f.g = newLeaseGuard(f.file, f.clk.Now, func(_ context.Context, es []lease.Entry) error {
 		if f.failing {
 			return errors.New("docker did not answer")

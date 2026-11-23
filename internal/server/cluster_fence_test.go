@@ -114,7 +114,7 @@ func fencedMember(t *testing.T) (*Service, *fakeClock) {
 	s := newTestService(t)
 	s.SetAgentDir(t.TempDir())
 	clk := &fakeClock{t: time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)}
-	s.leaseOnce.Do(func() { s.lease = newLeaseGuard(s.leaseFile(), clk.Now, s.fenceStacks) })
+	s.leaseOnce.Do(func() { s.lease = newLeaseGuard(s.leaseFile(), clk.Now, s.fenceStacks); t.Cleanup(s.lease.sync) })
 	s.lease.Renew(lease.Order{Cluster: "clu_1", Member: "srv_a", Epoch: 1, Placement: fenceEntries(fenceA)})
 	return s, clk
 }

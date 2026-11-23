@@ -87,6 +87,9 @@ type Order struct {
 	Gone []string `json:"gone,omitempty"`
 	// From is the server the leader runs on: a member gives each epoch to one leader only.
 	From string `json:"from,omitempty"`
+	// Heard is how many milliseconds ago each member last answered a leader of this cluster: an heir that takes over
+	// goes on counting from there, so a member already lost is gone on the same clock (ADR-0043).
+	Heard map[string]int64 `json:"heard,omitempty"`
 	// Line is the members that lead after this leader, heir first, and Last Deplo's machine, which comes after them.
 	Line []string `json:"line,omitempty"`
 	Last string   `json:"last,omitempty"`

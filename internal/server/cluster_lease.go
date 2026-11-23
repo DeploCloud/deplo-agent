@@ -66,11 +66,16 @@ type clusterLease struct {
 	// Line and Last are who leads after that leader, as its last renewal named them.
 	Line []string `json:"line,omitempty"`
 	Last string   `json:"last,omitempty"`
+	// Heard is when that leader last heard each member, by this server's clock: an heir it asks to lead goes on from there.
+	Heard map[string]time.Time `json:"heard,omitempty"`
 	// cold is a lease that was dead when this agent started after the server itself did: Docker brought every
 	// stack back, so nothing of it runs until the leader speaks. An agent that only restarted fences as usual.
 	cold bool
 	// heard is a lease a leader renewed since this agent started; one read back from disk says where things were.
 	heard bool
+	// toldStop and stopErr are what the log said of this lease running out, so a stop tried again is not said again.
+	toldStop bool
+	stopErr  string
 	// since is when the return under way began, and asked whether the leader has said it moved this member's work.
 	since time.Time
 	asked bool
@@ -213,13 +218,21 @@ type leaseGuard struct {
 	succeed func(ctx context.Context, a succeedAsk) error
 	asking  map[string]bool
 	asked   map[string]string
+	// unsaved is the newest leases to write and version their number; written is the last on disk (see save). All three
+	// under mu; wmu keeps one write at a time.
+	unsaved          []byte
+	version, written uint64
+	writing          bool
+	wmu              sync.Mutex
+	// relinquished is the member each stack was last said to run on, so the stop is said once (see relinquishLocked).
+	relinquished map[string]string
 }
 
 // unreadableLease names the lease a file that would not open stands for: one that ran out, of nobody knows what.
 const unreadableLease = "unreadable"
 
 func newLeaseGuard(file string, now func() time.Time, fence func(context.Context, []lease.Entry) error) *leaseGuard {
-	g := &leaseGuard{file: file, now: now, fence: fence, clusters: map[string]*clusterLease{}, settling: map[string]bool{}, relinquishing: map[string]bool{}, starting: map[string]time.Time{}, keeps: map[string]map[string]lease.Keep{}, stores: map[string][]lease.Store{}, retryAt: map[string]time.Time{}, retryWait: map[string]time.Duration{}, logf: stderrf, asking: map[string]bool{}, asked: map[string]string{}}
+	g := &leaseGuard{file: file, now: now, fence: fence, clusters: map[string]*clusterLease{}, settling: map[string]bool{}, relinquishing: map[string]bool{}, starting: map[string]time.Time{}, keeps: map[string]map[string]lease.Keep{}, stores: map[string][]lease.Store{}, retryAt: map[string]time.Time{}, retryWait: map[string]time.Duration{}, logf: stderrf, asking: map[string]bool{}, asked: map[string]string{}, relinquished: map[string]string{}}
 	if raw, err := os.ReadFile(file); err == nil {
 		if err := json.Unmarshal(raw, &g.clusters); err != nil {
 			fmt.Fprintf(os.Stderr, "deplo-agent: the cluster lease in %s cannot be read (%v): taken as a lease that ran out\n", file, err)
@@ -308,7 +321,14 @@ var bootID = func() string {
 	return strings.TrimSpace(string(raw))
 }
 
-// save writes the leases; the caller holds g.mu.
+// writeLease writes the lease file; a var so a test can make the disk hang.
+var writeLease = writeFileAtomic
+
+// leaseWritesInline has save write under the lock, as before: tests set it, so no write lands after their directory is gone.
+var leaseWritesInline bool
+
+// save has the leases written, off the lock; the caller holds g.mu. On eu (23 Nov 2026) a sync took 6 s while a new
+// App's data was copied to every member of one host's disk, and every renewal waited on it under g.mu: all fenced.
 func (g *leaseGuard) save() {
 	if g.file == "" {
 		return
@@ -317,8 +337,57 @@ func (g *leaseGuard) save() {
 	out := maps.Clone(g.clusters)
 	delete(out, unreadableLease)
 	raw, err := json.Marshal(out)
-	if err == nil {
-		err = writeFileAtomic(g.file, raw, 0o600)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "deplo-agent: could not keep the cluster lease in %s: %v\n", g.file, err)
+		return
+	}
+	g.queue(raw)
+}
+
+// queue makes raw the next lease file, nil none; the caller holds g.mu.
+func (g *leaseGuard) queue(raw []byte) {
+	g.unsaved, g.version = raw, g.version+1
+	if leaseWritesInline {
+		g.write(raw)
+		g.written = g.version
+		return
+	}
+	if !g.writing {
+		g.writing = true
+		g.work.Add(1)
+		go func() {
+			defer g.work.Done()
+			g.sync()
+		}()
+	}
+}
+
+// sync writes the newest leases save asked for, unless they are on disk already; the caller does not hold g.mu.
+func (g *leaseGuard) sync() {
+	g.wmu.Lock()
+	defer g.wmu.Unlock()
+	g.mu.Lock()
+	raw, v, done := g.unsaved, g.version, g.written
+	g.writing = false
+	g.mu.Unlock()
+	if v == done || g.file == "" {
+		return
+	}
+	g.write(raw)
+	g.mu.Lock()
+	g.written = max(g.written, v)
+	g.mu.Unlock()
+}
+
+// write puts raw in the lease file, or removes it for nil.
+func (g *leaseGuard) write(raw []byte) {
+	var err error
+	if raw == nil {
+		if err = os.Remove(g.file); os.IsNotExist(err) {
+			err = nil
+		}
+	} else {
+		err = writeLease(g.file, raw, 0o600)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "deplo-agent: could not keep the cluster lease in %s: %v\n", g.file, err)
@@ -362,13 +431,28 @@ func (g *leaseGuard) Admit(cluster string, epoch uint64) (held uint64, ok bool) 
 	return epoch, true
 }
 
-// Renew applies one renewal: it takes the epoch and the placement, and starts the lease over.
+// Renew applies one renewal: it takes the epoch and the placement, and starts the lease over. A new epoch, or a
+// new leader, is on disk before it answers; a plain renewal is written after.
 func (g *leaseGuard) Renew(o lease.Order) lease.Reply {
+	r, taken := g.renew(o)
+	if taken {
+		g.sync()
+	}
+	return r
+}
+
+// taking says whether an order hands this member an epoch, or a leader, it does not hold; the caller holds g.mu.
+func taking(c *clusterLease, o lease.Order) bool {
+	return c == nil || c.Epoch != o.Epoch || c.Leader != o.From
+}
+
+func (g *leaseGuard) renew(o lease.Order) (lease.Reply, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if c := g.clusters[o.Cluster]; g.refuse(c, o) != "" {
-		return lease.Reply{Error: g.refuse(c, o), Epoch: c.Epoch}
+		return lease.Reply{Error: g.refuse(c, o), Epoch: c.Epoch}, false
 	}
+	taken := taking(g.clusters[o.Cluster], o)
 	g.endOlderStarts(o.Cluster, o.Epoch)
 	// The leader's word replaces the stand-in for an unreadable file: what that stopped comes back as held.
 	if u := g.clusters[unreadableLease]; u != nil && g.clusters[o.Cluster] == nil {
@@ -376,7 +460,7 @@ func (g *leaseGuard) Renew(o lease.Order) lease.Reply {
 	}
 	delete(g.clusters, unreadableLease)
 	next := &clusterLease{Epoch: o.Epoch, PlacedAt: o.Epoch, Member: o.Member, RenewedAt: g.now(), Boot: bootID(), Placement: o.Placement, heard: true, ExtraSeconds: min(max(o.ExtendSeconds, 0), int(lease.ExtendFor/time.Second)),
-		FenceSeconds: min(max(o.FenceSeconds, 0), int(lease.FenceAfter/time.Second)), Gone: o.Gone, Leader: o.From, Line: o.Line, Last: o.Last}
+		FenceSeconds: min(max(o.FenceSeconds, 0), int(lease.FenceAfter/time.Second)), Gone: o.Gone, Leader: o.From, Line: o.Line, Last: o.Last, Heard: heardAt(g.now(), o.Heard)}
 	g.confirmStarts(o)
 	witness(g.clusters[o.Cluster], next, g.now(), o)
 	r := lease.Reply{OK: true, Epoch: o.Epoch, StoppedWithin: int((next.fence() + fenceTakes()).Seconds()), Unsure: next.unsure(g.now())}
@@ -388,7 +472,19 @@ func (g *leaseGuard) Renew(o lease.Order) lease.Reply {
 		g.stores[o.Cluster] = o.Stores
 	}
 	g.save()
-	return r
+	return r, taken
+}
+
+// heardAt turns an order's "heard so many milliseconds ago" into times on this server's clock.
+func heardAt(now time.Time, ago map[string]int64) map[string]time.Time {
+	if ago == nil {
+		return nil
+	}
+	out := make(map[string]time.Time, len(ago))
+	for id, ms := range ago {
+		out[id] = now.Add(-time.Duration(max(ms, 0)) * time.Millisecond)
+	}
+	return out
 }
 
 // relinquishLocked stops every single-writer stack a current lease places on another member and on none of its
@@ -420,11 +516,20 @@ func (g *leaseGuard) relinquishLocked(cluster string, c *clusterLease) {
 			away[e.Slug] = e.Member
 		}
 	}
+	for slug := range g.relinquished {
+		if _, still := away[slug]; !still || here[slug] {
+			delete(g.relinquished, slug)
+		}
+	}
 	for slug, member := range away {
 		if _, starting := g.starting[slug]; here[slug] || starting || g.relinquishing[slug] || g.has != nil && !g.has(slug) {
 			continue
 		}
-		g.logf("deplo-agent: cluster %s: stopping %s here: the lease places it on %s (lease %s)", cluster, slug, member, c.leaseAge(g.now()))
+		// Every renewal asks again while the copy is there, stopped or not: said once per member it runs on.
+		if g.relinquished[slug] != member {
+			g.relinquished[slug] = member
+			g.logf("deplo-agent: cluster %s: stopping %s here: the lease places it on %s (lease %s)", cluster, slug, member, c.leaseAge(g.now()))
+		}
 		g.relinquishing[slug] = true
 		g.work.Add(1)
 		go func() {
@@ -485,12 +590,21 @@ func (g *leaseGuard) runningOf(placed []string, epoch uint64) []lease.Writer {
 // Probe answers a leader that is not sure it still leads: the epoch is taken and nothing else changes. The
 // lease is as old as it was, so a leader that hears too few members to lead never keeps this one alive.
 func (g *leaseGuard) Probe(o lease.Order) lease.Reply {
+	r, taken := g.probe(o)
+	if taken {
+		g.sync()
+	}
+	return r
+}
+
+func (g *leaseGuard) probe(o lease.Order) (lease.Reply, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	c := g.clusters[o.Cluster]
+	taken := taking(c, o)
 	switch why := g.refuse(c, o); {
 	case why != "":
-		return lease.Reply{Error: why, Epoch: c.Epoch}
+		return lease.Reply{Error: why, Epoch: c.Epoch}, false
 	case c == nil:
 		c = &clusterLease{Epoch: o.Epoch, Member: o.Member, Leader: o.From}
 		g.clusters[o.Cluster] = c
@@ -500,7 +614,7 @@ func (g *leaseGuard) Probe(o lease.Order) lease.Reply {
 	witness(nil, c, g.now(), o)
 	g.endOlderStarts(o.Cluster, o.Epoch)
 	g.save()
-	return lease.Reply{OK: true, Epoch: o.Epoch, Unsure: c.unsure(g.now())}
+	return lease.Reply{OK: true, Epoch: o.Epoch, Unsure: c.unsure(g.now())}, taken
 }
 
 // Check stops the single-writer workloads of every lease that has run out, once each. A stop that fails is tried again on the next check.
@@ -523,9 +637,13 @@ func (g *leaseGuard) Check(ctx context.Context) {
 		for _, e := range c.Placement {
 			if g.fences(c, e) {
 				mine = append(mine, e)
-				g.logf("deplo-agent: cluster %s: stopping %s here: %s (lease %s)", id, e.Slug, g.stopReason(c, e), age)
+				// A stop that failed is tried every check: the decision is said once per lease.
+				if !c.toldStop {
+					g.logf("deplo-agent: cluster %s: stopping %s here: %s (lease %s)", id, e.Slug, g.stopReason(c, e), age)
+				}
 			}
 		}
+		c.toldStop = true
 		todo = append(todo, due{id, mine})
 	}
 	g.mu.Unlock()
@@ -533,10 +651,11 @@ func (g *leaseGuard) Check(ctx context.Context) {
 	for _, d := range todo {
 		held := g.runningNow(ctx, d.entries)
 		err := g.fence(ctx, d.entries)
-		if err != nil {
+		g.mu.Lock()
+		if c := g.clusters[d.cluster]; err != nil && c != nil && c.stopErr != err.Error() {
+			c.stopErr = err.Error()
 			fmt.Fprintf(os.Stderr, "deplo-agent: cluster %s: lease ran out, could not stop its workloads: %v\n", d.cluster, err)
 		}
-		g.mu.Lock()
 		// What stopped is held either way, also when a stack still runs; a renewal that landed while stopping wins
 		// and starts it again at once. A stop that failed is not fenced, so the next check tries it again.
 		if c := g.clusters[d.cluster]; c != nil {
@@ -553,6 +672,10 @@ func (g *leaseGuard) Check(ctx context.Context) {
 			g.save()
 		}
 		g.mu.Unlock()
+	}
+	// What a fence stopped is held across a restart: started again once the leader says so.
+	if len(todo) > 0 {
+		g.sync()
 	}
 }
 
@@ -601,13 +724,14 @@ func (g *leaseGuard) RanOut() bool {
 
 // Forget drops everything held for a cluster this agent has left.
 func (g *leaseGuard) Forget() {
+	defer g.sync()
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.clusters = map[string]*clusterLease{}
 	g.keeps = map[string]map[string]lease.Keep{}
 	g.stores = map[string][]lease.Store{}
 	if g.file != "" {
-		_ = os.Remove(g.file)
+		g.queue(nil)
 	}
 }
 

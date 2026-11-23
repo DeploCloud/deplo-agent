@@ -121,16 +121,21 @@ func (p *Party) Run(ctx context.Context) {
 
 func (p *Party) keep(ctx context.Context, relay string) {
 	backoff := minBackoff
+	// A relay that ends the link at once, again and again for the same reason, is one state: said once.
+	said, stable := "", true
 	for ctx.Err() == nil {
 		started := time.Now()
-		err := p.hold(ctx, relay)
+		err := p.hold(ctx, relay, stable)
 		if ctx.Err() != nil {
 			return
 		}
-		if time.Since(started) > 30*time.Second {
+		if stable = time.Since(started) > 30*time.Second; stable {
 			backoff = minBackoff
 		}
-		p.cfg.Logf("deplo-cluster: relay %s: %v (retrying)", relay, err)
+		if stable || err.Error() != said {
+			said = err.Error()
+			p.cfg.Logf("deplo-cluster: relay %s: %v (retrying)", relay, err)
+		}
 		select {
 		case <-ctx.Done():
 		case <-time.After(backoff/2 + rand.N(backoff/2+1)):
@@ -139,8 +144,8 @@ func (p *Party) keep(ctx context.Context, relay string) {
 	}
 }
 
-// hold keeps one connection to the relay until it ends.
-func (p *Party) hold(ctx context.Context, relay string) error {
+// hold keeps one connection to the relay until it ends; announce says when it is up.
+func (p *Party) hold(ctx context.Context, relay string, announce bool) error {
 	id, err := p.cfg.Identity()
 	if err != nil {
 		return err
@@ -181,7 +186,14 @@ func (p *Party) hold(ctx context.Context, relay string) error {
 	defer mux.Close()
 	p.set(relay, mux)
 	defer p.unset(relay, mux)
-	p.cfg.Logf("deplo-cluster: relay %s is up", relay)
+	up := func() { p.cfg.Logf("deplo-cluster: relay %s is up", relay) }
+	if announce {
+		up()
+	} else {
+		// After the same quick end again and again, it is news once it stays up.
+		t := time.AfterFunc(30*time.Second, up)
+		defer t.Stop()
+	}
 	for {
 		st, err := mux.AcceptStream()
 		if err != nil {

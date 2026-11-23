@@ -72,8 +72,74 @@ func TestSuccession_anEpochGoesToOneLeaderOnly(t *testing.T) {
 	if r := f.g.Renew(b); r.OK || r.Error != lease.StaleEpoch || r.Epoch != 5 {
 		t.Fatalf("a second leader took the same epoch: %+v", r)
 	}
-	if r := f.reopen().Renew(orderFor(5)); !r.OK {
-		t.Fatalf("a leader that names no server (an older one) was refused: %+v", r)
+	// eu, 23 Nov 2026: Deplo's machine and an heir both took epoch 65. A leader that names no server is refused an
+	// epoch a named one holds; an epoch an unnamed leader holds goes to the one that names itself, once.
+	if r := f.reopen().Renew(orderFor(5)); r.OK || r.Error != lease.StaleEpoch {
+		t.Fatalf("a leader that names no server took the epoch srv_a1 holds: %+v", r)
+	}
+	g := newGuard(t)
+	if r := g.g.Renew(orderFor(7)); !r.OK {
+		t.Fatalf("an older leader's renewal got %+v", r)
+	}
+	named := orderFor(7)
+	named.From = "srv_a1"
+	if r := g.g.Renew(named); !r.OK {
+		t.Fatalf("the same leader, updated to name its server, was refused: %+v", r)
+	}
+	named.From = "srv_b1"
+	if r := g.g.Renew(named); r.OK {
+		t.Fatalf("a second named leader took epoch 7: %+v", r)
+	}
+}
+
+// Every order that can give an epoch, in every order from two named leaders and an older one that names nobody: once
+// a named leader holds the epoch, no other is answered for it.
+func TestSuccession_noSequenceOfOrdersGivesOneEpochToTwoLeaders(t *testing.T) {
+	kinds := []string{"renew", "probe", "succeed", "prevote"}
+	send := func(g *leaseGuard, kind, from string) bool {
+		o := orderFor(9)
+		o.From = from
+		switch kind {
+		case "probe":
+			o.Probe = true
+			return g.Probe(o).OK
+		case "succeed":
+			o.Succeed = true
+			return g.Renew(o).OK
+		case "prevote":
+			o.PreVote, o.Succeed = true, true
+			g.PreVote(o)
+			return false // a pre-vote takes nothing
+		}
+		return g.Renew(o).OK
+	}
+	for _, k1 := range kinds {
+		for _, k2 := range kinds {
+			for _, k3 := range kinds {
+				f := newGuard(t)
+				// A leader of epoch 8 went silent long ago, so a Succeed order is not refused for it.
+				old := orderFor(8)
+				old.From = "srv_old"
+				f.g.Renew(old)
+				f.clk.Add(time.Minute)
+				holder := ""
+				for i, step := range []struct{ kind, from string }{{k1, "srv_a1"}, {k2, ""}, {k3, "srv_b1"}} {
+					// The last order comes after a restart: what was given is read back from disk.
+					if i == 2 {
+						f.g = f.reopen()
+					}
+					if !send(f.g, step.kind, step.from) {
+						continue
+					}
+					if holder != "" && step.from != holder {
+						t.Fatalf("%s, %s, %s: epoch 9 went to %q after %q", k1, k2, k3, step.from, holder)
+					}
+					if step.from != "" {
+						holder = step.from
+					}
+				}
+			}
+		}
 	}
 }
 
