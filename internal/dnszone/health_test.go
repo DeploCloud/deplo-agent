@@ -113,18 +113,24 @@ func TestDecide_aPartitionOfFive(t *testing.T) {
 	}
 }
 
-func TestDecide_warmingAnswersTheLastAgreedSet(t *testing.T) {
+func TestDecide_warmingNamesNothingUntilItHearsEveryServer(t *testing.T) {
 	now := time.Now()
 	last := &Agreed{Servers: []string{"s0", "s1", "s2"}, Addrs: Addrs{V4: []string{"203.0.113.1", "203.0.113.2", "203.0.113.3"}}}
-	v := Decide(members(3), "s0", nil, now, 10*time.Second, true, last)
-	if v.State != StateWarming || len(v.Servers) != 3 {
+	// Back with its old set and hearing a majority: still nothing from the old set, nothing at all.
+	v := Decide(members(3), "s0", heardFrom(now, "s1"), now, 10*time.Second, true, last)
+	if v.State != StateWarming || len(v.Servers) != 0 || len(v.Addrs.V4) != 0 {
 		t.Fatalf("%+v", v)
 	}
-	if v := Decide(members(3), "s0", nil, now, 10*time.Second, true, nil); v.State != StateFail {
+	if v := Decide(members(3), "s0", nil, now, 10*time.Second, true, nil); v.State != StateWarming || len(v.Servers) != 0 {
 		t.Fatalf("nothing agreed: %+v", v)
 	}
+	// Hearing every server, it answers what it hears now, not what it agreed before.
+	v = Decide(members(3), "s0", heardFrom(now, "s1", "s2"), now, 10*time.Second, true, &Agreed{Servers: []string{"s9"}})
+	if v.State != StateAnswer || !slices.Equal(v.Servers, []string{"s0", "s1", "s2"}) {
+		t.Fatalf("heard all: %+v", v)
+	}
 	// A cluster of one is always a majority of itself.
-	if v := Decide(members(1), "s0", nil, now, 10*time.Second, false, nil); v.State != StateAnswer || len(v.Servers) != 1 {
+	if v := Decide(members(1), "s0", nil, now, 10*time.Second, true, nil); v.State != StateAnswer || len(v.Servers) != 1 {
 		t.Fatalf("one server: %+v", v)
 	}
 }
@@ -139,15 +145,15 @@ func TestDecideHolding_aHeldServerCountsButIsNamedNowhere(t *testing.T) {
 		!slices.Equal(v.Addrs.V4, []string{"203.0.113.1", "203.0.113.2"}) {
 		t.Fatalf("verdict %+v", v)
 	}
-	// Starting, it answers the last agreed set without the held one.
+	// Starting and hearing every server, it answers them without the held one.
 	last := &Agreed{Servers: []string{"s0", "s1", "s2"}, Addrs: Addrs{V4: []string{"203.0.113.1", "203.0.113.2", "203.0.113.3"}}}
 	v = DecideHolding(m, "s0", heardFrom(now, "s1", "s2"), now, 10*time.Second, true, last, map[string]bool{"s0": true})
-	if v.State != StateWarming || !slices.Equal(v.Servers, []string{"s1", "s2"}) ||
+	if v.State != StateAnswer || !slices.Equal(v.Servers, []string{"s1", "s2"}) ||
 		!slices.Equal(v.Addrs.V4, []string{"203.0.113.2", "203.0.113.3"}) {
 		t.Fatalf("warming %+v", v)
 	}
-	// Holding every server it agreed on would answer nothing: it answers the set as it was.
-	v = DecideHolding(m, "s0", heardFrom(now, "s1", "s2"), now, 10*time.Second, true, last, map[string]bool{"s0": true, "s1": true, "s2": true})
+	// Holding every server it hears would answer nothing: it answers the last agreed set.
+	v = DecideHolding(m, "s0", heardFrom(now, "s1", "s2"), now, 10*time.Second, false, last, map[string]bool{"s0": true, "s1": true, "s2": true})
 	if !slices.Equal(v.Addrs.V4, last.Addrs.V4) {
 		t.Fatalf("all held %+v", v)
 	}
@@ -172,8 +178,8 @@ func TestDecideLed_aGoneMemberLeavesTheCountAndHalfIsEnough(t *testing.T) {
 	if !slices.Equal(v.Servers, []string{"s0", "s1"}) {
 		t.Fatalf("s2 heard while gone: %+v", v)
 	}
-	// Warming still answers the last agreed set.
-	if v := DecideLed(m, nil, "s0", heardFrom(now), now, 10*time.Second, true, stale, nil); v.State != StateWarming {
+	// Warming names nothing, the last agreed set included.
+	if v := DecideLed(m, nil, "s0", heardFrom(now), now, 10*time.Second, true, stale, nil); v.State != StateWarming || len(v.Servers) != 0 {
 		t.Fatalf("warming: %+v", v)
 	}
 }

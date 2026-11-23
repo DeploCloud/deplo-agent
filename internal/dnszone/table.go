@@ -48,7 +48,9 @@ type Zone struct {
 	// NameServers are ns1, ns2, ... of the zone, in that order.
 	NameServers []Addrs `json:"ns"`
 	// Fail answers SERVFAIL for every name of the zone: this server hears too few of its cluster.
-	Fail    bool  `json:"fail,omitempty"`
+	Fail bool `json:"fail,omitempty"`
+	// Quiet answers nothing for the zone but which server this is: just started, it has not heard its cluster yet.
+	Quiet   bool  `json:"quiet,omitempty"`
 	Servers Addrs `json:"servers"`
 	// Near is Servers one server at a time, where each is, so a visitor is answered with the nearest; empty answers
 	// every one of Servers. It names exactly the addresses of Servers, so geography never adds a server health left out.
@@ -156,6 +158,7 @@ type zone struct {
 	inner   map[string]bool // names with no records of their own that lead to one: NODATA, not NXDOMAIN
 	ns      []nameServer
 	fail    bool
+	quiet   bool
 	servers addrSet
 	near    []place
 	homes   map[string]addrSet
@@ -207,7 +210,7 @@ func compile(t *Table) (*compiled, error) {
 		if raw.TTL == 0 || raw.TTL > 86400 {
 			return nil, fmt.Errorf("zone %s: a TTL of %d s", name, raw.TTL)
 		}
-		z := &zone{name: name, names: map[string]bool{}, inner: map[string]bool{}, txt: map[string][]string{}, fail: raw.Fail,
+		z := &zone{name: name, names: map[string]bool{}, inner: map[string]bool{}, txt: map[string][]string{}, fail: raw.Fail, quiet: raw.Quiet,
 			ttl: raw.TTL, serial: raw.Serial, ident: t.Ident}
 		if z.servers, err = parseAddrs(raw.Servers); err != nil {
 			return nil, fmt.Errorf("zone %s: %w", name, err)

@@ -283,7 +283,7 @@ func (c *zoneCluster) tableZones(v dnszone.Verdict, txt map[string]txtState) []d
 	near := c.near(v)
 	out := make([]dnszone.Zone, 0, len(c.Zones))
 	for _, e := range c.Zones {
-		out = append(out, dnszone.Zone{Name: e.Name, Names: e.Names, NameServers: ns, Fail: v.State == dnszone.StateFail,
+		out = append(out, dnszone.Zone{Name: e.Name, Names: e.Names, NameServers: ns, Fail: v.State == dnszone.StateFail, Quiet: v.State == dnszone.StateWarming,
 			Servers: v.Addrs, Near: near, Homes: c.homes(e, v), TXT: c.records(e.Name, txt), TTL: c.TTL, Serial: c.Serial})
 	}
 	return out

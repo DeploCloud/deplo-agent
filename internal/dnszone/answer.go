@@ -53,6 +53,12 @@ func (c *compiled) reply(req *dns.Msg, udp bool, v visitor) *dns.Msg {
 	if len(req.Question) != 1 {
 		return resp.SetRcode(req, dns.RcodeFormatError)
 	}
+	if c != nil {
+		qname := dns.CanonicalName(req.Question[0].Name)
+		if z := c.zoneFor(qname); z != nil && z.quiet && qname != ServerLabel+z.name {
+			return nil
+		}
+	}
 	resp.SetReply(req)
 	resp.RecursionAvailable = false
 	resp.Compress = true

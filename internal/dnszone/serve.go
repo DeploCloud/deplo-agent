@@ -112,7 +112,9 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 		// Just started, before the agent's first table: silence, so a resolver asks another name server, never SERVFAIL.
 		return
 	}
-	_ = w.WriteMsg(t.reply(req, udp, visitor{from: addrOf(w.RemoteAddr()), geo: s.geo.Load()}))
+	if m := t.reply(req, udp, visitor{from: addrOf(w.RemoteAddr()), geo: s.geo.Load()}); m != nil {
+		_ = w.WriteMsg(m)
+	}
 }
 
 func addrOf(a net.Addr) netip.Addr {
