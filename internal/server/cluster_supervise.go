@@ -101,20 +101,23 @@ type supervisor struct {
 	// kept is the policy turned off, per stack and service; stopped the services stopped on purpose, "" the whole stack.
 	kept    map[string]map[string]string
 	stopped map[string][]string
-	pause   map[string]time.Duration
-	nextAt  map[string]time.Time
-	busy    map[string]bool
-	swept   time.Time
+	// fenced is the containers a fence stopped while they ran: started again, whatever their policy, once the lease is back.
+	fenced map[string][]string
+	pause  map[string]time.Duration
+	nextAt map[string]time.Time
+	busy   map[string]bool
+	swept  time.Time
 }
 
 type supervisorState struct {
 	Kept    map[string]map[string]string `json:"kept,omitempty"`
 	Stopped map[string][]string          `json:"stopped,omitempty"`
+	Fenced  map[string][]string          `json:"fenced,omitempty"`
 }
 
 func newSupervisor(file string, now func() time.Time) *supervisor {
 	sv := &supervisor{file: file, now: now, list: listWriterContainers, setPolicy: setRestartPolicy, start: startContainer,
-		kept: map[string]map[string]string{}, stopped: map[string][]string{}, pause: map[string]time.Duration{},
+		kept: map[string]map[string]string{}, stopped: map[string][]string{}, fenced: map[string][]string{}, pause: map[string]time.Duration{},
 		nextAt: map[string]time.Time{}, busy: map[string]bool{}, said: map[string]string{}, logf: logCluster}
 	var st supervisorState
 	raw, err := os.ReadFile(file)
@@ -128,6 +131,9 @@ func newSupervisor(file string, now func() time.Time) *supervisor {
 		}
 		if st.Stopped != nil {
 			sv.stopped = st.Stopped
+		}
+		if st.Fenced != nil {
+			sv.fenced = st.Fenced
 		}
 	case !errors.Is(err, os.ErrNotExist):
 		sv.logf("could not read %s, so every writer here is supervised: %v", file, err)
@@ -156,7 +162,7 @@ func (sv *supervisor) saveLocked() {
 	if sv.file == "" {
 		return
 	}
-	raw, err := json.Marshal(supervisorState{Kept: sv.kept, Stopped: sv.stopped})
+	raw, err := json.Marshal(supervisorState{Kept: sv.kept, Stopped: sv.stopped, Fenced: sv.fenced})
 	if err == nil {
 		err = writeFileAtomic(sv.file, raw, 0o600)
 	}
@@ -185,10 +191,45 @@ func (sv *supervisor) stoppedOnPurpose(slug string, services []string, why strin
 func (sv *supervisor) cleared(slug string) {
 	sv.mu.Lock()
 	defer sv.mu.Unlock()
+	_, fenced := sv.fenced[slug]
+	delete(sv.fenced, slug)
 	if _, ok := sv.stopped[slug]; ok {
 		delete(sv.stopped, slug)
 		sv.saveLocked()
 		sv.logf("%s was started or deployed again: the supervisor looks after it again", slug)
+	} else if fenced {
+		sv.saveLocked()
+	}
+}
+
+// fencedSince keeps which of a stack's containers its fence stopped: those that exited since it began.
+func (sv *supervisor) fencedSince(ctx context.Context, slug string, began time.Time) {
+	cs, err := sv.list(ctx, slug)
+	if err != nil {
+		return
+	}
+	var ids []string
+	for _, c := range cs {
+		if c.State == "exited" && !c.FinishedAt.Before(began.Add(-time.Second)) {
+			ids = append(ids, c.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return
+	}
+	sv.mu.Lock()
+	sv.fenced[slug] = ids
+	sv.saveLocked()
+	sv.mu.Unlock()
+}
+
+// unfenced forgets what a fence stopped of a stack whose lease went elsewhere: it stays down, and is cleaned up.
+func (sv *supervisor) unfenced(slug string) {
+	sv.mu.Lock()
+	defer sv.mu.Unlock()
+	if _, ok := sv.fenced[slug]; ok {
+		delete(sv.fenced, slug)
+		sv.saveLocked()
 	}
 }
 
@@ -198,9 +239,11 @@ func (sv *supervisor) forget(slug string) {
 	defer sv.mu.Unlock()
 	_, k := sv.kept[slug]
 	_, s := sv.stopped[slug]
+	_, f := sv.fenced[slug]
 	delete(sv.kept, slug)
 	delete(sv.stopped, slug)
-	if k || s {
+	delete(sv.fenced, slug)
+	if k || s || f {
 		sv.saveLocked()
 	}
 }
@@ -319,6 +362,8 @@ func (sv *supervisor) startable(slug string, cs []writerContainer) []writerConta
 				notes = append(notes, said{c.ID, c.Name + " stays down: it was stopped on purpose"})
 			case c.State != "exited":
 				notes = append(notes, said{c.ID, fmt.Sprintf("%s is %s", c.Name, c.State)})
+			case slices.Contains(sv.fenced[slug], c.ID):
+				out = append(out, c)
 			case !c.wantsStart(policy):
 				notes = append(notes, said{c.ID, fmt.Sprintf("%s stays down: its restart policy %s (%s) does not start it after exit %d",
 					c.Name, policy, from, c.ExitCode)})
@@ -346,6 +391,14 @@ func (sv *supervisor) startDue(ctx context.Context, slug string) {
 	}
 	for _, c := range sv.startable(slug, cs) {
 		sv.mu.Lock()
+		wasFenced := slices.Contains(sv.fenced[slug], c.ID)
+		if wasFenced {
+			sv.fenced[slug] = slices.DeleteFunc(slices.Clone(sv.fenced[slug]), func(id string) bool { return id == c.ID })
+			if len(sv.fenced[slug]) == 0 {
+				delete(sv.fenced, slug)
+			}
+			sv.saveLocked()
+		}
 		p := sv.pause[c.ID]
 		if p == 0 || (!c.StartedAt.IsZero() && c.FinishedAt.Sub(c.StartedAt) >= superviseSettled) {
 			p = superviseFirst
@@ -357,6 +410,10 @@ func (sv *supervisor) startDue(ctx context.Context, slug string) {
 			continue
 		}
 		sv.note(c.ID, "")
+		if wasFenced {
+			sv.logf("started %s again: its lease is back, and the fence had stopped it", c.Name)
+			continue
+		}
 		sv.logf("started %s again under its lease: it had stopped by itself (exit %d)", c.Name, c.ExitCode)
 	}
 }
@@ -393,7 +450,7 @@ func (sv *supervisor) release(ctx context.Context, slugs []string) {
 		}
 	}
 	sv.mu.Lock()
-	sv.kept, sv.stopped = map[string]map[string]string{}, map[string][]string{}
+	sv.kept, sv.stopped, sv.fenced = map[string]map[string]string{}, map[string][]string{}, map[string][]string{}
 	sv.saveLocked()
 	sv.mu.Unlock()
 }

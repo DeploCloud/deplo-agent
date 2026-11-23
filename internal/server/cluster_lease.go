@@ -786,7 +786,15 @@ func (s *Service) fenceStacks(ctx context.Context, entries []lease.Entry) error 
 	defer cancel()
 	errs := make(chan error, len(slugs))
 	for slug := range slugs {
-		go func() { errs <- s.fenceStack(ctx, slug) }()
+		go func() {
+			began := time.Now()
+			err := s.fenceStack(ctx, slug)
+			// Read after the stop, so the fence is never late: what exited since it began is what it stopped.
+			listed, done := context.WithTimeout(context.Background(), 5*time.Second)
+			s.supervision().fencedSince(listed, slug, began)
+			done()
+			errs <- err
+		}()
 	}
 	var first error
 	for range slugs {
@@ -821,6 +829,7 @@ func (s *Service) fenceStack(ctx context.Context, slug string) error {
 // relinquishStack stops a stack whose lease moved to another member: once at once, as the fence does, then again
 // under the stack's lock, so a start that was under way when the lease moved does not outlive it. Nothing is removed.
 func (s *Service) relinquishStack(ctx context.Context, slug string) (bool, error) {
+	s.supervision().unfenced(slug)
 	stopped := false
 	var err error
 	if stackRuns(ctx, slug) {
