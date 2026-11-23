@@ -75,6 +75,10 @@ service Agent {
   // Refuses any volume that is not such a copy. Hello capability `volumes.set-aside`.
   rpc RemoveSetAside(RemoveSetAsideRequest) returns (StackResult);
 
+  // Copies each named volume of a stack aside under a dated name, as a returning member does, before a copy that
+  // arrives writes over it or its stack goes. An absent volume is skipped. Hello capability `volumes.newest-wins`.
+  rpc SetAside(SetAsideRequest) returns (SetAsideResponse);
+
   // Copy a service's host-side FILES DIR (<stack_dir>/files/<slug>) across hosts, for a
   // server move - the sibling of ExportVolume/ImportVolume for the one piece of a
   // service's state that is NOT a Docker volume.
@@ -1062,6 +1066,17 @@ message RemoveSetAsideRequest {
   string volume_name = 1;
 }
 
+message SetAsideRequest {
+  // The stack whose volumes they are; it is locked while they are copied.
+  string slug = 1;
+  repeated string volume_names = 2;
+}
+
+message SetAsideResponse {
+  // One per volume copied aside, with set_aside_of and set_aside_at_ms set.
+  repeated VolumeUsage copies = 1;
+}
+
 message VolumeUsageResponse {
   // One entry per volume that EXISTS; an absent name is simply omitted, never
   // reported as zero - "no such volume" is not "an empty volume".
@@ -1177,6 +1192,10 @@ message ReadStackResponse {
   bool exists = 1;
   // The rendered stack YAML (empty when exists=false).
   string yaml = 2;
+  // When a container of the stack last ran, as Unix ms: now while one runs (running), else the latest exit.
+  // 0 when the stack has no container. Hello capability `volumes.newest-wins`.
+  int64 last_ran_ms = 3;
+  bool running = 4;
 }
 
 message InspectRequest {

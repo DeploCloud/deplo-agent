@@ -167,6 +167,36 @@ func (s *Service) RemoveSetAside(ctx context.Context, req *pb.RemoveSetAsideRequ
 	return &pb.StackResult{Ok: true}, nil
 }
 
+// SetAside copies each named volume of a stack aside under a dated name, skipping one that does not exist.
+func (s *Service) SetAside(ctx context.Context, req *pb.SetAsideRequest) (*pb.SetAsideResponse, error) {
+	if err := validateSlug(req.GetSlug()); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
+	}
+	var vols []string
+	for _, v := range req.GetVolumeNames() {
+		if validateVolumeName(v) != nil || asideSuffix.MatchString(v) {
+			return nil, status.Errorf(codes.InvalidArgument, "%q cannot be set aside", v)
+		}
+		if res, err := setAsideRun(ctx, volumeExistsTimeout, "volume", "inspect", v); err == nil && res.Code == 0 {
+			vols = append(vols, v)
+		}
+	}
+	defer s.lockStack(req.GetSlug())()
+	copies, err := setAside(ctx, setAsideRun, req.GetSlug(), vols, time.Now())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "%v", err)
+	}
+	out := &pb.SetAsideResponse{}
+	for _, a := range copies {
+		at, _ := time.Parse(time.RFC3339, a.At)
+		out.Copies = append(out.Copies, &pb.VolumeUsage{VolumeName: a.Volume, Bytes: a.SizeBytes, SetAsideOf: a.Of, SetAsideAtMs: at.UnixMilli()})
+	}
+	return out, nil
+}
+
+// setAsideRun is a var so a test answers without Docker.
+var setAsideRun dockerRun = helperDocker
+
 // unionAside adds what a pass set aside to what earlier passes did; a copy named twice is kept once.
 func unionAside(have, more []lease.Aside) []lease.Aside {
 	for _, a := range more {
