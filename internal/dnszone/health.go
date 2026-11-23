@@ -70,12 +70,15 @@ func decide(members []Member, self string, heard map[string]time.Time, now time.
 	warming bool, last *Agreed, hold map[string]bool, halfIsEnough bool) Verdict {
 	v := Verdict{Of: len(members)}
 	var healthy []Member
+	othersHeld := false
 	for _, m := range members {
 		at, ok := heard[m.Fingerprint]
 		if m.Fingerprint == self || ok && now.Sub(at) < dropAfter {
 			v.Heard++
 			if !m.Emptying && !hold[m.Fingerprint] {
 				healthy = append(healthy, m)
+			} else if hold[m.Fingerprint] && m.Fingerprint != self {
+				othersHeld = true
 			}
 		}
 	}
@@ -102,6 +105,10 @@ func decide(members []Member, self string, heard map[string]time.Time, now time.
 		return v
 	case 2*v.Heard == v.Of && !halfIsEnough:
 		return fallBack(StateStale)
+	case othersHeld && len(healthy) == 1 && healthy[0].Fingerprint == self:
+		// New or back, it hears the others only as just back: it never answers with only itself (ADR-0049).
+		v.State = StateWarming
+		return v
 	}
 	for _, m := range healthy {
 		v.Servers = append(v.Servers, m.Fingerprint)

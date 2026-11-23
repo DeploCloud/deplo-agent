@@ -183,3 +183,30 @@ func TestDecideLed_aGoneMemberLeavesTheCountAndHalfIsEnough(t *testing.T) {
 		t.Fatalf("warming: %+v", v)
 	}
 }
+
+// eu-4, new on 23 Nov 2026, heard every other server first as just back and named only itself for 10 s.
+func TestDecideHolding_neverOnlyItselfWhileTheOthersAreHeldAsBack(t *testing.T) {
+	now := time.Now()
+	for _, n := range []int{2, 3, 4} {
+		m := members(n)
+		hold := map[string]bool{}
+		var fps []string
+		for _, x := range m[1:] {
+			hold[x.Fingerprint], fps = true, append(fps, x.Fingerprint)
+		}
+		v := DecideHolding(m, "s0", heardFrom(now, fps...), now, 10*time.Second, false, nil, hold)
+		if v.State != StateWarming || len(v.Servers) != 0 || v.Agreed != nil {
+			t.Fatalf("%d servers, the others held: %+v", n, v)
+		}
+	}
+	// One of three held still answers the two it can name.
+	v := DecideHolding(members(3), "s0", heardFrom(now, "s1", "s2"), now, 10*time.Second, false, nil, map[string]bool{"s1": true})
+	if v.State != StateAnswer || !slices.Equal(v.Servers, []string{"s0", "s2"}) {
+		t.Fatalf("one held: %+v", v)
+	}
+	// The last one left of a led cluster still answers alone: nobody else counts.
+	v = DecideLed(members(3), map[string]bool{"s1": true, "s2": true}, "s0", heardFrom(now), now, 10*time.Second, false, nil, nil)
+	if v.State != StateAnswer || !slices.Equal(v.Servers, []string{"s0"}) {
+		t.Fatalf("last one led: %+v", v)
+	}
+}
