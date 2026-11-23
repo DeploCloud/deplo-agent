@@ -175,6 +175,9 @@ type leaseGuard struct {
 	purge func(ctx context.Context, e lease.Entry, k lease.Keep, still func() bool) error
 	// stop stops a stack and removes nothing.
 	stop func(ctx context.Context, slug string) error
+	// aside copies a moved stack's volumes to dated copies; dropAside then takes the stack down with those volumes.
+	aside     func(ctx context.Context, e lease.Entry, at time.Time) ([]lease.Aside, error)
+	dropAside func(ctx context.Context, e lease.Entry, asides []lease.Aside, still func() bool) error
 	// relinquish stops this member's copy of a stack a current lease places on another member, and says whether
 	// one ran; relinquishing are the stacks it is stopping now.
 	relinquish    func(ctx context.Context, slug string) (bool, error)
@@ -757,6 +760,7 @@ func (s *Service) leaseGuard() *leaseGuard {
 		s.lease.remove, s.lease.resume, s.lease.trim = s.removeMoved, s.resumeHeld, s.trimReplicas
 		s.lease.keep, s.lease.purge, s.lease.stop = s.keepLeft, s.purgeLeft, s.stopMoved
 		s.lease.relinquish = s.relinquishStack
+		s.lease.aside, s.lease.dropAside = s.asideStack, s.dropAside
 		s.lease.succeed = s.askLeaderToLead
 		s.lease.has = func(slug string) bool { return isFile(s.stackPath(slug)) }
 		s.lease.running = stackRuns

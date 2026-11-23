@@ -49,5 +49,11 @@ func (s *Service) VolumeUsage(
 			Bytes:      dirSize(mount),
 		})
 	}
+	for _, n := range req.GetSetAsideOf() {
+		if err := validateVolumeName(n); err != nil {
+			return nil, status.Error(codes.InvalidArgument, err.Error())
+		}
+	}
+	out.Volumes = append(out.Volumes, asideCopies(cctx, helperDocker, req.GetSetAsideOf())...)
 	return out, nil
 }

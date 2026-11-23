@@ -87,42 +87,71 @@ func (g *leaseGuard) movedAway(cluster, slug string) bool {
 	return elsewhere
 }
 
-// keepMoved decides what happens to the data of one moved stack. gone: the stack went with its volumes;
-// retry: the archive is written and only the removal is left, for the next pass.
-func (g *leaseGuard) keepMoved(cluster, me string, e lease.Entry, k lease.Keep, already *lease.Saved) (saved *lease.Saved, kept *lease.Kept, gone, retry bool) {
-	switch {
-	case len(k.Request) == 0 && already != nil:
-		return nil, nil, false, false
-	case len(k.Request) == 0:
-		return nil, &lease.Kept{Slug: e.Slug, Ref: k.Ref, Reason: lease.KeptNoDestination}, false, false
-	case storeOutOfReach(k, me):
-		return nil, &lease.Kept{Slug: e.Slug, Ref: k.Ref, Reason: lease.KeptStoreElsewhere}, false, false
-	}
+// keepMoved decides what happens to the data of one moved stack. gone: the stack went with its volumes, each copied
+// aside first (asides); retry: what is saved is kept, and only the removal is left, for the next pass.
+func (g *leaseGuard) keepMoved(cluster, me string, e lease.Entry, k lease.Keep, already *lease.Saved) (saved *lease.Saved, kept *lease.Kept, asides []lease.Aside, gone, retry bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), leftTimeout)
 	defer cancel()
 	still := func() bool { return g.movedAway(cluster, e.Slug) }
+	switch {
+	case len(k.Request) == 0 && already != nil:
+		return nil, nil, nil, false, false
+	case len(k.Request) == 0:
+		// Nowhere to save it: the data stays here under a dated name, and the stack goes.
+		asides, err := g.setAside(ctx, cluster, e, k)
+		if err != nil || g.dropAside == nil {
+			return nil, &lease.Kept{Slug: e.Slug, Ref: k.Ref, Reason: lease.KeptNoDestination}, asides, false, false
+		}
+		if err := g.dropAside(ctx, e, asides, still); err != nil {
+			return nil, nil, asides, false, true
+		}
+		return nil, nil, asides, true, false
+	case storeOutOfReach(k, me):
+		return nil, &lease.Kept{Slug: e.Slug, Ref: k.Ref, Reason: lease.KeptStoreElsewhere}, nil, false, false
+	}
 	if saved = already; saved == nil {
 		sv, err := g.keep(ctx, e, k, me, still)
 		switch {
 		case errors.Is(err, errRunsAgain):
 			// Placed here again meanwhile: the next pass reads the placement anew and leaves it alone.
-			return nil, nil, false, true
+			return nil, nil, nil, false, true
 		case errors.Is(err, errNothingHeld):
-			return nil, nil, false, false
+			return nil, nil, nil, false, false
 		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "deplo-agent: cluster %s: could not save what %s still held here, so its volume stays: %v\n", cluster, e.Slug, err)
-			return nil, &lease.Kept{Slug: e.Slug, Ref: k.Ref, Reason: lease.KeptBackupFailed, Error: err.Error()}, false, false
+			return nil, &lease.Kept{Slug: e.Slug, Ref: k.Ref, Reason: lease.KeptBackupFailed, Error: err.Error()}, nil, false, false
 		}
 		// Written down before the volume goes: an agent that stops here still tells the leader where the data is.
 		g.noteSaved(cluster, *sv)
 		saved = sv
 	}
+	// Saved elsewhere, and kept here too: a backup is not where anyone looks for the last writes.
+	asides, err := g.setAside(ctx, cluster, e, k)
+	if err != nil {
+		return saved, nil, asides, false, true
+	}
 	if err := g.purge(ctx, e, k, still); err != nil {
 		fmt.Fprintf(os.Stderr, "deplo-agent: cluster %s: %s is saved, but its copy could not be removed: %v\n", cluster, e.Slug, err)
-		return saved, nil, false, true
+		return saved, nil, asides, false, true
 	}
-	return saved, nil, true, false
+	return saved, nil, asides, true, false
+}
+
+// setAside copies a moved stack's volumes aside, dated by its failover; a guard under test with no hook sets none.
+func (g *leaseGuard) setAside(ctx context.Context, cluster string, e lease.Entry, k lease.Keep) ([]lease.Aside, error) {
+	if g.aside == nil {
+		return nil, nil
+	}
+	at, err := time.Parse(time.RFC3339, k.FailedOverAt)
+	if err != nil {
+		at = g.now()
+	}
+	asides, err := g.aside(ctx, e, at)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "deplo-agent: cluster %s: could not set aside what %s still held here, so its volume stays: %v\n", cluster, e.Slug, err)
+	}
+	return asides, err
 }
 
 func (g *leaseGuard) noteSaved(cluster string, sv lease.Saved) {

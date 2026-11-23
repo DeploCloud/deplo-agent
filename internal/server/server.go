@@ -174,6 +174,8 @@ var Capabilities = []string{
 	"failover.certificates",
 	// A line of succession: pre-votes, one leader per epoch, and a member next in line asks the leader beside it to lead.
 	"cluster.succession",
+	// A returning member sets each moved volume aside under a dated name; VolumeUsage lists them, RemoveSetAside removes one.
+	"volumes.set-aside",
 }
 
 // AgentVersion is the version this agent reports over Hello.

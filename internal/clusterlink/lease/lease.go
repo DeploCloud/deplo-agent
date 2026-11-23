@@ -120,6 +120,17 @@ type Returned struct {
 	// Saved is what was written as a backup before its volume went; Kept is what stays on the member, and why.
 	Saved []Saved `json:"saved,omitempty"`
 	Kept  []Kept  `json:"kept,omitempty"`
+	// Aside is the dated copies it kept of the volumes it removed: writes its copy may not have sent yet.
+	Aside []Aside `json:"aside,omitempty"`
+}
+
+// Aside is one dated copy a returning member kept of a moved stack's volume, before that volume went.
+type Aside struct {
+	Slug      string `json:"slug"`
+	Volume    string `json:"volume"`
+	Of        string `json:"of"`
+	At        string `json:"at"`
+	SizeBytes int64  `json:"sizeBytes"`
 }
 
 // Keep is where the data a member still holds of one moved workload goes; credentials travel in Request only.

@@ -71,6 +71,10 @@ service Agent {
   // volume-naming scheme stays control-plane-side, as for backup and move).
   rpc VolumeUsage(VolumeUsageRequest) returns (VolumeUsageResponse);
 
+  // Removes one dated copy a returning cluster member set aside (VolumeUsage set_aside_of lists them).
+  // Refuses any volume that is not such a copy. Hello capability `volumes.set-aside`.
+  rpc RemoveSetAside(RemoveSetAsideRequest) returns (StackResult);
+
   // Copy a service's host-side FILES DIR (<stack_dir>/files/<slug>) across hosts, for a
   // server move - the sibling of ExportVolume/ImportVolume for the one piece of a
   // service's state that is NOT a Docker volume.
@@ -1038,12 +1042,21 @@ message ExportVolumeRequest {
 message VolumeUsageRequest {
   // FULL Docker named volumes, validated like ExportVolumeRequest.volume_name.
   repeated string volume_names = 1;
+  // Also every dated copy a returning cluster member set aside of these volumes.
+  repeated string set_aside_of = 2;
 }
 
 message VolumeUsage {
   string volume_name = 1;
   // On-disk bytes (allocated blocks, so a sparse file counts what it occupies).
   int64 bytes = 2;
+  // Set on a set-aside copy: the volume it is a copy of, and when it was made.
+  string set_aside_of = 3;
+  int64 set_aside_at_ms = 4;
+}
+
+message RemoveSetAsideRequest {
+  string volume_name = 1;
 }
 
 message VolumeUsageResponse {
