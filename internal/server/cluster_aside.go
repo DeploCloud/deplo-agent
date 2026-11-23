@@ -194,6 +194,24 @@ func (s *Service) SetAside(ctx context.Context, req *pb.SetAsideRequest) (*pb.Se
 	return out, nil
 }
 
+// createAsideTarget makes the dated copy another server's copy of `of` is written into: a new volume, labelled as
+// one this server set aside, so the App's page lists it and RemoveSetAside takes it.
+func createAsideTarget(ctx context.Context, run dockerRun, name, of string) error {
+	stamp := strings.TrimPrefix(name, of+"-aside-")
+	at, err := time.Parse("20060102T150405Z", stamp)
+	if validateVolumeName(of) != nil || asideSuffix.MatchString(of) || stamp == name || err != nil {
+		return fmt.Errorf("%q is not a set-aside copy of %q", name, of)
+	}
+	if res, err := run(ctx, volumeExistsTimeout, "volume", "inspect", name); err == nil && res.Code == 0 {
+		return fmt.Errorf("%s exists already", name)
+	}
+	res, err := run(ctx, time.Minute, "volume", "create", "--label", asideOfLabel+"="+of, "--label", asideAtLabel+"="+at.UTC().Format(time.RFC3339), name)
+	if err != nil || res.Code != 0 {
+		return fmt.Errorf("could not create %s: %v %s", name, err, strings.TrimSpace(res.Stderr))
+	}
+	return nil
+}
+
 // setAsideRun is a var so a test answers without Docker.
 var setAsideRun dockerRun = helperDocker
 

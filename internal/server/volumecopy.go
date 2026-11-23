@@ -137,6 +137,12 @@ func (s *Service) ImportVolume(stream pb.Agent_ImportVolumeServer) error {
 	if err := validateVolumeName(vol); err != nil {
 		return sendImportResult(stream, false, 0, "", fmt.Sprintf("import volume: %v", err))
 	}
+	aside := hdr.GetAsideOf() != ""
+	if aside {
+		if err := createAsideTarget(ctx, setAsideRun, vol, hdr.GetAsideOf()); err != nil {
+			return sendImportResult(stream, false, 0, "", fmt.Sprintf("import volume: %v", err))
+		}
+	}
 
 	pr, pw := io.Pipe()
 	done := make(chan error, 1)
@@ -208,6 +214,9 @@ func (s *Service) ImportVolume(stream pb.Agent_ImportVolumeServer) error {
 		failure = fmt.Sprintf("import volume %q: the source sent no data", vol)
 	}
 	if failure != "" {
+		if aside {
+			_, _ = setAsideRun(context.Background(), time.Minute, "volume", "rm", vol)
+		}
 		if wiped || wipeErr != nil {
 			failure += abandonImport(helper, func(c context.Context) error {
 				return wipeVolume(c, vol)

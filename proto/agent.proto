@@ -1096,6 +1096,9 @@ message VolumeChunk {
     // overwrites rather than merges into whatever the freshly-provisioned stack
     // initialised).
     bool wipe_first = 2;
+    // Set: the stream is a set-aside copy of this volume, written into volume_name, a new dated copy
+    // (`<aside_of>-aside-<UTC time>`) made with its labels. Hello capability `volumes.newest-wins`.
+    string aside_of = 3;
   }
   oneof frame {
     Header header = 1;
