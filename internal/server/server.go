@@ -62,6 +62,7 @@ var Capabilities = []string{
 	"cron.output-hardened",
 	"volume-copy",
 	"volume-copy-hardened",
+	"volumes.adopt",
 	"host-path-copy.file",
 	"volume-copy.drop-report",
 	"files-copy",
