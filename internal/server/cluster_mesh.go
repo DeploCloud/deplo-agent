@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -512,6 +513,17 @@ func (n *clusterNetwork) doorConn(c net.Conn) {
 		c.Close()
 	case meshDoorDial:
 		to, err := wire.ParseParty(arg)
+		// The leader beside this server renews it too: that stream stays here, never through Deplo's relay.
+		if err == nil && n.s.isOwnFingerprint(to.Fingerprint) {
+			p := n.s.clusterParty()
+			if p == nil || wire.WriteHeader(c, wire.VerbOK, "") != nil {
+				c.Close()
+				return
+			}
+			_ = c.SetDeadline(time.Time{})
+			p.Answer(c)
+			return
+		}
 		name, ok := "", false
 		if err == nil {
 			name, ok = n.s.meshName(m.Has, to.Fingerprint)
@@ -539,6 +551,16 @@ func (n *clusterNetwork) doorConn(c net.Conn) {
 	default:
 		c.Close()
 	}
+}
+
+// isOwnFingerprint says whether fp is this server's certificate, or one a key rotation links it to.
+func (s *Service) isOwnFingerprint(fp string) bool {
+	id, err := s.clusterIdentity()
+	if err != nil {
+		return false
+	}
+	rs := s.rotations().all()
+	return fp == id.Fingerprint || slices.Contains(wire.Successors(rs, fp), id.Fingerprint) || slices.Contains(wire.Predecessors(rs, fp), id.Fingerprint)
 }
 
 // udpFree says whether a UDP port can be taken now.
