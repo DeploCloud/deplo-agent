@@ -130,7 +130,7 @@ func TestInventoryImage_readsPackagesAndCleansUp(t *testing.T) {
 	if len(resp.Packages) != 2 || resp.WorkingDir != "/app" || resp.DistroId != "debian" {
 		t.Fatalf("unexpected response: %v", resp)
 	}
-	left, _ := filepath.Glob(filepath.Join(s.buildTmpDir, inventoryDirPrefix+"*"))
+	left, _ := filepath.Glob(filepath.Join(s.inventoryDir(), inventoryDirPrefix+"*"))
 	if len(left) != 0 {
 		t.Fatalf("temp dir left behind: %v", left)
 	}
@@ -277,5 +277,24 @@ esac`)
 	}
 	if len(pulls) != 1 || strings.Contains(pulls[0], "--policy") {
 		t.Fatalf("want exactly one unconditional pull, got %v", pulls)
+	}
+}
+
+// /tmp is memory on many hosts: an image's tar and the reader's own files go to the agent's data dir on disk.
+func TestInventoryImage_worksOnDiskAndCleansUp(t *testing.T) {
+	for _, exit := range []string{"", "exit 3\n"} {
+		rec := filepath.Join(t.TempDir(), "rec")
+		s := inventoryService(t, "#!/bin/sh\necho \"$TMPDIR $*\" > "+rec+"\n"+exit+strings.TrimPrefix(passThroughSystemdRun, "#!/bin/sh\n"))
+		if _, err := s.InventoryImage(context.Background(), &pb.InventoryImageRequest{ImageId: testImageID}); err != nil {
+			t.Fatal(err)
+		}
+		b, _ := os.ReadFile(rec)
+		work := filepath.Join(s.dataBase, "inventory", inventoryDirPrefix)
+		if f := strings.Fields(string(b)); len(f) == 0 || !strings.HasPrefix(f[0], work) || !strings.Contains(string(b), "docker-archive:"+work) {
+			t.Fatalf("the reader must work under %s: %q", work, b)
+		}
+		if left, _ := filepath.Glob(filepath.Join(s.dataBase, "inventory", "*")); len(left) != 0 {
+			t.Fatalf("the working dir must be gone after the scan (exit %q): %v", exit, left)
+		}
 	}
 }

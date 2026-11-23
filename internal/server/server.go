@@ -311,6 +311,7 @@ func New(stackDir, buildTmpDir, dataDir, dataBase string) *Service {
 	}
 	sweepTempSecrets()
 	sweepInventoryDirs(buildTmpDir)
+	sweepInventoryDirs(filepath.Join(dataBase, "inventory"))
 	sweepBackupHolds(filepath.Join(dataBase, "backup-holds"))
 	return &Service{
 		stackDir:    stackDir,
