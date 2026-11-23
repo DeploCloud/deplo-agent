@@ -61,7 +61,8 @@ func TestVolumeBackup_pausesWhileCopyingThenResumes(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := argvVerbs(argv())
-	i, j, k := strings.Index(got, "pause"), strings.Index(got, "run"), strings.LastIndex(got, "unpause")
+	i, k := strings.Index(got, "pause"), strings.LastIndex(got, "unpause")
+	j := strings.Index(got[max(i, 0):], "run") + max(i, 0)
 	if i < 0 || !(i < j && j < k) {
 		t.Fatalf("want pause, then the copy, then unpause; got %q", got)
 	}
@@ -95,7 +96,7 @@ func TestVolumeBackup_pauseRefusedFailsTheBackup(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "pause") {
 		t.Fatalf("want a clear pause error, got %v", err)
 	}
-	if strings.Contains(argvVerbs(argv()), "run") {
+	if got := argvVerbs(argv()); strings.Contains(got[strings.Index(got, "pause"):], "run") {
 		t.Fatal("never copy a volume that could not be held")
 	}
 }
@@ -182,5 +183,59 @@ func TestE2E_VolumeBackupPausesAWritingApp(t *testing.T) {
 			}
 			return
 		}
+	}
+}
+
+// The proxy drops a paused App's routes whenever it reads containers, which it does when one starts or stops.
+// So the copy starts before the pause and stops after the App runs again, and the copier itself is never paused.
+func TestVolumeBackup_copierStartsBeforeThePauseAndStopsAfter(t *testing.T) {
+	argv := dockerOnPath(t, `case "$1" in
+ps) echo abc123def456; echo cop999 ;;
+run) case "$*" in *" -d "*) echo cop999 ;; esac ;;
+esac`)
+	s := &Service{dataBase: t.TempDir()}
+	if err, _ := archiveWith(t, s); err != nil {
+		t.Fatal(err)
+	}
+	lines := argv()
+	at := func(pred func(string) bool) int {
+		for i, l := range lines {
+			if pred(l) {
+				return i
+			}
+		}
+		return -1
+	}
+	start := at(func(l string) bool { return strings.HasPrefix(l, "run ") && strings.Contains(l, " -d ") })
+	pause := at(func(l string) bool { return l == "pause abc123def456" })
+	copy := at(func(l string) bool { return strings.HasPrefix(l, "exec ") && strings.Contains(l, " cop999 tar ") })
+	unpause := at(func(l string) bool { return l == "unpause abc123def456" })
+	stop := at(func(l string) bool { return l == "rm -f cop999" })
+	if start < 0 || !(start < pause && pause < copy && copy < unpause && unpause < stop) {
+		t.Fatalf("want the copier started, the App paused, the copy, the App unpaused, the copier gone; got %q", lines)
+	}
+	if at(func(l string) bool { return l == "pause cop999" }) >= 0 {
+		t.Fatalf("the copier mounts the volume too, but is never paused: %q", lines)
+	}
+	for _, l := range lines[pause:unpause] {
+		if strings.HasPrefix(l, "run ") {
+			t.Fatalf("no helper starts or stops while the App is paused: %q", lines)
+		}
+	}
+}
+
+func TestVolumeBackup_copierGoesWhenTheCopyFails(t *testing.T) {
+	argv := dockerOnPath(t, `case "$1" in
+ps) echo abc123def456 ;;
+run) case "$*" in *" -d "*) echo cop999 ;; esac ;;
+exec) exit 2 ;;
+esac`)
+	s := &Service{dataBase: t.TempDir()}
+	if err, _ := archiveWith(t, s); err == nil {
+		t.Fatal("a failed copy of a paused app is an error")
+	}
+	got := strings.Join(argv(), "\n")
+	if !strings.Contains(got, "unpause abc123def456") || !strings.Contains(got, "rm -f cop999") {
+		t.Fatalf("the App runs again and the copier goes: %q", got)
 	}
 }

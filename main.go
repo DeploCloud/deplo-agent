@@ -134,6 +134,7 @@ func main() {
 	svc.SetAgentDir(*agentDir)
 	svc.SettlePanel()
 	svc.StartRestartWatch(context.Background())
+	svc.StartProxyResync(context.Background())
 	svc.StartCluster()
 	svc.StartClusterMember()
 	svc.StartClusterNetwork()

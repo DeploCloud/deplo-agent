@@ -44,7 +44,13 @@ func (s *Service) backupProject(ctx context.Context, p *pb.ProjectDescriptor, de
 }
 
 func (s *Service) writeProjectArchive(ctx context.Context, p *pb.ProjectDescriptor, tw *tar.Writer, e *bkEmitter) error {
-	hold, herr := s.holdVolumes(ctx, p.GetSlug(), p.GetVolumeNames(), func(text string) { e.log("info", text) })
+	copier := startCopier(ctx, p.GetVolumeNames())
+	defer copier.remove()
+	skip := ""
+	if copier != nil {
+		skip = copier.id
+	}
+	hold, herr := s.holdVolumes(ctx, p.GetSlug(), p.GetVolumeNames(), func(text string) { e.log("info", text) }, skip)
 	if herr != nil {
 		return herr
 	}
@@ -58,6 +64,7 @@ func (s *Service) writeProjectArchive(ctx context.Context, p *pb.ProjectDescript
 		if !ended {
 			ended = true
 			s.endHold(hold, e)
+			copier.remove()
 		}
 	}
 	defer end()
@@ -66,7 +73,7 @@ func (s *Service) writeProjectArchive(ctx context.Context, p *pb.ProjectDescript
 			continue
 		}
 		e.log("info", "Archiving volume "+vol)
-		if err := s.archiveVolume(ctx, vol, tw, e); err != nil {
+		if err := s.archiveVolume(ctx, copier.tarArgs(ctx, vol), vol, tw, e); err != nil {
 			return fmt.Errorf("archive volume %q: %w", vol, err)
 		}
 	}
@@ -118,16 +125,14 @@ func (s *Service) endHold(hold *volumeHold, e *bkEmitter) {
 	e.log("info", fmt.Sprintf("The app was paused for %s and is running again", held.Round(time.Millisecond)))
 }
 
-func (s *Service) archiveVolume(ctx context.Context, vol string, tw *tar.Writer, e *bkEmitter) error {
+func (s *Service) archiveVolume(ctx context.Context, argv []string, vol string, tw *tar.Writer, e *bkEmitter) error {
 	if err := validateVolumeName(vol); err != nil {
 		return err
 	}
 	pr, pw := io.Pipe()
 	done := make(chan error, 1)
 	go func() {
-		code, err := dockercli.PipeOut(ctx, backupStepTimeout, pw, nil,
-			volumeHelperRun(ctx, "-v", vol+":/v:ro", volumeHelperImage,
-				"tar", "-C", "/v", "-cf", "-", ".")...)
+		code, err := dockercli.PipeOut(ctx, backupStepTimeout, pw, nil, argv...)
 		if err == nil && code != 0 {
 			err = fmt.Errorf("volume tar exited %d", code)
 		}
