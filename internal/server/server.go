@@ -180,6 +180,8 @@ var Capabilities = []string{
 	"volumes.newest-wins",
 	// DeployResult.image_volumes: what a built image declares as volumes, read on the server that built it.
 	"deploy.image-volumes",
+	// A stack's Files folder is set aside with its volumes, as `deplo-<slug>.files-aside-<UTC time>`.
+	"volumes.set-aside-files",
 }
 
 // AgentVersion is the version this agent reports over Hello.

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"os"
 	"regexp"
 	"slices"
 	"strings"
@@ -70,23 +71,40 @@ func stackVolumes(ctx context.Context, run dockerRun, slug string) ([]string, er
 	return out, nil
 }
 
-// setAside copies each volume to its dated copy; one already copied for that time is kept as it is.
-func setAside(ctx context.Context, run dockerRun, slug string, vols []string, at time.Time) ([]lease.Aside, error) {
+// filesAsideOf is what a stack's Files folder is set aside as: a volume name no compose project or Deplo Volume takes.
+func filesAsideOf(slug string) string {
+	return "deplo-" + slug + ".files"
+}
+
+// setAside copies each volume, and the stack's Files folder when it holds anything, to its dated copy; one already
+// copied for that time is kept as it is.
+func setAside(ctx context.Context, run dockerRun, slug string, vols []string, files string, at time.Time) ([]lease.Aside, error) {
 	var out []lease.Aside
 	stamp := at.UTC().Format(time.RFC3339)
-	for _, v := range vols {
-		name := asideName(v, at)
+	copyAside := func(from, of string) error {
+		name := asideName(of, at)
 		if res, err := run(ctx, volumeExistsTimeout, "volume", "inspect", name); err != nil || res.Code != 0 {
-			if res, err := run(ctx, time.Minute, "volume", "create", "--label", asideOfLabel+"="+v, "--label", asideAtLabel+"="+stamp, name); err != nil || res.Code != 0 {
-				return out, fmt.Errorf("could not set aside %s: %v %s", v, err, strings.TrimSpace(res.Stderr))
+			if res, err := run(ctx, time.Minute, "volume", "create", "--label", asideOfLabel+"="+of, "--label", asideAtLabel+"="+stamp, name); err != nil || res.Code != 0 {
+				return fmt.Errorf("could not set aside %s: %v %s", of, err, strings.TrimSpace(res.Stderr))
 			}
-			res, err := run(ctx, adoptTimeout, "run", "--network", "none", "-v", v+":/from:ro", "-v", name+":/to", volumeHelperImage, "cp", "-a", "/from/.", "/to/")
+			res, err := run(ctx, adoptTimeout, "run", "--network", "none", "-v", from+":/from:ro", "-v", name+":/to", volumeHelperImage, "cp", "-a", "/from/.", "/to/")
 			if err != nil || res.Code != 0 {
 				_, _ = run(ctx, time.Minute, "volume", "rm", name)
-				return out, fmt.Errorf("could not set aside %s: %v %s", v, err, strings.TrimSpace(res.Stderr))
+				return fmt.Errorf("could not set aside %s: %v %s", of, err, strings.TrimSpace(res.Stderr))
 			}
 		}
-		out = append(out, lease.Aside{Slug: slug, Volume: name, Of: v, At: stamp, SizeBytes: volumeBytes(ctx, run, name)})
+		out = append(out, lease.Aside{Slug: slug, Volume: name, Of: of, At: stamp, SizeBytes: volumeBytes(ctx, run, name)})
+		return nil
+	}
+	for _, v := range vols {
+		if err := copyAside(v, v); err != nil {
+			return out, err
+		}
+	}
+	if entries, err := os.ReadDir(files); files != "" && err == nil && len(entries) > 0 {
+		if err := copyAside(files, filesAsideOf(slug)); err != nil {
+			return out, err
+		}
 	}
 	return out, nil
 }
@@ -102,14 +120,17 @@ func volumeBytes(ctx context.Context, run dockerRun, name string) int64 {
 // asideStack stops a moved stack and copies its volumes aside, dated by its failover.
 func (s *Service) asideStack(ctx context.Context, e lease.Entry, at time.Time) ([]lease.Aside, error) {
 	vols, err := stackVolumes(ctx, helperDocker, e.Slug)
-	if err != nil || len(vols) == 0 {
+	if err != nil {
 		return nil, err
+	}
+	if entries, _ := os.ReadDir(s.filesRoot(e.Slug)); len(vols) == 0 && len(entries) == 0 {
+		return nil, nil
 	}
 	if _, err := s.StopStack(stoppedBecause(ctx, "its data is set aside before its copy here goes"), &pb.StackRef{Slug: e.Slug}); err != nil {
 		return nil, err
 	}
 	defer s.lockStack(e.Slug)()
-	return setAside(ctx, helperDocker, e.Slug, vols, at)
+	return setAside(ctx, helperDocker, e.Slug, vols, s.filesRoot(e.Slug), at)
 }
 
 // dropAside takes a stack down with the volumes it set aside: their copies stay.
@@ -120,7 +141,10 @@ func (s *Service) dropAside(ctx context.Context, e lease.Entry, asides []lease.A
 	}
 	var vols []string
 	for _, a := range asides {
-		vols = append(vols, a.Of)
+		// The Files folder goes with the stack's files, not as a volume.
+		if a.Of != filesAsideOf(e.Slug) {
+			vols = append(vols, a.Of)
+		}
 	}
 	return stackErr(s.destroyStack(ctx, &pb.StackRef{Slug: e.Slug, RemoveVolumes: true, ReclaimVolumes: vols}))
 }
@@ -167,7 +191,8 @@ func (s *Service) RemoveSetAside(ctx context.Context, req *pb.RemoveSetAsideRequ
 	return &pb.StackResult{Ok: true}, nil
 }
 
-// SetAside copies each named volume of a stack aside under a dated name, skipping one that does not exist.
+// SetAside copies each named volume of a stack aside under a dated name, skipping one that does not exist, and its
+// Files folder with them.
 func (s *Service) SetAside(ctx context.Context, req *pb.SetAsideRequest) (*pb.SetAsideResponse, error) {
 	if err := validateSlug(req.GetSlug()); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "%v", err)
@@ -182,7 +207,7 @@ func (s *Service) SetAside(ctx context.Context, req *pb.SetAsideRequest) (*pb.Se
 		}
 	}
 	defer s.lockStack(req.GetSlug())()
-	copies, err := setAside(ctx, setAsideRun, req.GetSlug(), vols, time.Now())
+	copies, err := setAside(ctx, setAsideRun, req.GetSlug(), vols, s.filesRoot(req.GetSlug()), time.Now())
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "%v", err)
 	}
