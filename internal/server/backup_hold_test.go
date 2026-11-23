@@ -239,3 +239,56 @@ esac`)
 		t.Fatalf("the App runs again and the copier goes: %q", got)
 	}
 }
+
+// eu, 23 Nov 2026: a relayed backup's stream broke and lab-web stayed paused 4 minutes, its tar blocked. The copy
+// a reader gave up on is stopped, and the App runs again at once, not at the step's 30 minutes.
+func TestVolumeBackup_aCopyItsReaderLeftEndsAndTheAppRunsAgain(t *testing.T) {
+	argv := dockerOnPath(t, `case "$1" in
+ps) echo abc123def456 ;;
+run) case "$*" in *" -d "*) ;; *) exec yes ;; esac ;;
+esac`)
+	s := &Service{dataBase: t.TempDir()}
+	done := make(chan error, 1)
+	go func() {
+		err, _ := archiveWith(t, s)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a copy that is no tar stream is an error")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the copy still holds the App paused after its reader gave up")
+	}
+	got := strings.Join(argv(), "\n")
+	if !strings.Contains(got, "unpause abc123def456") || !strings.Contains(got, "rm -f deplo-helper-") {
+		t.Fatalf("the App must run again and its copy stop: %q", argv())
+	}
+}
+
+// A stream that stops taking the artifact frees what produces it, so a hold behind it ends.
+func TestWriteArtifact_aStalledStreamFreesTheCopy(t *testing.T) {
+	was := streamStallAfter
+	streamStallAfter = 100 * time.Millisecond
+	t.Cleanup(func() { streamStallAfter = was })
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) })
+	dest := &artifactDestination{stream: func([]byte) error { <-block; return nil }}
+	produced := make(chan error, 1)
+	go func() {
+		_, _ = (&Service{}).writeArtifact(context.Background(), dest, func(w io.Writer) error {
+			for {
+				if _, err := w.Write(make([]byte, 64<<10)); err != nil {
+					produced <- err
+					return err
+				}
+			}
+		})
+	}()
+	select {
+	case <-produced:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the copy is still held by a stream that stopped taking it")
+	}
+}

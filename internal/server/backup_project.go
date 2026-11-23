@@ -131,8 +131,11 @@ func (s *Service) archiveVolume(ctx context.Context, argv []string, vol string, 
 	}
 	pr, pw := io.Pipe()
 	done := make(chan error, 1)
+	// A reader that gives up stops the copy: its helper would otherwise run on, and the App stay paused behind it.
+	cctx, stop := context.WithCancel(ctx)
+	defer stop()
 	go func() {
-		code, err := dockercli.PipeOut(ctx, backupStepTimeout, pw, nil, argv...)
+		code, err := dockercli.PipeOut(cctx, backupStepTimeout, pw, nil, argv...)
 		if err == nil && code != 0 {
 			err = fmt.Errorf("volume tar exited %d", code)
 		}
@@ -154,6 +157,7 @@ func (s *Service) archiveVolume(ctx context.Context, argv []string, vol string, 
 		}
 		if err != nil {
 			_ = pr.CloseWithError(err)
+			stop()
 			<-done
 			return err
 		}
@@ -164,12 +168,14 @@ func (s *Service) archiveVolume(ctx context.Context, argv []string, vol string, 
 		}
 		if err := tw.WriteHeader(hdr); err != nil {
 			_ = pr.CloseWithError(err)
+			stop()
 			<-done
 			return err
 		}
 		if hdr.Typeflag == tar.TypeReg {
 			if _, err := io.Copy(tw, tr); err != nil {
 				_ = pr.CloseWithError(err)
+				stop()
 				<-done
 				return err
 			}
