@@ -183,6 +183,35 @@ func TestNetwork_theLeaderBesideAServerReachesMembersThroughIt(t *testing.T) {
 	}
 }
 
+// The leader on a member renews that member too: the door answers it on the spot, with no relay and no tunnel,
+// so a leader cut off from Deplo still renews its own server (eu-3, 23 Nov 2026).
+func TestNetwork_theLeaderReachesItsOwnServerThroughTheDoorWithNoRelay(t *testing.T) {
+	a, b, _, _, fpA, fpB := memberPair(t)
+	joinNetwork(t, a, b, fpA, fpB, true)
+	door := filepath.Join(a.agentDir, "cluster", "mesh.sock")
+	c, err := net.DialTimeout("unix", door, 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+	if err := wire.WriteHeader(c, meshDoorDial, wire.Party{Fingerprint: fpA, Role: wire.RoleMember}.Key()); err != nil {
+		t.Fatal(err)
+	}
+	if verb, why, err := wire.ReadHeader(c); err != nil || verb != wire.VerbOK {
+		t.Fatalf("the door refused its own server: %s %v", why, err)
+	}
+	id, err := a.clusterIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = wire.WriteHeader(c, wire.VerbFrom, wire.Party{Fingerprint: id.Fingerprint, Role: wire.RoleLeader}.Key())
+	tc := tls.Client(c, id.ClientConfig(fpA))
+	if err := tc.Handshake(); err != nil {
+		t.Fatalf("no end-to-end handshake with its own server through the door: %v", err)
+	}
+}
+
 func TestNetwork_advertised(t *testing.T) {
 	if !slices.Contains(Capabilities, "cluster.network") {
 		t.Fatal("Hello does not advertise cluster.mesh")
