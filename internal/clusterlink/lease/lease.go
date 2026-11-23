@@ -32,6 +32,15 @@ const RestoreTimeout = StartTimeout + 30*time.Minute
 // StaleEpoch is the reply Error of a member that has seen a newer leader.
 const StaleEpoch = "stale_epoch"
 
+// LeaderAlive is the reply Error of a member asked for a Succeed epoch while its leader renewed it within PreVoteFor.
+const LeaderAlive = "leader_alive"
+
+// PreVoteFor is how long a member keeps refusing a Succeed epoch after its leader's last renewal: the removal time.
+const PreVoteFor = 10 * time.Second
+
+// SucceedStagger is how much longer each member further down the line waits before it asks to lead.
+const SucceedStagger = 5 * time.Second
+
 // Entry is one replica of a workload and where the leader placed it.
 type Entry struct {
 	Kind         string `json:"kind"`
@@ -76,6 +85,15 @@ type Order struct {
 	// Gone is the certificates of the members gone past the grace that this leader no longer counts for a majority:
 	// they vote and host again once back and caught up (ADR-0049).
 	Gone []string `json:"gone,omitempty"`
+	// From is the server the leader runs on: a member gives each epoch to one leader only.
+	From string `json:"from,omitempty"`
+	// Line is the members that lead after this leader, heir first, and Last Deplo's machine, which comes after them.
+	Line []string `json:"line,omitempty"`
+	Last string   `json:"last,omitempty"`
+	// PreVote only asks whether the member would take this epoch: it takes nothing and changes nothing.
+	PreVote bool `json:"preVote,omitempty"`
+	// Succeed is an epoch taken without Deplo's word: refused while the member still hears its current leader.
+	Succeed bool `json:"succeed,omitempty"`
 }
 
 // Store is one archive another member of the cluster may send this one, to keep in its own backup store.
@@ -102,6 +120,17 @@ type Returned struct {
 	// Saved is what was written as a backup before its volume went; Kept is what stays on the member, and why.
 	Saved []Saved `json:"saved,omitempty"`
 	Kept  []Kept  `json:"kept,omitempty"`
+	// Aside is the dated copies it kept of the volumes it removed: writes its copy may not have sent yet.
+	Aside []Aside `json:"aside,omitempty"`
+}
+
+// Aside is one dated copy a returning member kept of a moved stack's volume, before that volume went.
+type Aside struct {
+	Slug      string `json:"slug"`
+	Volume    string `json:"volume"`
+	Of        string `json:"of"`
+	At        string `json:"at"`
+	SizeBytes int64  `json:"sizeBytes"`
 }
 
 // Keep is where the data a member still holds of one moved workload goes; credentials travel in Request only.

@@ -172,6 +172,12 @@ var Capabilities = []string{
 	"network.rekey",
 	// A failover start refuses while this server holds no valid certificate a domain of the App has (ADR-0049).
 	"failover.certificates",
+	// A line of succession: pre-votes, one leader per epoch, and a member next in line asks the leader beside it to lead.
+	"cluster.succession",
+	// A returning member sets each moved volume aside under a dated name; VolumeUsage lists them, RemoveSetAside removes one.
+	"volumes.set-aside",
+	// DeployResult.image_volumes: what a built image declares as volumes, read on the server that built it.
+	"deploy.image-volumes",
 }
 
 // AgentVersion is the version this agent reports over Hello.

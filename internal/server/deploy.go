@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -26,6 +27,8 @@ type emitter struct {
 	send func(*pb.DeployEvent) error
 	// What auto detection chose to build with, reported on every result after it.
 	builtWith string
+	// The paths the image this deploy built declares as volumes, read once it is built.
+	imageVolumes []string
 	// The command that starts the services held back until the deploy is ready (see startLate).
 	lateArgs []string
 }
@@ -48,7 +51,7 @@ func (e *emitter) result(ready bool, errMsg, commitSha string) {
 
 // finish sends the deploy's result.
 func (e *emitter) finish(r *pb.DeployResult) {
-	r.BuiltWith = e.builtWith
+	r.BuiltWith, r.ImageVolumes = e.builtWith, e.imageVolumes
 	_ = e.send(&pb.DeployEvent{Event: &pb.DeployEvent_Result{Result: r}})
 }
 
@@ -203,6 +206,10 @@ func (s *Service) runDeployBody(ctx context.Context, req *pb.DeployRequest, cont
 		return
 	}
 
+	// Read where it was built, so Deplo keeps what the image declares as a Volume (deplo.build/docs/guides/data).
+	if req.GetSourceKind() != pb.SourceKind_SOURCE_KIND_IMAGE && !isStack(req) {
+		e.imageVolumes = builtImageVolumes(ctx, imageRef)
+	}
 	if req.GetBuildOnly() {
 		e.log("info", "Built "+imageRef+" (build server: nothing is started here)")
 		e.result(true, "", commitSha)
@@ -769,4 +776,29 @@ func orDefault(v, def string) string {
 		return def
 	}
 	return v
+}
+
+// builtImageVolumes is the absolute paths an image declares with VOLUME; none when it cannot be read.
+func builtImageVolumes(ctx context.Context, imageRef string) []string {
+	res, err := dockercli.Run(ctx, 30*time.Second, "image", "inspect", "--format", "{{json .Config.Volumes}}", imageRef)
+	if err != nil || res.Code != 0 {
+		return nil
+	}
+	return imageVolumePaths(res.Stdout)
+}
+
+// imageVolumePaths reads `{{json .Config.Volumes}}`: an object keyed by path, or null.
+func imageVolumePaths(raw string) []string {
+	var vols map[string]json.RawMessage
+	if json.Unmarshal([]byte(strings.TrimSpace(raw)), &vols) != nil {
+		return nil
+	}
+	var out []string
+	for p := range vols {
+		if strings.HasPrefix(p, "/") {
+			out = append(out, p)
+		}
+	}
+	sort.Strings(out)
+	return out
 }

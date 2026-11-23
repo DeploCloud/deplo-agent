@@ -132,6 +132,7 @@ func (g *leaseGuard) settle(cluster string) {
 	var removed, trimmed, done []string
 	var saved []lease.Saved
 	var kept []lease.Kept
+	var asides []lease.Aside
 	if returning && g.trim != nil {
 		here, all := map[string]int{}, map[string]int{}
 		for _, e := range placement {
@@ -173,10 +174,11 @@ func (g *leaseGuard) settle(cluster string) {
 					failed = true
 					continue
 				}
-				sv, why, gone, retry := g.keepMoved(cluster, me, e, k, before[slug])
+				sv, why, as, gone, retry := g.keepMoved(cluster, me, e, k, before[slug])
 				if sv != nil {
 					saved = append(saved, *sv)
 				}
+				asides = append(asides, as...)
 				if why != nil {
 					kept = append(kept, *why)
 				}
@@ -235,6 +237,7 @@ func (g *leaseGuard) settle(cluster string) {
 		c.Returned.Removed = union(c.Returned.Removed, removed)
 		slices.Sort(c.Returned.Removed)
 		noteReturned(c.Returned, saved, kept)
+		c.Returned.Aside = unionAside(c.Returned.Aside, asides)
 		if c.Returning = failed; !failed {
 			delete(g.keeps, cluster)
 			c.since, c.asked = time.Time{}, false

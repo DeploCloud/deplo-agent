@@ -37,6 +37,7 @@ const (
 	Agent_ExportVolume_FullMethodName          = "/deplo.agent.v1.Agent/ExportVolume"
 	Agent_ImportVolume_FullMethodName          = "/deplo.agent.v1.Agent/ImportVolume"
 	Agent_VolumeUsage_FullMethodName           = "/deplo.agent.v1.Agent/VolumeUsage"
+	Agent_RemoveSetAside_FullMethodName        = "/deplo.agent.v1.Agent/RemoveSetAside"
 	Agent_ExportFiles_FullMethodName           = "/deplo.agent.v1.Agent/ExportFiles"
 	Agent_ImportFiles_FullMethodName           = "/deplo.agent.v1.Agent/ImportFiles"
 	Agent_ExportHostPath_FullMethodName        = "/deplo.agent.v1.Agent/ExportHostPath"
@@ -163,6 +164,9 @@ type AgentClient interface {
 	// How much disk a named volume occupies. The caller supplies the names (Deplo's
 	// volume-naming scheme stays control-plane-side, as for backup and move).
 	VolumeUsage(ctx context.Context, in *VolumeUsageRequest, opts ...grpc.CallOption) (*VolumeUsageResponse, error)
+	// Removes one dated copy a returning cluster member set aside (VolumeUsage set_aside_of lists them).
+	// Refuses any volume that is not such a copy. Hello capability `volumes.set-aside`.
+	RemoveSetAside(ctx context.Context, in *RemoveSetAsideRequest, opts ...grpc.CallOption) (*StackResult, error)
 	// Copy a service's host-side FILES DIR (<stack_dir>/files/<slug>) across hosts, for a
 	// server move - the sibling of ExportVolume/ImportVolume for the one piece of a
 	// service's state that is NOT a Docker volume.
@@ -583,6 +587,16 @@ func (c *agentClient) VolumeUsage(ctx context.Context, in *VolumeUsageRequest, o
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(VolumeUsageResponse)
 	err := c.cc.Invoke(ctx, Agent_VolumeUsage_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) RemoveSetAside(ctx context.Context, in *RemoveSetAsideRequest, opts ...grpc.CallOption) (*StackResult, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StackResult)
+	err := c.cc.Invoke(ctx, Agent_RemoveSetAside_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1514,6 +1528,9 @@ type AgentServer interface {
 	// How much disk a named volume occupies. The caller supplies the names (Deplo's
 	// volume-naming scheme stays control-plane-side, as for backup and move).
 	VolumeUsage(context.Context, *VolumeUsageRequest) (*VolumeUsageResponse, error)
+	// Removes one dated copy a returning cluster member set aside (VolumeUsage set_aside_of lists them).
+	// Refuses any volume that is not such a copy. Hello capability `volumes.set-aside`.
+	RemoveSetAside(context.Context, *RemoveSetAsideRequest) (*StackResult, error)
 	// Copy a service's host-side FILES DIR (<stack_dir>/files/<slug>) across hosts, for a
 	// server move - the sibling of ExportVolume/ImportVolume for the one piece of a
 	// service's state that is NOT a Docker volume.
@@ -1799,6 +1816,9 @@ func (UnimplementedAgentServer) ImportVolume(grpc.ClientStreamingServer[VolumeCh
 }
 func (UnimplementedAgentServer) VolumeUsage(context.Context, *VolumeUsageRequest) (*VolumeUsageResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method VolumeUsage not implemented")
+}
+func (UnimplementedAgentServer) RemoveSetAside(context.Context, *RemoveSetAsideRequest) (*StackResult, error) {
+	return nil, status.Error(codes.Unimplemented, "method RemoveSetAside not implemented")
 }
 func (UnimplementedAgentServer) ExportFiles(*ExportFilesRequest, grpc.ServerStreamingServer[FilesChunk]) error {
 	return status.Error(codes.Unimplemented, "method ExportFiles not implemented")
@@ -2250,6 +2270,24 @@ func _Agent_VolumeUsage_Handler(srv interface{}, ctx context.Context, dec func(i
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(AgentServer).VolumeUsage(ctx, req.(*VolumeUsageRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_RemoveSetAside_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemoveSetAsideRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).RemoveSetAside(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_RemoveSetAside_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).RemoveSetAside(ctx, req.(*RemoveSetAsideRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -3542,6 +3580,10 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "VolumeUsage",
 			Handler:    _Agent_VolumeUsage_Handler,
+		},
+		{
+			MethodName: "RemoveSetAside",
+			Handler:    _Agent_RemoveSetAside_Handler,
 		},
 		{
 			MethodName: "ReadStack",

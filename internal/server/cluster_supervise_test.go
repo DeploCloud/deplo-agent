@@ -300,7 +300,10 @@ func TestSupervise_logsEveryReasonOnceEachTimeItChanges(t *testing.T) {
 	if n := log.count("started " + writer + " again under its lease"); n != 1 {
 		t.Fatalf("the start was logged %d times: %q", n, log.lines)
 	}
-	s.writerStopped(stoppedBecause(context.Background(), "its restore failed, so it never serves empty"), writer, nil)
+	// A stop asked for again and again (a held copy, every second on eu-1) is said once.
+	for range 3 {
+		s.writerStopped(stoppedBecause(context.Background(), "its restore failed, so it never serves empty"), writer, nil)
+	}
 	fw.stops("c1", 1)
 	supervise(t, s)
 	supervise(t, s)

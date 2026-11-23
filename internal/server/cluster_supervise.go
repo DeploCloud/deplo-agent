@@ -184,7 +184,7 @@ func (sv *supervisor) stoppedOnPurpose(slug string, services []string, why strin
 	}
 	sv.saveLocked()
 	sv.mu.Unlock()
-	sv.logf("%s stays down until it is started or deployed again: %s", slug, why)
+	sv.note("stopped "+slug, slug+" stays down until it is started or deployed again: "+why)
 }
 
 // cleared ends the stops kept for a stack that was started or deployed again.
@@ -194,6 +194,7 @@ func (sv *supervisor) cleared(slug string) {
 	_, fenced := sv.fenced[slug]
 	delete(sv.fenced, slug)
 	if _, ok := sv.stopped[slug]; ok {
+		sv.note("stopped "+slug, "")
 		delete(sv.stopped, slug)
 		sv.saveLocked()
 		sv.logf("%s was started or deployed again: the supervisor looks after it again", slug)

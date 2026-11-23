@@ -565,7 +565,9 @@ func (z *clusterZones) holdLocked(now time.Time, heard map[string]time.Time, dro
 			continue
 		}
 		if at, ok := heard[fp]; ok {
-			if prev := z.lastHeard[fp]; !prev.IsZero() && at.Sub(prev) >= drop {
+			// First heard after this server listened for the removal time: it was away at least that long, so it is
+			// back as surely as one heard before a gap (eu-2 named eu-3 at once, eu-1 10 s later; 23 Nov 2026).
+			if prev := z.lastHeard[fp]; !prev.IsZero() && at.Sub(prev) >= drop || prev.IsZero() && at.Sub(z.since) >= drop {
 				z.back[fp] = at
 			}
 			z.lastHeard[fp] = at
