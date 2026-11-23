@@ -129,6 +129,33 @@ jobs:
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
 
+  # Every kind of order the leader sends is a contract with deplo-cluster (cluster-rollout.md §7): this agent must
+  # take each at the epoch it holds, as canary.40 did not for the start orders, which name no leader.
+  leader-contract:
+    needs: tested
+    if: needs.tested.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: DeploCloud/deplo-cluster
+          path: cluster
+          sparse-checkout: |
+            internal/leader/testdata/orders.golden.json
+          sparse-checkout-cone-mode: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: This agent takes every order the leader sends today
+        run: |
+          if [ ! -f cluster/internal/leader/testdata/orders.golden.json ]; then echo "the leader has no list yet"; exit 0; fi
+          go test ./internal/server -run 'TestOrders_' -count=1 -v
+        env:
+          CGO_ENABLED: "0"
+          DEPLO_CLUSTER_REPO: ${{ github.workspace }}/cluster
+
   # The answers' routes are a contract with the panel (DeploCloud/deplo, docs/agents/cluster-rollout.md §7): the
   # agent changes first, so the panel's reference may lag this one's, but what the panel renders today must still
   # pass this agent's checks, or every App of a cluster would stop answering everywhere.
