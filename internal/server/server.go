@@ -172,6 +172,8 @@ var Capabilities = []string{
 	"network.rekey",
 	// A failover start refuses while this server holds no valid certificate a domain of the App has (ADR-0049).
 	"failover.certificates",
+	// A line of succession: pre-votes, one leader per epoch, and a member next in line asks the leader beside it to lead.
+	"cluster.succession",
 }
 
 // AgentVersion is the version this agent reports over Hello.

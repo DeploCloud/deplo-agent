@@ -61,6 +61,11 @@ type clusterLease struct {
 	Unannounced time.Time `json:"unannounced,omitempty"`
 	// Gone is what the leader that renewed it no longer counts for a majority (ADR-0049).
 	Gone []string `json:"gone,omitempty"`
+	// Leader is the server whose leader holds Epoch: a member gives an epoch to one leader only.
+	Leader string `json:"leader,omitempty"`
+	// Line and Last are who leads after that leader, as its last renewal named them.
+	Line []string `json:"line,omitempty"`
+	Last string   `json:"last,omitempty"`
 	// cold is a lease that was dead when this agent started after the server itself did: Docker brought every
 	// stack back, so nothing of it runs until the leader speaks. An agent that only restarted fences as usual.
 	cold bool
@@ -200,13 +205,18 @@ type leaseGuard struct {
 	leader func() (cluster string, fingerprints []string)
 	// logf writes a line of the agent's log; tests read it.
 	logf func(format string, args ...any)
+	// succeed asks the leader beside this member to lead a cluster whose leader went silent; asking are those under way
+	// and asked what each last answered, so the log says it once.
+	succeed func(ctx context.Context, a succeedAsk) error
+	asking  map[string]bool
+	asked   map[string]string
 }
 
 // unreadableLease names the lease a file that would not open stands for: one that ran out, of nobody knows what.
 const unreadableLease = "unreadable"
 
 func newLeaseGuard(file string, now func() time.Time, fence func(context.Context, []lease.Entry) error) *leaseGuard {
-	g := &leaseGuard{file: file, now: now, fence: fence, clusters: map[string]*clusterLease{}, settling: map[string]bool{}, relinquishing: map[string]bool{}, starting: map[string]time.Time{}, keeps: map[string]map[string]lease.Keep{}, stores: map[string][]lease.Store{}, retryAt: map[string]time.Time{}, retryWait: map[string]time.Duration{}, logf: stderrf}
+	g := &leaseGuard{file: file, now: now, fence: fence, clusters: map[string]*clusterLease{}, settling: map[string]bool{}, relinquishing: map[string]bool{}, starting: map[string]time.Time{}, keeps: map[string]map[string]lease.Keep{}, stores: map[string][]lease.Store{}, retryAt: map[string]time.Time{}, retryWait: map[string]time.Duration{}, logf: stderrf, asking: map[string]bool{}, asked: map[string]string{}}
 	if raw, err := os.ReadFile(file); err == nil {
 		if err := json.Unmarshal(raw, &g.clusters); err != nil {
 			fmt.Fprintf(os.Stderr, "deplo-agent: the cluster lease in %s cannot be read (%v): taken as a lease that ran out\n", file, err)
@@ -353,8 +363,8 @@ func (g *leaseGuard) Admit(cluster string, epoch uint64) (held uint64, ok bool) 
 func (g *leaseGuard) Renew(o lease.Order) lease.Reply {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if c := g.clusters[o.Cluster]; c != nil && o.Epoch < c.Epoch {
-		return lease.Reply{Error: lease.StaleEpoch, Epoch: c.Epoch}
+	if c := g.clusters[o.Cluster]; g.refuse(c, o) != "" {
+		return lease.Reply{Error: g.refuse(c, o), Epoch: c.Epoch}
 	}
 	g.endOlderStarts(o.Cluster, o.Epoch)
 	// The leader's word replaces the stand-in for an unreadable file: what that stopped comes back as held.
@@ -363,7 +373,7 @@ func (g *leaseGuard) Renew(o lease.Order) lease.Reply {
 	}
 	delete(g.clusters, unreadableLease)
 	next := &clusterLease{Epoch: o.Epoch, PlacedAt: o.Epoch, Member: o.Member, RenewedAt: g.now(), Boot: bootID(), Placement: o.Placement, heard: true, ExtraSeconds: min(max(o.ExtendSeconds, 0), int(lease.ExtendFor/time.Second)),
-		FenceSeconds: min(max(o.FenceSeconds, 0), int(lease.FenceAfter/time.Second)), Gone: o.Gone}
+		FenceSeconds: min(max(o.FenceSeconds, 0), int(lease.FenceAfter/time.Second)), Gone: o.Gone, Leader: o.From, Line: o.Line, Last: o.Last}
 	g.confirmStarts(o)
 	witness(g.clusters[o.Cluster], next, g.now(), o)
 	r := lease.Reply{OK: true, Epoch: o.Epoch, StoppedWithin: int((next.fence() + fenceTakes()).Seconds()), Unsure: next.unsure(g.now())}
@@ -475,14 +485,14 @@ func (g *leaseGuard) Probe(o lease.Order) lease.Reply {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	c := g.clusters[o.Cluster]
-	switch {
+	switch why := g.refuse(c, o); {
+	case why != "":
+		return lease.Reply{Error: why, Epoch: c.Epoch}
 	case c == nil:
-		c = &clusterLease{Epoch: o.Epoch, Member: o.Member}
+		c = &clusterLease{Epoch: o.Epoch, Member: o.Member, Leader: o.From}
 		g.clusters[o.Cluster] = c
-	case o.Epoch < c.Epoch:
-		return lease.Reply{Error: lease.StaleEpoch, Epoch: c.Epoch}
 	default:
-		c.Epoch = o.Epoch
+		c.Epoch, c.Leader = o.Epoch, o.From
 	}
 	witness(nil, c, g.now(), o)
 	g.endOlderStarts(o.Cluster, o.Epoch)
@@ -492,6 +502,7 @@ func (g *leaseGuard) Probe(o lease.Order) lease.Reply {
 
 // Check stops the single-writer workloads of every lease that has run out, once each. A stop that fails is tried again on the next check.
 func (g *leaseGuard) Check(ctx context.Context) {
+	g.askToLead(ctx, g.now())
 	g.mu.Lock()
 	type due struct {
 		cluster string
@@ -625,6 +636,10 @@ func (g *leaseGuard) Serve(from wire.Party, c net.Conn) {
 		_ = lease.WriteReply(c, lease.Reply{Error: "the order names something that is not a stack"})
 		return
 	}
+	if o.PreVote {
+		_ = lease.WriteReply(c, g.PreVote(o))
+		return
+	}
 	if o.Probe {
 		placed, epoch := g.placedHere(o.Cluster)
 		r := g.Probe(o)
@@ -742,6 +757,7 @@ func (s *Service) leaseGuard() *leaseGuard {
 		s.lease.remove, s.lease.resume, s.lease.trim = s.removeMoved, s.resumeHeld, s.trimReplicas
 		s.lease.keep, s.lease.purge, s.lease.stop = s.keepLeft, s.purgeLeft, s.stopMoved
 		s.lease.relinquish = s.relinquishStack
+		s.lease.succeed = s.askLeaderToLead
 		s.lease.has = func(slug string) bool { return isFile(s.stackPath(slug)) }
 		s.lease.running = stackRuns
 		if s.lease.unreadable && s.loadMember().Member {
