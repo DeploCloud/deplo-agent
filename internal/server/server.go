@@ -237,7 +237,9 @@ type Service struct {
 	fwdOps  forwardOps
 
 	heldMu sync.Mutex
-	held   map[string]bool
+	// unpausedAtStart: this run unpaused what an earlier one held, so the proxy may lack those routes.
+	unpausedAtStart bool
+	held            map[string]bool
 	// gate keeps a deploy and a backup's pause of the same App apart; see app_gate.go.
 	gate appGate
 
@@ -312,14 +314,15 @@ func New(stackDir, buildTmpDir, dataDir, dataBase string) *Service {
 	sweepTempSecrets()
 	sweepInventoryDirs(buildTmpDir)
 	sweepInventoryDirs(filepath.Join(dataBase, "inventory"))
-	sweepBackupHolds(filepath.Join(dataBase, "backup-holds"))
+	unpaused := sweepBackupHolds(filepath.Join(dataBase, "backup-holds"))
 	return &Service{
-		stackDir:    stackDir,
-		buildTmpDir: buildTmpDir,
-		dataDir:     dataDir,
-		dataBase:    dataBase,
-		deploys:     map[string]*inflight{},
-		jobs:        map[string]*job{},
+		unpausedAtStart: unpaused,
+		stackDir:        stackDir,
+		buildTmpDir:     buildTmpDir,
+		dataDir:         dataDir,
+		dataBase:        dataBase,
+		deploys:         map[string]*inflight{},
+		jobs:            map[string]*job{},
 	}
 }
 

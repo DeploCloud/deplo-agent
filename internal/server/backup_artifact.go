@@ -5,12 +5,15 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"filippo.io/age"
 	pb "github.com/DeploCloud/deplo-agent/gen"
@@ -287,6 +290,11 @@ type artifactWritten struct {
 	digest        string
 }
 
+// streamStallAfter is how long a relayed backup's stream may take nothing before the copy behind it stops.
+var streamStallAfter = time.Minute
+
+var errStreamStalled = errors.New("the control plane stopped taking the backup for a minute, so the copy stopped and the app runs again")
+
 func (s *Service) writeArtifact(ctx context.Context, dest *artifactDestination, produce func(io.Writer) error) (out artifactWritten, err error) {
 	pr, pw := io.Pipe()
 	var decrypted int64
@@ -311,6 +319,26 @@ func (s *Service) writeArtifact(ctx context.Context, dest *artifactDestination, 
 
 	switch {
 	case dest.stream != nil:
+		// A stream that takes nothing for streamStallAfter frees the copy, so a hold behind it ends.
+		var sent atomic.Int64
+		sent.Store(time.Now().UnixNano())
+		watch := make(chan struct{})
+		defer close(watch)
+		go func() {
+			t := time.NewTicker(min(streamStallAfter/4, time.Second))
+			defer t.Stop()
+			for {
+				select {
+				case <-watch:
+					return
+				case <-t.C:
+					if time.Since(time.Unix(0, sent.Load())) > streamStallAfter {
+						_ = pr.CloseWithError(errStreamStalled)
+						return
+					}
+				}
+			}
+		}()
 		sum := sha256.New()
 		buf := make([]byte, storeChunkBytes)
 		var size int64
@@ -327,6 +355,7 @@ func (s *Service) writeArtifact(ctx context.Context, dest *artifactDestination, 
 				if serr := dest.stream(frame); serr != nil {
 					return artifactWritten{}, serr
 				}
+				sent.Store(time.Now().UnixNano())
 			}
 			if rerr == io.EOF {
 				return artifactWritten{size: size, decryptedSize: decrypted, digest: hex.EncodeToString(sum.Sum(nil))}, nil

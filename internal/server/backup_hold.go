@@ -39,8 +39,9 @@ func (s *Service) holdJournalDir() string { return filepath.Join(s.dataBase, "ba
 
 // holdVolumes pauses every running container of slug that mounts one of vols, once no deploy of slug is under way.
 // It returns nil, nil when none runs.
-func (s *Service) holdVolumes(ctx context.Context, slug string, vols []string, logf func(string)) (*volumeHold, error) {
-	ids, err := runningOn(ctx, vols)
+// skip is the backup's own copier, which mounts them too.
+func (s *Service) holdVolumes(ctx context.Context, slug string, vols []string, logf func(string), skip string) (*volumeHold, error) {
+	ids, err := runningOn(ctx, vols, skip)
 	if err != nil || len(ids) == 0 {
 		return nil, err
 	}
@@ -58,7 +59,7 @@ func (s *Service) holdVolumes(ctx context.Context, slug string, vols []string, l
 		logf(fmt.Sprintf("Waited %s for the deploy to finish.", spoken(waited)))
 	}
 	// Read again: the deploy may have replaced every container.
-	if ids, err = runningOn(ctx, vols); err != nil || len(ids) == 0 {
+	if ids, err = runningOn(ctx, vols, skip); err != nil || len(ids) == 0 {
 		leave()
 		return nil, err
 	}
@@ -93,8 +94,8 @@ func (s *Service) holdVolumes(ctx context.Context, slug string, vols []string, l
 	return h, nil
 }
 
-// runningOn lists the running containers that mount one of vols.
-func runningOn(ctx context.Context, vols []string) ([]string, error) {
+// runningOn lists the running containers that mount one of vols, but skip.
+func runningOn(ctx context.Context, vols []string, skip string) ([]string, error) {
 	seen := map[string]bool{}
 	var ids []string
 	for _, v := range vols {
@@ -106,6 +107,9 @@ func runningOn(ctx context.Context, vols []string) ([]string, error) {
 			return nil, err
 		}
 		for _, id := range strings.Fields(res.Stdout) {
+			if skip != "" && strings.HasPrefix(id, skip) {
+				continue
+			}
 			if !seen[id] {
 				seen[id] = true
 				ids = append(ids, id)
@@ -201,8 +205,9 @@ func unpauseAll(ctx context.Context, ids []string) bool {
 	return ok
 }
 
-// sweepBackupHolds unpauses what an earlier run of this agent paused for a copy and never released.
-func sweepBackupHolds(dir string) {
+// sweepBackupHolds unpauses what an earlier run of this agent paused for a copy and never released, and says
+// whether it unpaused anything.
+func sweepBackupHolds(dir string) bool {
 	files, _ := filepath.Glob(filepath.Join(dir, "*.json"))
 	for _, f := range files {
 		var ids []string
@@ -216,6 +221,7 @@ func sweepBackupHolds(dir string) {
 			_ = os.Remove(f)
 		}
 	}
+	return len(files) > 0
 }
 
 func (s *Service) markHeld(id string, on bool) {

@@ -61,7 +61,8 @@ func TestVolumeBackup_pausesWhileCopyingThenResumes(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := argvVerbs(argv())
-	i, j, k := strings.Index(got, "pause"), strings.Index(got, "run"), strings.LastIndex(got, "unpause")
+	i, k := strings.Index(got, "pause"), strings.LastIndex(got, "unpause")
+	j := strings.Index(got[max(i, 0):], "run") + max(i, 0)
 	if i < 0 || !(i < j && j < k) {
 		t.Fatalf("want pause, then the copy, then unpause; got %q", got)
 	}
@@ -95,7 +96,7 @@ func TestVolumeBackup_pauseRefusedFailsTheBackup(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "pause") {
 		t.Fatalf("want a clear pause error, got %v", err)
 	}
-	if strings.Contains(argvVerbs(argv()), "run") {
+	if got := argvVerbs(argv()); strings.Contains(got[strings.Index(got, "pause"):], "run") {
 		t.Fatal("never copy a volume that could not be held")
 	}
 }
@@ -182,5 +183,112 @@ func TestE2E_VolumeBackupPausesAWritingApp(t *testing.T) {
 			}
 			return
 		}
+	}
+}
+
+// The proxy drops a paused App's routes whenever it reads containers, which it does when one starts or stops.
+// So the copy starts before the pause and stops after the App runs again, and the copier itself is never paused.
+func TestVolumeBackup_copierStartsBeforeThePauseAndStopsAfter(t *testing.T) {
+	argv := dockerOnPath(t, `case "$1" in
+ps) echo abc123def456; echo cop999 ;;
+run) case "$*" in *" -d "*) echo cop999 ;; esac ;;
+esac`)
+	s := &Service{dataBase: t.TempDir()}
+	if err, _ := archiveWith(t, s); err != nil {
+		t.Fatal(err)
+	}
+	lines := argv()
+	at := func(pred func(string) bool) int {
+		for i, l := range lines {
+			if pred(l) {
+				return i
+			}
+		}
+		return -1
+	}
+	start := at(func(l string) bool { return strings.HasPrefix(l, "run ") && strings.Contains(l, " -d ") })
+	pause := at(func(l string) bool { return l == "pause abc123def456" })
+	copy := at(func(l string) bool { return strings.HasPrefix(l, "exec ") && strings.Contains(l, " cop999 tar ") })
+	unpause := at(func(l string) bool { return l == "unpause abc123def456" })
+	stop := at(func(l string) bool { return l == "rm -f cop999" })
+	if start < 0 || !(start < pause && pause < copy && copy < unpause && unpause < stop) {
+		t.Fatalf("want the copier started, the App paused, the copy, the App unpaused, the copier gone; got %q", lines)
+	}
+	if at(func(l string) bool { return l == "pause cop999" }) >= 0 {
+		t.Fatalf("the copier mounts the volume too, but is never paused: %q", lines)
+	}
+	for _, l := range lines[pause:unpause] {
+		if strings.HasPrefix(l, "run ") {
+			t.Fatalf("no helper starts or stops while the App is paused: %q", lines)
+		}
+	}
+}
+
+func TestVolumeBackup_copierGoesWhenTheCopyFails(t *testing.T) {
+	argv := dockerOnPath(t, `case "$1" in
+ps) echo abc123def456 ;;
+run) case "$*" in *" -d "*) echo cop999 ;; esac ;;
+exec) exit 2 ;;
+esac`)
+	s := &Service{dataBase: t.TempDir()}
+	if err, _ := archiveWith(t, s); err == nil {
+		t.Fatal("a failed copy of a paused app is an error")
+	}
+	got := strings.Join(argv(), "\n")
+	if !strings.Contains(got, "unpause abc123def456") || !strings.Contains(got, "rm -f cop999") {
+		t.Fatalf("the App runs again and the copier goes: %q", got)
+	}
+}
+
+// eu, 23 Nov 2026: a relayed backup's stream broke and lab-web stayed paused 4 minutes, its tar blocked. The copy
+// a reader gave up on is stopped, and the App runs again at once, not at the step's 30 minutes.
+func TestVolumeBackup_aCopyItsReaderLeftEndsAndTheAppRunsAgain(t *testing.T) {
+	argv := dockerOnPath(t, `case "$1" in
+ps) echo abc123def456 ;;
+run) case "$*" in *" -d "*) ;; *) exec yes ;; esac ;;
+esac`)
+	s := &Service{dataBase: t.TempDir()}
+	done := make(chan error, 1)
+	go func() {
+		err, _ := archiveWith(t, s)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a copy that is no tar stream is an error")
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the copy still holds the App paused after its reader gave up")
+	}
+	got := strings.Join(argv(), "\n")
+	if !strings.Contains(got, "unpause abc123def456") || !strings.Contains(got, "rm -f deplo-helper-") {
+		t.Fatalf("the App must run again and its copy stop: %q", argv())
+	}
+}
+
+// A stream that stops taking the artifact frees what produces it, so a hold behind it ends.
+func TestWriteArtifact_aStalledStreamFreesTheCopy(t *testing.T) {
+	was := streamStallAfter
+	streamStallAfter = 100 * time.Millisecond
+	t.Cleanup(func() { streamStallAfter = was })
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) })
+	dest := &artifactDestination{stream: func([]byte) error { <-block; return nil }}
+	produced := make(chan error, 1)
+	go func() {
+		_, _ = (&Service{}).writeArtifact(context.Background(), dest, func(w io.Writer) error {
+			for {
+				if _, err := w.Write(make([]byte, 64<<10)); err != nil {
+					produced <- err
+					return err
+				}
+			}
+		})
+	}()
+	select {
+	case <-produced:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the copy is still held by a stream that stopped taking it")
 	}
 }
