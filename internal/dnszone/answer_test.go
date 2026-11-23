@@ -372,3 +372,23 @@ func TestReply_saysWhichServerAnswered(t *testing.T) {
 		t.Fatal("an ident that is not hex was taken")
 	}
 }
+
+// Just started, a server names nothing for its zone; which server it is stays answered.
+func TestReply_aQuietZoneAnswersOnlyWhichServerThisIs(t *testing.T) {
+	tb := testTable()
+	tb.Ident = "abc123"
+	tb.Zones[0].Quiet = true
+	c := mustCompile(t, tb)
+	for _, name := range []string{"shop-example-com.go.example.com.", "go.example.com."} {
+		if r := c.reply(query(name, dns.TypeA), true, visitor{}); r != nil {
+			t.Fatalf("%s answered rcode %d with %v", name, r.Rcode, r.Answer)
+		}
+	}
+	r := c.reply(query(ServerLabel+"go.example.com.", dns.TypeTXT), true, visitor{})
+	if r == nil || len(r.Answer) != 1 {
+		t.Fatalf("ident: %v", r)
+	}
+	if r := c.reply(query("example.org.", dns.TypeA), true, visitor{}); r == nil || r.Rcode != dns.RcodeRefused {
+		t.Fatalf("outside the zone: %v", r)
+	}
+}

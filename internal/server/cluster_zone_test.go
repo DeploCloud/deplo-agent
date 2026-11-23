@@ -233,14 +233,20 @@ func TestZone_answersFromDiskAfterARestartWithDeploDown(t *testing.T) {
 	}
 	// A new run of the agent, hearing nobody yet, with what the last one kept on disk.
 	writeZoneFile(t, dir)
-	again := zoneService(t, dir, &fakeHeard{})
+	back := &fakeHeard{}
+	again := zoneService(t, dir, back)
 	again.StartClusterZone()
 	addrs, _ := again.zone.sup.Listening()
 	if len(addrs) != 1 {
 		t.Fatalf("listening on %v", addrs)
 	}
-	// Just started and hearing nobody yet: it answers what it last agreed on, rather than nothing, but for itself:
-	// for the removal time a server just started is named by nobody, itself included.
+	// Just started and hearing nobody yet: no answer at all, never the set it agreed on before it stopped.
+	if got := lookup(addrs[0], "shop-example-com.go.example.com."); !strings.HasPrefix(got, "error") {
+		t.Fatalf("answered %s before hearing its cluster", got)
+	}
+	// Hearing the others, it answers from the zone it kept, Deplo still down; for the removal time a server just
+	// started is named by nobody, itself included.
+	back.set(zfp1, zfp2)
 	until(t, 5*time.Second, "203.0.113.2 203.0.113.3", func() string { return lookup(addrs[0], "shop-example-com.go.example.com.") })
 }
 
