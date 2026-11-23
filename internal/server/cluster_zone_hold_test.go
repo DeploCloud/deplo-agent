@@ -13,7 +13,8 @@ func holdCluster() *zoneCluster {
 // answer with its default certificate (found on the ADR-0049 lab).
 func TestZoneHold_aServerBackIsNamedOnlyOnceHeardForTheRemovalTime(t *testing.T) {
 	t0 := time.Now()
-	z := &clusterZones{since: t0.Add(-time.Hour)}
+	// Up for an hour, and hearing both all along.
+	z := &clusterZones{since: t0.Add(-time.Hour), lastHeard: map[string]time.Time{"fp-b": t0.Add(-2 * time.Second), "fp-c": t0.Add(-2 * time.Second)}, back: map[string]time.Time{}}
 	c, drop := holdCluster(), 10*time.Second
 	heard := map[string]time.Time{"fp-b": t0, "fp-c": t0}
 	if h := z.holdLocked(t0, heard, drop, c); len(h) != 0 {
@@ -76,5 +77,33 @@ func TestZoneHold_aServerThawedAfterTheRemovalTimeIsOneJustStarted(t *testing.T)
 	}
 	if h := z.holdLocked(thaw, map[string]time.Time{"fp-b": thaw, "fp-c": thaw}, drop, c); !h["fp-a"] {
 		t.Fatalf("thawed: held %v", h)
+	}
+}
+
+// A server that came back itself while another was still off never heard that one before: it holds it as long as a
+// server that heard it before the cut does, so the two name it at the same time.
+func TestZoneHold_aServerNeverHeardSinceThisOneStartedIsHeldAsOneBack(t *testing.T) {
+	t0 := time.Now()
+	z := &clusterZones{since: t0}
+	c, drop := holdCluster(), 10*time.Second
+	// fp-c speaks first a minute after this server started: it was off all that time.
+	for at := t0; at.Before(t0.Add(time.Minute)); at = at.Add(2 * time.Second) {
+		z.holdLocked(at, map[string]time.Time{"fp-b": at}, drop, c)
+	}
+	on := t0.Add(time.Minute)
+	if h := z.holdLocked(on, map[string]time.Time{"fp-b": on, "fp-c": on}, drop, c); !h["fp-c"] || h["fp-b"] {
+		t.Fatalf("first heard after a minute: held %v", h)
+	}
+	var h map[string]bool
+	for at := on.Add(time.Second); !at.After(on.Add(11 * time.Second)); at = at.Add(2 * time.Second) {
+		h = z.holdLocked(at, map[string]time.Time{"fp-b": at, "fp-c": at}, drop, c)
+	}
+	if len(h) != 0 {
+		t.Fatalf("held %v past the removal time", h)
+	}
+	// Heard within the removal time of this server's own start is no return: it was only not heard yet.
+	z = &clusterZones{since: t0}
+	if h := z.holdLocked(t0.Add(3*time.Second), map[string]time.Time{"fp-b": t0.Add(3 * time.Second), "fp-c": t0.Add(3 * time.Second)}, drop, c); h["fp-b"] || h["fp-c"] {
+		t.Fatalf("just started: held %v", h)
 	}
 }
