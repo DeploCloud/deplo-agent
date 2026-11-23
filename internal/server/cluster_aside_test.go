@@ -134,3 +134,73 @@ func TestAside_onlyASetAsideCopyIsRemoved(t *testing.T) {
 		}
 	}
 }
+
+func TestSetAside_copiesEachVolumeThatExistsAndSkipsAnAbsentOne(t *testing.T) {
+	d := &asideDocker{vols: map[string]bool{"deplo-fise-fise-db-data": true}}
+	was := setAsideRun
+	setAsideRun = d.run
+	t.Cleanup(func() { setAsideRun = was })
+	s := &Service{}
+	res, err := s.SetAside(context.Background(), &pb.SetAsideRequest{Slug: "fise", VolumeNames: []string{"deplo-fise-fise-db-data", "deplo-fise_cache"}})
+	if err != nil || len(res.GetCopies()) != 1 {
+		t.Fatalf("copies %v, %v: only the volume that exists has a copy", res.GetCopies(), err)
+	}
+	c := res.GetCopies()[0]
+	if c.GetSetAsideOf() != "deplo-fise-fise-db-data" || !asideSuffix.MatchString(c.GetVolumeName()) || c.GetSetAsideAtMs() == 0 {
+		t.Fatalf("copy %+v", c)
+	}
+	if strings.Contains(strings.Join(d.ran, "\n"), "-v deplo-fise_cache:/from") {
+		t.Fatalf("an absent volume was copied, which would create it empty:\n%s", strings.Join(d.ran, "\n"))
+	}
+}
+
+func TestSetAside_refusesACopyOfACopyAndABadName(t *testing.T) {
+	s := &Service{}
+	for _, v := range []string{"deplo-fise-fise-db-data-aside-20261123T040506Z", "../etc"} {
+		if _, err := s.SetAside(context.Background(), &pb.SetAsideRequest{Slug: "fise", VolumeNames: []string{v}}); err == nil {
+			t.Fatalf("%q was set aside", v)
+		}
+	}
+}
+
+func TestReadStack_saysWhenTheStackLastRan(t *testing.T) {
+	now := time.Date(2026, 11, 23, 7, 49, 13, 0, time.UTC)
+	exited := writerContainer{State: "exited", FinishedAt: now.Add(-7 * time.Minute)}
+	if at, running := lastRan([]writerContainer{exited}, now); running || at != now.Add(-7*time.Minute).UnixMilli() {
+		t.Fatalf("stopped stack: %d %v", at, running)
+	}
+	if at, running := lastRan([]writerContainer{exited, {State: "running"}}, now); !running || at != now.UnixMilli() {
+		t.Fatalf("a running container is running now: %d %v", at, running)
+	}
+	if at, running := lastRan(nil, now); running || at != 0 {
+		t.Fatalf("no container: %d %v", at, running)
+	}
+	was := listStackContainers
+	listStackContainers = func(context.Context, string) ([]writerContainer, error) {
+		return []writerContainer{{State: "running"}}, nil
+	}
+	t.Cleanup(func() { listStackContainers = was })
+	res, err := newTestService(t).ReadStack(context.Background(), &pb.StackRef{Slug: "fise"})
+	if err != nil || res.GetExists() || !res.GetRunning() || res.GetLastRanMs() == 0 {
+		t.Fatalf("read %+v, %v: containers run with no stack file left", res, err)
+	}
+}
+
+func TestAsideTarget_anotherServersCopyArrivesAsANewLabelledCopy(t *testing.T) {
+	d := &asideDocker{vols: map[string]bool{}}
+	name := "deplo-fise-fise-db-data-aside-20261123T074913Z"
+	if err := createAsideTarget(context.Background(), d.run, name, "deplo-fise-fise-db-data"); err != nil {
+		t.Fatal(err)
+	}
+	if all := strings.Join(d.ran, "\n"); !strings.Contains(all, "volume create --label deplo.aside.of=deplo-fise-fise-db-data --label deplo.aside.at=2026-11-23T07:49:13Z "+name) {
+		t.Fatalf("commands:\n%s", all)
+	}
+	if err := createAsideTarget(context.Background(), d.run, name, "deplo-fise-fise-db-data"); err == nil {
+		t.Fatal("an existing copy was written into")
+	}
+	for _, bad := range [][2]string{{"deplo-fise-fise-db-data", "deplo-fise-fise-db-data"}, {"deplo-other-aside-20261123T074913Z", "deplo-fise-fise-db-data"}} {
+		if err := createAsideTarget(context.Background(), d.run, bad[0], bad[1]); err == nil {
+			t.Fatalf("%q was taken as a copy of %q", bad[0], bad[1])
+		}
+	}
+}

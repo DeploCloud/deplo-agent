@@ -176,6 +176,8 @@ var Capabilities = []string{
 	"cluster.succession",
 	// A returning member sets each moved volume aside under a dated name; VolumeUsage lists them, RemoveSetAside removes one.
 	"volumes.set-aside",
+	// ReadStack.last_ran_ms and SetAside: a moved stack's newer copy wins, and the other is set aside first.
+	"volumes.newest-wins",
 	// DeployResult.image_volumes: what a built image declares as volumes, read on the server that built it.
 	"deploy.image-volumes",
 }
@@ -814,11 +816,35 @@ func (s *Service) ReadStack(ctx context.Context, ref *pb.StackRef) (*pb.ReadStac
 	if err := validateSlug(ref.GetSlug()); err != nil {
 		return &pb.ReadStackResponse{Exists: false, Yaml: ""}, nil
 	}
-	contents, err := os.ReadFile(s.stackPath(ref.GetSlug()))
-	if err != nil {
-		return &pb.ReadStackResponse{Exists: false, Yaml: ""}, nil
+	out := &pb.ReadStackResponse{}
+	if contents, err := os.ReadFile(s.stackPath(ref.GetSlug())); err == nil {
+		out.Exists, out.Yaml = true, string(contents)
 	}
-	return &pb.ReadStackResponse{Exists: true, Yaml: string(contents)}, nil
+	// Which copy of a moved stack's data is newer is the one whose containers ran last.
+	if cs, err := listStackContainers(ctx, ref.GetSlug()); err == nil {
+		out.LastRanMs, out.Running = lastRan(cs, time.Now())
+	}
+	return out, nil
+}
+
+// listStackContainers is a var so a test answers without Docker.
+var listStackContainers = listWriterContainers
+
+// lastRan is when a container of the stack last ran: now while one runs, else the latest exit; 0 with none.
+func lastRan(cs []writerContainer, now time.Time) (int64, bool) {
+	var at time.Time
+	for _, c := range cs {
+		if c.State == "running" || c.State == "restarting" || c.State == "paused" {
+			return now.UnixMilli(), true
+		}
+		if c.FinishedAt.After(at) {
+			at = c.FinishedAt
+		}
+	}
+	if at.IsZero() {
+		return 0, false
+	}
+	return at.UnixMilli(), false
 }
 
 // Inspect reports a container's existence + running state for live status.
