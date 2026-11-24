@@ -475,3 +475,43 @@ func TestReplica_aGrowingCopyStopsAtATenthFree(t *testing.T) {
 		t.Fatalf("the copy holds %v", entries)
 	}
 }
+
+// Deplo reads a copy's status at its own pace: a stop for room is still said while the copy dials again.
+func TestReplica_aStopForRoomIsSaidUntilAWholeSnapshotLands(t *testing.T) {
+	mid, goOn := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	was := flushRange
+	flushRange = func(f *os.File, off, n int64) {
+		once.Do(func() { close(mid); <-goOn })
+		was(f, off, n)
+	}
+	t.Cleanup(func() { flushRange = was })
+	src := t.TempDir()
+	os.WriteFile(filepath.Join(src, "big.bin"), noise(2*gentleStep, 3), 0o644)
+	dir := t.TempDir()
+	st := &Status{}
+	st.Fail("replica: big: this server has 1.4 GB free, too little to go on with this copy and " + room.Marker)
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	defer ln.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		if c, err := ln.Accept(); err == nil {
+			defer c.Close()
+			_ = Send(ctx, c, []string{VolumeRoot("data")}, []string{src})
+		}
+	}()
+	c, _ := net.Dial("tcp", ln.Addr().String())
+	defer c.Close()
+	go func() { _ = Receive(ctx, c, dir, []string{VolumeRoot("data")}, st, NewIndex()) }()
+	<-mid // the next stream is open and half way through the file
+	connected, _, _, _, err := st.Snapshot()
+	close(goOn)
+	if !connected || !strings.Contains(err, room.Marker) {
+		t.Fatalf("connected=%v: the stop for room was cleared before a snapshot landed: %q", connected, err)
+	}
+	eventually(t, "a whole snapshot to clear it", func() bool {
+		_, synced, _, _, err := st.Snapshot()
+		return synced && err == ""
+	})
+}
