@@ -163,7 +163,7 @@ func (r *root) chunksOf(rel string) ([]chunk, int64, error) {
 	}
 	defer f.Close()
 	var l listOf
-	n, err := io.Copy(&l, f)
+	n, err := io.Copy(&l, &behind{f: f})
 	if err != nil {
 		return nil, 0, err
 	}

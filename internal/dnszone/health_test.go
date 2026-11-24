@@ -113,16 +113,27 @@ func TestDecide_aPartitionOfFive(t *testing.T) {
 	}
 }
 
-func TestDecide_warmingNamesNothingUntilItHearsEveryServer(t *testing.T) {
+// ADR-0049: a restarted name server answers once it hears more than half of its cluster, never its old set.
+func TestDecide_warmingAnswersOnceItHearsMoreThanHalf(t *testing.T) {
 	now := time.Now()
 	last := &Agreed{Servers: []string{"s0", "s1", "s2"}, Addrs: Addrs{V4: []string{"203.0.113.1", "203.0.113.2", "203.0.113.3"}}}
-	// Back with its old set and hearing a majority: still nothing from the old set, nothing at all.
-	v := Decide(members(3), "s0", heardFrom(now, "s1"), now, 10*time.Second, true, last)
-	if v.State != StateWarming || len(v.Servers) != 0 || len(v.Addrs.V4) != 0 {
-		t.Fatalf("%+v", v)
+	// Back with its old set and hearing only itself: nothing from the old set, nothing at all.
+	if v := Decide(members(3), "s0", nil, now, 10*time.Second, true, last); v.State != StateWarming || len(v.Servers) != 0 {
+		t.Fatalf("alone: %+v", v)
 	}
-	if v := Decide(members(3), "s0", nil, now, 10*time.Second, true, nil); v.State != StateWarming || len(v.Servers) != 0 {
-		t.Fatalf("nothing agreed: %+v", v)
+	// Two of three, one peer unreachable: it answers what it hears now, s2 left out.
+	v := Decide(members(3), "s0", heardFrom(now, "s1"), now, 10*time.Second, true, last)
+	if v.State != StateAnswer || !slices.Equal(v.Servers, []string{"s0", "s1"}) || !slices.Equal(v.Addrs.V4, []string{"203.0.113.1", "203.0.113.2"}) {
+		t.Fatalf("two of three: %+v", v)
+	}
+	// Holding itself until its proxy serves, it names the peer it hears.
+	v = DecideHolding(members(3), "s0", heardFrom(now, "s1"), now, 10*time.Second, true, last, map[string]bool{"s0": true})
+	if v.State != StateAnswer || !slices.Equal(v.Servers, []string{"s1"}) {
+		t.Fatalf("held itself: %+v", v)
+	}
+	// Exactly half is no majority: still nothing.
+	if v := Decide(members(4), "s0", heardFrom(now, "s1"), now, 10*time.Second, true, last); v.State != StateWarming {
+		t.Fatalf("two of four: %+v", v)
 	}
 	// Hearing every server, it answers what it hears now, not what it agreed before.
 	v = Decide(members(3), "s0", heardFrom(now, "s1", "s2"), now, 10*time.Second, true, &Agreed{Servers: []string{"s9"}})

@@ -86,14 +86,15 @@ func helperPriority() []string {
 	return []string{"--cpu-shares=2"}
 }
 
-// atLowPriority runs fn on a thread of its own at the lowest CPU and disk priority; the thread ends with fn.
+// atLowPriority runs fn on a thread of its own at the lowest disk priority; the thread ends with fn. Never a lower
+// CPU priority: a starved thread keeps the Go scheduler's slot, the only one on a 1-core server, and every goroutine,
+// a renewal's too, waits for it (eu, 24 Nov 2026: renewals 3 to 4.6 s late while a copy ran at nice 19).
 func atLowPriority(fn func() error) error {
 	done := make(chan error, 1)
 	go func() {
 		// Never unlocked: the lowered thread exits with this goroutine instead of serving another.
 		runtime.LockOSThread()
 		tid := unix.Gettid()
-		_ = unix.Setpriority(unix.PRIO_PROCESS, tid, 19)
 		_, _, _ = unix.Syscall(unix.SYS_IOPRIO_SET, 1, uintptr(tid), 3<<13)
 		done <- fn()
 	}()

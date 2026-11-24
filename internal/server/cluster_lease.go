@@ -442,7 +442,7 @@ func (g *leaseGuard) renew(o lease.Order) (lease.Reply, bool) {
 	prev := g.clusters[o.Cluster]
 	taken := taking(prev, o)
 	// A late renewal is the first sign of a server too busy for its leases: said, so a test can prove there was none.
-	if gap := g.now().Sub(prev.lastRenewed()); !taken && prev.heard && gap >= lateRenewal {
+	if gap := g.now().Sub(prev.lastRenewed()); !taken && prev.heard && gap > lateRenewal {
 		g.logf("deplo-agent: cluster %s: a renewal came %.1fs after the one before", o.Cluster, gap.Seconds())
 	}
 	from := o.From
@@ -473,8 +473,8 @@ func (g *leaseGuard) renew(o lease.Order) (lease.Reply, bool) {
 	return r, taken
 }
 
-// lateRenewal is a gap between renewals, sent every second, worth saying.
-const lateRenewal = 2500 * time.Millisecond
+// lateRenewal is a gap between renewals, sent every second, worth saying: one more than a second late.
+const lateRenewal = 2 * time.Second
 
 func (c *clusterLease) lastRenewed() time.Time {
 	if c == nil {

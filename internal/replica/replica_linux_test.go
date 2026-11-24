@@ -417,3 +417,32 @@ func TestReplica_aRebuiltFileIsWrittenInStepsItWaitsOn(t *testing.T) {
 		t.Fatalf("%d bytes in %d steps, for a file of %d", total, len(steps), len(data))
 	}
 }
+
+// eu, 24 Nov 2026: three copies read a 2.2 GB file through the page cache of a 2 GB server, every task stalled on
+// reclaim and the sender's lease ran out. What a copy reads goes from memory as it is read, on both sides.
+func TestReplica_whatACopyReadsLeavesMemoryAsItGoes(t *testing.T) {
+	var mu sync.Mutex
+	dropped := map[string]int64{}
+	was := dropPages
+	dropPages = func(f *os.File, off, n int64) {
+		mu.Lock()
+		dropped[filepath.Base(f.Name())] += n
+		mu.Unlock()
+		was(f, off, n)
+	}
+	t.Cleanup(func() { dropPages = was })
+	src := t.TempDir()
+	data := noise(3*gentleStep+5, 7)
+	os.WriteFile(filepath.Join(src, "big.bin"), data, 0o644)
+	dir, st, stop := pair(t, src)
+	defer stop()
+	eventually(t, "snapshot", synced(st))
+	if b, _ := os.ReadFile(filepath.Join(dir, "volume-data", "big.bin")); !bytes.Equal(b, data) {
+		t.Fatal("the copy is not the file")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if dropped["big.bin"] < int64(len(data)) {
+		t.Fatalf("%d of %d bytes the sender read left memory", dropped["big.bin"], len(data))
+	}
+}

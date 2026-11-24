@@ -40,7 +40,16 @@ func clusterHostFor(t *testing.T) (*Service, string) {
 	s := New(t.TempDir(), t.TempDir(), "/", "")
 	s.SetAgentDir(agentDir)
 	t.Cleanup(func() { s.RemoveCluster(context.Background(), &pb.RemoveClusterRequest{}) })
+	// The stand-in serves no socket: it answers, unless a test says otherwise.
+	answers(t, true)
 	return s, filepath.Join(agentDir, "cluster")
+}
+
+func answers(t *testing.T, ok bool) {
+	t.Helper()
+	was := clusterAnswers
+	clusterAnswers = func(string, bool, time.Time) bool { return ok }
+	t.Cleanup(func() { clusterAnswers = was })
 }
 
 func installReq(version, script string, relay bool) *pb.InstallClusterRequest {
@@ -185,6 +194,33 @@ func TestInstallCluster_updateRestartsTheLeader(t *testing.T) {
 	eventually(t, "the new leader to start", func() bool { return startsOf(dir) == 2 })
 	if st := readClusterState(dir); st.Version != "0.2.0" {
 		t.Fatalf("state: %+v", st)
+	}
+}
+
+// A leader that does not answer within the wait is replaced by the one before it (deplo ADR-0043).
+func TestInstallCluster_aNewLeaderThatDoesNotAnswerGoesBack(t *testing.T) {
+	s, dir := clusterHostFor(t)
+	stubDownload(t, []byte(fakeCluster), nil)
+	if _, err := s.InstallCluster(context.Background(), installReq("0.1.0", fakeCluster, false)); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the leader to start", func() bool { return startsOf(dir) == 1 })
+	broken := "#!/bin/sh\nexit 1\n"
+	stubDownload(t, []byte(broken), nil)
+	answers(t, false)
+	_, err := s.InstallCluster(context.Background(), installReq("0.2.0", broken, false))
+	if status.Code(err) != codes.Aborted || !strings.Contains(err.Error(), "v0.1.0 runs again") {
+		t.Fatalf("got %v, want Aborted naming v0.1.0", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, clusterBinaryName)); string(b) != fakeCluster {
+		t.Fatalf("the binary is %q, want the one before", b)
+	}
+	if st := readClusterState(dir); st.Version != "0.1.0" {
+		t.Fatalf("state: %+v", st)
+	}
+	eventually(t, "the earlier leader to start again", func() bool { return startsOf(dir) == 2 })
+	if _, err := os.Stat(filepath.Join(dir, clusterBinaryName+".previous")); !os.IsNotExist(err) {
+		t.Fatal("a .previous binary was left")
 	}
 }
 

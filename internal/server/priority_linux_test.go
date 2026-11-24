@@ -42,21 +42,25 @@ func TestVolumeHelperRun_aCopyRunsLast(t *testing.T) {
 	}
 }
 
-func TestAtLowPriority_runsOnALoweredThreadOfItsOwn(t *testing.T) {
-	var nice, class int
+// A copy yields the disk, never the CPU: a thread at nice 19 that holds Go's only scheduler slot on a 1-core server
+// holds up every goroutine behind it, a lease renewal's included.
+func TestAtLowPriority_yieldsTheDiskButNeverTheCPU(t *testing.T) {
+	var prio, class int
 	_ = atLowPriority(func() error {
 		tid := unix.Gettid()
-		p, _ := unix.Getpriority(unix.PRIO_PROCESS, tid)
-		nice = 20 - p
+		p, err := unix.Getpriority(unix.PRIO_PROCESS, tid)
+		if err != nil {
+			return err
+		}
 		r, _, _ := unix.Syscall(unix.SYS_IOPRIO_GET, 1, uintptr(tid), 0)
-		class = int(r) >> 13
+		prio, class = p, int(r>>13)
 		return nil
 	})
-	if nice != 19 || class != 3 {
-		t.Fatalf("the copy ran at nice %d, disk class %d", nice, class)
+	// The kernel answers 20 - nice.
+	if mine, _ := unix.Getpriority(unix.PRIO_PROCESS, 0); prio != mine {
+		t.Fatalf("a copy runs at nice %d, the agent at nice %d", 20-prio, 20-mine)
 	}
-	p, _ := unix.Getpriority(unix.PRIO_PROCESS, unix.Gettid())
-	if 20-p == 19 {
-		t.Fatal("the caller's thread was lowered too")
+	if class != 3 {
+		t.Fatalf("a copy's disk class is %d, want idle (3)", class)
 	}
 }

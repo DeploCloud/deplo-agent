@@ -97,6 +97,26 @@ jobs:
           CGO_ENABLED=0 go test -c -o "$RUNNER_TEMP/server.test" ./internal/server
           sudo "$RUNNER_TEMP/server.test" -test.run 'TestChallenge_listensOnlyInTheProxysNetwork' -test.count=1 -test.v | tee "$RUNNER_TEMP/server.log"
           grep -q -- '--- PASS: TestChallenge_listensOnlyInTheProxysNetwork' "$RUNNER_TEMP/server.log"
+      # A self-update never takes a server down (deplo ADR-0043): the real path, in a throwaway container whose PID 1
+      # is systemd, from an agent whose unit predates the restart rule to a newer one, then to a binary that exits.
+      - name: A self-update runs the new binary, and any exit starts it again
+        run: |
+          set -euo pipefail
+          d="$RUNNER_TEMP/systemd-e2e"
+          mkdir -p "$d"
+          for v in 1.0.0 2.0.0; do
+            CGO_ENABLED=0 go build -ldflags "-X github.com/DeploCloud/deplo-agent/internal/server.AgentVersion=$v" -o "$d/deplo-agent-$v" .
+          done
+          CGO_ENABLED=0 go test -c -o "$d/server.test" ./internal/server
+          printf 'FROM debian:trixie-slim\nRUN apt-get update && apt-get install -y --no-install-recommends systemd systemd-sysv && rm -rf /var/lib/apt/lists/*\nCMD ["/sbin/init"]\n' |
+            docker build -q -t deplo-agent-test-systemd -
+          docker run -d --name deplo-agent-test-systemd --privileged --cgroupns=private --tmpfs /run --tmpfs /run/lock -v "$d:/e2e" deplo-agent-test-systemd
+          for i in $(seq 60); do
+            case "$(docker exec deplo-agent-test-systemd systemctl is-system-running 2>/dev/null || true)" in running | degraded) break ;; esac
+            sleep 1
+          done
+          docker exec -e DEPLO_AGENT_TEST_SYSTEMD=/e2e deplo-agent-test-systemd /e2e/server.test -test.run 'TestSystemd_' -test.count=1 -test.v | tee "$d/test.log"
+          grep -q -- '--- PASS: TestSystemd_aSelfUpdateRunsTheNewBinaryAndAnyExitStartsItAgain' "$d/test.log"
       - name: Fuzz the name server's packet path
         run: go test ./internal/dnszone -run '^$' -fuzz '^FuzzReply$' -fuzztime 30s
       - name: Fuzz the client subnet a resolver sends
