@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // StageSync is `deplo-agent stage-sync [--since <unix ns>] <from> <to>`, run inside a backup's copier: it makes <to>
@@ -31,6 +33,10 @@ func StageSync(args []string, stdout, stderr io.Writer) int {
 	var from time.Time
 	if since > 0 {
 		from = time.Unix(0, since)
+	} else {
+		// The first copy runs beside the App and the agent: it yields the CPU and the disk to them.
+		_ = syscall.Setpriority(syscall.PRIO_PROCESS, 0, 19)
+		_, _, _ = unix.Syscall(unix.SYS_IOPRIO_SET, 1, 0, 3<<13)
 	}
 	files, bytes, err := syncTree(args[0], args[1], from)
 	if err != nil {
@@ -45,7 +51,7 @@ func StageSync(args []string, stdout, stderr io.Writer) int {
 // changed at or after since, and what src no longer has goes. A second pass copies only what changed meanwhile.
 // ponytail: hard links are copied as separate files, track inodes if a volume ever relies on them.
 func syncTree(src, dst string, since time.Time) (files int, bytes int64, err error) {
-	s := &syncer{since: since}
+	s := &syncer{since: since, gentle: since.IsZero()}
 	root, err := os.Stat(src)
 	if err != nil {
 		return 0, 0, err
@@ -62,8 +68,11 @@ func syncTree(src, dst string, since time.Time) (files int, bytes int64, err err
 
 type syncer struct {
 	since time.Time
-	files int
-	bytes int64
+	// gentle writes in synced steps: a first copy of 2 GB at page-cache speed left a 1-core server unable to renew
+	// its lease (eu, 24 Nov 2026), and its writeback stalled every server on the same disk for 20 s.
+	gentle bool
+	files  int
+	bytes  int64
 }
 
 func (s *syncer) dir(src, dst string) error {
@@ -121,7 +130,7 @@ func (s *syncer) entry(sp, dp string) error {
 		if derr == nil && s.same(si, di) {
 			return nil
 		}
-		if err := copyRegular(sp, dp); err != nil {
+		if err := copyRegular(sp, dp, s.gentle); err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
 				return nil
 			}
@@ -164,7 +173,17 @@ func (s *syncer) same(si, di fs.FileInfo) bool {
 		a.Uid == b.Uid && a.Gid == b.Gid && (s.since.IsZero() || time.Unix(a.Ctim.Sec, a.Ctim.Nsec).Before(s.since))
 }
 
-func copyRegular(sp, dp string) error {
+// gentleStep is how much a gentle copy writes before it waits for the disk and lets the pages go.
+const gentleStep = 8 << 20
+
+// flushRange waits until a written range is on disk and drops it from memory; a var so tests can count.
+var flushRange = func(f *os.File, off, n int64) {
+	fd := int(f.Fd())
+	_ = unix.SyncFileRange(fd, off, n, unix.SYNC_FILE_RANGE_WAIT_BEFORE|unix.SYNC_FILE_RANGE_WRITE|unix.SYNC_FILE_RANGE_WAIT_AFTER)
+	_ = unix.Fadvise(fd, off, n, unix.FADV_DONTNEED)
+}
+
+func copyRegular(sp, dp string, gentle bool) error {
 	in, err := os.Open(sp)
 	if err != nil {
 		return err
@@ -174,9 +193,37 @@ func copyRegular(sp, dp string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		return err
+	if !gentle {
+		if _, err := io.Copy(out, in); err != nil {
+			out.Close()
+			return err
+		}
+		return out.Close()
+	}
+	buf := make([]byte, 1<<20)
+	var off, flushed int64
+	for {
+		n, rerr := in.Read(buf)
+		if n > 0 {
+			if _, err := out.Write(buf[:n]); err != nil {
+				out.Close()
+				return err
+			}
+			if off += int64(n); off-flushed >= gentleStep {
+				flushRange(out, flushed, off-flushed)
+				flushed = off
+			}
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			out.Close()
+			return rerr
+		}
+	}
+	if off > flushed {
+		flushRange(out, flushed, off-flushed)
 	}
 	return out.Close()
 }
