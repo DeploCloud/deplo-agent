@@ -302,7 +302,7 @@ func (n *clusterNetwork) applyLocked() error {
 		if !udpFree(port) {
 			port = 0
 		}
-		cfg := mesh.Config{PrivateKey: key, Port: port, Address: addr, Relay: n.relayDial,
+		cfg := mesh.Config{PrivateKey: key, Port: port, Address: addr, Relay: n.relayDial, GreetPort: meshStreamPort,
 			Logf: func(f string, a ...any) { fmt.Fprintf(os.Stderr, "deplo-agent: "+f+"\n", a...) }}
 		m, err := mesh.Start(cfg)
 		if err != nil {
