@@ -6,19 +6,14 @@ import (
 	"fmt"
 	"maps"
 	"math"
-	"net"
 	"os"
-	"path/filepath"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/DeploCloud/deplo-agent/internal/clusterlink/lease"
-	"github.com/DeploCloud/deplo-agent/internal/clusterlink/wire"
-	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
 // A member lives on the leader's lease: each renewal carries the leader's epoch and the placement. Without one
@@ -413,21 +408,6 @@ func (g *leaseGuard) presumeDead(slugs []string) {
 	g.clusters[unreadableLease] = c
 }
 
-type startRun struct {
-	cluster string
-	epoch   uint64
-	cancel  context.CancelFunc
-}
-
-// endOlderStarts cancels every start an older epoch's leader ordered for this cluster; the caller holds g.mu.
-func (g *leaseGuard) endOlderStarts(cluster string, epoch uint64) {
-	for _, r := range g.runs {
-		if r.cluster == cluster && r.epoch < epoch {
-			r.cancel()
-		}
-	}
-}
-
 // Admit refuses an epoch older than the newest this member has seen.
 func (g *leaseGuard) Admit(cluster string, epoch uint64) (held uint64, ok bool) {
 	g.mu.Lock()
@@ -749,134 +729,6 @@ func (g *leaseGuard) Forget() {
 	}
 }
 
-// Serve answers an order on one stream, from a leader Deplo named for the cluster the order is about.
-func (g *leaseGuard) Serve(from wire.Party, c net.Conn) {
-	defer c.Close()
-	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
-	if from.Role != wire.RoleLeader {
-		return
-	}
-	cluster := ""
-	if g.leader != nil {
-		var leaders []string
-		if cluster, leaders = g.leader(); !slices.ContainsFunc(leaders, from.Is) {
-			return
-		}
-	}
-	o, err := lease.ReadOrder(c)
-	if err != nil || o.Cluster == "" || o.Member == "" {
-		_ = lease.WriteReply(c, lease.Reply{Error: "unreadable order"})
-		return
-	}
-	if g.leader != nil && o.Cluster != cluster {
-		_ = lease.WriteReply(c, lease.Reply{Error: "this server is not in that cluster"})
-		return
-	}
-	// A slug ends up in a file path: an order naming anything else is refused whole.
-	if !slugsOK(o) {
-		_ = lease.WriteReply(c, lease.Reply{Error: "the order names something that is not a stack"})
-		return
-	}
-	if o.PreVote {
-		_ = lease.WriteReply(c, g.PreVote(o))
-		return
-	}
-	if o.Probe {
-		placed, epoch := g.placedHere(o.Cluster)
-		r := g.Probe(o)
-		if r.OK {
-			r.Running, r.Reports = g.runningOf(placed, epoch), true
-		}
-		_ = lease.WriteReply(c, r)
-		return
-	}
-	before := ""
-	if o.Start != nil {
-		before = g.placedBefore(o.Cluster, o.Start.Slug)
-	}
-	r := g.Renew(o)
-	if o.Start != nil && r.OK {
-		r = g.startWorkload(c, o, before)
-	}
-	if r.OK {
-		r.Unplaced = g.unplaced(o)
-	}
-	_ = lease.WriteReply(c, r)
-}
-
-func slugsOK(o lease.Order) bool {
-	if o.Start != nil && validateSlug(o.Start.Slug) != nil {
-		return false
-	}
-	for _, e := range o.Placement {
-		if e.Slug != "" && validateSlug(e.Slug) != nil {
-			return false
-		}
-	}
-	for _, k := range o.Keep {
-		if validateSlug(k.Slug) != nil {
-			return false
-		}
-	}
-	return true
-}
-
-// startWorkload brings one moved workload up. The order must place that stack on this member, so a leader cannot
-// start a stack the placement does not give it; Started is only true once the stack is ready.
-func (g *leaseGuard) startWorkload(c net.Conn, o lease.Order, before string) lease.Reply {
-	mine, single := false, false
-	for _, e := range o.Placement {
-		if e.Member == o.Member && e.Slug == o.Start.Slug && e.Slug != "" {
-			mine, single = true, e.SingleWriter
-		}
-	}
-	if !mine || g.start == nil {
-		return lease.Reply{Error: "this stack is not placed on this member"}
-	}
-	limit := lease.StartTimeout
-	if o.Start.Restore != nil {
-		limit = lease.RestoreTimeout
-	}
-	_ = c.SetDeadline(time.Now().Add(limit + time.Minute))
-	ctx, cancel := context.WithTimeout(context.Background(), limit)
-	defer cancel()
-	run := &startRun{o.Cluster, o.Epoch, cancel}
-	g.mu.Lock()
-	g.runs = append(g.runs, run)
-	g.mu.Unlock()
-	defer func() {
-		g.mu.Lock()
-		g.runs = slices.DeleteFunc(g.runs, func(r *startRun) bool { return r == run })
-		g.mu.Unlock()
-	}()
-	// The leader's renewals still place this stack on its old member until this has answered.
-	g.markStart(o.Start.Slug, false)
-	err := g.start(ctx, o.Start)
-	// A restore takes minutes: a leader with a newer epoch spoke meanwhile, so this order is nobody's any more.
-	if held, ok := g.Admit(o.Cluster, o.Epoch); !ok {
-		g.markStart(o.Start.Slug, true)
-		if single && g.stop != nil {
-			sctx, done := context.WithTimeout(context.Background(), 2*time.Minute)
-			defer done()
-			if serr := g.stop(sctx, o.Start.Slug); serr != nil {
-				fmt.Fprintf(os.Stderr, "deplo-agent: cluster %s: could not stop %s, started for a leader that was replaced: %v\n", o.Cluster, o.Start.Slug, serr)
-			}
-		}
-		return lease.Reply{Error: lease.StaleEpoch, Epoch: held}
-	}
-	if err != nil {
-		g.markStart(o.Start.Slug, true)
-		if single {
-			g.mu.Lock()
-			g.noteFailedStart(o, before)
-			g.mu.Unlock()
-		}
-		return lease.Reply{Error: err.Error()}
-	}
-	g.markStart(o.Start.Slug, false)
-	return lease.Reply{OK: true, Started: true, Restored: o.Start.Restore != nil, Promoted: o.Start.Promote != nil, Epoch: o.Epoch}
-}
-
 // Run checks the lease until ctx ends.
 func (g *leaseGuard) Run(ctx context.Context) {
 	g.Check(ctx)
@@ -890,157 +742,4 @@ func (g *leaseGuard) Run(ctx context.Context) {
 			g.Check(ctx)
 		}
 	}
-}
-
-func (s *Service) leaseFile() string {
-	if s.agentDir == "" {
-		return ""
-	}
-	return filepath.Join(s.agentDir, "cluster-lease.json")
-}
-
-// leaseGuard is created with the member, so a lease that ran out while the agent was down is still honoured.
-func (s *Service) leaseGuard() *leaseGuard {
-	s.leaseOnce.Do(func() {
-		s.lease = newLeaseGuard(s.leaseFile(), time.Now, s.fenceStacks)
-		s.lease.start, s.lease.leader = s.startFromBundle, s.leaderPins
-		s.lease.remove, s.lease.resume, s.lease.trim = s.removeMoved, s.resumeHeld, s.trimReplicas
-		s.lease.keep, s.lease.purge, s.lease.stop = s.keepLeft, s.purgeLeft, s.stopMoved
-		s.lease.relinquish = s.relinquishStack
-		s.lease.aside, s.lease.dropAside = s.asideStack, s.dropAside
-		s.lease.dropFailed = s.dropFailedStart
-		s.lease.succeed = s.askLeaderToLead
-		s.lease.has = func(slug string) bool { return isFile(s.stackPath(slug)) }
-		s.lease.running = stackRuns
-		if s.lease.unreadable && s.loadMember().Member {
-			s.lease.presumeDead(s.stackSlugs())
-		}
-	})
-	return s.lease
-}
-
-// stackSlugs is every stack this host holds, a deploy's stand-in aside.
-func (s *Service) stackSlugs() []string {
-	files, _ := filepath.Glob(filepath.Join(s.stackDir, "*.yml"))
-	var out []string
-	for _, f := range files {
-		slug := strings.TrimSuffix(filepath.Base(f), ".yml")
-		if validateSlug(slug) == nil {
-			out = append(out, slug)
-		}
-	}
-	return out
-}
-
-// fenceGrace is what a fenced stack gets to stop cleanly before it is killed; a var so tests can hurry it.
-var fenceGrace = 5 * time.Second
-
-// fenceTakes is the longest from a lease running out to its stacks being down: the check, the stop, the kills
-// fenceStack runs together, plus a second. A leader waits 13 s for an agent Deplo knows has it (quickStop).
-func fenceTakes() time.Duration {
-	return leaseCheckEvery + fenceGrace + fenceStopSlack + fenceKillFor + time.Second
-}
-
-// fenceStopSlack is what compose takes past the grace to say the stop is done; fenceKillFor bounds the kills.
-const (
-	fenceStopSlack = time.Second
-	fenceKillFor   = 3 * time.Second
-)
-
-// fenceStacks stops every stack at once, and every running scheduled job. It never waits for a stack's lock: a
-// deploy that holds one is cancelled, and whatever it started is stopped by the deploy itself on its way out.
-func (s *Service) fenceStacks(ctx context.Context, entries []lease.Entry) error {
-	s.fenceJobs()
-	slugs := map[string]bool{}
-	for _, e := range entries {
-		slugs[e.Slug] = true
-	}
-	s.cancelDeploysOf(slugs)
-	ctx, cancel := context.WithTimeout(ctx, fenceGrace+10*time.Second)
-	defer cancel()
-	errs := make(chan error, len(slugs))
-	for slug := range slugs {
-		go func() {
-			began := time.Now()
-			err := s.fenceStack(ctx, slug)
-			// Read after the stop, so the fence is never late: what exited since it began is what it stopped.
-			listed, done := context.WithTimeout(context.Background(), 5*time.Second)
-			s.supervision().fencedSince(listed, slug, began)
-			done()
-			errs <- err
-		}()
-	}
-	var first error
-	for range slugs {
-		if err := <-errs; err != nil && first == nil {
-			first = err
-		}
-	}
-	return first
-}
-
-// fenceStack stops one stack within fenceGrace, kills what is left, and fails when something of it still runs.
-func (s *Service) fenceStack(ctx context.Context, slug string) error {
-	if err := validateSlug(slug); err != nil {
-		return err
-	}
-	grace := strconv.Itoa(max(int(fenceGrace/time.Second), 1))
-	res, err := dockercli.Run(ctx, fenceGrace+fenceStopSlack, s.composeCtl(slug, "stop", "-t", grace)...)
-	kills := [][]string{}
-	if err != nil || res.Code != 0 || stackRuns(ctx, slug) {
-		kills = append(kills, s.composeCtl(slug, "kill"), []string{"kill", "deplo-" + slug})
-	}
-	// A deploy's stand-in mounts the same volume: it goes with the stack.
-	if isFile(s.stackPath(slug + standInSuffix)) {
-		kills = append(kills, append(s.standInCompose(slug), "kill"))
-	}
-	var wg sync.WaitGroup
-	for _, argv := range kills {
-		wg.Go(func() { _, _ = dockercli.Run(ctx, fenceKillFor, argv...) })
-	}
-	wg.Wait()
-	if stackRuns(ctx, slug) {
-		return fmt.Errorf("%s: still running", slug)
-	}
-	return nil
-}
-
-// relinquishStack stops a stack whose lease moved to another member: once at once, as the fence does, then again
-// under the stack's lock, so a start that was under way when the lease moved does not outlive it. Nothing is removed.
-func (s *Service) relinquishStack(ctx context.Context, slug string) (bool, error) {
-	s.supervision().unfenced(slug)
-	stopped := false
-	var err error
-	if stackRuns(ctx, slug) {
-		stopped, err = true, s.fenceStack(ctx, slug)
-	}
-	defer s.lockStack(slug)()
-	if stackRuns(ctx, slug) {
-		stopped, err = true, s.fenceStack(ctx, slug)
-	}
-	return stopped, err
-}
-
-// lockToStart takes a stack's lock for something that brings it up, refused while this member has no live lease.
-// done releases the lock and says whether the lease ran out meanwhile: the stack is then stopped again.
-func (s *Service) lockToStart(slug string) (done func() bool, ok bool) {
-	unlock := s.lockStack(slug)
-	if s.leaseGuard().Holds(slug) {
-		unlock()
-		return nil, false
-	}
-	return func() bool {
-		defer unlock()
-		if !s.leaseGuard().mustStayDown(slug) {
-			return false
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), fenceGrace+10*time.Second)
-		defer cancel()
-		if err := s.fenceStack(ctx, slug); err != nil {
-			fmt.Fprintf(os.Stderr, "deplo-agent: the lease ran out while %s started, and it could not be stopped again: %v\n", slug, err)
-		} else {
-			fmt.Fprintf(os.Stderr, "deplo-agent: stopped %s again: its lease ran out while it started\n", slug)
-		}
-		return true
-	}, true
 }
