@@ -121,7 +121,8 @@ func storeKeyPath(root, key string) (string, error) {
 	return abs, nil
 }
 
-func storeWrite(root, key string, r io.Reader, overwrite bool) (int64, string, error) {
+// storeWrite lands r at key; check, when set, sees what landed before it is kept, and refuses it with an error.
+func storeWrite(root, key string, r io.Reader, overwrite bool, check ...func(n int64, sum string) error) (int64, string, error) {
 	dst, err := storeKeyPath(root, key)
 	if err != nil {
 		return 0, "", err
@@ -152,6 +153,12 @@ func storeWrite(root, key string, r io.Reader, overwrite bool) (int64, string, e
 	if err != nil {
 		return 0, "", fmt.Errorf("write backup artifact: %w", err)
 	}
+	digest := hex.EncodeToString(sum.Sum(nil))
+	for _, c := range check {
+		if err := c(n, digest); err != nil {
+			return 0, "", err
+		}
+	}
 	if err := f.Sync(); err != nil {
 		return 0, "", fmt.Errorf("flush backup artifact: %w", err)
 	}
@@ -162,7 +169,7 @@ func storeWrite(root, key string, r io.Reader, overwrite bool) (int64, string, e
 		return 0, "", fmt.Errorf("commit backup artifact: %w", err)
 	}
 	committed = true
-	return n, hex.EncodeToString(sum.Sum(nil)), nil
+	return n, digest, nil
 }
 
 func storeOpen(root, key string) (io.ReadCloser, error) {
@@ -403,16 +410,30 @@ func (s *Service) WriteStoreFile(stream pb.Agent_WriteStoreFileServer) error {
 	}
 
 	pr, pw := io.Pipe()
+	// A sealed stream is kept only up to a trailer that names what was sent: a send cut midway, even one that ends
+	// with a clean close, leaves nothing (eu, 24 Nov 2026: a failed relay left its 184-byte header kept).
+	var trailer *pb.StoreChunk_Trailer
 	go func() {
 		var perr error
 		for {
 			msg, rerr := stream.Recv()
 			if rerr == io.EOF {
+				if h.GetSealed() && trailer == nil {
+					perr = errors.New("the backup stream ended before the whole backup arrived")
+				}
 				break
 			}
 			if rerr != nil {
 				perr = rerr
 				break
+			}
+			if trailer != nil {
+				perr = errors.New("the backup stream went on after its end")
+				break
+			}
+			if t := msg.GetTrailer(); t != nil && h.GetSealed() {
+				trailer = t
+				continue
 			}
 			if d := msg.GetData(); len(d) > 0 {
 				if _, werr := pw.Write(d); werr != nil {
@@ -423,8 +444,17 @@ func (s *Service) WriteStoreFile(stream pb.Agent_WriteStoreFileServer) error {
 		}
 		pw.CloseWithError(perr)
 	}()
+	sealed := func(n int64, sum string) error {
+		if !h.GetSealed() {
+			return nil
+		}
+		if trailer.GetSizeBytes() != n || !strings.EqualFold(trailer.GetSha256(), sum) {
+			return fmt.Errorf("what arrived (%d bytes) is not what was sent (%d bytes), so it was not kept", n, trailer.GetSizeBytes())
+		}
+		return nil
+	}
 
-	n, sum, werr := storeWrite(root, h.GetStore().GetObjectKey(), pr, h.GetOverwrite())
+	n, sum, werr := storeWrite(root, h.GetStore().GetObjectKey(), pr, h.GetOverwrite(), sealed)
 	if werr != nil {
 		_ = pr.CloseWithError(werr)
 		return stream.SendAndClose(&pb.StoreResult{Ok: false, Error: werr.Error()})

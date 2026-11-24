@@ -182,6 +182,10 @@ var Capabilities = []string{
 	"deploy.image-volumes",
 	// A stack's Files folder is set aside with its volumes, as `deplo-<slug>.files-aside-<UTC time>`.
 	"volumes.set-aside-files",
+	// WriteStoreFile's sealed stream: an artifact is kept only when a trailer names exactly what landed.
+	"backup-store.sealed",
+	// DestroyStack.drop_set_aside: a deleted App's set-aside copies go with it.
+	"teardown.set-aside",
 }
 
 // AgentVersion is the version this agent reports over Hello.

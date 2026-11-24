@@ -981,6 +981,9 @@ message StackRef {
   // -v` finds. Every entry must start with `deplo-` (the agent refuses the rest), so
   // this can only ever reclaim volumes Deplo itself creates.
   repeated string reclaim_volumes = 3;
+  // DestroyStack only: the set-aside copies of those volumes and of the stack's Files
+  // go too, for an App that is deleted (capability `teardown.set-aside`).
+  bool drop_set_aside = 5;
   // StopStack only: stop just these compose services instead of the whole stack. Empty
   // stops everything, which is what every caller before the restart-loop guard meant.
   // Field 4 is ADDITIVE (contract stays V1); gated on the `stack.stop-services` capability.
@@ -1583,12 +1586,21 @@ message StoreChunk {
     // carry a run id and are unique, so a collision means something is wrong and
     // silently clobbering it would destroy a good backup.
     bool overwrite = 2;
+    // The stream ends with a trailer: the artifact is kept only when it holds
+    // exactly what the trailer names (capability `backup-store.sealed`).
+    bool sealed = 3;
+  }
+  // What the sender sent, the last frame of a sealed stream.
+  message Trailer {
+    int64 size_bytes = 1;
+    string sha256 = 2;
   }
   oneof frame {
     Header header = 1;
     // A raw slice of the (already age-encrypted) artifact. Chunked well under
     // the gRPC max message size; reassembled in order on the destination.
     bytes data = 2;
+    Trailer trailer = 3;
   }
 }
 
