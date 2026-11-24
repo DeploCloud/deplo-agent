@@ -88,7 +88,10 @@ type replicas struct {
 	sending map[string]int
 	// holding are the Apps a failover start is putting in place here: nothing receives for them meanwhile.
 	holding map[string]bool
-	wake    chan struct{}
+	// handed is a table from Deplo in this run. Until then no new copy starts: only Deplo checks it fits on this
+	// disk, and a member back from a power cut took a whole new copy beside its set-aside one (deplo ADR-0043).
+	handed bool
+	wake   chan struct{}
 	// mountpoint reads where a volume's data lives on this host; tests replace it.
 	mountpoint func(ctx context.Context, volume string, create bool) (string, error)
 	// running says whether an App's stack runs here; tests replace it.
@@ -186,7 +189,7 @@ func (s *Service) SetClusterReplicas(_ context.Context, req *pb.SetClusterReplic
 		return nil, status.Errorf(codes.Internal, "remember the replicated Apps: %v", err)
 	}
 	r.mu.Lock()
-	r.tab = t
+	r.tab, r.handed = t, true
 	r.mu.Unlock()
 	r.poke()
 	return &pb.SetClusterReplicasResponse{Entries: int32(len(t.Entries))}, nil
@@ -264,7 +267,7 @@ func (r *replicas) reconcile(ctx context.Context) {
 		listed[e.AppID] = true
 		member, here, ok := r.s.leaseGuard().locate(tab.Cluster, "app", e.AppID)
 		r.mu.Lock()
-		holding := r.holding[e.AppID]
+		holding, handed := r.holding[e.AppID], r.handed
 		r.mu.Unlock()
 		switch {
 		case holding:
@@ -278,6 +281,8 @@ func (r *replicas) reconcile(ctx context.Context) {
 			r.stop(e.AppID, "this server still holds its own copy of the App")
 		case !validFingerprint(tab.Members[member]):
 			r.stop(e.AppID, "this server does not know the server the App runs on")
+		case !handed && !exists(r.dir(e.AppID)):
+			r.stop(e.AppID, "waiting for Deplo to check that a copy fits on this server")
 		default:
 			r.mu.Lock()
 			run := r.runs[e.AppID]

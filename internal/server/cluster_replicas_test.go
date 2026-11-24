@@ -30,6 +30,11 @@ func replicaStatus(t *testing.T, s *Service, appID string) *pb.ClusterReplicaSta
 
 // replicating links two members, places "web" on a and hands both the table; a's volume is vol, b's live one live.
 func replicating(t *testing.T, aRuns bool) (a, b *Service, vol, live string) {
+	return replicatingHanded(t, aRuns, true)
+}
+
+// replicatingHanded is replicating where b, unless handB, holds the table only as read from its disk at a start.
+func replicatingHanded(t *testing.T, aRuns, handB bool) (a, b *Service, vol, live string) {
 	t.Helper()
 	prev := replReconcileEvery
 	replReconcileEvery = 50 * time.Millisecond
@@ -52,6 +57,18 @@ func replicating(t *testing.T, aRuns bool) (a, b *Service, vol, live string) {
 		Entries: []*pb.ClusterReplicaEntry{{AppId: "prj_1", Slug: "web", VolumeNames: []string{"deplo-web-data"}}},
 	}
 	for _, s := range []*Service{a, b} {
+		if s == b && !handB {
+			tab, err := validateReplicas(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := b.replicas()
+			r.mu.Lock()
+			r.tab = tab
+			r.mu.Unlock()
+			r.poke()
+			continue
+		}
 		if _, err := s.SetClusterReplicas(context.Background(), req); err != nil {
 			t.Fatal(err)
 		}
@@ -201,4 +218,33 @@ func TestReplicas_aCopyFollowsATableThatNamesMoreData(t *testing.T) {
 		st := replicaStatus(t, b, "prj_1")
 		return string(raw) == "one" && st.GetSynced() && st.GetError() == ""
 	})
+}
+
+// deplo ADR-0043, eu 24 Nov 2026: eu-3, back from a power cut with its copy of lab-fit set aside, took a whole new
+// copy from the table it kept on disk, before Deplo could check it fit, and reached 91%. A new copy waits for Deplo.
+func TestReplicas_aNewCopyWaitsForDeploAfterARestart(t *testing.T) {
+	_, b, vol, _ := replicatingHanded(t, true, false)
+	if err := os.WriteFile(filepath.Join(vol, "data.bin"), []byte("rows"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "b to wait for Deplo", func() bool {
+		st := replicaStatus(t, b, "prj_1")
+		return st.GetRole() == "idle" && strings.Contains(st.GetError(), "waiting for Deplo")
+	})
+	if _, err := os.Stat(b.replicas().dir("prj_1")); !os.IsNotExist(err) {
+		t.Fatal("b started a copy Deplo did not check")
+	}
+	// Deplo hands it the table: the copy starts.
+	r := b.replicas()
+	r.mu.Lock()
+	tab := r.tab
+	r.mu.Unlock()
+	req := &pb.SetClusterReplicasRequest{ClusterId: tab.Cluster, Entries: []*pb.ClusterReplicaEntry{{AppId: "prj_1", Slug: "web", VolumeNames: []string{"deplo-web-data"}}}}
+	for id, fp := range tab.Members {
+		req.Members = append(req.Members, &pb.ClusterForwarderMember{ServerId: id, Fingerprint: fp})
+	}
+	if _, err := b.SetClusterReplicas(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "b to receive", func() bool { return replicaStatus(t, b, "prj_1").GetRole() == "receiving" })
 }
