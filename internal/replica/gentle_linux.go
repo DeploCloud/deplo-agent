@@ -3,6 +3,8 @@ package replica
 import (
 	"os"
 
+	"github.com/DeploCloud/deplo-agent/internal/pace"
+
 	"github.com/DeploCloud/deplo-agent/internal/room"
 	"golang.org/x/sys/unix"
 )
@@ -18,19 +20,23 @@ var flushRange = func(f *os.File, off, n int64) {
 	_ = unix.Fadvise(fd, off, n, unix.FADV_DONTNEED)
 }
 
-// gentle writes to f, a step at a time, and stops once its disk is down to a tenth free (deplo ADR-0043).
+// gentle writes to f, a step at a time, and stops once its disk is down to a tenth free (deplo ADR-0043). A file
+// rebuilt beside the one it replaces starts only if both fit: need is what the old one holds.
 type gentle struct {
 	f            *os.File
 	off, flushed int64
+	need         int64
+	pace         pace.Pacer
 }
 
 func (g *gentle) Write(p []byte) (int, error) {
 	if g.off == 0 {
-		if err := room.Left(g.f); err != nil {
+		if err := room.LeftFor(g.f, g.need); err != nil {
 			return 0, err
 		}
 	}
 	n, err := g.f.Write(p)
+	g.pace.Moved(n)
 	if g.off += int64(n); g.off-g.flushed >= gentleStep {
 		g.finish()
 		if err == nil {
@@ -56,10 +62,12 @@ var dropPages = func(f *os.File, off, n int64) { _ = unix.Fadvise(int(f.Fd()), o
 type behind struct {
 	f            *os.File
 	off, dropped int64
+	pace         pace.Pacer
 }
 
 func (b *behind) Read(p []byte) (int, error) {
 	n, err := b.f.Read(p)
+	b.pace.Moved(n)
 	if b.off += int64(n); b.off-b.dropped >= gentleStep || err != nil && b.off > b.dropped {
 		dropPages(b.f, b.dropped, b.off-b.dropped)
 		b.dropped = b.off

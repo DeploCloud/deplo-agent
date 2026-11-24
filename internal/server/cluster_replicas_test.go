@@ -248,3 +248,22 @@ func TestReplicas_aNewCopyWaitsForDeploAfterARestart(t *testing.T) {
 	}
 	eventually(t, "b to receive", func() bool { return replicaStatus(t, b, "prj_1").GetRole() == "receiving" })
 }
+
+// The panel shows a copy's size on disk and whether it went through a relay, never the bytes it was sent.
+func TestReplicas_aCopySaysItsSizeOnDiskAndThatARelayCarriesIt(t *testing.T) {
+	a, b, vol, _ := replicating(t, true)
+	if err := os.WriteFile(filepath.Join(vol, "data.bin"), make([]byte, 1<<20), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "b to hold a whole copy", func() bool { return replicaStatus(t, b, "prj_1").GetSynced() })
+	st := replicaStatus(t, b, "prj_1")
+	if want := dirSize(b.replicas().dir("prj_1")); st.GetDiskBytes() != want || want < 1<<20 {
+		t.Fatalf("the copy says %d bytes on disk, it takes %d", st.GetDiskBytes(), want)
+	}
+	if !st.GetRelayed() {
+		t.Fatal("a copy through the relay says it went direct")
+	}
+	if replicaStatus(t, a, "prj_1").GetDiskBytes() != 0 {
+		t.Fatal("the App's own data counted as a copy")
+	}
+}

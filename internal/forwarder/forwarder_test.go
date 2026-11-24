@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/DeploCloud/deplo-agent/internal/pace"
 )
 
 func TestRelay_carriesBothWays(t *testing.T) {
@@ -125,5 +127,19 @@ func TestJoin_aHalfClosedClientStillGetsItsAnswer(t *testing.T) {
 	got, _ := io.ReadAll(client)
 	if string(got) != "answer to ping" {
 		t.Fatalf("the client read %q", got)
+	}
+}
+
+// A copy steps aside while an App's traffic crosses the agent (deplo ADR-0043).
+func TestJoin_marksAppTrafficForTheCopies(t *testing.T) {
+	a1, a2 := net.Pipe()
+	b1, b2 := net.Pipe()
+	since := time.Now()
+	go Join(a2, b1)
+	go func() { _, _ = io.Copy(io.Discard, b2) }()
+	_, _ = a1.Write([]byte("GET / HTTP/1.1\r\n\r\n"))
+	a1.Close()
+	if !pace.TouchedSince(since) {
+		t.Fatal("an App's request crossed the agent unnoticed")
 	}
 }

@@ -185,6 +185,10 @@ service Agent {
   // An image stream that matches no such entry is refused.
   rpc ExpectClusterImage(ExpectClusterImageRequest) returns (ExpectClusterImageResponse);
 
+  // Tell this member to keep one backup from one member in its store, once, within the copy's time
+  // limit (capability "backup-store.member"). A backup stream that matches no such entry is refused.
+  rpc ExpectClusterBackup(ExpectClusterBackupRequest) returns (ExpectClusterBackupResponse);
+
   // ---- CLUSTER NAME FORWARDERS (#200, Hello capability "cluster.forwarders"; a compose service's
   // names, and every port of a name, need "cluster.forwarders.services") ----
 
@@ -1063,6 +1067,8 @@ message VolumeUsage {
   // Set on a set-aside copy: the volume it is a copy of, and when it was made.
   string set_aside_of = 3;
   int64 set_aside_at_ms = 4;
+  // On-disk bytes of its biggest file: a copy that rebuilds it holds it twice meanwhile.
+  int64 largest_file_bytes = 5;
 }
 
 message RemoveSetAsideRequest {
@@ -1437,6 +1443,9 @@ message BackupRequest {
   // segments Postgres archived into <PGDATA>/deplo-wal since the last LOG, then removes them there.
   // A LOG with nothing waiting succeeds with an empty object_key and writes no artifact.
   PostgresArchive archive = 8;
+  // Send the artifact to this member of the cluster over its private network, keyed store.object_key;
+  // that member was told to expect it (ExpectClusterBackup). Capability "backup-store.member".
+  string member_fingerprint = 9;
 }
 
 enum PostgresArchive {
@@ -1478,6 +1487,9 @@ message BackupResult {
   // Why the app stayed paused for the whole copy instead of only while its data was
   // copied on its own server's disk; empty when it was not.
   string held_why = 8;
+  // Under member_fingerprint: "direct" or "relay", how it went; "none" when that member could not be
+  // reached and nothing was read, so the caller may send it another way.
+  string path = 9;
 }
 
 message RestoreRequest {
@@ -2617,6 +2629,15 @@ message ExpectClusterImageRequest {
 
 message ExpectClusterImageResponse {}
 
+message ExpectClusterBackupRequest {
+  // Where this member keeps it: its store's root and the artifact's key.
+  StoreTarget store = 1;
+  // The sending member's certificate fingerprint (sha256 hex of its DER).
+  string source_fingerprint = 2;
+}
+
+message ExpectClusterBackupResponse {}
+
 // ---- CLUSTER NAME FORWARDERS (#200) ----
 
 // A cluster member's certificate, by the server id the leader's placement names it with.
@@ -2971,6 +2992,10 @@ message ClusterReplicaState {
   string error = 8;
   // The member it receives from.
   string from_server_id = 9;
+  // A relay carries its stream, or the tunnel's packets under it.
+  bool relayed = 10;
+  // What this copy takes on this member's disk now, in bytes.
+  int64 disk_bytes = 11;
 }
 
 message ClaimServerRequest {

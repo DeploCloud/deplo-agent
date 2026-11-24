@@ -94,6 +94,10 @@ func s3cfg(t *pb.S3Target) s3client.Config {
 func (s *Service) Backup(req *pb.BackupRequest, stream pb.Agent_BackupServer) error {
 	e := &bkEmitter{send: stream.Send}
 	ctx := stream.Context()
+	if req.GetMemberFingerprint() != "" {
+		s.backupToMember(ctx, req, e)
+		return nil
+	}
 
 	dest, err := destinationFromBackup(s, req, e.data)
 	if err != nil {

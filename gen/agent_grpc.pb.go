@@ -60,6 +60,7 @@ const (
 	Agent_ClusterWatch_FullMethodName          = "/deplo.agent.v1.Agent/ClusterWatch"
 	Agent_CopyClusterImage_FullMethodName      = "/deplo.agent.v1.Agent/CopyClusterImage"
 	Agent_ExpectClusterImage_FullMethodName    = "/deplo.agent.v1.Agent/ExpectClusterImage"
+	Agent_ExpectClusterBackup_FullMethodName   = "/deplo.agent.v1.Agent/ExpectClusterBackup"
 	Agent_SetClusterForwarders_FullMethodName  = "/deplo.agent.v1.Agent/SetClusterForwarders"
 	Agent_ReadProxyCertificates_FullMethodName = "/deplo.agent.v1.Agent/ReadProxyCertificates"
 	Agent_SetClusterReplicas_FullMethodName    = "/deplo.agent.v1.Agent/SetClusterReplicas"
@@ -242,6 +243,9 @@ type AgentClient interface {
 	// Tell this member to accept one image from one member, once, within the copy's time limit.
 	// An image stream that matches no such entry is refused.
 	ExpectClusterImage(ctx context.Context, in *ExpectClusterImageRequest, opts ...grpc.CallOption) (*ExpectClusterImageResponse, error)
+	// Tell this member to keep one backup from one member in its store, once, within the copy's time
+	// limit (capability "backup-store.member"). A backup stream that matches no such entry is refused.
+	ExpectClusterBackup(ctx context.Context, in *ExpectClusterBackupRequest, opts ...grpc.CallOption) (*ExpectClusterBackupResponse, error)
 	// Hand this member the names it holds on its Environments' networks and the streams it accepts
 	// for its own workloads. The full set each time; one not listed is removed. Never sent to a
 	// member that is not in a cluster.
@@ -866,6 +870,16 @@ func (c *agentClient) ExpectClusterImage(ctx context.Context, in *ExpectClusterI
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ExpectClusterImageResponse)
 	err := c.cc.Invoke(ctx, Agent_ExpectClusterImage_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) ExpectClusterBackup(ctx context.Context, in *ExpectClusterBackupRequest, opts ...grpc.CallOption) (*ExpectClusterBackupResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExpectClusterBackupResponse)
+	err := c.cc.Invoke(ctx, Agent_ExpectClusterBackup_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1619,6 +1633,9 @@ type AgentServer interface {
 	// Tell this member to accept one image from one member, once, within the copy's time limit.
 	// An image stream that matches no such entry is refused.
 	ExpectClusterImage(context.Context, *ExpectClusterImageRequest) (*ExpectClusterImageResponse, error)
+	// Tell this member to keep one backup from one member in its store, once, within the copy's time
+	// limit (capability "backup-store.member"). A backup stream that matches no such entry is refused.
+	ExpectClusterBackup(context.Context, *ExpectClusterBackupRequest) (*ExpectClusterBackupResponse, error)
 	// Hand this member the names it holds on its Environments' networks and the streams it accepts
 	// for its own workloads. The full set each time; one not listed is removed. Never sent to a
 	// member that is not in a cluster.
@@ -1902,6 +1919,9 @@ func (UnimplementedAgentServer) CopyClusterImage(context.Context, *CopyClusterIm
 }
 func (UnimplementedAgentServer) ExpectClusterImage(context.Context, *ExpectClusterImageRequest) (*ExpectClusterImageResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ExpectClusterImage not implemented")
+}
+func (UnimplementedAgentServer) ExpectClusterBackup(context.Context, *ExpectClusterBackupRequest) (*ExpectClusterBackupResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ExpectClusterBackup not implemented")
 }
 func (UnimplementedAgentServer) SetClusterForwarders(context.Context, *SetClusterForwardersRequest) (*SetClusterForwardersResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetClusterForwarders not implemented")
@@ -2643,6 +2663,24 @@ func _Agent_ExpectClusterImage_Handler(srv interface{}, ctx context.Context, dec
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(AgentServer).ExpectClusterImage(ctx, req.(*ExpectClusterImageRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_ExpectClusterBackup_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExpectClusterBackupRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).ExpectClusterBackup(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_ExpectClusterBackup_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).ExpectClusterBackup(ctx, req.(*ExpectClusterBackupRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -3682,6 +3720,10 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ExpectClusterImage",
 			Handler:    _Agent_ExpectClusterImage_Handler,
+		},
+		{
+			MethodName: "ExpectClusterBackup",
+			Handler:    _Agent_ExpectClusterBackup_Handler,
 		},
 		{
 			MethodName: "SetClusterForwarders",

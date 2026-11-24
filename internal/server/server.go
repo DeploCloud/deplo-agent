@@ -186,6 +186,8 @@ var Capabilities = []string{
 	"backup-store.sealed",
 	// DestroyStack.drop_set_aside: a deleted App's set-aside copies go with it.
 	"teardown.set-aside",
+	// ExpectClusterBackup and BackupRequest.member_fingerprint: a backup goes member to member, not through Deplo.
+	"backup-store.member",
 }
 
 // AgentVersion is the version this agent reports over Hello.
@@ -234,6 +236,8 @@ type Service struct {
 	// expected is the images Deplo told this member to take from another one, by ref.
 	expectedMu sync.Mutex
 	expected   map[string]expectedImage
+	// expectedBackups is the backups Deplo told this member to keep from another, by object key.
+	expectedBackups map[string]expectedBackup
 
 	leaseOnce sync.Once
 	lease     *leaseGuard

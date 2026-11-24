@@ -21,6 +21,7 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/clusterlink/wire"
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
+	"github.com/DeploCloud/deplo-agent/internal/mesh"
 	"github.com/DeploCloud/deplo-agent/internal/replica"
 )
 
@@ -72,6 +73,9 @@ type replicaRun struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 	from   string
+	// fingerprint is the sender's; relayed, whether a relay carries the stream itself.
+	fingerprint string
+	relayed     atomic.Bool
 	// roots are the entry's roots the run receives; a table that names others starts it again.
 	roots  []string
 	status *replica.Status
@@ -198,6 +202,17 @@ func (s *Service) SetClusterReplicas(_ context.Context, req *pb.SetClusterReplic
 // ClusterReplicaStatus says how each copy on this member stands; see the RPC's contract in proto/agent.proto.
 func (s *Service) ClusterReplicaStatus(context.Context, *pb.ClusterReplicaStatusRequest) (*pb.ClusterReplicaStatusResponse, error) {
 	r := s.replicas()
+	out := r.status()
+	// Measured outside the lock: a copy's size is a walk of its files.
+	for _, st := range out.Replicas {
+		if st.Role == "receiving" || st.Synced {
+			st.DiskBytes = dirSize(r.dir(st.AppId))
+		}
+	}
+	return out, nil
+}
+
+func (r *replicas) status() *pb.ClusterReplicaStatusResponse {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := &pb.ClusterReplicaStatusResponse{}
@@ -211,6 +226,7 @@ func (s *Service) ClusterReplicaStatus(context.Context, *pb.ClusterReplicaStatus
 		if run := r.runs[e.AppID]; run != nil {
 			connected, synced, at, bytes, msg := run.status.Snapshot()
 			st.Role, st.Connected, st.Synced, st.Bytes, st.Error, st.FromServerId = "receiving", connected, synced, bytes, msg, run.from
+			st.Relayed = connected && (run.relayed.Load() || r.s.meshPath(run.fingerprint) == mesh.PathRelay)
 			if !at.IsZero() {
 				st.AppliedAt = at.UTC().Format(time.RFC3339Nano)
 			}
@@ -220,7 +236,7 @@ func (s *Service) ClusterReplicaStatus(context.Context, *pb.ClusterReplicaStatus
 		}
 		out.Replicas = append(out.Replicas, st)
 	}
-	return out, nil
+	return out
 }
 
 func (r *replicas) poke() {
@@ -330,7 +346,7 @@ func (r *replicas) stop(appID, why string) {
 
 func (r *replicas) start(parent context.Context, cluster string, e replicaEntry, member, fingerprint string) {
 	ctx, cancel := context.WithCancel(parent)
-	run := &replicaRun{cancel: cancel, done: make(chan struct{}), from: member, roots: e.roots(), status: &replica.Status{}, index: replica.NewIndex()}
+	run := &replicaRun{cancel: cancel, done: make(chan struct{}), from: member, fingerprint: fingerprint, roots: e.roots(), status: &replica.Status{}, index: replica.NewIndex()}
 	r.mu.Lock()
 	r.runs[e.AppID] = run
 	r.mu.Unlock()
@@ -365,6 +381,7 @@ func (r *replicas) receiveOnce(ctx context.Context, cluster string, e replicaEnt
 		return err
 	}
 	defer conn.Close()
+	run.relayed.Store(r.s.copyPath(conn, "") == pathRelay)
 	_ = conn.SetDeadline(time.Now().Add(wire.HeaderTimeout))
 	if err := wire.WriteHeader(conn, replVerb, cluster+" "+e.AppID); err != nil {
 		return err

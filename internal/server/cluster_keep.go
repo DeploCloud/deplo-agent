@@ -214,7 +214,11 @@ func backupLikeTheRPC(s *Service, ctx context.Context, req *pb.BackupRequest, ou
 	if err != nil {
 		return nil, errors.New(statusMessage(err))
 	}
-	s.backupProject(ctx, req.GetProject(), dest, e)
+	if req.GetKind() == pb.BackupKind_BACKUP_KIND_DATABASE {
+		s.backupDatabase(ctx, req.GetDatabase(), dest, e)
+	} else {
+		s.backupProject(ctx, req.GetProject(), dest, e)
+	}
 	switch {
 	case res == nil:
 		return nil, errors.New("the backup ended without a result")
