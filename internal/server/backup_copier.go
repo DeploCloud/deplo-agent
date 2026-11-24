@@ -14,6 +14,9 @@ import (
 // So a backup's copier starts before the pause and stops after the App runs again: nothing starts in between.
 const copierLabel = "deplo.copier=1"
 
+// copierSettle is how long the App runs on after the copier starts: the proxy's read of that start must end first.
+var copierSettle = 3 * time.Second
+
 type volumeCopier struct {
 	id   string
 	dirs map[string]string

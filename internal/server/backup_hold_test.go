@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -290,5 +291,30 @@ func TestWriteArtifact_aStalledStreamFreesTheCopy(t *testing.T) {
 	case <-produced:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the copy is still held by a stream that stopped taking it")
+	}
+}
+
+// The proxy reads every container when the copier starts; a pause that lands while it reads drops the App's routes
+// (eu, 24 Nov 2026: memos answered 404 for 2 s). The App is paused only once that read is over.
+func TestVolumeBackup_theAppIsPausedOnceTheProxyReadTheCopier(t *testing.T) {
+	was := copierSettle
+	copierSettle = 300 * time.Millisecond
+	t.Cleanup(func() { copierSettle = was })
+	dir := t.TempDir()
+	dockerOnPath(t, `case "$1" in
+ps) echo abc123def456 ;;
+run) case "$*" in *" -d "*) date +%s%N > `+dir+`/start; echo cop999 ;; esac ;;
+pause) date +%s%N > `+dir+`/pause ;;
+esac`)
+	if err, _ := archiveWith(t, &Service{dataBase: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	read := func(n string) int64 {
+		b, _ := os.ReadFile(filepath.Join(dir, n))
+		v, _ := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+		return v
+	}
+	if gap := time.Duration(read("pause") - read("start")); gap < copierSettle {
+		t.Fatalf("the App was paused %v after the copier started, before the proxy could have read it", gap)
 	}
 }

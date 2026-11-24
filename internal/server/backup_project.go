@@ -49,6 +49,10 @@ func (s *Service) writeProjectArchive(ctx context.Context, p *pb.ProjectDescript
 	skip := ""
 	if copier != nil {
 		skip = copier.id
+		select {
+		case <-ctx.Done():
+		case <-time.After(copierSettle):
+		}
 	}
 	hold, herr := s.holdVolumes(ctx, p.GetSlug(), p.GetVolumeNames(), func(text string) { e.log("info", text) }, skip)
 	if herr != nil {
