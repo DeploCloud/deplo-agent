@@ -75,6 +75,10 @@ func (s *Service) holdVolumes(ctx context.Context, slug string, vols []string, l
 		return nil, err
 	}
 	for _, id := range ids {
+		if freezeContainer(ctx, id, true) == nil {
+			s.markHeld(id, true)
+			continue
+		}
 		res, err := dockercli.Run(ctx, holdStepTimeout, "pause", id)
 		if err == nil && res.Code == 0 {
 			s.markHeld(id, true)
@@ -187,12 +191,70 @@ func withHealth(ctx context.Context, ids []string, states ...string) []string {
 	return out
 }
 
-// unpauseAll reports whether every container is running again (one that is gone counts).
+// A hold freezes an App's processes where the proxy cannot see it: a paused container loses its routes at the
+// proxy's next read, which any other container's start, stop or health change makes (memos, 24 Nov 2026), and
+// the proxy then waits 2 s before it reads again. Docker's pause is the way back where freezing is not there.
+func freezeContainer(ctx context.Context, id string, on bool) error {
+	dir, err := containerCgroup(ctx, id)
+	if err != nil {
+		return err
+	}
+	v := "0"
+	if on {
+		v = "1"
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cgroup.freeze"), []byte(v), 0o644); err != nil || !on {
+		return err
+	}
+	for end := time.Now().Add(holdStepTimeout); ; time.Sleep(2 * time.Millisecond) {
+		if b, err := os.ReadFile(filepath.Join(dir, "cgroup.events")); err == nil && strings.Contains(string(b), "frozen 1") {
+			return nil
+		}
+		if time.Now().After(end) {
+			_ = os.WriteFile(filepath.Join(dir, "cgroup.freeze"), []byte("0"), 0o644)
+			return errors.New("the app's processes did not stop")
+		}
+	}
+}
+
+// containerCgroup is the cgroup v2 folder a running container's processes live in; a var so tests point elsewhere.
+var containerCgroup = func(ctx context.Context, id string) (string, error) {
+	res, err := dockercli.Run(ctx, holdStepTimeout, "inspect", "-f", "{{.State.Pid}} {{.State.Paused}}", id)
+	if err != nil || res.Code != 0 {
+		return "", fmt.Errorf("inspect %s: %v %s", id, err, res.Stderr)
+	}
+	// Docker's own pause freezes the same folder: only Docker undoes it.
+	pid, paused, _ := strings.Cut(strings.TrimSpace(res.Stdout), " ")
+	if paused != "false" {
+		return "", fmt.Errorf("%s is paused by Docker", id)
+	}
+	raw, err := os.ReadFile("/proc/" + pid + "/cgroup")
+	if err != nil || pid == "0" {
+		return "", fmt.Errorf("no process for %s", id)
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if rel, ok := strings.CutPrefix(line, "0::"); ok {
+			dir := filepath.Join("/sys/fs/cgroup", rel)
+			if _, err := os.Stat(filepath.Join(dir, "cgroup.freeze")); err != nil {
+				return "", err
+			}
+			return dir, nil
+		}
+	}
+	return "", errors.New("no cgroup v2 for " + id)
+}
+
+// unpauseAll reports whether every container is running again (one that is gone counts): thawed when it was
+// frozen, unpaused when Docker paused it.
 func unpauseAll(ctx context.Context, ids []string) bool {
 	ok := true
 	for _, id := range ids {
 		var done bool
 		for try := 0; try < 3 && !done; try++ {
+			if frozen(ctx, id) {
+				done = freezeContainer(ctx, id, false) == nil
+				continue
+			}
 			res, err := dockercli.Run(ctx, holdStepTimeout, "unpause", id)
 			done = err == nil && res.Code == 0 ||
 				strings.Contains(res.Stderr, "is not paused") || strings.Contains(res.Stderr, "No such container")
@@ -203,6 +265,16 @@ func unpauseAll(ctx context.Context, ids []string) bool {
 		ok = ok && done
 	}
 	return ok
+}
+
+// frozen says whether a hold froze the container: Docker does not know, and still calls it running and unpaused.
+func frozen(ctx context.Context, id string) bool {
+	dir, err := containerCgroup(ctx, id)
+	if err != nil {
+		return false
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "cgroup.freeze"))
+	return err == nil && strings.TrimSpace(string(b)) == "1"
 }
 
 // sweepBackupHolds unpauses what an earlier run of this agent paused for a copy and never released, and says

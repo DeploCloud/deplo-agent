@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/x509"
 	"errors"
 	"os"
@@ -74,6 +75,10 @@ func dockerOnPath(t *testing.T, body string) func() []string {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// A fake docker runs nothing to freeze: a hold pauses through it, unless a test gives it a cgroup.
+	was := containerCgroup
+	containerCgroup = func(context.Context, string) (string, error) { return "", errors.New("a fake docker runs nothing") }
+	t.Cleanup(func() { containerCgroup = was })
 	return func() []string {
 		b, _ := os.ReadFile(logf)
 		return strings.Split(strings.TrimSpace(string(b)), "\n")

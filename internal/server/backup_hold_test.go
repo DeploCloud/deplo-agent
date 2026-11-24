@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -52,6 +53,52 @@ func argvVerbs(lines []string) string {
 		}
 	}
 	return strings.Join(v, " ")
+}
+
+// A frozen App keeps its routes: Docker, and so the proxy, still read it as running (memos, 24 Nov 2026).
+func TestVolumeBackup_freezesTheAppWhereTheProxyCannotSeeIt(t *testing.T) {
+	argv := dockerOnPath(t, holdDocker("0", "0"))
+	cg := t.TempDir()
+	freeze, events := filepath.Join(cg, "cgroup.freeze"), filepath.Join(cg, "cgroup.events")
+	if os.WriteFile(freeze, []byte("0\n"), 0o644) != nil || os.WriteFile(events, []byte("populated 1\nfrozen 0\n"), 0o644) != nil {
+		t.Fatal("write")
+	}
+	containerCgroup = func(context.Context, string) (string, error) { return cg, nil }
+	// The kernel's side: cgroup.events follows cgroup.freeze, and the test notes every state it saw.
+	var mu sync.Mutex
+	var seen []string
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(time.Millisecond):
+			}
+			b, _ := os.ReadFile(freeze)
+			v := strings.TrimSpace(string(b))
+			_ = os.WriteFile(events, []byte("populated 1\nfrozen "+v+"\n"), 0o644)
+			mu.Lock()
+			if len(seen) == 0 || seen[len(seen)-1] != v {
+				seen = append(seen, v)
+			}
+			mu.Unlock()
+		}
+	}()
+	s := &Service{dataBase: t.TempDir()}
+	if err, _ := archiveWith(t, s); err != nil {
+		t.Fatal(err)
+	}
+	if got := argvVerbs(argv()); strings.Contains(got, "pause") {
+		t.Fatalf("docker paused the app: %q", got)
+	}
+	time.Sleep(10 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if strings.Join(seen, " ") != "0 1 0" {
+		t.Fatalf("freeze states %v, want 0 1 0", seen)
+	}
 }
 
 func TestVolumeBackup_pausesWhileCopyingThenResumes(t *testing.T) {
