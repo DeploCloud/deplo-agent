@@ -60,6 +60,9 @@ type Config struct {
 	// Relay opens a stream to a peer through a cluster relay; the tunnel's packets ride it when no direct path answers.
 	Relay func(ctx context.Context, fingerprint string) (net.Conn, error)
 	Logf  func(format string, args ...any)
+	// GreetPort is a port every peer answers on: a new peer is greeted there at once, so this run hears it within
+	// a round trip, not at its next alive (a restarted name server stayed silent up to 2 s, deplo ADR-0049).
+	GreetPort uint16
 }
 
 // PeerStatus is how the tunnel to one peer stands.
@@ -259,6 +262,7 @@ func (m *Mesh) SetPeers(peers []Peer) error {
 		return net.ErrClosed
 	}
 	seen := map[string]bool{}
+	var fresh []string
 	// One key is one peer, the first entry: WireGuard knows a peer by its key, the bind by the addresses it sends from.
 	keys := map[Key]bool{}
 	for _, np := range peers {
@@ -285,6 +289,7 @@ func (m *Mesh) SetPeers(peers []Peer) error {
 			}
 			p.ep = &endpoint{p: p}
 			m.peers[np.Fingerprint], m.byKey[np.PublicKey] = p, p
+			fresh = append(fresh, np.Fingerprint)
 		} else {
 			p.Address, p.Endpoints = np.Address, np.Endpoints
 		}
@@ -319,7 +324,33 @@ func (m *Mesh) SetPeers(peers []Peer) error {
 		m.tick(now)
 		m.sayAlive(now)
 	}()
+	for _, fp := range fresh {
+		go m.greetPeer(fp)
+	}
 	return err
+}
+
+// greetPeer opens and closes one stream to a new peer: its greeting is the peer heard.
+func (m *Mesh) greetPeer(fp string) {
+	if m.cfg.GreetPort == 0 {
+		return
+	}
+	// Tried every 100 ms: a first SYN lost while the path is still being found is sent again only after a second.
+	for end := time.Now().Add(greetWithin); time.Now().Before(end); {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		c, err := m.Dial(ctx, fp, m.cfg.GreetPort)
+		cancel()
+		if err == nil {
+			c.Close()
+			return
+		}
+		m.mu.RLock()
+		gone := m.closed || m.peers[fp] == nil
+		m.mu.RUnlock()
+		if gone {
+			return
+		}
+	}
 }
 
 // dropLocked forgets a peer; the caller holds m.mu.

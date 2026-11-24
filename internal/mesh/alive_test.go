@@ -349,3 +349,37 @@ func eventually(t *testing.T, within time.Duration, ok func() bool) {
 	}
 	t.Fatal("not within", within)
 }
+
+// A restarted name server answered only once it heard its peers, and a peer says it is alive every aliveEvery: eu-3
+// stayed silent 1.15 s after its agent started (24 Nov 2026). A new run greets each new peer and hears it at once.
+func TestMesh_aRestartedRunHearsEachPeerAtOnceNotAtItsNextAlive(t *testing.T) {
+	a, b := start(t, nil, fpA, "fdde:9100::a"), start(t, nil, fpB, "fdde:9100::b")
+	echo(t, b)
+	connect(t, a, b, true)
+	waitHeard(t, b, a)
+	waitHeard(t, a, b)
+	was := aliveEvery
+	aliveEvery = time.Hour
+	t.Cleanup(func() { aliveEvery = was })
+	time.Sleep(400 * time.Millisecond) // past b's first tick, which says it is alive once
+	// a restarts on its own key and port; b keeps its session and says nothing new until its next alive.
+	port := a.m.Port()
+	a.m.Close()
+	m, err := Start(Config{PrivateKey: a.key, Port: port, Address: a.m.Address(), Logf: t.Logf, GreetPort: servicePort})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { m.Close() })
+	began := time.Now()
+	if err := m.SetPeers([]Peer{b.as(true)}); err != nil {
+		t.Fatal(err)
+	}
+	for time.Since(began) < time.Second {
+		if _, ok := m.Heard()[fpB]; ok {
+			t.Logf("heard after %v", time.Since(began))
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("a restarted run did not hear its peer within a second")
+}
