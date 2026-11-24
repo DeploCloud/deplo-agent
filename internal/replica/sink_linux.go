@@ -307,6 +307,7 @@ func (rc *receiving) file(k Key, e Entry) error {
 				srcs[src] = f
 			}
 			got, err := io.Copy(out, io.NewSectionReader(f, int64(off), int64(n)))
+			dropPages(f, int64(off), int64(n))
 			if err != nil {
 				return err
 			}

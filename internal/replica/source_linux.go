@@ -313,8 +313,9 @@ func (s *sender) sendFile(k Key, e Entry, f *os.File) (Entry, error) {
 	}
 	var c chunker
 	buf := make([]byte, 64<<10)
+	in := &behind{f: f}
 	for {
-		n, err := f.Read(buf)
+		n, err := in.Read(buf)
 		if n > 0 {
 			if werr := c.write(buf[:n], emit); werr != nil {
 				return e, werr
