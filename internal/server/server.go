@@ -224,6 +224,9 @@ type Service struct {
 	clusterOnce sync.Once
 	cluster     *clusterHost
 
+	// answered is the first Hello of this run, which an update's guard waits for.
+	answered sync.Once
+
 	memberOnce sync.Once
 	member     *clusterMember
 	// imageOps is the docker side of cluster image copies; tests replace it.
@@ -332,6 +335,7 @@ func New(stackDir, buildTmpDir, dataDir, dataBase string) *Service {
 
 // Hello is the health + identity handshake and the mandatory deploy pre-flight (PLAN P5).
 func (s *Service) Hello(ctx context.Context, req *pb.HelloRequest) (*pb.HelloResponse, error) {
+	s.noteAnswered()
 	version, available := dockercli.Server(ctx)
 	return &pb.HelloResponse{
 		ContractVersion: pb.ContractVersion_CONTRACT_VERSION_V1,

@@ -53,6 +53,10 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "stage-sync" {
 		os.Exit(server.StageSync(os.Args[2:], os.Stdout, os.Stderr))
 	}
+	// The binary before a self-update, run beside the new one until it answers (deplo ADR-0043).
+	if len(os.Args) > 1 && os.Args[1] == "update-guard" {
+		os.Exit(server.UpdateGuard(os.Args[2:]))
+	}
 	// The same binary, mounted into a name forwarder's container (#200).
 	if len(os.Args) > 1 && os.Args[1] == "forward" {
 		os.Exit(forwarder.Main(os.Args[2:], os.Stderr))
@@ -94,6 +98,7 @@ func main() {
 		}
 	}
 	go server.TakePriority(context.Background())
+	go server.EnsureRestart(context.Background())
 
 	if *insecure && !loopbackAddr(*addr) {
 		log.Fatalf("deplo-agent: --insecure serves without mTLS, so it needs a loopback --addr (got %q)", *addr)

@@ -109,12 +109,23 @@ func (s *Service) applyUpdate(ctx context.Context, exePath string, req *pb.SelfU
 		return nil, err
 	}
 
+	// The binary that runs now stays beside the new one until the new one answers (deplo ADR-0043).
+	prev := exePath + ".previous"
+	_ = os.Remove(prev)
+	kept := os.Link(exePath, prev) == nil
 	if err := os.Rename(staged, exePath); err != nil {
 		os.Remove(staged)
+		os.Remove(prev)
 		return nil, status.Errorf(codes.FailedPrecondition,
 			"cannot replace the agent binary at %s: %v (is the install dir writable? re-run the installer to upgrade)", exePath, err)
 	}
 	log.Printf("deplo-agent: self-update staged v%s at %s; restarting to apply", req.GetVersion(), exePath)
+	if !kept {
+		log.Printf("deplo-agent: could not keep v%s beside v%s: nothing puts it back if v%s does not answer", AgentVersion, req.GetVersion(), req.GetVersion())
+	} else if err := startGuard(prev, exePath, req.GetVersion(), s.answeredFile(exePath)); err != nil {
+		os.Remove(prev)
+		log.Printf("deplo-agent: nothing puts v%s back if v%s does not answer: %v", AgentVersion, req.GetVersion(), err)
+	}
 
 	argv := append([]string{exePath}, os.Args[1:]...)
 	env := os.Environ()
@@ -238,4 +249,23 @@ func preNum(s string) (int, bool) {
 	}
 	n, err := strconv.Atoi(s)
 	return n, err == nil
+}
+
+// answeredFile is where a run says its version once it answered a Hello: the guard of an update waits for it.
+func (s *Service) answeredFile(exe string) string {
+	if s.agentDir != "" {
+		return filepath.Join(s.agentDir, "update-answered")
+	}
+	return filepath.Join(filepath.Dir(exe), ".deplo-agent-answered")
+}
+
+// noteAnswered is called by every Hello; the first one of this run leaves its version for an update's guard.
+func (s *Service) noteAnswered() {
+	s.answered.Do(func() {
+		exe, err := os.Executable()
+		if err != nil {
+			return
+		}
+		_ = writeFileAtomic(s.answeredFile(exe), []byte(AgentVersion+"\n"), 0o600)
+	})
 }

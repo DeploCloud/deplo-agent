@@ -160,3 +160,28 @@ func TestSelfUninstall_readOnlyInstallDirRemovesNothing(t *testing.T) {
 		}
 	}
 }
+
+// The restart drop-in goes with the unit: left alone it would start an agent that is no longer there.
+func TestSelfUninstall_removesTheRestartDropIn(t *testing.T) {
+	binDir := t.TempDir()
+	exe := filepath.Join(binDir, "deplo-agent")
+	if err := os.WriteFile(exe, []byte("BINARY"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	unit := filepath.Join(t.TempDir(), "deplo-agent.service")
+	if os.WriteFile(unit, []byte("[Unit]"), 0o600) != nil || os.MkdirAll(unit+".d", 0o755) != nil ||
+		os.WriteFile(filepath.Join(unit+".d", "restart.conf"), []byte(restartDropIn), 0o644) != nil {
+		t.Fatal("write")
+	}
+	unitAt(t, unit)
+	stubSystemctl(t, nil)
+	exited := captureExit(t)
+	s := New(t.TempDir(), t.TempDir(), "/", "")
+	if _, err := s.applyUninstall(context.Background(), exe); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(unit + ".d"); !os.IsNotExist(err) {
+		t.Fatal("the drop-in is still there")
+	}
+	waitExit(t, exited)
+}
