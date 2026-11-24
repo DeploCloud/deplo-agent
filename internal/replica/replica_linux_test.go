@@ -531,3 +531,30 @@ func TestReplica_bothEndsOfACopyArePaced(t *testing.T) {
 		t.Fatalf("a copy of 3 steps looked %d times", n)
 	}
 }
+
+// A file rebuilt beside the one it replaces holds both until it goes in place: it starts only if both fit.
+func TestReplica_aRebuildStartsOnlyIfTheOldAndTheNewFit(t *testing.T) {
+	src := t.TempDir()
+	big := filepath.Join(src, "big.bin")
+	putWhole(t, big, noise(4*gentleStep, 11))
+	dir := t.TempDir()
+	st, got, stop := stream(t, src, dir, NewIndex())
+	defer stop()
+	eventually(t, "snapshot", synced(st))
+	was := room.StatFile
+	// What the disk holds now leaves a tenth free, but not a second copy of big.bin.
+	room.StatFile = func(*os.File) (int64, int64, bool) { return 1<<30 + 2*gentleStep, 10 << 30, true }
+	t.Cleanup(func() { room.StatFile = was })
+	putWhole(t, big, noise(4*gentleStep, 12))
+	select {
+	case err := <-got:
+		if err == nil || !strings.Contains(err.Error(), room.Marker) {
+			t.Fatalf("the copy ended with %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the rebuild started without room for both")
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "volume-data", "big.bin")); !bytes.Equal(b, noise(4*gentleStep, 11)) {
+		t.Fatal("the old copy of big.bin went")
+	}
+}

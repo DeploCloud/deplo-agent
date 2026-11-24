@@ -152,7 +152,12 @@ func prunedCacheRecordIDs(out string) []string {
 	return ids
 }
 func dirSize(root string) int64 {
-	var total int64
+	total, _ := dirSizes(root)
+	return total
+}
+
+// dirSizes is dirSize and the on-disk size of the biggest file under root.
+func dirSizes(root string) (total, largest int64) {
 	_ = filepath.WalkDir(root, func(_ string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -161,16 +166,19 @@ func dirSize(root string) int64 {
 		if ierr != nil {
 			return nil
 		}
+		n := info.Size()
 		if st, ok := info.Sys().(*syscall.Stat_t); ok {
-			total += st.Blocks * 512
-			return nil
+			n = st.Blocks * 512
+		} else if d.IsDir() {
+			n = 0
 		}
+		total += n
 		if !d.IsDir() {
-			total += info.Size()
+			largest = max(largest, n)
 		}
 		return nil
 	})
-	return total
+	return total, largest
 }
 func splitLines(out string) []string {
 	var lines []string

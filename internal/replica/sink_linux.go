@@ -261,6 +261,9 @@ func (rc *receiving) file(k Key, e Entry) error {
 	sum := sha256.New()
 	var list listOf
 	gw := &gentle{f: t.f}
+	if prev, ok := rc.held[k]; ok && prev.Kind == kindFile {
+		gw.need = prev.Size
+	}
 	out := bufio.NewWriterSize(io.MultiWriter(gw, sum, &list), 256<<10)
 	var total int64
 	for {

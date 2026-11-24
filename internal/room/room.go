@@ -80,12 +80,15 @@ func CheckDir(dir string) error {
 }
 
 // Left says why a copy writing onto f stops now, nil while a tenth of its disk is still free.
-func Left(f *os.File) error {
+func Left(f *os.File) error { return LeftFor(f, 0) }
+
+// LeftFor is Left for a copy that still has need bytes to write: it starts only if a tenth stays free once they are.
+func LeftFor(f *os.File, need int64) error {
 	free, total, ok := StatFile(f)
-	if !ok || Fits(free, total, 0) {
+	if !ok || Fits(free, total, need) {
 		return nil
 	}
-	return noRoom{free: free}
+	return noRoom{free: free, need: need}
 }
 
 // Writer writes to F, and fails once F's disk is down to a tenth free; it looks every Step.
