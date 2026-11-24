@@ -187,6 +187,9 @@ type leaseGuard struct {
 	// one ran; relinquishing are the stacks it is stopping now.
 	relinquish    func(ctx context.Context, slug string) (bool, error)
 	relinquishing map[string]bool
+	// failed is what failed failover starts left here, by stack; dropFailed removes it once the App runs elsewhere.
+	failed     map[string]failedStart
+	dropFailed func(ctx context.Context, slug string, vols []string, still func() bool) error
 	// keeps is where each cluster's moved stacks are saved, as the leader last said. Never written to disk:
 	// a keep carries the destination's credentials.
 	keeps map[string]map[string]lease.Keep
@@ -477,6 +480,7 @@ func (g *leaseGuard) renew(o lease.Order) (lease.Reply, bool) {
 	g.comeBack(o, g.clusters[o.Cluster], next, &r)
 	g.clusters[o.Cluster] = next
 	g.relinquishLocked(o.Cluster, next)
+	g.sweepFailedLocked(o.Cluster, next)
 	// A start order carries neither keeps nor stores: it says nothing about them.
 	if o.Start == nil {
 		g.stores[o.Cluster] = o.Stores
@@ -786,9 +790,13 @@ func (g *leaseGuard) Serve(from wire.Party, c net.Conn) {
 		_ = lease.WriteReply(c, r)
 		return
 	}
+	before := ""
+	if o.Start != nil {
+		before = g.placedBefore(o.Cluster, o.Start.Slug)
+	}
 	r := g.Renew(o)
 	if o.Start != nil && r.OK {
-		r = g.startWorkload(c, o)
+		r = g.startWorkload(c, o, before)
 	}
 	if r.OK {
 		r.Unplaced = g.unplaced(o)
@@ -815,7 +823,7 @@ func slugsOK(o lease.Order) bool {
 
 // startWorkload brings one moved workload up. The order must place that stack on this member, so a leader cannot
 // start a stack the placement does not give it; Started is only true once the stack is ready.
-func (g *leaseGuard) startWorkload(c net.Conn, o lease.Order) lease.Reply {
+func (g *leaseGuard) startWorkload(c net.Conn, o lease.Order, before string) lease.Reply {
 	mine, single := false, false
 	for _, e := range o.Placement {
 		if e.Member == o.Member && e.Slug == o.Start.Slug && e.Slug != "" {
@@ -858,6 +866,11 @@ func (g *leaseGuard) startWorkload(c net.Conn, o lease.Order) lease.Reply {
 	}
 	if err != nil {
 		g.markStart(o.Start.Slug, true)
+		if single {
+			g.mu.Lock()
+			g.noteFailedStart(o, before)
+			g.mu.Unlock()
+		}
 		return lease.Reply{Error: err.Error()}
 	}
 	g.markStart(o.Start.Slug, false)
@@ -895,6 +908,7 @@ func (s *Service) leaseGuard() *leaseGuard {
 		s.lease.keep, s.lease.purge, s.lease.stop = s.keepLeft, s.purgeLeft, s.stopMoved
 		s.lease.relinquish = s.relinquishStack
 		s.lease.aside, s.lease.dropAside = s.asideStack, s.dropAside
+		s.lease.dropFailed = s.dropFailedStart
 		s.lease.succeed = s.askLeaderToLead
 		s.lease.has = func(slug string) bool { return isFile(s.stackPath(slug)) }
 		s.lease.running = stackRuns
