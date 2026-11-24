@@ -1472,6 +1472,9 @@ message BackupResult {
   // How long the app's containers were paused so its volumes could be copied
   // consistently, in milliseconds. 0 when nothing was held.
   int64 held_ms = 7;
+  // Why the app stayed paused for the whole copy instead of only while its data was
+  // copied on its own server's disk; empty when it was not.
+  string held_why = 8;
 }
 
 message RestoreRequest {

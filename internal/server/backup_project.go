@@ -44,7 +44,7 @@ func (s *Service) backupProject(ctx context.Context, p *pb.ProjectDescriptor, de
 }
 
 func (s *Service) writeProjectArchive(ctx context.Context, p *pb.ProjectDescriptor, tw *tar.Writer, e *bkEmitter) error {
-	copier := startCopier(ctx, p.GetVolumeNames())
+	copier := startCopier(ctx, p.GetVolumeNames(), s.newStage())
 	defer copier.remove()
 	skip := ""
 	if copier != nil {
@@ -54,6 +54,8 @@ func (s *Service) writeProjectArchive(ctx context.Context, p *pb.ProjectDescript
 		case <-time.After(copierSettle):
 		}
 	}
+	// Measured while the App runs: the pause then lasts only for a copy on this server's own disk.
+	why := copier.roomToStage(ctx)
 	hold, herr := s.holdVolumes(ctx, p.GetSlug(), p.GetVolumeNames(), func(text string) { e.log("info", text) }, skip)
 	if herr != nil {
 		return herr
@@ -68,10 +70,24 @@ func (s *Service) writeProjectArchive(ctx context.Context, p *pb.ProjectDescript
 		if !ended {
 			ended = true
 			s.endHold(hold, e)
-			copier.remove()
+			if copier == nil || !copier.staged {
+				copier.remove()
+			}
 		}
 	}
 	defer end()
+	if hold != nil && why == "" {
+		if err := copier.copyToStage(ctx); err != nil {
+			why = "copying the data on the server's own disk failed: " + err.Error()
+		} else {
+			end()
+			e.staged = true
+		}
+	}
+	if hold != nil && why != "" {
+		e.heldWhy = why
+		e.log("warn", "The app stays paused for the whole copy: "+why)
+	}
 	for _, vol := range p.GetVolumeNames() {
 		if vol == "" {
 			continue
@@ -152,7 +168,7 @@ func (s *Service) archiveVolume(ctx context.Context, argv []string, vol string, 
 		hdr, err := tr.Next()
 		if err == io.EOF {
 			_, _ = io.Copy(io.Discard, pr)
-			if perr := <-done; perr != nil && e.holding {
+			if perr := <-done; perr != nil && (e.holding || e.staged) {
 				return perr
 			} else if perr != nil {
 				e.log("warn", fmt.Sprintf("volume %q: %v (archive completed; a file likely changed during read)", vol, perr))
