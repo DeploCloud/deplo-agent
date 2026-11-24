@@ -400,6 +400,59 @@ func (r *root) walkDir(rel string, fn func(rel string, e Entry) error) error {
 	return nil
 }
 
+// moveTree puts what from holds into to, which is emptied first, by renaming it there when both are on one disk:
+// at once, where a copy of 2 GB at a failover starved every server sharing that disk (eu, 24 Nov 2026). used is
+// called before the first rename, as from is being used up.
+func moveTree(from, to *root, used func()) error {
+	var a, b unix.Stat_t
+	if unix.Fstat(from.fd, &a) != nil || unix.Fstat(to.fd, &b) != nil || a.Dev != b.Dev {
+		return copyTree(from, to)
+	}
+	if err := to.empty(); err != nil {
+		return err
+	}
+	names, err := from.list("")
+	if err != nil {
+		return err
+	}
+	used()
+	for _, n := range names {
+		if strings.HasPrefix(n, ".deplo-replica-") {
+			continue
+		}
+		if err := unix.Renameat(from.fd, n, to.fd, n); err != nil {
+			return err
+		}
+	}
+	return to.dropTemps("")
+}
+
+// dropTemps removes the files a write left half done below rel: a copy never holds them as data.
+func (r *root) dropTemps(rel string) error {
+	names, err := r.list(rel)
+	if err != nil {
+		return err
+	}
+	for _, n := range names {
+		child := n
+		if rel != "" {
+			child = rel + "/" + n
+		}
+		if strings.HasPrefix(n, ".deplo-replica-") {
+			if err := r.remove(child); err != nil {
+				return err
+			}
+			continue
+		}
+		if e, ok, err := r.stat(child); err == nil && ok && e.Kind == kindDir {
+			if err := r.dropTemps(child); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // copyTree puts what from holds into to, which is emptied first: a promoted copy is the App's data, exactly.
 func copyTree(from, to *root) error {
 	if err := to.empty(); err != nil {
