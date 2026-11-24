@@ -122,3 +122,36 @@ func TestStageSync_printsWhatItCopied(t *testing.T) {
 		t.Fatalf("a call without both folders must be refused, got %d", code)
 	}
 }
+
+// eu, 24 Nov 2026: the first copy of 2 GB, made at page-cache speed beside a running App, left its 1-core server
+// unable to renew its lease for 5 s, and its writeback stalled every server on the lab's disk for 20 s. The first
+// pass now writes in steps it waits on; the pass made while the App is paused does not wait.
+func TestStageSync_aFirstPassWritesInStepsItWaitsOn(t *testing.T) {
+	src := t.TempDir()
+	writeAt(t, src, "big", string(bytes.Repeat([]byte("z"), 20<<20)))
+	was := flushRange
+	var flushed int64
+	steps := 0
+	flushRange = func(f *os.File, off, n int64) {
+		steps++
+		flushed += n
+		was(f, off, n)
+	}
+	t.Cleanup(func() { flushRange = was })
+
+	dst := filepath.Join(t.TempDir(), "0")
+	if _, _, err := syncTree(src, dst, time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	sameCopy(t, src, dst)
+	if steps < 3 || flushed != 20<<20 {
+		t.Fatalf("the first pass wrote 20 MB in %d waited steps (%d bytes), want steps of at most 8 MB", steps, flushed)
+	}
+	steps = 0
+	if _, _, err := syncTree(src, filepath.Join(t.TempDir(), "1"), time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if steps != 0 {
+		t.Fatalf("the pass made while the App is paused must not wait on the disk, it waited %d times", steps)
+	}
+}

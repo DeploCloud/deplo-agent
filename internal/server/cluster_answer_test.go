@@ -566,6 +566,10 @@ func TestAnswers_readyOnlyWhenEveryContainerIs(t *testing.T) {
 			ts(at), status, streak, strings.Join(log, ","))
 	}
 	stuck := `{"status":"created","started":"0001-01-01T00:00:00Z","created":"` + ts(at) + `","health":null}`
+	// A routing change recreates the container: its replacement waits, created, under the old one's id and name.
+	old := `{"id":"be6b0bf9408e5a1c","name":"/deplo-shop-web-1","status":"running","started":"` + ts(at) + `","health":null}`
+	next := `{"id":"77aa","name":"/be6b0bf9408e_deplo-shop-web-1","status":"created","started":"0001-01-01T00:00:00Z","created":"` + ts(time.Now()) + `","health":null}`
+	other := `{"id":"77aa","name":"/0123456789ab_deplo-shop-web-1","status":"created","started":"0001-01-01T00:00:00Z","created":"` + ts(time.Now()) + `","health":null}`
 	for name, tc := range map[string]struct {
 		lines []string
 		ok    bool
@@ -573,18 +577,20 @@ func TestAnswers_readyOnlyWhenEveryContainerIs(t *testing.T) {
 		// unknown: healthy, with no kept check to say since when.
 		unknown bool
 	}{
-		"one without a health check":                {[]string{plain("running")}, true, at, false},
-		"healthy since its oldest kept check":       {[]string{health("healthy", 0, 0, 0, 0)}, true, checked, false},
-		"healthy after a failed check":              {[]string{health("healthy", 0, 1, 0, 0)}, true, time.Time{}, true},
-		"a healthy one beside a starting one":       {[]string{health("healthy", 0, 0), health("starting", 0)}, false, time.Time{}, false},
-		"no health check beside an unhealthy one":   {[]string{plain("running"), health("unhealthy", 3, 1, 1, 1)}, false, time.Time{}, false},
-		"a job that ran beside a healthy one":       {[]string{plain("exited"), health("healthy", 0, 0)}, true, checked, false},
-		"one restarting":                            {[]string{health("healthy", 0, 0), plain("restarting")}, false, time.Time{}, false},
-		"one still being created":                   {[]string{plain("created")}, false, time.Time{}, false},
-		"broken: one never started":                 {[]string{plain("running"), stuck}, false, time.Time{}, false},
-		"broken: unhealthy beside one just created": {[]string{plain("created"), health("unhealthy", 3, 1, 1, 1)}, false, time.Time{}, false},
-		"nothing running":                           {[]string{plain("exited")}, false, time.Time{}, false},
-		"a line docker did not write":               {[]string{"running " + ts(at)}, false, time.Time{}, false},
+		"one without a health check":                  {[]string{plain("running")}, true, at, false},
+		"healthy since its oldest kept check":         {[]string{health("healthy", 0, 0, 0, 0)}, true, checked, false},
+		"healthy after a failed check":                {[]string{health("healthy", 0, 1, 0, 0)}, true, time.Time{}, true},
+		"a healthy one beside a starting one":         {[]string{health("healthy", 0, 0), health("starting", 0)}, false, time.Time{}, false},
+		"no health check beside an unhealthy one":     {[]string{plain("running"), health("unhealthy", 3, 1, 1, 1)}, false, time.Time{}, false},
+		"a job that ran beside a healthy one":         {[]string{plain("exited"), health("healthy", 0, 0)}, true, checked, false},
+		"one restarting":                              {[]string{health("healthy", 0, 0), plain("restarting")}, false, time.Time{}, false},
+		"one still being created":                     {[]string{plain("created")}, false, time.Time{}, false},
+		"the one running while its replacement waits": {[]string{old, next}, true, at, false},
+		"a waiting copy of another container":         {[]string{old, other}, false, time.Time{}, false},
+		"broken: one never started":                   {[]string{plain("running"), stuck}, false, time.Time{}, false},
+		"broken: unhealthy beside one just created":   {[]string{plain("created"), health("unhealthy", 3, 1, 1, 1)}, false, time.Time{}, false},
+		"nothing running":                             {[]string{plain("exited")}, false, time.Time{}, false},
+		"a line docker did not write":                 {[]string{"running " + ts(at)}, false, time.Time{}, false},
 	} {
 		r := readinessOf(tc.lines)
 		if r.OK != tc.ok || (r.OK && (!r.Since.Equal(tc.since) || r.Health != tc.unknown)) {

@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -181,6 +182,7 @@ func forwarderPids(ctx context.Context, containers []string) (map[string]int, er
 	if len(containers) == 0 {
 		return map[string]int{}, nil
 	}
+	// .ID, never .Id: a field the typed container lacks makes docker read the raw map, where a missing Health fails.
 	args := append([]string{"inspect", "--format", "{{.Name}} {{.State.Pid}}"}, containers...)
 	res, err := dockercli.Run(ctx, 15*time.Second, args...)
 	if err != nil {
@@ -227,7 +229,7 @@ func appReady(ctx context.Context, appID string) appReadiness {
 	if err != nil || res.Code != 0 || len(ids) == 0 {
 		return appReadiness{}
 	}
-	args := append([]string{"inspect", "--format", `{"status":{{json .State.Status}},"started":{{json .State.StartedAt}},"created":{{json .Created}},` +
+	args := append([]string{"inspect", "--format", `{"id":{{json .ID}},"name":{{json .Name}},"status":{{json .State.Status}},"started":{{json .State.StartedAt}},"created":{{json .Created}},` +
 		`"health":{{if .State.Health}}{{json .State.Health}}{{else}}null{{end}}}`}, ids...)
 	res, err = dockercli.Run(ctx, 10*time.Second, args...)
 	if err != nil || res.Code != 0 {
@@ -237,6 +239,8 @@ func appReady(ctx context.Context, appID string) appReadiness {
 }
 
 type containerState struct {
+	ID      string    `json:"id"`
+	Name    string    `json:"name"`
 	Status  string    `json:"status"`
 	Started time.Time `json:"started"`
 	Created time.Time `json:"created"`
@@ -250,6 +254,9 @@ type containerState struct {
 	} `json:"health"`
 }
 
+// recreated is the name compose gives a container's replacement until the old one is gone.
+var recreated = regexp.MustCompile(`^/([0-9a-f]{12})_(.+)$`)
+
 // readinessOf is the rule appReady applies, one container per line. A container without a health check counts
 // from its start; one with a check from the oldest check docker keeps, when every one kept passed. One whose check
 // fails, or one created answerStuck ago and never started (its dependency never came up), makes the App broken.
@@ -262,16 +269,29 @@ func readinessOf(lines []string) appReadiness {
 			r.Since = t
 		}
 	}
+	all := make([]containerState, 0, len(lines))
+	runs := map[string]string{}
 	for _, line := range lines {
 		var c containerState
 		if json.Unmarshal([]byte(line), &c) != nil {
 			return appReadiness{}
 		}
+		all = append(all, c)
+		if c.Status == "running" {
+			runs[c.Name] = c.ID
+		}
+	}
+	for _, c := range all {
 		switch c.Status {
 		case "exited", "dead":
 			continue
 		case "running":
 		case "created":
+			// A routing change recreates a container: the copy that will replace it waits beside it as
+			// <its id>_<its name>, and the one running answers until then (eu, 24 Nov 2026: 13 s held on a new domain).
+			if m := recreated.FindStringSubmatch(c.Name); m != nil && strings.HasPrefix(runs["/"+m[2]], m[1]) {
+				continue
+			}
 			if !c.Created.IsZero() && time.Since(c.Created) >= answerStuck {
 				broken = true
 			} else {
