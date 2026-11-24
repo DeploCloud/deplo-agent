@@ -202,3 +202,36 @@ func TestReplicas_aCopyFollowsATableThatNamesMoreData(t *testing.T) {
 		return string(raw) == "one" && st.GetSynced() && st.GetError() == ""
 	})
 }
+
+// deplo ADR-0043, eu 24 Nov 2026: eu-3, back from a power cut with its copy of lab-fit set aside, took a whole new
+// copy from the table it kept on disk, before Deplo could check it fit, and reached 91%. A new copy waits for Deplo.
+func TestReplicas_aNewCopyWaitsForDeploAfterARestart(t *testing.T) {
+	_, b, vol, _ := replicating(t, true)
+	if err := os.WriteFile(filepath.Join(vol, "data.bin"), []byte("rows"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// b as it starts again: the table read from its disk, nothing handed in this run, no copy of the App yet.
+	r := b.replicas()
+	r.stop("prj_1", "")
+	_ = os.RemoveAll(r.dir("prj_1"))
+	r.mu.Lock()
+	r.handed = false
+	r.mu.Unlock()
+	eventually(t, "b to wait for Deplo", func() bool {
+		st := replicaStatus(t, b, "prj_1")
+		return st.GetRole() == "idle" && strings.Contains(st.GetError(), "waiting for Deplo")
+	})
+	if entries, _ := os.ReadDir(r.dir("prj_1")); len(entries) > 0 {
+		t.Fatal("b started a copy Deplo did not check")
+	}
+	// Deplo hands it the table: the copy starts.
+	r.mu.Lock()
+	tab := r.tab
+	r.handed = true
+	r.mu.Unlock()
+	if len(tab.Entries) != 1 {
+		t.Fatalf("table %+v", tab)
+	}
+	r.poke()
+	eventually(t, "b to receive", func() bool { return replicaStatus(t, b, "prj_1").GetRole() == "receiving" })
+}
