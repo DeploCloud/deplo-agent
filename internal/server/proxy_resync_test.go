@@ -64,7 +64,7 @@ func TestProxyResync_startsAndStopsAContainer(t *testing.T) {
 	argv := dockerOnPath(t, "exit 0")
 	proxyResync(t.Context())
 	got := strings.Join(argv(), "\n")
-	if !strings.Contains(got, "--rm --log-driver=none --network none") || !strings.Contains(got, volumeHelperImage+" true") {
+	if !strings.Contains(got, "--rm --log-driver=none") || !strings.Contains(got, "--network none") || !strings.Contains(got, volumeHelperImage+" true") {
 		t.Fatalf("the proxy reads containers again only when one starts or stops: %q", got)
 	}
 }

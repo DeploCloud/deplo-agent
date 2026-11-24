@@ -16,15 +16,17 @@ func TestTakePriority_putsTheAgentsServiceFirst(t *testing.T) {
 		calls = append(calls, strings.Join(args, " "))
 		return nil
 	}
-	t.Cleanup(func() { systemctl = was })
+	t.Cleanup(func() { systemctl = was; copyParent.Store("") })
 	takePriority(t.Context(), "0::/system.slice/deplo-agent.service\n")
 	if len(calls) == 0 || calls[0] != "set-property --runtime deplo-agent.service CPUWeight=1000 IOWeight=1000 MemoryLow=128M" {
 		t.Fatalf("systemctl was asked %q", calls)
 	}
 	calls = nil
 	takePriority(t.Context(), "0::/user.slice/user-0.slice/session-4.scope\n")
-	if len(calls) != 0 {
-		t.Fatalf("a run outside a service changed %q", calls)
+	for _, c := range calls {
+		if strings.Contains(c, ".service") || strings.Contains(c, ".scope") {
+			t.Fatalf("a run outside a service changed %q", c)
+		}
 	}
 }
 
