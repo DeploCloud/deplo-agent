@@ -189,6 +189,14 @@ service Agent {
   // limit (capability "backup-store.member"). A backup stream that matches no such entry is refused.
   rpc ExpectClusterBackup(ExpectClusterBackupRequest) returns (ExpectClusterBackupResponse);
 
+  // Tell this member to take one volume from one member, once, within the copy's time limit
+  // (capability "volume-copy.member"). A volume stream that matches no such entry is refused.
+  rpc ExpectClusterVolume(ExpectClusterVolumeRequest) returns (ExpectClusterVolumeResponse);
+
+  // Copy one of this host's volumes into the same volume on another member, over the cluster's
+  // private network, which was told to expect it. path "none": no path joins them, nothing was read.
+  rpc SendClusterVolume(SendClusterVolumeRequest) returns (SendClusterVolumeResponse);
+
   // ---- CLUSTER NAME FORWARDERS (#200, Hello capability "cluster.forwarders"; a compose service's
   // names, and every port of a name, need "cluster.forwarders.services") ----
 
@@ -2637,6 +2645,32 @@ message ExpectClusterBackupRequest {
 }
 
 message ExpectClusterBackupResponse {}
+
+message ExpectClusterVolumeRequest {
+  string volume_name = 1;
+  // Empty the volume before the first byte lands, as ImportVolume's wipe_first does.
+  bool wipe_first = 2;
+  // The sending member's certificate fingerprint (sha256 hex of its DER).
+  string source_fingerprint = 3;
+}
+
+message ExpectClusterVolumeResponse {}
+
+message SendClusterVolumeRequest {
+  string volume_name = 1;
+  // The target member's certificate fingerprint (sha256 hex of its DER).
+  string target_fingerprint = 2;
+}
+
+message SendClusterVolumeResponse {
+  // The gzipped tar's size and sha256, as the target wrote it.
+  int64 bytes = 1;
+  string sha256 = 2;
+  // "direct" or "relay", how it went; "none" when the target could not be reached and nothing was read.
+  string path = 3;
+  // This host holds no such volume.
+  bool missing = 4;
+}
 
 // ---- CLUSTER NAME FORWARDERS (#200) ----
 

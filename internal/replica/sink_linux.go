@@ -38,6 +38,10 @@ func Receive(ctx context.Context, conn io.ReadWriter, dir string, names []string
 			return err
 		}
 		defer r.close()
+		// One stream writes a copy at a time: what a cut stream or an earlier run left half rebuilt goes first.
+		if err := r.dropTemps(""); err != nil {
+			return err
+		}
 		rc.roots = append(rc.roots, r)
 	}
 	for i, r := range rc.roots {

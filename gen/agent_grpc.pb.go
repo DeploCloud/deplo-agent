@@ -61,6 +61,8 @@ const (
 	Agent_CopyClusterImage_FullMethodName      = "/deplo.agent.v1.Agent/CopyClusterImage"
 	Agent_ExpectClusterImage_FullMethodName    = "/deplo.agent.v1.Agent/ExpectClusterImage"
 	Agent_ExpectClusterBackup_FullMethodName   = "/deplo.agent.v1.Agent/ExpectClusterBackup"
+	Agent_ExpectClusterVolume_FullMethodName   = "/deplo.agent.v1.Agent/ExpectClusterVolume"
+	Agent_SendClusterVolume_FullMethodName     = "/deplo.agent.v1.Agent/SendClusterVolume"
 	Agent_SetClusterForwarders_FullMethodName  = "/deplo.agent.v1.Agent/SetClusterForwarders"
 	Agent_ReadProxyCertificates_FullMethodName = "/deplo.agent.v1.Agent/ReadProxyCertificates"
 	Agent_SetClusterReplicas_FullMethodName    = "/deplo.agent.v1.Agent/SetClusterReplicas"
@@ -246,6 +248,12 @@ type AgentClient interface {
 	// Tell this member to keep one backup from one member in its store, once, within the copy's time
 	// limit (capability "backup-store.member"). A backup stream that matches no such entry is refused.
 	ExpectClusterBackup(ctx context.Context, in *ExpectClusterBackupRequest, opts ...grpc.CallOption) (*ExpectClusterBackupResponse, error)
+	// Tell this member to take one volume from one member, once, within the copy's time limit
+	// (capability "volume-copy.member"). A volume stream that matches no such entry is refused.
+	ExpectClusterVolume(ctx context.Context, in *ExpectClusterVolumeRequest, opts ...grpc.CallOption) (*ExpectClusterVolumeResponse, error)
+	// Copy one of this host's volumes into the same volume on another member, over the cluster's
+	// private network, which was told to expect it. path "none": no path joins them, nothing was read.
+	SendClusterVolume(ctx context.Context, in *SendClusterVolumeRequest, opts ...grpc.CallOption) (*SendClusterVolumeResponse, error)
 	// Hand this member the names it holds on its Environments' networks and the streams it accepts
 	// for its own workloads. The full set each time; one not listed is removed. Never sent to a
 	// member that is not in a cluster.
@@ -880,6 +888,26 @@ func (c *agentClient) ExpectClusterBackup(ctx context.Context, in *ExpectCluster
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ExpectClusterBackupResponse)
 	err := c.cc.Invoke(ctx, Agent_ExpectClusterBackup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) ExpectClusterVolume(ctx context.Context, in *ExpectClusterVolumeRequest, opts ...grpc.CallOption) (*ExpectClusterVolumeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExpectClusterVolumeResponse)
+	err := c.cc.Invoke(ctx, Agent_ExpectClusterVolume_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) SendClusterVolume(ctx context.Context, in *SendClusterVolumeRequest, opts ...grpc.CallOption) (*SendClusterVolumeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SendClusterVolumeResponse)
+	err := c.cc.Invoke(ctx, Agent_SendClusterVolume_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1636,6 +1664,12 @@ type AgentServer interface {
 	// Tell this member to keep one backup from one member in its store, once, within the copy's time
 	// limit (capability "backup-store.member"). A backup stream that matches no such entry is refused.
 	ExpectClusterBackup(context.Context, *ExpectClusterBackupRequest) (*ExpectClusterBackupResponse, error)
+	// Tell this member to take one volume from one member, once, within the copy's time limit
+	// (capability "volume-copy.member"). A volume stream that matches no such entry is refused.
+	ExpectClusterVolume(context.Context, *ExpectClusterVolumeRequest) (*ExpectClusterVolumeResponse, error)
+	// Copy one of this host's volumes into the same volume on another member, over the cluster's
+	// private network, which was told to expect it. path "none": no path joins them, nothing was read.
+	SendClusterVolume(context.Context, *SendClusterVolumeRequest) (*SendClusterVolumeResponse, error)
 	// Hand this member the names it holds on its Environments' networks and the streams it accepts
 	// for its own workloads. The full set each time; one not listed is removed. Never sent to a
 	// member that is not in a cluster.
@@ -1922,6 +1956,12 @@ func (UnimplementedAgentServer) ExpectClusterImage(context.Context, *ExpectClust
 }
 func (UnimplementedAgentServer) ExpectClusterBackup(context.Context, *ExpectClusterBackupRequest) (*ExpectClusterBackupResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ExpectClusterBackup not implemented")
+}
+func (UnimplementedAgentServer) ExpectClusterVolume(context.Context, *ExpectClusterVolumeRequest) (*ExpectClusterVolumeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ExpectClusterVolume not implemented")
+}
+func (UnimplementedAgentServer) SendClusterVolume(context.Context, *SendClusterVolumeRequest) (*SendClusterVolumeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SendClusterVolume not implemented")
 }
 func (UnimplementedAgentServer) SetClusterForwarders(context.Context, *SetClusterForwardersRequest) (*SetClusterForwardersResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetClusterForwarders not implemented")
@@ -2681,6 +2721,42 @@ func _Agent_ExpectClusterBackup_Handler(srv interface{}, ctx context.Context, de
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(AgentServer).ExpectClusterBackup(ctx, req.(*ExpectClusterBackupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_ExpectClusterVolume_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExpectClusterVolumeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).ExpectClusterVolume(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_ExpectClusterVolume_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).ExpectClusterVolume(ctx, req.(*ExpectClusterVolumeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_SendClusterVolume_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SendClusterVolumeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).SendClusterVolume(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_SendClusterVolume_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).SendClusterVolume(ctx, req.(*SendClusterVolumeRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -3724,6 +3800,14 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ExpectClusterBackup",
 			Handler:    _Agent_ExpectClusterBackup_Handler,
+		},
+		{
+			MethodName: "ExpectClusterVolume",
+			Handler:    _Agent_ExpectClusterVolume_Handler,
+		},
+		{
+			MethodName: "SendClusterVolume",
+			Handler:    _Agent_SendClusterVolume_Handler,
 		},
 		{
 			MethodName: "SetClusterForwarders",

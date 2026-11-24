@@ -188,6 +188,8 @@ var Capabilities = []string{
 	"teardown.set-aside",
 	// ExpectClusterBackup and BackupRequest.member_fingerprint: a backup goes member to member, not through Deplo.
 	"backup-store.member",
+	// ExpectClusterVolume and SendClusterVolume: a move copies a volume member to member, not through Deplo.
+	"volume-copy.member",
 }
 
 // AgentVersion is the version this agent reports over Hello.
@@ -238,6 +240,8 @@ type Service struct {
 	expected   map[string]expectedImage
 	// expectedBackups is the backups Deplo told this member to keep from another, by object key.
 	expectedBackups map[string]expectedBackup
+	// expectedVolumes is the volumes Deplo told this member to take from another, by name.
+	expectedVolumes map[string]expectedVolume
 
 	leaseOnce sync.Once
 	lease     *leaseGuard
