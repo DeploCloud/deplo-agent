@@ -13,8 +13,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/DeploCloud/deplo-agent/internal/room"
 )
 
 // Receive keeps the copy under dir: one folder per root name. It sends what it holds, then applies the sender's
@@ -98,7 +101,13 @@ func Receive(ctx context.Context, conn io.ReadWriter, dir string, names []string
 			return errors.New("replica: the sender holds other data than this copy")
 		}
 	}
-	st.set(func(s *Status) { s.Connected, s.Err = true, "" })
+	// A copy stopped for room says so until a whole snapshot lands: the next stream would clear it before Deplo reads it.
+	st.set(func(s *Status) {
+		s.Connected = true
+		if !strings.Contains(s.Err, room.Marker) {
+			s.Err = ""
+		}
+	})
 	defer st.set(func(s *Status) { s.Connected = false })
 	// A relay stream's close only ends its writing half: a read waiting on it is woken by a deadline.
 	go func() {
@@ -131,7 +140,7 @@ func Receive(ctx context.Context, conn io.ReadWriter, dir string, names []string
 			if err := os.WriteFile(filepath.Join(dir, readyFile), []byte(time.Now().UTC().Format(time.RFC3339)), 0o600); err != nil {
 				return err
 			}
-			st.set(func(s *Status) { s.Synced = true })
+			st.set(func(s *Status) { s.Synced, s.Err = true, "" })
 			touch()
 		case opBeat:
 			if _, err := rd.varint(); err != nil {
