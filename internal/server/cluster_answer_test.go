@@ -129,6 +129,53 @@ func TestAnswers_passADomainOnToTheProxyOfTheServerThatRunsTheApp(t *testing.T) 
 	}
 }
 
+// eu, 24 Nov 2026: a domain added to one App cut every App passed on through the other servers for 1 to 2 s. A
+// new table held the forwarders' lock while docker answered slowly, and every connection waited on it.
+func TestAnswers_aNewTableWhileDockerIsSlowHoldsUpNoConnection(t *testing.T) {
+	a, b, fa, fb, members := answerPair(t)
+	bothAnswer(t, a, b, members)
+	placeOn(t, a, "srvA", appEntry("srvB"))
+	placeOn(t, b, "srvB", appEntry("srvB"))
+	s := fa.spec(t, answerAlias)
+
+	slow := make(chan struct{})
+	defer func() {
+		if slow != nil {
+			close(slow)
+		}
+	}()
+	for _, h := range []*fakeFwdHost{fa, fb} {
+		h.mu.Lock()
+		h.slow = slow
+		h.mu.Unlock()
+	}
+	blog := &pb.ClusterAnswer{AppId: "prj2", TlsPort: 10003, WebPort: 10004, Routes: routesFor("prj2", 10003, 10004, "blog.example.com")}
+	done := make(chan struct{}, 2)
+	for _, srv := range []*Service{a, b} {
+		go func() {
+			_, _ = srv.SetClusterForwarders(context.Background(), &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members,
+				AnswerPort: srv.forwarders().state().AnswerPort, Answers: []*pb.ClusterAnswer{shop(), blog}, ServeAnswers: []string{"prj1", "prj2"}})
+			done <- struct{}{}
+		}()
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	got := make(chan string, 1)
+	go func() { got <- askPort(t, s, shopTLS) }()
+	select {
+	case g := <-got:
+		if g != "proxy-b:PING" {
+			t.Fatalf("while the new table waited on docker, shop reached %q", g)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("shop's connection waited for the new table, which waited for docker")
+	}
+	close(slow)
+	slow = nil
+	<-done
+	<-done
+}
+
 // After a failover the App may run on the server a visitor reached: its proxy gets the connection back.
 func TestAnswers_answerOnTheirOwnProxyWhileTheAppRunsHere(t *testing.T) {
 	a, b, fa, _, members := answerPair(t)

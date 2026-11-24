@@ -223,10 +223,12 @@ func (f *forwarders) takeRefusals() []*pb.ClusterAnswerRefusal {
 	return out
 }
 
-// reconcileAnswers runs the one answer forwarder and writes the proxy's routes file; the caller holds f.mu.
-func (f *forwarders) reconcileAnswers(ctx context.Context, wanted map[string]bool, note func(error)) {
+// reconcileAnswers runs the one answer forwarder and writes the proxy's routes file; the caller holds f.dock.
+func (f *forwarders) reconcileAnswers(ctx context.Context, st forwardState, wanted map[string]bool, note func(error)) {
+	f.mu.Lock()
 	note(f.writeAnswerRoutes())
-	if len(f.st.Answers) == 0 {
+	f.mu.Unlock()
+	if len(st.Answers) == 0 {
 		return
 	}
 	ops := f.ops()
