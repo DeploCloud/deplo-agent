@@ -113,3 +113,25 @@ func TestWaitedReadsSomeTotal(t *testing.T) {
 		t.Fatal("a missing file waited")
 	}
 }
+
+// eu, 24 Nov 2026: one 8 MB step of a copy took 5 s, so a wait capped at a second let it run 83% of the time.
+func TestASlowCopyLooksEveryFifthOfASecond(t *testing.T) {
+	clock := time.Unix(1000, 0)
+	var slept []time.Duration
+	oldNow, oldSleep, oldWaited := now, sleep, appsWaited
+	now = func() time.Time { return clock }
+	sleep = func(d time.Duration) { slept = append(slept, d); clock = clock.Add(d) }
+	appsWaited = func() int64 { return 0 }
+	t.Cleanup(func() { now, sleep, appsWaited = oldNow, oldSleep, oldWaited; lastApp.Store(0) })
+	p := &Pacer{}
+	p.Moved(0)
+	// 64 KB every 50 ms while a request crosses the agent: far from a Step, it still looks and waits.
+	for range 10 {
+		clock = clock.Add(50 * time.Millisecond)
+		Touch()
+		p.Moved(64 << 10)
+	}
+	if len(slept) < 2 {
+		t.Fatalf("a slow copy waited %v", slept)
+	}
+}

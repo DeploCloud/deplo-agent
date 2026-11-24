@@ -13,8 +13,12 @@ import (
 	"time"
 )
 
-// Step is how much a copy moves between two looks.
-const Step = 8 << 20
+// Step is how much a copy moves between two looks, and Every the longest it goes without one: a slow copy
+// (eu, 24 Nov 2026: 8 MB took 5 s) would otherwise run most of the time between capped waits.
+const (
+	Step  = 8 << 20
+	Every = 200 * time.Millisecond
+)
 
 const (
 	// busyShare is how long, of a step, the Apps may wait before the copy steps aside.
@@ -91,12 +95,13 @@ type Pacer struct {
 
 // Moved notes n bytes the copy moved and, every Step, waits while the Apps were held up during it.
 func (p *Pacer) Moved(n int) {
-	if p.n += int64(n); p.n < Step && !p.last.IsZero() {
+	t := now()
+	if p.n += int64(n); p.n < Step && !p.last.IsZero() && t.Sub(p.last) < Every {
 		return
 	}
 	p.n = 0
 	Looks.Add(1)
-	t, st := now(), appsWaited()
+	st := appsWaited()
 	if !p.last.IsZero() {
 		took := t.Sub(p.last)
 		if took > 0 && (time.Duration(st-p.stall)*time.Microsecond > took/busyShare || TouchedSince(p.last)) {
