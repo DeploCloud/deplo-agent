@@ -319,9 +319,9 @@ func (s *Service) writeArtifact(ctx context.Context, dest *artifactDestination, 
 
 	switch {
 	case dest.stream != nil:
-		// A stream that takes nothing for streamStallAfter frees the copy, so a hold behind it ends.
-		var sent atomic.Int64
-		sent.Store(time.Now().UnixNano())
+		// A frame the stream takes nothing of for streamStallAfter frees the copy, so a hold behind it ends. Only a
+		// send counts: the copy on the App's disk before the first byte can take minutes (eu, 24 Nov 2026).
+		var sending atomic.Int64
 		watch := make(chan struct{})
 		defer close(watch)
 		go func() {
@@ -332,7 +332,7 @@ func (s *Service) writeArtifact(ctx context.Context, dest *artifactDestination, 
 				case <-watch:
 					return
 				case <-t.C:
-					if time.Since(time.Unix(0, sent.Load())) > streamStallAfter {
+					if at := sending.Load(); at != 0 && time.Since(time.Unix(0, at)) > streamStallAfter {
 						_ = pr.CloseWithError(errStreamStalled)
 						return
 					}
@@ -352,10 +352,12 @@ func (s *Service) writeArtifact(ctx context.Context, dest *artifactDestination, 
 				size += int64(n)
 				frame := make([]byte, n)
 				copy(frame, buf[:n])
-				if serr := dest.stream(frame); serr != nil {
+				sending.Store(time.Now().UnixNano())
+				serr := dest.stream(frame)
+				sending.Store(0)
+				if serr != nil {
 					return artifactWritten{}, serr
 				}
-				sent.Store(time.Now().UnixNano())
 			}
 			if rerr == io.EOF {
 				return artifactWritten{size: size, decryptedSize: decrypted, digest: hex.EncodeToString(sum.Sum(nil))}, nil
