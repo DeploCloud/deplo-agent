@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -74,9 +76,17 @@ func TestCopySlice_capsWhatACopyKeepsInMemory(t *testing.T) {
 
 // c37: eu-2's proxy waited for the CPU behind the agent's copies, and every App through it timed out.
 func TestProxyFirst_putsTheProxyLevelWithTheAgent(t *testing.T) {
-	argv := dockerOnPath(t, `case "$1" in inspect) echo running;; esac`)
+	dir := t.TempDir()
+	was := containerCgroup
+	containerCgroup = func(_ context.Context, id string) (string, error) {
+		if id != "deplo-traefik" {
+			t.Fatalf("asked for %q", id)
+		}
+		return dir, nil
+	}
+	t.Cleanup(func() { containerCgroup = was })
 	proxyFirst(context.Background())
-	if !slices.Contains(argv(), "update --cpu-shares 26215 deplo-traefik") {
-		t.Fatalf("the proxy keeps Docker's default weight: %q", argv())
+	if raw, _ := os.ReadFile(filepath.Join(dir, "cpu.weight")); string(raw) != "1000" {
+		t.Fatalf("the proxy's weight is %q, want the agent's 1000", raw)
 	}
 }

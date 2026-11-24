@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -25,17 +26,20 @@ const (
 	copyWeights = "CPUWeight=10 IOWeight=1 MemoryHigh=256M"
 )
 
-// proxyShares gives the proxy every request crosses the agent's own CPU weight (1000, Docker's default is 100):
-// a copy inside the agent never outranks it (c37: eu-2's proxy waited for the CPU and every App timed out).
-const proxyShares = "26215"
+// proxyWeight gives the proxy every request crosses the agent's own CPU weight (Docker's default is 100): a copy
+// inside the agent never outranks it (c37: eu-2's proxy waited for the CPU and every App timed out).
+const proxyWeight = "1000"
 
-// proxyFirst puts the proxy level with the agent on the CPU. Best effort, and again whenever it is recreated.
+// proxyFirst puts the proxy level with the agent on the CPU, in its cgroup: Docker's --cpu-shares maps to a weight
+// that differs between runc versions. Best effort; again whenever the proxy is restarted or recreated.
+// ponytail: a restart Docker makes on its own keeps the default until the agent's next start.
 func proxyFirst(ctx context.Context) {
-	if exists, _ := dockercli.State(ctx, traefikContainer); !exists {
+	dir, err := containerCgroup(ctx, traefikContainer)
+	if err != nil {
 		return
 	}
-	if res, err := dockercli.Run(ctx, 20*time.Second, "update", "--cpu-shares", proxyShares, traefikContainer); err != nil || res.Code != 0 {
-		fmt.Fprintf(os.Stderr, "deplo-agent: could not put the proxy level with the agent on the CPU: %v %s\n", err, strings.TrimSpace(res.Stderr))
+	if err := os.WriteFile(filepath.Join(dir, "cpu.weight"), []byte(proxyWeight), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "deplo-agent: could not put the proxy level with the agent on the CPU: %v\n", err)
 	}
 }
 
