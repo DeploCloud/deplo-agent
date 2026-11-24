@@ -30,6 +30,9 @@ import (
 )
 
 func main() {
+	// A self-update from canary.47 hands this run a stderr nobody reads: a log again before the first line.
+	logpipe.Revive(1, "deplo-agent")
+	logpipe.Revive(2, "deplo-agent")
 	// The same binary, mounted into the screenshot browser's container.
 	if len(os.Args) > 1 && os.Args[1] == "capture" {
 		os.Exit(capture.Main(os.Stdin, os.Stdout))
