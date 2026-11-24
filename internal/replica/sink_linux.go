@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -367,6 +368,8 @@ func Promote(dir string, names []string, live map[string]string) error {
 	if !Ready(dir) {
 		return errors.New("this server has no whole copy of the App's data yet")
 	}
+	// A copy moved half into place is never promoted again.
+	used := sync.OnceFunc(func() { _ = os.Remove(filepath.Join(dir, readyFile)) })
 	for _, n := range names {
 		to, ok := live[n]
 		if !ok {
@@ -381,7 +384,7 @@ func Promote(dir string, names []string, live map[string]string) error {
 			from.close()
 			return err
 		}
-		err = copyTree(from, dst)
+		err = moveTree(from, dst, used)
 		from.close()
 		dst.close()
 		if err != nil {

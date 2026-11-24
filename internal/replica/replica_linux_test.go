@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"golang.org/x/sys/unix"
 	"time"
 )
 
@@ -159,6 +161,37 @@ func TestReplica_aSymlinkTravelsAsOneAndNothingIsWrittenThroughIt(t *testing.T) 
 	}
 	if _, err := os.Stat(filepath.Join(outside, "planted")); !os.IsNotExist(err) {
 		t.Fatal("a file landed outside the copy")
+	}
+}
+
+// eu, 24 Nov 2026: a 2 GB App's copy was copied into place at its failover, and that copy starved every server on
+// the lab's shared disk until their leases ran out. On the same disk a promoted copy is moved, at once, and a copy
+// moved half into place can never be promoted again.
+func TestReplica_aPromotedCopyIsMovedNotCopied(t *testing.T) {
+	src := t.TempDir()
+	os.MkdirAll(filepath.Join(src, "pg"), 0o700)
+	os.WriteFile(filepath.Join(src, "pg", "base.dat"), noise(1<<20, 7), 0o600)
+	dir, st, stop := pair(t, src)
+	eventually(t, "snapshot", func() bool { _, s, _, _, _ := st.Snapshot(); return s })
+	stop()
+	held := filepath.Join(dir, "volume-data", "pg", "base.dat")
+	var before, after unix.Stat_t
+	if err := unix.Stat(held, &before); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(dir, "volume-data", "pg", ".deplo-replica-1-1"), []byte("half"), 0o600)
+	live := t.TempDir()
+	if err := Promote(dir, []string{VolumeRoot("data")}, map[string]string{VolumeRoot("data"): live}); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Stat(filepath.Join(live, "pg", "base.dat"), &after); err != nil || after.Ino != before.Ino {
+		t.Fatalf("the copy was not moved into place (inode %d, was %d): %v", after.Ino, before.Ino, err)
+	}
+	if _, err := os.Stat(filepath.Join(live, "pg", ".deplo-replica-1-1")); !os.IsNotExist(err) {
+		t.Fatal("a half-written file of the copy became data")
+	}
+	if Ready(dir) {
+		t.Fatal("a copy used up by a promote can be promoted again")
 	}
 }
 

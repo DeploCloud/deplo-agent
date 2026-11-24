@@ -294,6 +294,23 @@ func TestWriteArtifact_aStalledStreamFreesTheCopy(t *testing.T) {
 	}
 }
 
+// eu, 24 Nov 2026: the copy on lab-pause2's disk took a minute before its first byte, and the backup failed as a
+// stalled stream. A stream that never had to wait is not stalled, however long the copy takes to start.
+func TestWriteArtifact_aSlowStartIsNoStall(t *testing.T) {
+	was := streamStallAfter
+	streamStallAfter = 100 * time.Millisecond
+	t.Cleanup(func() { streamStallAfter = was })
+	dest := &artifactDestination{stream: func([]byte) error { return nil }}
+	out, err := (&Service{}).writeArtifact(context.Background(), dest, func(w io.Writer) error {
+		time.Sleep(500 * time.Millisecond)
+		_, err := w.Write(make([]byte, 64<<10))
+		return err
+	})
+	if err != nil || out.size == 0 {
+		t.Fatalf("a copy that starts late must still be sent: %v (%d bytes)", err, out.size)
+	}
+}
+
 // The proxy reads every container when the copier starts; a pause that lands while it reads drops the App's routes
 // (eu, 24 Nov 2026: memos answered 404 for 2 s). The App is paused only once that read is over.
 func TestVolumeBackup_theAppIsPausedOnceTheProxyReadTheCopier(t *testing.T) {
