@@ -393,7 +393,7 @@ func (r *replicas) receiveOnce(ctx context.Context, cluster string, e replicaEnt
 			}
 		}
 	}()
-	return replica.Receive(ctx, in, r.dir(e.AppID), e.roots(), run.status, run.index)
+	return atLowPriority(func() error { return replica.Receive(ctx, in, r.dir(e.AppID), e.roots(), run.status, run.index) })
 }
 
 // A whole copy whose sender says nothing at all, not even the beat it sends every 2 s, dials again: a stream that
@@ -513,7 +513,7 @@ func (s *Service) serveReplica(from wire.Party, c net.Conn, arg string) {
 			}
 		}
 	}()
-	if err := replica.Send(ctx, c, entry.roots(), dirs); err != nil && ctx.Err() == nil {
+	if err := atLowPriority(func() error { return replica.Send(ctx, c, entry.roots(), dirs) }); err != nil && ctx.Err() == nil {
 		fmt.Fprintf(os.Stderr, "deplo-agent: replica of %s: %v\n", entry.Slug, err)
 	}
 }
