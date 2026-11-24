@@ -18,6 +18,7 @@ import (
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
+	"github.com/DeploCloud/deplo-agent/internal/room"
 )
 
 const volumeCopyTimeout = 6 * time.Hour
@@ -167,7 +168,8 @@ func (s *Service) ImportVolume(stream pb.Agent_ImportVolumeServer) error {
 
 	var recvErr error
 	var wipeErr error
-	var received int64
+	var received, looked int64
+	mount := ""
 	digest := sha256.New()
 	wiped := false
 	for {
@@ -186,6 +188,16 @@ func (s *Service) ImportVolume(stream pb.Agent_ImportVolumeServer) error {
 					break
 				}
 				wiped = true
+			}
+			if received == 0 || received-looked >= room.Step/4 {
+				looked = received
+				if mount == "" {
+					mount = volumePath(ctx, helperDocker, vol)
+				}
+				if err := room.CheckDir(mount); mount != "" && err != nil {
+					recvErr = err
+					break
+				}
 			}
 			received += int64(len(data))
 			digest.Write(data)

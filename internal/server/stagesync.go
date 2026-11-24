@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/DeploCloud/deplo-agent/internal/room"
 	"golang.org/x/sys/unix"
 )
 
@@ -193,8 +194,9 @@ func copyRegular(sp, dp string, gentle bool) error {
 	if err != nil {
 		return err
 	}
+	w := &room.Writer{F: out}
 	if !gentle {
-		if _, err := io.Copy(out, in); err != nil {
+		if _, err := io.Copy(w, in); err != nil {
 			out.Close()
 			return err
 		}
@@ -205,7 +207,7 @@ func copyRegular(sp, dp string, gentle bool) error {
 	for {
 		n, rerr := in.Read(buf)
 		if n > 0 {
-			if _, err := out.Write(buf[:n]); err != nil {
+			if _, err := w.Write(buf[:n]); err != nil {
 				out.Close()
 				return err
 			}

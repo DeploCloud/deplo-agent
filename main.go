@@ -152,6 +152,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "deplo-agent: could not place the health check probe: %v\n", err)
 	}
 	svc.SetAgentDir(*agentDir)
+	go svc.SweepStorePartials()
 	svc.SettlePanel()
 	svc.StartRestartWatch(context.Background())
 	svc.StartProxyResync(context.Background())

@@ -3,6 +3,7 @@ package replica
 import (
 	"os"
 
+	"github.com/DeploCloud/deplo-agent/internal/room"
 	"golang.org/x/sys/unix"
 )
 
@@ -17,16 +18,24 @@ var flushRange = func(f *os.File, off, n int64) {
 	_ = unix.Fadvise(fd, off, n, unix.FADV_DONTNEED)
 }
 
-// gentle writes to f, a step at a time.
+// gentle writes to f, a step at a time, and stops once its disk is down to a tenth free (deplo ADR-0043).
 type gentle struct {
 	f            *os.File
 	off, flushed int64
 }
 
 func (g *gentle) Write(p []byte) (int, error) {
+	if g.off == 0 {
+		if err := room.Left(g.f); err != nil {
+			return 0, err
+		}
+	}
 	n, err := g.f.Write(p)
 	if g.off += int64(n); g.off-g.flushed >= gentleStep {
 		g.finish()
+		if err == nil {
+			err = room.Left(g.f)
+		}
 	}
 	return n, err
 }

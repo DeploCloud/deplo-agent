@@ -16,6 +16,7 @@ import (
 
 	"filippo.io/age"
 	pb "github.com/DeploCloud/deplo-agent/gen"
+	"github.com/DeploCloud/deplo-agent/internal/room"
 	"github.com/DeploCloud/deplo-agent/internal/s3client"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -149,7 +150,7 @@ func storeWrite(root, key string, r io.Reader, overwrite bool, check ...func(n i
 	}()
 
 	sum := sha256.New()
-	n, err := io.Copy(io.MultiWriter(f, sum), r)
+	n, err := io.Copy(io.MultiWriter(&room.Writer{F: f}, sum), r)
 	if err != nil {
 		return 0, "", fmt.Errorf("write backup artifact: %w", err)
 	}
@@ -261,9 +262,20 @@ func pruneEmptyDirs(root, dir string) {
 	}
 }
 
+// SweepStorePartials clears what a run that ended left half-written in this server's own backup store.
+func (s *Service) SweepStorePartials() { sweepPartials(s.managedStoreRoot()) }
+
+// agentStarted dates this run: a partial file older than it is a write a crash or a power cut ended.
+var agentStarted = time.Now()
+
+// sweepPartials removes every partial file no write of this run is on: before a destination takes a copy, nothing
+// half-written of a run that ended is left on it (eu, 24 Nov 2026: one stayed after a power cut mid-send).
 func sweepPartials(root string) int {
 	n := 0
 	cutoff := time.Now().Add(-storePartialStaleAfter)
+	if agentStarted.After(cutoff) {
+		cutoff = agentStarted
+	}
 	_ = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -284,12 +296,8 @@ func sweepPartials(root string) int {
 }
 
 func storeFreeBytes(root string) (free, total int64) {
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(root, &st); err != nil {
-		return 0, 0
-	}
-	bsize := int64(st.Bsize)
-	return int64(st.Bavail) * bsize, int64(st.Blocks) * bsize
+	free, total, _ = room.Stat(root)
+	return free, total
 }
 
 func verifyStoreDigest(root, key, expected string) error {
@@ -408,6 +416,7 @@ func (s *Service) WriteStoreFile(stream pb.Agent_WriteStoreFileServer) error {
 	if err != nil {
 		return err
 	}
+	sweepPartials(root)
 
 	pr, pw := io.Pipe()
 	// A sealed stream is kept only up to a trailer that names what was sent: a send cut midway, even one that ends

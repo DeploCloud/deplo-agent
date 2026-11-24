@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/DeploCloud/deplo-agent/internal/room"
 	"golang.org/x/sys/unix"
 	"time"
 )
@@ -444,5 +445,33 @@ func TestReplica_whatACopyReadsLeavesMemoryAsItGoes(t *testing.T) {
 	defer mu.Unlock()
 	if dropped["big.bin"] < int64(len(data)) {
 		t.Fatalf("%d of %d bytes the sender read left memory", dropped["big.bin"], len(data))
+	}
+}
+
+// eu, 24 Nov 2026: a copy that began while its App was small grew with it and took eu-1 to 92%. A copy stops at a
+// tenth of its disk free, the file it was writing goes, and it says why.
+func TestReplica_aGrowingCopyStopsAtATenthFree(t *testing.T) {
+	was := room.StatFile
+	room.StatFile = func(f *os.File) (int64, int64, bool) {
+		info, _ := f.Stat()
+		return 1<<30 + 3*gentleStep/2 - info.Size(), 10 << 30, true
+	}
+	t.Cleanup(func() { room.StatFile = was })
+	src := t.TempDir()
+	os.WriteFile(filepath.Join(src, "big.bin"), noise(4*gentleStep, 9), 0o644)
+	dir := t.TempDir()
+	_, got, stop := stream(t, src, dir, NewIndex())
+	defer stop()
+	select {
+	case err := <-got:
+		if err == nil || !strings.Contains(err.Error(), room.Marker) {
+			t.Fatalf("the copy ended with %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the copy went on past a tenth free")
+	}
+	entries, _ := os.ReadDir(filepath.Join(dir, "volume-data"))
+	if len(entries) != 0 {
+		t.Fatalf("the copy holds %v", entries)
 	}
 }

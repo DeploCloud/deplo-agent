@@ -17,7 +17,11 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/clusterlink/lease"
 	"github.com/DeploCloud/deplo-agent/internal/clusterlink/wire"
+	"github.com/DeploCloud/deplo-agent/internal/room"
 )
+
+// leftVolumeBytes is what a volume holds on this disk, the most its archive takes; a var so tests size it.
+var leftVolumeBytes = func(ctx context.Context, name string) int64 { return volumeBytes(ctx, helperDocker, name) }
 
 // What a member had left of a workload goes to the member whose disk holds the team's backups, over the relay
 // and mutual TLS end to end (ADR-0044). Stream: "LEFT <key>", answered SEND or ERR, then the encrypted archive
@@ -131,7 +135,10 @@ func (s *Service) receiveLeft(from wire.Party, c net.Conn, key string) {
 		return
 	}
 	_ = c.SetDeadline(time.Now().Add(leftTimeout))
-	if wire.WriteHeader(c, leftSend, "") != nil {
+	sweepPartials(root)
+	// Its room rides on SEND: the sender measures the archive and keeps it rather than fill this disk.
+	free, total := storeFreeBytes(root)
+	if wire.WriteHeader(c, leftSend, fmt.Sprintf("%d %d", free, total)) != nil {
 		return
 	}
 	n, sum, err := storeWrite(root, key, &leftReader{c: c, sum: sha256.New()}, true)
@@ -169,6 +176,17 @@ func (s *Service) sendLeft(ctx context.Context, req *pb.BackupRequest, to string
 	}
 	if verb != leftSend {
 		return nil, fmt.Errorf("the server that holds the backups refused it: %s", arg)
+	}
+	// An older member says SEND alone; its own write still stops at a tenth free.
+	var free, total int64
+	if n, _ := fmt.Sscan(arg, &free, &total); n == 2 {
+		var need int64
+		for _, v := range req.GetProject().GetVolumeNames() {
+			need += leftVolumeBytes(ctx, v)
+		}
+		if !room.Fits(free, total, need) {
+			return nil, room.Refuse("the server that holds the backups", free, need)
+		}
 	}
 	req.StreamOut = true
 	res, err := runLeftBackup(s, ctx, req, frameWriter{conn})
