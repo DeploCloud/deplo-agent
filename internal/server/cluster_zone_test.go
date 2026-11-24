@@ -199,6 +199,32 @@ func TestZone_answersFollowWhatThisServerHears(t *testing.T) {
 	}
 }
 
+// eu, 24 Nov 2026: a restarted name server answered 1.4 s after its agent started, a second after it heard a majority.
+func TestZone_aRestartedNameServerAnswersAsSoonAsItHearsMoreThanHalf(t *testing.T) {
+	for i := 0; i < 3; i++ {
+		heard := &fakeHeard{}
+		s := zoneService(t, t.TempDir(), heard)
+		addr := listening(t, setZone(t, s, zoneRequest()))
+		q := func() string { return lookup(addr, "shop-example-com.go.example.com.") }
+		time.Sleep(time.Duration(150+250*i) * time.Millisecond)
+		if got := q(); !strings.HasPrefix(got, "error") {
+			t.Fatalf("alone and just started, it answered %q", got)
+		}
+		// Two of three: it answers what it hears, itself held until its proxy serves.
+		heard.set(zfp1)
+		c := &dns.Client{Timeout: 50 * time.Millisecond}
+		m := new(dns.Msg)
+		m.SetQuestion("shop-example-com.go.example.com.", dns.TypeA)
+		start := time.Now()
+		for r, _, err := c.Exchange(m, addr); err != nil || len(r.Answer) == 0; r, _, err = c.Exchange(m, addr) {
+			if time.Since(start) > 300*time.Millisecond {
+				t.Fatalf("start %d: no answer 300 ms after it heard more than half (%v)", i, err)
+			}
+		}
+		stopZones(s)
+	}
+}
+
 func TestZone_anEvenSplitRepeatsTheLastAgreedSet(t *testing.T) {
 	heard := &fakeHeard{}
 	heard.set(zfp1, zfp2, strings.Repeat("d", 64))
