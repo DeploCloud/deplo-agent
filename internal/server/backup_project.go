@@ -27,7 +27,7 @@ func (s *Service) backupProject(ctx context.Context, p *pb.ProjectDescriptor, de
 
 	produce := func(w io.Writer) error {
 		tw := tar.NewWriter(w)
-		err := s.writeProjectArchive(ctx, p, tw, e)
+		err := s.writeProjectArchive(ctx, p, tw, e, dest.store != nil)
 		if cerr := tw.Close(); err == nil {
 			err = cerr
 		}
@@ -43,7 +43,8 @@ func (s *Service) backupProject(ctx context.Context, p *pb.ProjectDescriptor, de
 	e.emitResult(true, "", dest.key, written)
 }
 
-func (s *Service) writeProjectArchive(ctx context.Context, p *pb.ProjectDescriptor, tw *tar.Writer, e *bkEmitter) error {
+// archiveHere says the archive is written on this server's disk too.
+func (s *Service) writeProjectArchive(ctx context.Context, p *pb.ProjectDescriptor, tw *tar.Writer, e *bkEmitter, archiveHere bool) error {
 	copier := startCopier(ctx, p.GetVolumeNames(), s.newStage())
 	defer copier.remove()
 	skip := ""
@@ -54,8 +55,17 @@ func (s *Service) writeProjectArchive(ctx context.Context, p *pb.ProjectDescript
 		case <-time.After(copierSettle):
 		}
 	}
-	// Measured while the App runs: the pause then lasts only for a copy on this server's own disk.
-	why := copier.roomToStage(ctx)
+	// Copied once while the App runs: the pause then lasts only for what changed meanwhile.
+	why := copier.roomToStage(ctx, archiveHere)
+	first, copied := int64(0), false
+	since := time.Now().Add(-2 * time.Second)
+	if running, _ := runningOn(ctx, p.GetVolumeNames(), skip); why == "" && len(running) > 0 {
+		if n, err := copier.copyToStage(ctx, time.Time{}); err != nil {
+			why = "copying the data on the server's own disk failed: " + err.Error()
+		} else {
+			first, copied = n, true
+		}
+	}
 	hold, herr := s.holdVolumes(ctx, p.GetSlug(), p.GetVolumeNames(), func(text string) { e.log("info", text) }, skip)
 	if herr != nil {
 		return herr
@@ -76,12 +86,20 @@ func (s *Service) writeProjectArchive(ctx context.Context, p *pb.ProjectDescript
 		}
 	}
 	defer end()
+	if hold != nil && why == "" && !copied {
+		why = "it started while its data was being copied, so nothing was copied on the server's own disk first"
+	}
 	if hold != nil && why == "" {
-		if err := copier.copyToStage(ctx); err != nil {
+		if n, err := copier.copyToStage(ctx, since); err != nil {
 			why = "copying the data on the server's own disk failed: " + err.Error()
 		} else {
+			copier.staged = true
 			end()
 			e.staged = true
+			if first > 0 && n >= first {
+				e.heldWhy = fmt.Sprintf("its data changed as fast as it was copied: the copy made while it was paused (%s) was no smaller than the first", humanBytes(n))
+				e.log("warn", "The second copy was not smaller than the first: "+e.heldWhy)
+			}
 		}
 	}
 	if hold != nil && why != "" {

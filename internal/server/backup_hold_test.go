@@ -37,7 +37,7 @@ func archiveWith(t *testing.T, s *Service) (error, []string) {
 	}}
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
-	err := s.writeProjectArchive(context.Background(), &pb.ProjectDescriptor{Slug: "agent-test-web", VolumeNames: []string{"deplo-agent-test-web-data"}}, tw, e)
+	err := s.writeProjectArchive(context.Background(), &pb.ProjectDescriptor{Slug: "agent-test-web", VolumeNames: []string{"deplo-agent-test-web-data"}}, tw, e, false)
 	if e.held > 0 {
 		logs = append(logs, "held")
 	}
@@ -161,7 +161,7 @@ func TestE2E_VolumeBackupPausesAWritingApp(t *testing.T) {
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
 	e := &bkEmitter{send: func(*pb.BackupEvent) error { return nil }}
-	if err := svc.writeProjectArchive(ctx, &pb.ProjectDescriptor{Slug: tag, VolumeNames: []string{vol}}, tw, e); err != nil {
+	if err := svc.writeProjectArchive(ctx, &pb.ProjectDescriptor{Slug: tag, VolumeNames: []string{vol}}, tw, e, false); err != nil {
 		t.Fatalf("a held copy of a busy writer must succeed: %v", err)
 	}
 	if e.held <= 0 {
@@ -319,28 +319,39 @@ esac`)
 	}
 }
 
-// stagingDocker is a copier whose volumes hold 200 MB: du, the copy and the archive all run inside it.
-const stagingDocker = `case "$1" in
+// stagingDocker is a copier whose volumes hold 200 MB: du, both copies and the archive all run inside it. The
+// copy made while the App is paused takes 5 MB.
+var stagingDocker = stagingDockerSecond("5242880")
+
+func stagingDockerSecond(bytes string) string {
+	return `case "$1" in
 ps) echo abc123def456 ;;
 run) case "$*" in *" -d "*) echo cop999 ;; esac ;;
-exec) case "$*" in *" du -sk "*) printf '204800\t/v\n' ;; esac ;;
+exec) case "$*" in
+  *" du -sk "*) printf '204800\t/v\n' ;;
+  *" stage-sync --since "*) echo "3 ` + bytes + `" ;;
+  *" stage-sync "*) echo "40 209715200" ;;
+  esac ;;
 esac`
+}
 
-// eu, 24 Nov 2026: a backup paused its App for its whole copy, 20 s per 200 MB sent to another server. Now the
-// pause lasts only for a copy on the App's own disk; the archive is read from that copy with the App running.
-func TestVolumeBackup_pausedOnlyForACopyOnItsOwnDisk(t *testing.T) {
+func stagedFree(t *testing.T, free, total int64) {
+	t.Helper()
+	was := stageSpace
+	stageSpace = func(string) (int64, int64) { return free, total }
+	t.Cleanup(func() { stageSpace = was })
+}
+
+// eu, 24 Nov 2026: a 2 GB App was paused 20 to 44 s, its whole copy on its own disk. Now that copy is made while
+// it runs, and the pause lasts only for a second pass of what changed meanwhile; the archive is read from the copy.
+func TestVolumeBackup_pausedOnlyForWhatChanged(t *testing.T) {
 	argv := dockerOnPath(t, stagingDocker)
-	was := stageFree
-	stageFree = func(string) int64 { return 10 << 30 }
-	t.Cleanup(func() { stageFree = was })
+	stagedFree(t, 10<<30, 20<<30)
 	s := &Service{dataBase: t.TempDir()}
-	var why string
 	e := &bkEmitter{send: func(ev *pb.BackupEvent) error { return nil }}
-	tw := tar.NewWriter(io.Discard)
-	if err := s.writeProjectArchive(context.Background(), &pb.ProjectDescriptor{Slug: "agent-test-web", VolumeNames: []string{"deplo-agent-test-web-data"}}, tw, e); err != nil {
+	if err := s.writeProjectArchive(context.Background(), &pb.ProjectDescriptor{Slug: "agent-test-web", VolumeNames: []string{"deplo-agent-test-web-data"}}, tar.NewWriter(io.Discard), e, false); err != nil {
 		t.Fatal(err)
 	}
-	why = e.heldWhy
 	lines := argv()
 	at := func(pred func(string) bool) int {
 		for i, l := range lines {
@@ -350,46 +361,79 @@ func TestVolumeBackup_pausedOnlyForACopyOnItsOwnDisk(t *testing.T) {
 		}
 		return -1
 	}
+	whole := at(func(l string) bool {
+		return strings.HasPrefix(l, "exec cop999 /deplo-agent stage-sync /v/0 /stage/0")
+	})
 	pause := at(func(l string) bool { return l == "pause abc123def456" })
-	copy := at(func(l string) bool { return strings.HasPrefix(l, "exec cop999 sh -c") && strings.Contains(l, "cp -a") })
+	changed := at(func(l string) bool {
+		return strings.HasPrefix(l, "exec cop999 /deplo-agent stage-sync --since ") && strings.HasSuffix(l, " /v/0 /stage/0")
+	})
 	unpause := at(func(l string) bool { return l == "unpause abc123def456" })
 	archive := at(func(l string) bool {
 		return strings.HasPrefix(l, "exec ") && strings.Contains(l, " cop999 tar -C /stage/0 ")
 	})
 	gone := at(func(l string) bool { return l == "rm -f cop999" })
-	if pause < 0 || !(pause < copy && copy < unpause && unpause < archive && archive < gone) {
-		t.Fatalf("want the App paused, its data copied on its disk, the App unpaused, the archive read from the copy, the copier gone; got %q", lines)
+	if whole < 0 || !(whole < pause && pause < changed && changed < unpause && unpause < archive && archive < gone) {
+		t.Fatalf("want the data copied with the App running, the App paused, what changed copied, the App unpaused, the archive read from the copy, the copier gone; got %q", lines)
 	}
-	if why != "" {
-		t.Fatalf("nothing kept the App paused for the whole copy, yet it says %q", why)
+	if !strings.Contains(strings.Join(lines, "\n"), ":/deplo-agent:ro") {
+		t.Fatalf("the copier must carry this binary to copy with: %q", lines)
+	}
+	if e.heldWhy != "" {
+		t.Fatalf("the second copy was smaller than the first, yet the backup says %q", e.heldWhy)
 	}
 	if left, _ := filepath.Glob(filepath.Join(s.backupStageDir(), "*")); len(left) != 0 {
 		t.Fatalf("the copy on disk must be gone once the backup is written: %v", left)
 	}
 }
 
-// Without room for the copy on its disk, the App is paused for the whole copy as before, and the backup says why.
-func TestVolumeBackup_tooLittleDiskPausesForTheWholeCopyAndSaysWhy(t *testing.T) {
-	argv := dockerOnPath(t, stagingDocker)
-	was := stageFree
-	stageFree = func(string) int64 { return 100 << 20 }
-	t.Cleanup(func() { stageFree = was })
+// When the data changes as fast as it is copied, the pause is no shorter than one copy: the backup says so.
+func TestVolumeBackup_aSecondCopyNoSmallerSaysSo(t *testing.T) {
+	dockerOnPath(t, stagingDockerSecond("209715200"))
+	stagedFree(t, 10<<30, 20<<30)
 	s := &Service{dataBase: t.TempDir()}
-	var logs []string
-	e := &bkEmitter{send: func(ev *pb.BackupEvent) error {
-		if l := ev.GetLog(); l != nil {
-			logs = append(logs, l.GetText())
-		}
-		return nil
-	}}
-	if err := s.writeProjectArchive(context.Background(), &pb.ProjectDescriptor{Slug: "agent-test-web", VolumeNames: []string{"deplo-agent-test-web-data"}}, tar.NewWriter(io.Discard), e); err != nil {
+	e := &bkEmitter{send: func(ev *pb.BackupEvent) error { return nil }}
+	if err := s.writeProjectArchive(context.Background(), &pb.ProjectDescriptor{Slug: "agent-test-web", VolumeNames: []string{"deplo-agent-test-web-data"}}, tar.NewWriter(io.Discard), e, false); err != nil {
 		t.Fatal(err)
 	}
-	got := strings.Join(argv(), "\n")
-	if strings.Contains(got, "cp -a") || !strings.Contains(got, " cop999 tar -C /v/0 ") {
-		t.Fatalf("with too little disk the archive is read from the volume itself: %q", got)
+	if !strings.Contains(e.heldWhy, "no smaller than the first") {
+		t.Fatalf("the backup must say its second copy was as large as the first: %q", e.heldWhy)
 	}
-	if !strings.Contains(e.heldWhy, "too little") || !strings.Contains(strings.Join(logs, "|"), "stays paused for the whole copy") {
-		t.Fatalf("the backup must say why the App stayed paused: %q %v", e.heldWhy, logs)
+}
+
+// Without room for the copy and a tenth of the disk free, the App is paused for the whole copy as before, and the
+// backup says why; an archive written on the same disk counts too.
+func TestVolumeBackup_tooLittleDiskPausesForTheWholeCopyAndSaysWhy(t *testing.T) {
+	for _, c := range []struct {
+		name        string
+		free, total int64
+		archiveHere bool
+	}{
+		{"too little free", 100 << 20, 20 << 30, false},
+		{"a tenth must stay free", 1 << 30, 8 << 30, false},
+		{"the archive is written here too", 500 << 20, 1 << 30, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			argv := dockerOnPath(t, stagingDocker)
+			stagedFree(t, c.free, c.total)
+			s := &Service{dataBase: t.TempDir()}
+			var logs []string
+			e := &bkEmitter{send: func(ev *pb.BackupEvent) error {
+				if l := ev.GetLog(); l != nil {
+					logs = append(logs, l.GetText())
+				}
+				return nil
+			}}
+			if err := s.writeProjectArchive(context.Background(), &pb.ProjectDescriptor{Slug: "agent-test-web", VolumeNames: []string{"deplo-agent-test-web-data"}}, tar.NewWriter(io.Discard), e, c.archiveHere); err != nil {
+				t.Fatal(err)
+			}
+			got := strings.Join(argv(), "\n")
+			if strings.Contains(got, "stage-sync") || !strings.Contains(got, " cop999 tar -C /v/0 ") {
+				t.Fatalf("with too little disk the archive is read from the volume itself: %q", got)
+			}
+			if !strings.Contains(e.heldWhy, "too little") || !strings.Contains(strings.Join(logs, "|"), "stays paused for the whole copy") {
+				t.Fatalf("the backup must say why the App stayed paused: %q %v", e.heldWhy, logs)
+			}
+		})
 	}
 }

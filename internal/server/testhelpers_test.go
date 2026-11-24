@@ -22,6 +22,9 @@ func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == "dns" {
 		os.Exit(dnszone.Main(os.Stdin, os.Stdout, os.Stderr))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "stage-sync" {
+		os.Exit(StageSync(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	buildStepCgroupDir = ""
 	// The tests' certificates come from no public root: only the authority test judges against one.
 	publicRoots = func() (*x509.CertPool, error) { return nil, errors.New("no public roots in the tests") }

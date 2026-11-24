@@ -37,6 +37,8 @@ type fakeFwdHost struct {
 	readyCalls int
 	// broken is each App that runs here but fails its health check.
 	broken map[string]bool
+	// slow, while set, holds every container check until it is closed: a docker busy with a deploy.
+	slow chan struct{}
 }
 
 func newFakeFwdHost() *fakeFwdHost {
@@ -48,6 +50,12 @@ func (h *fakeFwdHost) ops() forwardOps {
 	return forwardOps{
 		network: func(context.Context, string) error { return nil },
 		ensure: func(_ context.Context, s forwardSpec) error {
+			h.mu.Lock()
+			slow := h.slow
+			h.mu.Unlock()
+			if slow != nil {
+				<-slow
+			}
 			h.mu.Lock()
 			defer h.mu.Unlock()
 			h.specs[s.Container] = s

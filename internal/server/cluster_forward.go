@@ -137,8 +137,11 @@ type heldListener struct {
 }
 
 type forwarders struct {
-	s         *Service
-	mu        sync.Mutex
+	s  *Service
+	mu sync.Mutex
+	// dock is held while a table is put in place with docker, and guards listeners and redirected: f.mu stays free
+	// meanwhile, so the connections already passed on never wait for a slow docker (eu, 24 Nov 2026).
+	dock      sync.Mutex
 	st        forwardState
 	listeners map[string]*heldListener
 	// redirected is the process each container's redirect was set up in: a restarted container needs it again.
@@ -272,14 +275,18 @@ func (s *Service) SetClusterForwarders(ctx context.Context, req *pb.SetClusterFo
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	f := s.forwarders()
+	f.dock.Lock()
+	defer f.dock.Unlock()
+	f.mu.Lock()
+	f.st = st
+	f.mu.Unlock()
+	err = f.reconcile(ctx)
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.st = st
-	if err := f.reconcile(ctx); err != nil {
-		f.save()
+	f.save()
+	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "run the name forwarders: %v", err)
 	}
-	f.save()
 	return &pb.SetClusterForwardersResponse{Held: int32(len(st.Hold)), Served: int32(len(st.Serve)),
 		AnswerRefusals: f.takeRefusals(), ProxyRestarts: s.proxyRestarts().take(req.GetProxyRestartsSeenMs())}, nil
 }
@@ -288,23 +295,34 @@ func (s *Service) SetClusterForwarders(ctx context.Context, req *pb.SetClusterFo
 func (f *forwarders) Resume() {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if len(f.st.Hold)+len(f.st.Answers) == 0 {
+	f.dock.Lock()
+	defer f.dock.Unlock()
+	if st := f.state(); len(st.Hold)+len(st.Answers) == 0 {
 		return
 	}
 	if err := f.reconcile(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "deplo-agent: name forwarders: %v\n", err)
 	}
+	f.mu.Lock()
 	f.save()
+	f.mu.Unlock()
+}
+
+// state is the table as it stands now.
+func (f *forwarders) state() forwardState {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.st
 }
 
 // Clear stops every forwarder and forgets the table: this agent left its cluster.
 func (f *forwarders) Clear() {
+	f.dock.Lock()
+	defer f.dock.Unlock()
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	idle := len(f.st.Hold)+len(f.st.Answers) == 0 && len(f.listeners) == 0
 	f.st = forwardState{}
+	f.mu.Unlock()
 	if idle {
 		if f.s.agentDir != "" {
 			_ = os.Remove(f.file())
@@ -319,9 +337,10 @@ func (f *forwarders) Clear() {
 	}
 }
 
-// reconcile makes the listeners and containers match the table; the caller holds f.mu.
+// reconcile makes the listeners and containers match the table; the caller holds f.dock, never f.mu.
 func (f *forwarders) reconcile(ctx context.Context) error {
 	ops := f.ops()
+	st := f.state()
 	var first error
 	note := func(err error) {
 		if err != nil && first == nil {
@@ -329,7 +348,7 @@ func (f *forwarders) reconcile(ctx context.Context) error {
 		}
 	}
 	wanted, networks := map[string]bool{}, map[string]error{}
-	for _, h := range f.st.Hold {
+	for _, h := range st.Hold {
 		name := containerFor(h)
 		wanted[name] = true
 		if _, seen := networks[h.Network]; !seen {
@@ -352,8 +371,8 @@ func (f *forwarders) reconcile(ctx context.Context) error {
 		}
 		note(ops.ensure(ctx, forwardSpec{Container: name, Network: h.Network, Alias: h.Name, Port: h.Port, Dir: l.dir}))
 	}
-	f.reconcileAnswers(ctx, wanted, note)
-	f.redirectLocked(ctx)
+	f.reconcileAnswers(ctx, st, wanted, note)
+	f.redirect(ctx, st)
 	if have, err := ops.list(ctx); err == nil {
 		for _, name := range have {
 			if !wanted[name] {
@@ -375,22 +394,22 @@ func (f *forwarders) reconcile(ctx context.Context) error {
 	return first
 }
 
-// redirectLocked sends every TCP port of each forwarder container to its one listener, once per container
-// process: a container that restarted lost it with its network. A name whose redirect fails still answers on
-// its own port. The caller holds f.mu.
-func (f *forwarders) redirectLocked(ctx context.Context) {
+// redirect sends every TCP port of each forwarder container to its one listener, once per container process: a
+// container that restarted lost it with its network. A name whose redirect fails still answers on its own port.
+// The caller holds f.dock.
+func (f *forwarders) redirect(ctx context.Context, st forwardState) {
 	ops := f.ops()
-	if ops.pids == nil || ops.redirect == nil || len(f.st.Hold)+len(f.st.Answers) == 0 {
+	if ops.pids == nil || ops.redirect == nil || len(st.Hold)+len(st.Answers) == 0 {
 		return
 	}
 	ports := map[string]uint32{}
-	names := make([]string, 0, len(f.st.Hold)+len(f.st.Answers))
-	for _, h := range f.st.Hold {
+	names := make([]string, 0, len(st.Hold)+len(st.Answers))
+	for _, h := range st.Hold {
 		c := containerFor(h)
 		ports[c] = h.Port
 		names = append(names, c)
 	}
-	if len(f.st.Answers) > 0 {
+	if len(st.Answers) > 0 {
 		ports[answerContainer()] = answerListen
 		names = append(names, answerContainer())
 	}
@@ -418,11 +437,11 @@ func (f *forwarders) Watch(ctx context.Context) {
 			return
 		case <-time.After(fwdWatchEvery):
 		}
-		f.mu.Lock()
+		f.dock.Lock()
 		wctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		f.redirectLocked(wctx)
+		f.redirect(wctx, f.state())
 		cancel()
-		f.mu.Unlock()
+		f.dock.Unlock()
 	}
 }
 
