@@ -620,6 +620,11 @@ func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.Stack
 	}
 	defer s.lockStack(slug)()
 	res, err := s.destroyStack(ctx, ref)
+	if err == nil && ref.GetDropSetAside() {
+		if left := dropSetAside(ctx, setAsideRun, slug, ref.GetReclaimVolumes()); left != "" {
+			res = &pb.StackResult{Ok: false, Error: strings.TrimPrefix(res.GetError()+"; "+left, "; ")}
+		}
+	}
 	if err == nil && res.GetOk() {
 		s.supervision().forget(slug)
 	}
