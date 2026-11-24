@@ -251,7 +251,8 @@ func (rc *receiving) file(k Key, e Entry) error {
 	}()
 	sum := sha256.New()
 	var list listOf
-	out := bufio.NewWriterSize(io.MultiWriter(t.f, sum, &list), 256<<10)
+	gw := &gentle{f: t.f}
+	out := bufio.NewWriterSize(io.MultiWriter(gw, sum, &list), 256<<10)
 	var total int64
 	for {
 		p, err := rc.rd.byte()
@@ -326,6 +327,7 @@ func (rc *receiving) file(k Key, e Entry) error {
 			if err := out.Flush(); err != nil {
 				return err
 			}
+			gw.finish()
 			if size != total || !bytes.Equal(want[:], sum.Sum(nil)) {
 				rc.wrong = true
 				return errors.New("the file rebuilt here is not the sender's: the copy is read again")

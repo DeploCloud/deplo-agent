@@ -382,3 +382,38 @@ func TestReplica_aCopyThatIsNotWhatItsIndexSaysIsReadAgainAndRepaired(t *testing
 	defer stop3()
 	eventually(t, "the copy is repaired", func() bool { _, s, _, _, _ := st3.Snapshot(); return s && read(cp) == string(data) })
 }
+
+// eu, 24 Nov 2026: a 2 GB file rebuilt here at page-cache speed stalled its whole server for 3 s, a renewal with it.
+func TestReplica_aRebuiltFileIsWrittenInStepsItWaitsOn(t *testing.T) {
+	var mu sync.Mutex
+	var steps []int64
+	was := flushRange
+	flushRange = func(f *os.File, off, n int64) {
+		mu.Lock()
+		steps = append(steps, n)
+		mu.Unlock()
+		was(f, off, n)
+	}
+	t.Cleanup(func() { flushRange = was })
+	src := t.TempDir()
+	data := noise(3*gentleStep+5, 4)
+	os.WriteFile(filepath.Join(src, "big.bin"), data, 0o644)
+	dir, st, stop := pair(t, src)
+	defer stop()
+	eventually(t, "snapshot", synced(st))
+	if b, _ := os.ReadFile(filepath.Join(dir, "volume-data", "big.bin")); !bytes.Equal(b, data) {
+		t.Fatal("the copy is not the file")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	var total int64
+	for _, n := range steps {
+		if n > gentleStep+maxChunk+256<<10 {
+			t.Fatalf("a step of %d bytes went to the disk unwaited", n)
+		}
+		total += n
+	}
+	if total != int64(len(data)) || len(steps) < 3 {
+		t.Fatalf("%d bytes in %d steps, for a file of %d", total, len(steps), len(data))
+	}
+}
