@@ -71,3 +71,12 @@ func TestCopySlice_capsWhatACopyKeepsInMemory(t *testing.T) {
 		t.Fatalf("the copy slice is %q", copyWeights)
 	}
 }
+
+// c37: eu-2's proxy waited for the CPU behind the agent's copies, and every App through it timed out.
+func TestProxyFirst_putsTheProxyLevelWithTheAgent(t *testing.T) {
+	argv := dockerOnPath(t, `case "$1" in inspect) echo running;; esac`)
+	proxyFirst(context.Background())
+	if !slices.Contains(argv(), "update --cpu-shares 26215 deplo-traefik") {
+		t.Fatalf("the proxy keeps Docker's default weight: %q", argv())
+	}
+}

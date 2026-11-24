@@ -19,3 +19,5 @@ func EnsureRestart(context.Context) {}
 var startGuard = func(prev, exe, version, answered string) error { return errors.New("no systemd") }
 
 func UpdateGuard([]string) int { return 2 }
+
+func proxyFirst(context.Context) {}
