@@ -24,11 +24,13 @@ import (
 	"google.golang.org/grpc/status"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
+	"github.com/DeploCloud/deplo-agent/internal/logpipe"
 )
 
 const selfUpdateGrace = 750 * time.Millisecond
 
 var reexec = func(path string, argv []string, env []string) error {
+	logpipe.Restore()
 	return syscall.Exec(path, argv, env)
 }
 
