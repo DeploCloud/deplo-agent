@@ -91,7 +91,7 @@ func meshDoor(dir string) string { return filepath.Join(dir, "mesh.sock") }
 func (n *clusterNetwork) save() {
 	raw, err := json.Marshal(n.st)
 	if err == nil {
-		err = writeFileAtomic(n.file(), raw, 0o600)
+		keepLater(n.file(), raw)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "deplo-agent: could not keep the cluster network in %s: %v\n", n.file(), err)

@@ -132,7 +132,7 @@ func (z *clusterZones) file() string { return filepath.Join(z.s.agentDir, "clust
 func (z *clusterZones) save() {
 	raw, err := json.Marshal(z.st)
 	if err == nil {
-		err = writeFileAtomic(z.file(), raw, 0o600)
+		keepLater(z.file(), raw)
 	}
 	if err != nil {
 		log.Printf("deplo-agent: could not keep the cluster's DNS zone in %s: %v", z.file(), err)

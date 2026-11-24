@@ -26,6 +26,8 @@ func TestMain(m *testing.M) {
 		os.Exit(StageSync(os.Args[2:], os.Stdout, os.Stderr))
 	}
 	buildStepCgroupDir = ""
+	// The tests read the state files back at once: they are written in place.
+	stateWritesInline = true
 	// The tests' certificates come from no public root: only the authority test judges against one.
 	publicRoots = func() (*x509.CertPool, error) { return nil, errors.New("no public roots in the tests") }
 	if os.Getenv(realDockerEnv) != "1" {

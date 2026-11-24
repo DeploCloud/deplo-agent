@@ -201,7 +201,7 @@ func (f *forwarders) save() {
 	}
 	raw, err := json.Marshal(f.st)
 	if err == nil {
-		err = writeFileAtomic(f.file(), raw, 0o600)
+		keepLater(f.file(), raw)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "deplo-agent: could not keep the name forwarders in %s: %v\n", f.file(), err)

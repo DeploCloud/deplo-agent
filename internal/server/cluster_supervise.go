@@ -164,7 +164,7 @@ func (sv *supervisor) saveLocked() {
 	}
 	raw, err := json.Marshal(supervisorState{Kept: sv.kept, Stopped: sv.stopped, Fenced: sv.fenced})
 	if err == nil {
-		err = writeFileAtomic(sv.file, raw, 0o600)
+		keepLater(sv.file, raw)
 	}
 	if err != nil {
 		sv.logf("could not keep the restart policies in %s: %v", sv.file, err)
