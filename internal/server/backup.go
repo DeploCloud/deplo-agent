@@ -24,8 +24,10 @@ type bkEmitter struct {
 	mu   sync.Mutex
 	send func(*pb.BackupEvent) error
 	held time.Duration
-	// holding is true while the app is paused, when a failed tar is a real failure.
-	holding bool
+	// holding is true while the app is paused, staged once its data was copied while paused: a failed tar is
+	// then a real failure. heldWhy says why the pause lasted the whole copy.
+	holding, staged bool
+	heldWhy         string
 }
 
 func (e *bkEmitter) emit(ev *pb.BackupEvent) error {
@@ -52,6 +54,7 @@ func (e *bkEmitter) emitResult(ok bool, errMsg, objectKey string, w artifactWrit
 			Sha256:             w.digest,
 			DecryptedSizeBytes: w.decryptedSize,
 			HeldMs:             e.held.Milliseconds(),
+			HeldWhy:            e.heldWhy,
 		},
 	}})
 }

@@ -921,11 +921,17 @@ func (s *Service) stackSlugs() []string {
 // fenceGrace is what a fenced stack gets to stop cleanly before it is killed; a var so tests can hurry it.
 var fenceGrace = 5 * time.Second
 
-// fenceTakes is the longest from a lease running out to its stacks being down: the check, the stop and the three
-// kills in fenceStack, plus a second. Under the 21 s an older leader waits after the 60 s fence.
+// fenceTakes is the longest from a lease running out to its stacks being down: the check, the stop, the kills
+// fenceStack runs together, plus a second. A leader waits 13 s for an agent Deplo knows has it (quickStop).
 func fenceTakes() time.Duration {
-	return leaseCheckEvery + fenceGrace + 3*time.Second + 3*3*time.Second + time.Second
+	return leaseCheckEvery + fenceGrace + fenceStopSlack + fenceKillFor + time.Second
 }
+
+// fenceStopSlack is what compose takes past the grace to say the stop is done; fenceKillFor bounds the kills.
+const (
+	fenceStopSlack = time.Second
+	fenceKillFor   = 3 * time.Second
+)
 
 // fenceStacks stops every stack at once, and every running scheduled job. It never waits for a stack's lock: a
 // deploy that holds one is cancelled, and whatever it started is stopped by the deploy itself on its way out.
@@ -965,15 +971,20 @@ func (s *Service) fenceStack(ctx context.Context, slug string) error {
 		return err
 	}
 	grace := strconv.Itoa(max(int(fenceGrace/time.Second), 1))
-	res, err := dockercli.Run(ctx, fenceGrace+3*time.Second, s.composeCtl(slug, "stop", "-t", grace)...)
+	res, err := dockercli.Run(ctx, fenceGrace+fenceStopSlack, s.composeCtl(slug, "stop", "-t", grace)...)
+	kills := [][]string{}
 	if err != nil || res.Code != 0 || stackRuns(ctx, slug) {
-		_, _ = dockercli.Run(ctx, 3*time.Second, s.composeCtl(slug, "kill")...)
-		_, _ = dockercli.Run(ctx, 3*time.Second, "kill", "deplo-"+slug)
+		kills = append(kills, s.composeCtl(slug, "kill"), []string{"kill", "deplo-" + slug})
 	}
 	// A deploy's stand-in mounts the same volume: it goes with the stack.
 	if isFile(s.stackPath(slug + standInSuffix)) {
-		_, _ = dockercli.Run(ctx, 3*time.Second, append(s.standInCompose(slug), "kill")...)
+		kills = append(kills, append(s.standInCompose(slug), "kill"))
 	}
+	var wg sync.WaitGroup
+	for _, argv := range kills {
+		wg.Go(func() { _, _ = dockercli.Run(ctx, fenceKillFor, argv...) })
+	}
+	wg.Wait()
 	if stackRuns(ctx, slug) {
 		return fmt.Errorf("%s: still running", slug)
 	}

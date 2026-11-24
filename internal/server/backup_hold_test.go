@@ -318,3 +318,78 @@ esac`)
 		t.Fatalf("the App was paused %v after the copier started, before the proxy could have read it", gap)
 	}
 }
+
+// stagingDocker is a copier whose volumes hold 200 MB: du, the copy and the archive all run inside it.
+const stagingDocker = `case "$1" in
+ps) echo abc123def456 ;;
+run) case "$*" in *" -d "*) echo cop999 ;; esac ;;
+exec) case "$*" in *" du -sk "*) printf '204800\t/v\n' ;; esac ;;
+esac`
+
+// eu, 24 Nov 2026: a backup paused its App for its whole copy, 20 s per 200 MB sent to another server. Now the
+// pause lasts only for a copy on the App's own disk; the archive is read from that copy with the App running.
+func TestVolumeBackup_pausedOnlyForACopyOnItsOwnDisk(t *testing.T) {
+	argv := dockerOnPath(t, stagingDocker)
+	was := stageFree
+	stageFree = func(string) int64 { return 10 << 30 }
+	t.Cleanup(func() { stageFree = was })
+	s := &Service{dataBase: t.TempDir()}
+	var why string
+	e := &bkEmitter{send: func(ev *pb.BackupEvent) error { return nil }}
+	tw := tar.NewWriter(io.Discard)
+	if err := s.writeProjectArchive(context.Background(), &pb.ProjectDescriptor{Slug: "agent-test-web", VolumeNames: []string{"deplo-agent-test-web-data"}}, tw, e); err != nil {
+		t.Fatal(err)
+	}
+	why = e.heldWhy
+	lines := argv()
+	at := func(pred func(string) bool) int {
+		for i, l := range lines {
+			if pred(l) {
+				return i
+			}
+		}
+		return -1
+	}
+	pause := at(func(l string) bool { return l == "pause abc123def456" })
+	copy := at(func(l string) bool { return strings.HasPrefix(l, "exec cop999 sh -c") && strings.Contains(l, "cp -a") })
+	unpause := at(func(l string) bool { return l == "unpause abc123def456" })
+	archive := at(func(l string) bool {
+		return strings.HasPrefix(l, "exec ") && strings.Contains(l, " cop999 tar -C /stage/0 ")
+	})
+	gone := at(func(l string) bool { return l == "rm -f cop999" })
+	if pause < 0 || !(pause < copy && copy < unpause && unpause < archive && archive < gone) {
+		t.Fatalf("want the App paused, its data copied on its disk, the App unpaused, the archive read from the copy, the copier gone; got %q", lines)
+	}
+	if why != "" {
+		t.Fatalf("nothing kept the App paused for the whole copy, yet it says %q", why)
+	}
+	if left, _ := filepath.Glob(filepath.Join(s.backupStageDir(), "*")); len(left) != 0 {
+		t.Fatalf("the copy on disk must be gone once the backup is written: %v", left)
+	}
+}
+
+// Without room for the copy on its disk, the App is paused for the whole copy as before, and the backup says why.
+func TestVolumeBackup_tooLittleDiskPausesForTheWholeCopyAndSaysWhy(t *testing.T) {
+	argv := dockerOnPath(t, stagingDocker)
+	was := stageFree
+	stageFree = func(string) int64 { return 100 << 20 }
+	t.Cleanup(func() { stageFree = was })
+	s := &Service{dataBase: t.TempDir()}
+	var logs []string
+	e := &bkEmitter{send: func(ev *pb.BackupEvent) error {
+		if l := ev.GetLog(); l != nil {
+			logs = append(logs, l.GetText())
+		}
+		return nil
+	}}
+	if err := s.writeProjectArchive(context.Background(), &pb.ProjectDescriptor{Slug: "agent-test-web", VolumeNames: []string{"deplo-agent-test-web-data"}}, tar.NewWriter(io.Discard), e); err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(argv(), "\n")
+	if strings.Contains(got, "cp -a") || !strings.Contains(got, " cop999 tar -C /v/0 ") {
+		t.Fatalf("with too little disk the archive is read from the volume itself: %q", got)
+	}
+	if !strings.Contains(e.heldWhy, "too little") || !strings.Contains(strings.Join(logs, "|"), "stays paused for the whole copy") {
+		t.Fatalf("the backup must say why the App stayed paused: %q %v", e.heldWhy, logs)
+	}
+}
