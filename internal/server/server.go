@@ -243,6 +243,10 @@ type Service struct {
 	// expectedVolumes is the volumes Deplo told this member to take from another, by name.
 	expectedVolumes map[string]expectedVolume
 
+	// savingLeft ends each save of what a return left here, by stack: a delete never waits behind one.
+	savingMu   sync.Mutex
+	savingLeft map[string]context.CancelFunc
+
 	leaseOnce sync.Once
 	lease     *leaseGuard
 
@@ -629,6 +633,9 @@ func (s *Service) DestroyStack(ctx context.Context, ref *pb.StackRef) (*pb.Stack
 	slug := ref.GetSlug()
 	if err := validateSlug(slug); err != nil {
 		return nil, err
+	}
+	if ref.GetRemoveVolumes() || ref.GetDropSetAside() || len(ref.GetReclaimVolumes()) > 0 {
+		s.endLeftSave(slug)
 	}
 	defer s.lockStack(slug)()
 	res, err := s.destroyStack(ctx, ref)
