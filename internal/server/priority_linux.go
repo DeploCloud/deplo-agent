@@ -19,9 +19,10 @@ import (
 // copy, replica and backup last.
 const (
 	agentWeights = "CPUWeight=1000 IOWeight=1000 MemoryLow=128M"
-	// copySlice holds every helper container: a tenth of an App's share of the CPU, and the disk only when idle.
+	// copySlice holds every helper container: a tenth of an App's share of the CPU, and the disk only when idle; its
+	// memory cap keeps what it writes from piling up unwritten, which a disk with no scheduler flushes all at once.
 	copySlice   = "deplocopy.slice"
-	copyWeights = "CPUWeight=10 IOWeight=1"
+	copyWeights = "CPUWeight=10 IOWeight=1 MemoryHigh=256M"
 )
 
 // copyParent is the slice helper containers run in, once TakePriority made it; empty, they run where Docker puts them.

@@ -1,6 +1,8 @@
 package dockercli
 
 import (
+	"github.com/DeploCloud/deplo-agent/internal/pace"
+
 	"context"
 	"encoding/json"
 	"fmt"
@@ -202,11 +204,12 @@ func pipe(ctx context.Context, timeout time.Duration, src io.Reader, dst io.Writ
 	cmd := Command(cctx, "docker", args...)
 	cmd.Env = scopedEnv(extraEnv)
 	var errb strings.Builder
+	// What a pipe carries is a copy, a backup or a restore: it runs last (deplo ADR-0043).
 	if src != nil {
-		cmd.Stdin = src
+		cmd.Stdin = pace.Reader(src)
 	}
 	if dst != nil {
-		cmd.Stdout = dst
+		cmd.Stdout = pace.Writer(dst)
 	}
 	cmd.Stderr = &errb
 	err := cmd.Run()

@@ -16,6 +16,8 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/room"
 	"golang.org/x/sys/unix"
 	"time"
+
+	"github.com/DeploCloud/deplo-agent/internal/pace"
 )
 
 func init() {
@@ -514,4 +516,18 @@ func TestReplica_aStopForRoomIsSaidUntilAWholeSnapshotLands(t *testing.T) {
 		_, synced, _, _, err := st.Snapshot()
 		return synced && err == ""
 	})
+}
+
+// eu, 24 Nov 2026: a 600 MB copy took a 1-core server's CPU and every App through it timed out for 24 s.
+func TestReplica_bothEndsOfACopyArePaced(t *testing.T) {
+	src := t.TempDir()
+	data := noise(3*gentleStep+5, 6)
+	os.WriteFile(filepath.Join(src, "big.bin"), data, 0o644)
+	before := pace.Looks.Load()
+	_, st, stop := pair(t, src)
+	defer stop()
+	eventually(t, "snapshot", synced(st))
+	if n := pace.Looks.Load() - before; n < 6 {
+		t.Fatalf("a copy of 3 steps looked %d times", n)
+	}
 }

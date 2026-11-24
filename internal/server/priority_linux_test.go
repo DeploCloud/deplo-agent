@@ -64,3 +64,10 @@ func TestAtLowPriority_yieldsTheDiskButNeverTheCPU(t *testing.T) {
 		t.Fatalf("a copy's disk class is %d, want idle (3)", class)
 	}
 }
+
+// eu, 24 Nov 2026: a disk with no scheduler ignores the idle class, and a copy's unwritten pages flushed at once.
+func TestCopySlice_capsWhatACopyKeepsInMemory(t *testing.T) {
+	if !strings.Contains(copyWeights, "MemoryHigh=") {
+		t.Fatalf("the copy slice is %q", copyWeights)
+	}
+}

@@ -16,6 +16,7 @@ import (
 
 	"filippo.io/age"
 	pb "github.com/DeploCloud/deplo-agent/gen"
+	"github.com/DeploCloud/deplo-agent/internal/pace"
 	"github.com/DeploCloud/deplo-agent/internal/room"
 	"github.com/DeploCloud/deplo-agent/internal/s3client"
 	"google.golang.org/grpc/codes"
@@ -150,7 +151,7 @@ func storeWrite(root, key string, r io.Reader, overwrite bool, check ...func(n i
 	}()
 
 	sum := sha256.New()
-	n, err := io.Copy(io.MultiWriter(&room.Writer{F: f}, sum), r)
+	n, err := io.Copy(io.MultiWriter(&room.Writer{F: f}, sum), pace.Reader(r))
 	if err != nil {
 		return 0, "", fmt.Errorf("write backup artifact: %w", err)
 	}
