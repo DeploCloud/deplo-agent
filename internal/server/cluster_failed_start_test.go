@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -84,5 +85,22 @@ func TestFailedStart_aStartThatLaterWorksHereKeepsItsData(t *testing.T) {
 	f.g.work.Wait()
 	if called {
 		t.Fatal("the data of a start that worked here was removed when the App moved on later")
+	}
+}
+
+func TestRenew_aLateRenewalIsSaid(t *testing.T) {
+	f := newGuard(t)
+	var said []string
+	f.g.logf = func(format string, args ...any) { said = append(said, fmt.Sprintf(format, args...)) }
+	f.g.Renew(labPlacedOn("srv_a", 2))
+	f.clk.Add(time.Second)
+	f.g.Renew(labPlacedOn("srv_a", 2))
+	if len(said) != 0 {
+		t.Fatalf("a renewal on time was said: %q", said)
+	}
+	f.clk.Add(3 * time.Second)
+	f.g.Renew(labPlacedOn("srv_a", 2))
+	if len(said) != 1 || !strings.Contains(said[0], "a renewal came 3.0s after the one before") {
+		t.Fatalf("said %q", said)
 	}
 }
