@@ -44,8 +44,11 @@ func startCopier(ctx context.Context, vols []string, stage string) *volumeCopier
 		removeStage(stage)
 		return nil
 	}
-	if stage != "" {
-		args = append(args, "-v", stage+":/stage")
+	if exe, err := captureExe(); stage != "" && err == nil {
+		args = append(args, "-v", stage+":/stage", "-v", exe+":/deplo-agent:ro")
+	} else {
+		removeStage(stage)
+		c.stage = ""
 	}
 	args = append(args, volumeHelperImage, "sleep", strconv.Itoa(int(backupStepTimeout.Seconds())))
 	res, err := dockercli.Run(ctx, holdStepTimeout, volumeHelperRun(ctx, args...)...)
@@ -57,8 +60,9 @@ func startCopier(ctx context.Context, vols []string, stage string) *volumeCopier
 }
 
 // roomToStage says why the volumes cannot be copied on this server's disk first, "" when they can: what they
-// hold, a fifth more for what is written meanwhile, and 512 MiB must stay free.
-func (c *volumeCopier) roomToStage(ctx context.Context) string {
+// hold, a fifth more for what is written meanwhile, and the archive too when it is written here, must leave a
+// tenth of the disk free.
+func (c *volumeCopier) roomToStage(ctx context.Context, archiveHere bool) string {
 	if c == nil || c.stage == "" {
 		return "the server could not set up a copy on its own disk first"
 	}
@@ -67,36 +71,53 @@ func (c *volumeCopier) roomToStage(ctx context.Context) string {
 	if err != nil || res.Code != 0 || perr != nil {
 		return "the server could not measure the data to copy it on its own disk first"
 	}
-	need := kb*1024 + kb*1024/5 + 512<<20
-	if free := stageFree(c.stage); free < need {
-		return fmt.Sprintf("the server has %s free, too little to copy %s of data on its own disk first", humanBytes(free), humanBytes(kb*1024))
+	need := kb*1024 + kb*1024/5
+	if archiveHere {
+		need += kb * 1024
+	}
+	if free, total := stageSpace(c.stage); free-need < total/10 {
+		return fmt.Sprintf("the server has %s free, too little to copy %s of data on its own disk first and keep a tenth of it free", humanBytes(free), humanBytes(kb*1024))
 	}
 	return ""
 }
 
-// copyToStage copies every volume to the stage, for a caller that holds the App paused.
-func (c *volumeCopier) copyToStage(ctx context.Context) error {
+// copyToStage brings the copy on this server's disk up to date with every volume: all of it the first time, then
+// only what changed since. It says how many bytes it copied.
+func (c *volumeCopier) copyToStage(ctx context.Context, since time.Time) (int64, error) {
+	var copied int64
 	for _, dir := range c.dirs {
-		to := "/stage/" + strings.TrimPrefix(dir, "/v/")
-		res, err := dockercli.Run(ctx, backupStepTimeout, "exec", c.id, "sh", "-c", `mkdir -p "$2" && cp -a "$1/." "$2/"`, "sh", dir, to)
+		argv := []string{"exec", c.id, "/deplo-agent", "stage-sync"}
+		if !since.IsZero() {
+			argv = append(argv, "--since", strconv.FormatInt(since.UnixNano(), 10))
+		}
+		res, err := dockercli.Run(ctx, backupStepTimeout, append(argv, dir, "/stage/"+strings.TrimPrefix(dir, "/v/"))...)
 		if err == nil && res.Code != 0 {
 			err = fmt.Errorf("%s", strings.TrimSpace(res.Stderr))
 		}
+		var files, n int64
+		if err == nil {
+			if _, serr := fmt.Sscan(res.Stdout, &files, &n); serr != nil {
+				err = fmt.Errorf("the copy said %q", strings.TrimSpace(res.Stdout))
+			}
+		}
 		if err != nil {
 			c.clearStage(ctx)
-			return err
+			return 0, err
 		}
+		copied += n
 	}
-	c.staged = true
-	return nil
+	return copied, nil
 }
 
-// clearStage removes the copy from inside the copier, which wrote it as root, so it frees the disk at once.
+// clearStage stops whatever still copies inside the copier, which wrote the copy as root, and removes the copy
+// from there, so the disk is free at once.
 func (c *volumeCopier) clearStage(ctx context.Context) {
 	if c.stage == "" {
 		return
 	}
-	argv := []string{"exec", c.id, "rm", "-rf"}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), holdStepTimeout)
+	defer cancel()
+	argv := []string{"exec", c.id, "sh", "-c", `kill -9 -1 2>/dev/null; rm -rf "$@"`, "sh"}
 	for _, dir := range c.dirs {
 		argv = append(argv, "/stage/"+strings.TrimPrefix(dir, "/v/"))
 	}
@@ -148,8 +169,8 @@ func removeStage(dir string) {
 	}
 }
 
-// stageFree is the free space where a stage goes; a var so tests can fill the disk.
-var stageFree = filesystemFree
+// stageSpace is the free and whole space where a stage goes; a var so tests can fill the disk.
+var stageSpace = storeFreeBytes
 
 // removeCopiers removes what an earlier run of this agent left; its stop makes the proxy read containers again.
 // The copies those left on disk go with them.

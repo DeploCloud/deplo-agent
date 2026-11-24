@@ -45,6 +45,10 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "probe" {
 		os.Exit(server.Probe(os.Args[2:]))
 	}
+	// The same binary, mounted into a backup's copier: the copy it pauses an App for (deplo ADR-0043).
+	if len(os.Args) > 1 && os.Args[1] == "stage-sync" {
+		os.Exit(server.StageSync(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	// The same binary, mounted into a name forwarder's container (#200).
 	if len(os.Args) > 1 && os.Args[1] == "forward" {
 		os.Exit(forwarder.Main(os.Args[2:], os.Stderr))
