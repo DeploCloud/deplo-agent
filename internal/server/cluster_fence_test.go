@@ -212,3 +212,21 @@ func TestWriteFileAtomic_leavesTheOldFileWhenTheNewOneCannotBeWritten(t *testing
 		t.Fatalf("the file holds %q", raw)
 	}
 }
+
+// A stack that neither stops nor dies is given up on within the grace, a second and one round of kills run
+// together: 11 s from a lease running out, the 13 s a leader waits on an agent Deplo knows has it (quickStop).
+func TestFence_killsTogetherSoAHungStackIsGivenUpOnWithinTheQuickMargin(t *testing.T) {
+	hurryFence(t, 200*time.Millisecond)
+	dockerOnPath(t, `case " $* " in *" stop "*|*" kill"*) exec sleep 30;; ps*) echo abc123;; esac`)
+	s := newTestService(t)
+	writeStack(t, s, fenceA+standInSuffix)
+	began := time.Now()
+	_ = s.fenceStack(context.Background(), fenceA)
+	if took := time.Since(began); took > fenceGrace+fenceStopSlack+fenceKillFor+time.Second {
+		t.Fatalf("the fence took %s for a hung stack: its kills ran one after another", took)
+	}
+	fenceGrace = 5 * time.Second
+	if got := fenceTakes(); got != 11*time.Second {
+		t.Fatalf("fenceTakes is %s, want 11s", got)
+	}
+}
