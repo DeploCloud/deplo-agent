@@ -558,3 +558,19 @@ func TestReplica_aRebuildStartsOnlyIfTheOldAndTheNewFit(t *testing.T) {
 		t.Fatal("the old copy of big.bin went")
 	}
 }
+
+// eu, 24 Nov 2026: an agent restarted mid-rebuild left a 671 MB half-rebuilt file in its copy, beside the next one.
+func TestReplica_aNewStreamDropsWhatAnEarlierRunLeftHalfRebuilt(t *testing.T) {
+	src := t.TempDir()
+	os.WriteFile(filepath.Join(src, "a.txt"), []byte("a"), 0o644)
+	dir := t.TempDir()
+	stale := filepath.Join(dir, "volume-data", ".deplo-replica-4721-17")
+	os.MkdirAll(filepath.Dir(stale), 0o700)
+	os.WriteFile(stale, []byte("half"), 0o600)
+	st, _, stop := stream(t, src, dir, NewIndex())
+	defer stop()
+	eventually(t, "snapshot", synced(st))
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatal("the half-rebuilt file of an earlier run is still in the copy")
+	}
+}
