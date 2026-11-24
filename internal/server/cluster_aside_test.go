@@ -247,3 +247,86 @@ func TestAsideTarget_anotherServersCopyArrivesAsANewLabelledCopy(t *testing.T) {
 		}
 	}
 }
+
+// pathDocker answers each volume's mountpoint with a folder of the test's own, and lists the set-aside copies it made.
+type pathDocker struct {
+	asideDocker
+	paths map[string]string
+}
+
+func (d *pathDocker) run(ctx context.Context, timeout time.Duration, args ...string) (dockercli.Result, error) {
+	cmd := strings.Join(args, " ")
+	switch {
+	case strings.HasPrefix(cmd, "volume inspect --format {{.Mountpoint}} "):
+		d.ran = append(d.ran, cmd)
+		return dockercli.Result{Stdout: d.paths[args[len(args)-1]] + "\n"}, nil
+	case strings.HasPrefix(cmd, "volume ls --filter label="+asideOfLabel):
+		d.ran = append(d.ran, cmd)
+		var out []string
+		for name := range d.vols {
+			if of, _, ok := strings.Cut(name, "-aside-"); ok {
+				out = append(out, name+"\t"+of+"\t2026-11-24T07:31:41Z")
+			}
+		}
+		return dockercli.Result{Stdout: strings.Join(out, "\n")}, nil
+	case strings.HasPrefix(cmd, "volume rm "):
+		d.ran = append(d.ran, cmd)
+		delete(d.vols, args[len(args)-1])
+		return dockercli.Result{}, nil
+	}
+	return d.asideDocker.run(ctx, timeout, args...)
+}
+
+// eu, 24 Nov 2026: a returning member's dated copy of 2 GB was a full copy, on a disk its cluster shares.
+func TestAside_aReturningMembersCopyIsMovedAsideNotCopied(t *testing.T) {
+	live, aside := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(live, "fill"), []byte("2 GB of an App"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 11, 24, 7, 31, 41, 0, time.UTC)
+	d := &pathDocker{asideDocker{vols: map[string]bool{}}, map[string]string{"deplo-lab_data": live, asideName("deplo-lab_data", at): aside}}
+	got, err := setAside(context.Background(), d.run, "lab", []string{"deplo-lab_data"}, "", at, true)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("set aside %+v, %v", got, err)
+	}
+	if b, err := os.ReadFile(filepath.Join(aside, "fill")); err != nil || string(b) != "2 GB of an App" {
+		t.Fatalf("the copy holds %q, %v", b, err)
+	}
+	if left, _ := os.ReadDir(live); len(left) != 0 {
+		t.Fatalf("the live volume still holds %d entries", len(left))
+	}
+	if strings.Contains(strings.Join(d.ran, "\n"), "cp -a") {
+		t.Fatalf("the data was copied:\n%s", strings.Join(d.ran, "\n"))
+	}
+}
+
+func TestAside_whatCannotBeMovedIsCopied(t *testing.T) {
+	live := t.TempDir()
+	at := time.Date(2026, 11, 24, 7, 31, 41, 0, time.UTC)
+	d := &pathDocker{asideDocker{vols: map[string]bool{}}, map[string]string{"deplo-lab_data": live}}
+	if _, err := setAside(context.Background(), d.run, "lab", []string{"deplo-lab_data"}, "", at, true); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(d.ran, "\n"), "cp -a") {
+		t.Fatalf("with no path for the copy, nothing copied it:\n%s", strings.Join(d.ran, "\n"))
+	}
+}
+
+// eu, 24 Nov 2026: a deleted App's dated copy stayed on the member that had just come back.
+func TestDropSetAside_aDeletedAppsCopiesGoAndNoOtherAppsDo(t *testing.T) {
+	d := &pathDocker{asideDocker{vols: map[string]bool{
+		"deplo-lab_data-aside-20261124T073141Z":   true,
+		"deplo-lab.files-aside-20261124T073141Z":  true,
+		"deplo-memos_data-aside-20261124T073141Z": true,
+		"deplo-lab_data":                          true,
+	}}, nil}
+	if left := dropSetAside(context.Background(), d.run, "lab", []string{"deplo-lab_data"}); left != "" {
+		t.Fatal(left)
+	}
+	if d.vols["deplo-lab_data-aside-20261124T073141Z"] || d.vols["deplo-lab.files-aside-20261124T073141Z"] {
+		t.Fatalf("a copy of the deleted App stayed: %v", d.vols)
+	}
+	if !d.vols["deplo-memos_data-aside-20261124T073141Z"] {
+		t.Fatal("another App's copy went")
+	}
+}

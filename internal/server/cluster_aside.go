@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
@@ -77,8 +78,9 @@ func filesAsideOf(slug string) string {
 }
 
 // setAside copies each volume, and the stack's Files folder when it holds anything, to its dated copy; one already
-// copied for that time is kept as it is.
-func setAside(ctx context.Context, run dockerRun, slug string, vols []string, files string, at time.Time) ([]lease.Aside, error) {
+// copied for that time is kept as it is. move renames what they hold into the copy instead, for a stack that goes:
+// at once, where a copy of 2 GB on a disk the cluster shares costs every server on it its lease (eu, 24 Nov 2026).
+func setAside(ctx context.Context, run dockerRun, slug string, vols []string, files string, at time.Time, move ...bool) ([]lease.Aside, error) {
 	var out []lease.Aside
 	stamp := at.UTC().Format(time.RFC3339)
 	copyAside := func(from, of string) error {
@@ -87,6 +89,11 @@ func setAside(ctx context.Context, run dockerRun, slug string, vols []string, fi
 			if res, err := run(ctx, time.Minute, "volume", "create", "--label", asideOfLabel+"="+of, "--label", asideAtLabel+"="+stamp, name); err != nil || res.Code != 0 {
 				return fmt.Errorf("could not set aside %s: %v %s", of, err, strings.TrimSpace(res.Stderr))
 			}
+			if len(move) > 0 && move[0] && moveInto(ctx, run, from, name) {
+				out = append(out, lease.Aside{Slug: slug, Volume: name, Of: of, At: stamp, SizeBytes: volumeBytes(ctx, run, name)})
+				return nil
+			}
+			// What a move left, or all of it: copied, which merges with what was moved.
 			res, err := run(ctx, adoptTimeout, "run", "--network", "none", "-v", from+":/from:ro", "-v", name+":/to", volumeHelperImage, "cp", "-a", "/from/.", "/to/")
 			if err != nil || res.Code != 0 {
 				_, _ = run(ctx, time.Minute, "volume", "rm", name)
@@ -107,6 +114,33 @@ func setAside(ctx context.Context, run dockerRun, slug string, vols []string, fi
 		}
 	}
 	return out, nil
+}
+
+// moveInto renames everything from holds, a volume or a folder, into the volume to: true when all of it moved.
+func moveInto(ctx context.Context, run dockerRun, from, to string) bool {
+	src := from
+	if !filepath.IsAbs(from) {
+		src = volumePath(ctx, run, from)
+	}
+	dst := volumePath(ctx, run, to)
+	entries, err := os.ReadDir(src)
+	if src == "" || dst == "" || err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if os.Rename(filepath.Join(src, e.Name()), filepath.Join(dst, e.Name())) != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func volumePath(ctx context.Context, run dockerRun, name string) string {
+	res, err := run(ctx, volumeExistsTimeout, "volume", "inspect", "--format", "{{.Mountpoint}}", name)
+	if err != nil || res.Code != 0 {
+		return ""
+	}
+	return strings.TrimSpace(res.Stdout)
 }
 
 func volumeBytes(ctx context.Context, run dockerRun, name string) int64 {
@@ -130,7 +164,14 @@ func (s *Service) asideStack(ctx context.Context, e lease.Entry, at time.Time) (
 		return nil, err
 	}
 	defer s.lockStack(e.Slug)()
-	return setAside(ctx, helperDocker, e.Slug, vols, s.filesRoot(e.Slug), at)
+	t0 := time.Now()
+	out, err := setAside(ctx, helperDocker, e.Slug, vols, s.filesRoot(e.Slug), at, true)
+	var n int64
+	for _, a := range out {
+		n += a.SizeBytes
+	}
+	fmt.Fprintf(os.Stderr, "deplo-agent: cluster: set aside %d bytes of %s here in %v\n", n, e.Slug, time.Since(t0).Round(time.Millisecond))
+	return out, err
 }
 
 // dropAside takes a stack down with the volumes it set aside: their copies stay.
@@ -169,6 +210,21 @@ func asideCopies(ctx context.Context, run dockerRun, of []string) []*pb.VolumeUs
 		out = append(out, &pb.VolumeUsage{VolumeName: f[0], Bytes: volumeBytes(ctx, run, f[0]), SetAsideOf: f[1], SetAsideAtMs: at.UnixMilli()})
 	}
 	return out
+}
+
+// dropSetAside removes every set-aside copy of the given volumes and of the stack's Files: the App is deleted. It
+// says what stayed.
+func dropSetAside(ctx context.Context, run dockerRun, slug string, vols []string) string {
+	var left []string
+	for _, c := range asideCopies(ctx, run, append(slices.Clone(vols), filesAsideOf(slug))) {
+		if res, err := run(ctx, time.Minute, "volume", "rm", c.GetVolumeName()); err != nil || res.Code != 0 {
+			left = append(left, c.GetVolumeName())
+		}
+	}
+	if len(left) == 0 {
+		return ""
+	}
+	return "could not remove the set-aside " + strings.Join(left, ", ")
 }
 
 // RemoveSetAside removes one set-aside copy, and nothing that is not one.

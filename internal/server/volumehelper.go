@@ -14,7 +14,7 @@ const (
 
 func volumeHelperRun(ctx context.Context, args ...string) []string {
 	ensureVolumeHelperImage(ctx)
-	return append([]string{"run", "--rm", "--log-driver=none"}, args...)
+	return append(append([]string{"run", "--rm", "--log-driver=none"}, helperPriority()...), args...)
 }
 
 func ensureVolumeHelperImage(ctx context.Context) {

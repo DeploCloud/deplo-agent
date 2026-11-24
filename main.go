@@ -24,6 +24,7 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dnszone"
 	"github.com/DeploCloud/deplo-agent/internal/forwarder"
 	"github.com/DeploCloud/deplo-agent/internal/link"
+	"github.com/DeploCloud/deplo-agent/internal/logpipe"
 	"github.com/DeploCloud/deplo-agent/internal/reap"
 	"github.com/DeploCloud/deplo-agent/internal/server"
 )
@@ -83,6 +84,13 @@ func main() {
 		printCapabilities(os.Stdout)
 		return
 	}
+	// A log that falls behind drops lines rather than holding up a renewal (deplo ADR-0043).
+	for _, fd := range []int{1, 2} {
+		if err := logpipe.Unblock(fd); err != nil {
+			log.Printf("deplo-agent: the log may hold the agent up: %v", err)
+		}
+	}
+	go server.TakePriority(context.Background())
 
 	if *insecure && !loopbackAddr(*addr) {
 		log.Fatalf("deplo-agent: --insecure serves without mTLS, so it needs a loopback --addr (got %q)", *addr)
