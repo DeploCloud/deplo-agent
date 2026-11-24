@@ -16,6 +16,7 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/clusterlink/lease"
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
+	"github.com/DeploCloud/deplo-agent/internal/room"
 )
 
 // A returning member never deletes what its copy may not have sent: each volume of a moved stack is copied aside under
@@ -93,7 +94,11 @@ func setAside(ctx context.Context, run dockerRun, slug string, vols []string, fi
 				out = append(out, lease.Aside{Slug: slug, Volume: name, Of: of, At: stamp, SizeBytes: volumeBytes(ctx, run, name)})
 				return nil
 			}
-			// What a move left, or all of it: copied, which merges with what was moved.
+			// What a move left, or all of it: copied, which merges with what was moved, only while a tenth stays free.
+			if err := roomToSetAside(ctx, run, from, name); err != nil {
+				_, _ = run(ctx, time.Minute, "volume", "rm", name)
+				return fmt.Errorf("could not set aside %s: %w", of, err)
+			}
 			res, err := run(ctx, adoptTimeout, "run", "--network", "none", "-v", from+":/from:ro", "-v", name+":/to", volumeHelperImage, "cp", "-a", "/from/.", "/to/")
 			if err != nil || res.Code != 0 {
 				_, _ = run(ctx, time.Minute, "volume", "rm", name)
@@ -133,6 +138,19 @@ func moveInto(ctx context.Context, run dockerRun, from, to string) bool {
 		}
 	}
 	return true
+}
+
+// roomToSetAside refuses a copy of from into the volume to that would leave less than a tenth of its disk free.
+func roomToSetAside(ctx context.Context, run dockerRun, from, to string) error {
+	src := from
+	if !filepath.IsAbs(from) {
+		src = volumePath(ctx, run, from)
+	}
+	dst := volumePath(ctx, run, to)
+	if src == "" || dst == "" {
+		return nil
+	}
+	return room.Check(dst, dirSize(src))
 }
 
 func volumePath(ctx context.Context, run dockerRun, name string) string {

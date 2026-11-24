@@ -14,6 +14,7 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/clusterlink/lease"
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
+	"github.com/DeploCloud/deplo-agent/internal/room"
 )
 
 // What a member that comes back still holds of a database or a Volume App that moved is archived to the
@@ -314,7 +315,8 @@ func (s *Service) keepLeft(ctx context.Context, e lease.Entry, k lease.Keep, mem
 			return &lease.Saved{Slug: e.Slug, Ref: k.Ref, ObjectKey: req.GetS3().GetObjectKey() + req.GetStore().GetObjectKey(), SizeBytes: res.GetSizeBytes(),
 				DecryptedSizeBytes: res.GetDecryptedSizeBytes(), Sha256: res.GetSha256(), At: time.Now().UTC().Format(time.RFC3339)}, nil
 		}
-		if try >= leftTries || ctx.Err() != nil {
+		// No room is no room a moment later either: the next pass asks again.
+		if try >= leftTries || ctx.Err() != nil || errors.Is(err, room.ErrNoRoom) {
 			return nil, err
 		}
 		time.Sleep(leftWait)
