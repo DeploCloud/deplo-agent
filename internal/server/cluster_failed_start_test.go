@@ -98,9 +98,14 @@ func TestRenew_aLateRenewalIsSaid(t *testing.T) {
 	if len(said) != 0 {
 		t.Fatalf("a renewal on time was said: %q", said)
 	}
-	f.clk.Add(3 * time.Second)
+	f.clk.Add(2 * time.Second)
 	f.g.Renew(labPlacedOn("srv_a", 2))
-	if len(said) != 1 || !strings.Contains(said[0], "a renewal came 3.0s after the one before") {
+	if len(said) != 0 {
+		t.Fatalf("a renewal a second late was said: %q", said)
+	}
+	f.clk.Add(2200 * time.Millisecond)
+	f.g.Renew(labPlacedOn("srv_a", 2))
+	if len(said) != 1 || !strings.Contains(said[0], "a renewal came 2.2s after the one before") {
 		t.Fatalf("said %q", said)
 	}
 }
