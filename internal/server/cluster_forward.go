@@ -164,6 +164,10 @@ type forwarders struct {
 	renewTried time.Time
 	// staleSince is when the store was first seen holding the certificate of a passed-on App that runs elsewhere.
 	staleSince time.Time
+	// proxyDown is until when this server's own proxy counts as not answering, once a passed-on visitor found it
+	// refusing; proxyDownSaid keeps that to one log line per outage.
+	proxyDown     time.Time
+	proxyDownSaid bool
 }
 
 func (s *Service) forwarders() *forwarders {
