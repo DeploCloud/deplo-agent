@@ -35,7 +35,7 @@ func TestBackupProject_aVolumeWithNoFileIsNoBackup(t *testing.T) {
 			if res == nil || res.GetOk() != c.file {
 				t.Fatalf("ok = %v, want %v (%s)", res.GetOk(), c.file, res.GetError())
 			}
-			if !c.file && res.GetError() != errNoVolumeFiles.Error() {
+			if !c.file && res.GetError() != "the App's data holds no file on this server, so its archive is not a backup" {
 				t.Fatalf("error = %q", res.GetError())
 			}
 		})
