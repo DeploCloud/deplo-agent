@@ -202,6 +202,8 @@ type leaseGuard struct {
 	// has says whether a stack is on this host, running whether it runs now; nil reads as yes.
 	has     func(slug string) bool
 	running func(ctx context.Context, slug string) bool
+	// runningAll answers running for many stacks in one look, so a probe waits for one docker call (c43: 1.49 s).
+	runningAll func(ctx context.Context, slugs []string) map[string]bool
 	// seenRunning is which unplaced stacks the last look found running; looking, whether one is under way.
 	seenRunning map[string]bool
 	looking     bool
@@ -225,6 +227,8 @@ type leaseGuard struct {
 	succeed func(ctx context.Context, a succeedAsk) error
 	asking  map[string]bool
 	asked   map[string]string
+	// started is when this agent read its leases back: a cold one waits for its leader from then (see askToLead).
+	started time.Time
 	// unsaved is the newest leases to write and version their number; written is the last on disk (see save). All three
 	// under mu; wmu keeps one write at a time.
 	unsaved          []byte
@@ -249,6 +253,7 @@ func newLeaseGuard(file string, now func() time.Time, fence func(context.Context
 		fmt.Fprintf(os.Stderr, "deplo-agent: the cluster lease in %s cannot be read (%v): taken as a lease that ran out\n", file, err)
 		g.unreadable = true
 	}
+	g.started = now()
 	// Docker's restart policy brought these stacks back before this agent; a dead lease stops them all again.
 	for _, c := range g.clusters {
 		if c != nil && c.ranOut(now()) {
@@ -597,9 +602,13 @@ func (g *leaseGuard) runningOf(placed []string, epoch uint64) []lease.Writer {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	var runs map[string]bool
+	if g.runningAll != nil {
+		runs = g.runningAll(ctx, placed)
+	}
 	var out []lease.Writer
 	for _, slug := range placed {
-		if g.running(ctx, slug) {
+		if r, ok := runs[slug]; ok && r || !ok && g.running(ctx, slug) {
 			out = append(out, lease.Writer{Slug: slug, Epoch: epoch})
 		}
 	}

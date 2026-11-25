@@ -53,6 +53,8 @@ type Entry struct {
 	Standby bool `json:"standby,omitempty"`
 	// Balanced is an App the cluster load-balances: a member back from a failover gets its copy again (copyBack).
 	Balanced bool `json:"balanced,omitempty"`
+	// Epoch is the leader epoch that decided where this entry runs; zero is not known (an older panel or leader).
+	Epoch uint64 `json:"epoch,omitempty"`
 }
 
 // Order is what each renewal carries. Member names the receiver, so it knows which entries are its own.

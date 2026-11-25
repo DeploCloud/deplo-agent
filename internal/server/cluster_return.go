@@ -372,6 +372,29 @@ func stackRuns(ctx context.Context, slug string) bool {
 	return len(projectContainers(ctx, "deplo-"+slug)) > 0 || dockercli.IsRunning(ctx, "deplo-"+slug)
 }
 
+// stacksRun is stackRuns for many stacks in one docker call; nil when docker did not answer.
+func stacksRun(ctx context.Context, slugs []string) map[string]bool {
+	res, err := dockercli.Run(ctx, 5*time.Second, "ps", "--format", `{{.Names}}|{{.Label "com.docker.compose.project"}}`)
+	if err != nil || res.Code != 0 {
+		return nil
+	}
+	return runningIn(res.Stdout, slugs)
+}
+
+// runningIn reads which stacks run from `docker ps` lines of a container's name and its compose project.
+func runningIn(ps string, slugs []string) map[string]bool {
+	up := map[string]bool{}
+	for _, line := range splitLines(ps) {
+		name, project, _ := strings.Cut(line, "|")
+		up[name], up[project] = true, true
+	}
+	out := map[string]bool{}
+	for _, slug := range slugs {
+		out[slug] = up["deplo-"+slug]
+	}
+	return out
+}
+
 // removeMoved stops and removes this member's copy of a stack that now runs elsewhere, its connector with it.
 func (s *Service) removeMoved(ctx context.Context, e lease.Entry) error {
 	return stackErr(s.DestroyStack(ctx, &pb.StackRef{Slug: e.Slug}))

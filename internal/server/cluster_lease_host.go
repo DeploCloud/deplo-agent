@@ -33,7 +33,7 @@ func (s *Service) leaseGuard() *leaseGuard {
 		s.lease.dropFailed = s.dropFailedStart
 		s.lease.succeed = s.askLeaderToLead
 		s.lease.has = func(slug string) bool { return isFile(s.stackPath(slug)) }
-		s.lease.running = stackRuns
+		s.lease.running, s.lease.runningAll = stackRuns, stacksRun
 		if s.lease.unreadable && s.loadMember().Member {
 			s.lease.presumeDead(s.stackSlugs())
 		}
