@@ -3017,6 +3017,9 @@ message ClusterReplicaEntry {
   repeated string volume_names = 3;
   // Whether its Files (<stack-dir>/files/<slug>) are part of it.
   bool include_files = 4;
+  // Why this member keeps its copy as it is and receives nothing now: it waits its turn (Deplo's
+  // queue). Its status says this as its error, and the copy stays whole on disk. Empty receives.
+  string hold = 5;
 }
 
 message SetClusterReplicasResponse {

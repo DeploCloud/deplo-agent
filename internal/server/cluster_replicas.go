@@ -49,6 +49,8 @@ type replicaEntry struct {
 	Slug    string   `json:"slug"`
 	Volumes []string `json:"volumes"`
 	Files   bool     `json:"files"`
+	// Hold is why Deplo keeps this copy as it is for now: no stream runs, nothing on disk is removed.
+	Hold string `json:"hold,omitempty"`
 }
 
 // roots are the entry's data, in the order both sides name it.
@@ -173,7 +175,10 @@ func validateReplicas(req *pb.SetClusterReplicasRequest) (replicaTable, error) {
 			}
 			vols[v] = true
 		}
-		t.Entries = append(t.Entries, replicaEntry{AppID: e.GetAppId(), Slug: e.GetSlug(), Volumes: e.GetVolumeNames(), Files: e.GetIncludeFiles()})
+		if len(e.GetHold()) > 512 {
+			return replicaTable{}, status.Error(codes.InvalidArgument, "a replica's hold is too long")
+		}
+		t.Entries = append(t.Entries, replicaEntry{AppID: e.GetAppId(), Slug: e.GetSlug(), Volumes: e.GetVolumeNames(), Files: e.GetIncludeFiles(), Hold: e.GetHold()})
 	}
 	return t, nil
 }
@@ -292,6 +297,8 @@ func (r *replicas) reconcile(ctx context.Context) {
 			r.stop(e.AppID, "the cluster's leader has not said where this App runs yet")
 		case here:
 			r.stop(e.AppID, "")
+		case e.Hold != "":
+			r.stop(e.AppID, e.Hold)
 		case isFile(r.s.stackPath(e.Slug)):
 			// The App ran here and its data may still be its own: it waits until the leader's return removed it.
 			r.stop(e.AppID, "this server still holds its own copy of the App")
