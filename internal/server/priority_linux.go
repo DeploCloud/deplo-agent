@@ -33,11 +33,11 @@ const (
 // inside the agent never outranks it (c37: eu-2's proxy waited for the CPU and every App timed out).
 const proxyWeight = "1000"
 
-// proxyFirst puts the proxy level with the agent on the CPU, in its cgroup: Docker's --cpu-shares maps to a weight
-// that differs between runc versions. Best effort; again whenever the proxy is restarted or recreated.
+// proxyFirst puts a proxy (this server's or its standby) level with the agent on the CPU, in its cgroup: Docker's
+// --cpu-shares maps to a weight that differs between runc versions. Best effort; again at every restart or recreate.
 // ponytail: a restart Docker makes on its own keeps the default until the agent's next start.
-func proxyFirst(ctx context.Context) {
-	dir, err := containerCgroup(ctx, traefikContainer)
+func proxyFirst(ctx context.Context, container string) {
+	dir, err := containerCgroup(ctx, container)
 	if err != nil {
 		return
 	}
@@ -87,7 +87,7 @@ func takePriority(ctx context.Context, cgroup string) {
 			fmt.Fprintf(os.Stderr, "deplo-agent: could not put the agent first on the CPU and the disk: %v\n", err)
 		}
 	}
-	proxyFirst(ctx)
+	proxyFirst(ctx, traefikContainer)
 	if systemctl(ctx, "start", cliSlice) == nil &&
 		systemctl(ctx, append([]string{"set-property", "--runtime", cliSlice}, strings.Fields(cliWeights)...)...) == nil &&
 		!dockercli.UseCgroup("/sys/fs/cgroup/"+cliSlice) {

@@ -597,7 +597,8 @@ func (f *forwarders) ready(ctx context.Context, appID string) bool {
 		f.mu.Lock()
 		// A proxy restart changes no container: what was found ready stays, behind the restart and its settle,
 		// and answers through the standby proxy when one runs.
-		if settling, standby := f.settling(); f.replacing[appID] > 0 || (settling && standby == nil) {
+		settling, standby := f.settling()
+		if f.replacing[appID] > 0 || (settling && standby == nil) {
 			f.mu.Unlock()
 			return false
 		}
@@ -605,6 +606,11 @@ func (f *forwarders) ready(ctx context.Context, appID string) bool {
 		if rc == nil {
 			rc = &answerReadyCheck{}
 			f.readiness[appID] = rc
+		}
+		// Nor does it ask docker again meanwhile, busy recreating the proxy (c43: a look then took 3 s).
+		if settling && rc.ok {
+			f.mu.Unlock()
+			return true
 		}
 		if time.Now().Before(rc.until) {
 			ok := rc.ok

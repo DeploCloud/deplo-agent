@@ -152,6 +152,8 @@ func startStandbyProxy(ctx context.Context, agentDir string, answerPort uint32) 
 	}
 	id := strings.TrimSpace(res.Stdout)
 	end := func() { endStandby(id, copyDir) }
+	// It carries every visitor while the new proxy starts beside it: never behind Docker's own work (c43).
+	proxyFirst(ctx, id)
 	for _, n := range networks[min(1, len(networks)):] {
 		if err := dockercli.ConnectNetwork(ctx, n, id); err != nil {
 			end()
@@ -185,25 +187,51 @@ func startStandbyProxy(ctx context.Context, agentDir string, answerPort uint32) 
 		}
 	}
 	time.Sleep(standbySettle)
-	// A cluster App's routes are on the answer entrypoint, behind the PROXY header its visitors come with.
+	if err := routesLike(ctx, frontDoorDial, dial, answerPort); err != nil {
+		end()
+		return nil, nil, fmt.Errorf("the standby proxy did not route %v in %s", err, standbyWait)
+	}
+	return dial, end, nil
+}
+
+// routesLike waits until dial answers a routed domain as ref does, and errs with that domain when ctx ends first. A
+// cluster App's routes are on the answer entrypoint, behind the PROXY header its visitors come with.
+func routesLike(ctx context.Context, ref, dial standbyDialer, answerPort uint32) error {
 	port, header := uint32(443), ""
 	if answerPort != 0 {
 		port, header = answerPort, "PROXY TCP4 127.0.0.1 127.0.0.1 1 443\r\n"
 	}
-	if host := routedHost(ctx); host != "" {
-		old := func(ctx context.Context, port uint32) (net.Conn, error) { return dialProxyLoopback(ctx, port) }
-		if want := statusVia(ctx, old, port, header, host); want != 0 && want != 404 {
-			for statusVia(ctx, dial, port, header, host) != want {
-				select {
-				case <-ctx.Done():
-					end()
-					return nil, nil, fmt.Errorf("the standby proxy did not route %s in %s", host, standbyWait)
-				case <-time.After(200 * time.Millisecond):
-				}
+	host := routedHost(ctx)
+	if host == "" {
+		return nil
+	}
+	if want := statusVia(ctx, ref, port, header, host); want != 0 && want != 404 {
+		for statusVia(ctx, dial, port, header, host) != want {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("%s", host)
+			case <-time.After(200 * time.Millisecond):
 			}
 		}
 	}
-	return dial, end, nil
+	return nil
+}
+
+// newProxyRoutes waits, while the standby carries the visitors, until the new proxy routes as the standby does: its
+// port answers seconds before it read its routes on one core (c43: 0.8 s against 3.6 s, a 404 for the visitors moved).
+func (s *Service) newProxyRoutes(ctx context.Context) {
+	f := s.forwarders()
+	f.mu.Lock()
+	_, standby := f.settling()
+	f.mu.Unlock()
+	if standby == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, standbyWait)
+	defer cancel()
+	if err := routesLike(ctx, standby, frontDoorDial, s.forwarders().state().AnswerPort); err != nil {
+		fmt.Fprintf(os.Stderr, "deplo-agent: the new proxy did not route %v in %s: its visitors move to it anyway\n", err, standbyWait)
+	}
 }
 
 var routerRule = regexp.MustCompile("Host\\(`([a-z0-9.-]+)`\\)")

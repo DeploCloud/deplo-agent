@@ -247,8 +247,9 @@ func (s *Service) bringUpTraefik(ctx context.Context, path string, restartOnly b
 		if res.Code != 0 {
 			return fmt.Errorf("could not restart Traefik: %s", firstLine(res.Stderr))
 		}
-		proxyFirst(ctx)
+		proxyFirst(ctx, traefikContainer)
 		s.challenge().rebind()
+		s.newProxyRoutes(ctx)
 		return nil
 	}
 	// A proxy that mounts the routes file of its answers (ADR-0048) finds one: docker would make a missing one a
@@ -272,14 +273,16 @@ func (s *Service) bringUpTraefik(ctx context.Context, path string, restartOnly b
 		if res.Code != 0 {
 			return fmt.Errorf("could not apply the Traefik configuration: %s", firstLine(res.Stderr))
 		}
+		// The new proxy starts at the agent's weight, not behind the rest of the file (c43: 3.6 s to its routes, 0.6).
+		proxyFirst(ctx, traefikContainer)
 	}
 	for _, n := range dockercli.DeploNetworks(ctx) {
 		if err := dockercli.ConnectNetwork(ctx, n, traefikContainer); err != nil {
 			return fmt.Errorf("could not reconnect Traefik to %s: %v", n, err)
 		}
 	}
-	proxyFirst(ctx)
 	s.challenge().rebind()
+	s.newProxyRoutes(ctx)
 	return nil
 }
 

@@ -346,3 +346,35 @@ func TestCountedStandby_endsOnceItsLastVisitorIsGone(t *testing.T) {
 		t.Fatal("the standby outlived its last visitor")
 	}
 }
+
+// c43: a new proxy's port answered at 0.8 s and its routes at 3.6 s on one core; the visitors moved at the port, 404.
+func TestNewProxyRoutes_waitsUntilItRoutesAsTheStandby(t *testing.T) {
+	var asked atomic.Int32
+	standby := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer standby.Close()
+	fresh := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if asked.Add(1) < 4 {
+			w.WriteHeader(404)
+		}
+	}))
+	defer fresh.Close()
+	to := func(srv *httptest.Server) standbyDialer {
+		return func(ctx context.Context, _ uint32) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "tcp", srv.Listener.Addr().String())
+		}
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(standby.Certificate())
+	roots.AddCert(fresh.Certificate())
+	wasRoots, wasHost, wasDial := statusRoots, routedHost, frontDoorDial
+	t.Cleanup(func() { statusRoots, routedHost, frontDoorDial = wasRoots, wasHost, wasDial })
+	statusRoots, frontDoorDial = roots, to(fresh)
+	routedHost = func(context.Context) string { return "example.com" }
+	s := New(t.TempDir(), t.TempDir(), "/", t.TempDir())
+	s.forwarders().proxyStopping(to(standby))
+	s.newProxyRoutes(context.Background())
+	if got := asked.Load(); got != 4 {
+		t.Fatalf("the new proxy was asked %d times, want until it routes (4)", got)
+	}
+}

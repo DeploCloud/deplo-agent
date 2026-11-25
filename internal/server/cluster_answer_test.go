@@ -925,6 +925,28 @@ func TestAnswers_aResumedAgentServesBeforeItLooksAtItsContainers(t *testing.T) {
 	}
 }
 
+// c43 live: a readiness look that came due during a proxy restart waited 3 s for docker, busy recreating the proxy,
+// and visitors with it. An App found ready before the restart stays ready through it without a look.
+func TestAnswers_anAppReadyBeforeAProxyRestartIsNotLookedAtAgainDuringIt(t *testing.T) {
+	a, _, _, _, _ := answerPair(t)
+	f := a.forwarders()
+	looks := 0
+	f.s.fwdOps.ready = func(context.Context, string) appReadiness {
+		looks++
+		return appReadiness{OK: true, Since: time.Now().Add(-time.Hour)}
+	}
+	if !f.ready(context.Background(), "prj1") || looks != 1 {
+		t.Fatalf("ready after %d looks", looks)
+	}
+	f.mu.Lock()
+	f.readiness["prj1"].until = time.Time{}
+	f.mu.Unlock()
+	f.proxyStopping(func(context.Context, uint32) (net.Conn, error) { c, _ := net.Pipe(); return c, nil })
+	if !f.ready(context.Background(), "prj1") || looks != 1 {
+		t.Fatalf("during the restart: %d looks", looks)
+	}
+}
+
 // c41: at the thaw of a 2-minute hang, what a kept connection had queued reached the stale copy before the agent's
 // once-a-second look closed it. Each read passed on asks the lease first.
 func TestAnswers_aCarriedVisitorPassesNothingOnceTheLeaseRanOut(t *testing.T) {
