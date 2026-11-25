@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -85,8 +86,51 @@ func TestProxyFirst_putsTheProxyLevelWithTheAgent(t *testing.T) {
 		return dir, nil
 	}
 	t.Cleanup(func() { containerCgroup = was })
-	proxyFirst(context.Background())
+	proxyFirst(context.Background(), traefikContainer)
 	if raw, _ := os.ReadFile(filepath.Join(dir, "cpu.weight")); string(raw) != "1000" {
 		t.Fatalf("the proxy's weight is %q, want the agent's 1000", raw)
+	}
+}
+
+// weightsAt fakes the proxies' cgroups: each id given its weight, with how many docker commands had run by then.
+func weightsAt(t *testing.T, argv func() []string) *[]string {
+	var got []string
+	containerCgroup = func(_ context.Context, id string) (string, error) {
+		got = append(got, strconv.Itoa(len(argv()))+" "+id)
+		return t.TempDir(), nil
+	}
+	return &got
+}
+
+// c43: the new proxy started at Docker's default weight, behind the rest of its file: 3.6 s to its routes on one core.
+func TestBringUpTraefik_theNewProxyTakesItsWeightOnceCreated(t *testing.T) {
+	argv := dockerOnPath(t, `case "$*" in *compose.service*) echo traefik;; esac`)
+	weights := weightsAt(t, argv)
+	path := filepath.Join(t.TempDir(), "docker-compose.yml")
+	if err := os.WriteFile(path, []byte("services: {traefik: {image: traefik}}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s := New(t.TempDir(), t.TempDir(), "/", t.TempDir())
+	_ = s.bringUpTraefik(context.Background(), path, false)
+	for _, w := range *weights {
+		n, id, _ := strings.Cut(w, " ")
+		i, _ := strconv.Atoi(n)
+		if id == traefikContainer && i > 0 && strings.Contains(argv()[i-1], "--force-recreate --no-deps") {
+			return
+		}
+	}
+	t.Fatalf("no weight right after the recreate: %v in %q", *weights, argv())
+}
+
+// c43: the standby carried every visitor at Docker's default weight while the new proxy started beside it.
+func TestStartStandbyProxy_takesTheProxysWeight(t *testing.T) {
+	argv := dockerOnPath(t, `case "$*" in
+"inspect deplo-traefik") echo '[{"Image":"traefik","Config":{"Cmd":["--log.level=ERROR"]}}]';;
+"run -d"*) echo sid;;
+esac`)
+	weights := weightsAt(t, argv)
+	_, _, _ = startStandbyProxy(context.Background(), t.TempDir(), 0)
+	if !slices.ContainsFunc(*weights, func(w string) bool { return strings.HasSuffix(w, " sid") }) {
+		t.Fatalf("the standby kept the default weight: %v in %q", *weights, argv())
 	}
 }

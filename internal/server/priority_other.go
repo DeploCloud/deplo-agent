@@ -20,4 +20,4 @@ var startGuard = func(prev, exe, version, answered string) error { return errors
 
 func UpdateGuard([]string) int { return 2 }
 
-func proxyFirst(context.Context) {}
+func proxyFirst(context.Context, string) {}
