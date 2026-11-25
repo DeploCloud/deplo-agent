@@ -695,6 +695,14 @@ func TestAnswers_aProxyThatRefusesIsDialedOncePerHoldNotPerConnection(t *testing
 	placeOn(t, a, "srvA", appEntry("srvB"))
 	placeOn(t, b, "srvB", appEntry("srvB"))
 	s := fa.spec(t, answerAlias)
+	// The first visitor finds the refusal; the hold is noted before its answer, so no later one dials.
+	// Visitors racing the first refusal may each dial: CPU load decides how many (#132).
+	if got := askPort(t, s, shopTLS); got != "" {
+		t.Fatalf("a visitor reached %q through a proxy that refuses", got)
+	}
+	if n := dials.Load(); n != 1 {
+		t.Fatalf("B's refusing proxy was dialed %d times for the first visitor", n)
+	}
 	var wg sync.WaitGroup
 	for range 20 {
 		wg.Add(1)
@@ -706,9 +714,8 @@ func TestAnswers_aProxyThatRefusesIsDialedOncePerHoldNotPerConnection(t *testing
 		}()
 	}
 	wg.Wait()
-	// Those already dialing when the first refusal came may dial too; without the hold it was every one, at every look.
-	if n := dials.Load(); n > 3 {
-		t.Fatalf("B's refusing proxy was dialed %d times for 20 visitors in one hold", n)
+	if n := dials.Load(); n != 1 {
+		t.Fatalf("B's refusing proxy was dialed %d times for 21 visitors in one hold", n)
 	}
 }
 
