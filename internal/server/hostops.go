@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -262,13 +263,15 @@ func (s *Service) bringUpTraefik(ctx context.Context, path string, restartOnly b
 		}
 	}
 	// The agent holds new visitors meanwhile, so the old proxy drains only what it carries: 1 s (c39: 3 s, c41: 1).
-	res, err := dockercli.Run(ctx, 180*time.Second,
-		"compose", "-f", path, "up", "-d", "--force-recreate", "--remove-orphans", "--timeout", "1")
-	if err != nil {
-		return fmt.Errorf("could not apply the Traefik configuration: %v", err)
-	}
-	if res.Code != 0 {
-		return fmt.Errorf("could not apply the Traefik configuration: %s", firstLine(res.Stderr))
+	// Only the proxy is recreated: the standby answering meanwhile reads its routes through the socket proxy (c43).
+	for _, args := range traefikUpArgs(path, proxyService(ctx)) {
+		res, err := dockercli.Run(ctx, 180*time.Second, args...)
+		if err != nil {
+			return fmt.Errorf("could not apply the Traefik configuration: %v", err)
+		}
+		if res.Code != 0 {
+			return fmt.Errorf("could not apply the Traefik configuration: %s", firstLine(res.Stderr))
+		}
 	}
 	for _, n := range dockercli.DeploNetworks(ctx) {
 		if err := dockercli.ConnectNetwork(ctx, n, traefikContainer); err != nil {
@@ -278,6 +281,31 @@ func (s *Service) bringUpTraefik(ctx context.Context, path string, restartOnly b
 	proxyFirst(ctx)
 	s.challenge().rebind()
 	return nil
+}
+
+// traefikUpArgs recreates the proxy's own service, then brings up what else the file holds as compose sees fit;
+// with no service known, everything is recreated at once.
+func traefikUpArgs(path, service string) [][]string {
+	up := []string{"compose", "-f", path, "up", "-d"}
+	if service == "" {
+		return [][]string{append(up, "--force-recreate", "--remove-orphans", "--timeout", "1")}
+	}
+	return [][]string{
+		append(slices.Clone(up), "--force-recreate", "--no-deps", "--timeout", "1", service),
+		append(slices.Clone(up), "--remove-orphans", "--timeout", "1"),
+	}
+}
+
+// proxyService is the compose service the running proxy is, empty when none runs.
+func proxyService(ctx context.Context) string {
+	res, err := dockercli.Run(ctx, 10*time.Second, "inspect", "--format", `{{index .Config.Labels "com.docker.compose.service"}}`, traefikContainer)
+	if err != nil || res.Code != 0 {
+		return ""
+	}
+	if s := strings.TrimSpace(res.Stdout); fwdService.MatchString(s) {
+		return s
+	}
+	return ""
 }
 
 // RestartControlPlane bounces the container the Deplo panel runs in on this host.

@@ -1,13 +1,18 @@
 package server
 
 import (
+	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -83,6 +88,12 @@ func standbyRunArgs(p proxyShape, copyDir string) (args []string, copies [][2]st
 		copies = append(copies, [2]string{parts[0], cp})
 		args = append(args, "-v", cp+":"+parts[1])
 	}
+	// The routes file directory holds what compose copied in (its configs): the standby gets the proxy's copy.
+	if dir := fileProviderDir(p.Config.Cmd); dir != "" {
+		cp := filepath.Join(copyDir, "dynamic")
+		copies = append(copies, [2]string{"container:" + dir, cp})
+		args = append(args, "-v", cp+":"+dir+":ro")
+	}
 	cmd := p.Config.Cmd
 	if len(p.Config.Entrypoint) > 0 {
 		args = append(args, "--entrypoint", p.Config.Entrypoint[0])
@@ -92,8 +103,18 @@ func standbyRunArgs(p proxyShape, copyDir string) (args []string, copies [][2]st
 	return append(args, cmd...), copies, networks
 }
 
+// fileProviderDir is the directory the proxy reads its routes files from, empty when it reads none.
+func fileProviderDir(cmd []string) string {
+	for _, a := range cmd {
+		if d, ok := strings.CutPrefix(a, "--providers.file.directory="); ok && strings.HasPrefix(d, "/") {
+			return d
+		}
+	}
+	return ""
+}
+
 // startStandbyProxy runs the standby beside this server's proxy and waits until it answers and read its routes.
-func startStandbyProxy(ctx context.Context, agentDir string) (standbyDialer, func(), error) {
+func startStandbyProxy(ctx context.Context, agentDir string, answerPort uint32) (standbyDialer, func(), error) {
 	standbyMu.Lock()
 	defer standbyMu.Unlock()
 	ctx, cancel := context.WithTimeout(ctx, standbyWait)
@@ -113,6 +134,12 @@ func startStandbyProxy(ctx context.Context, agentDir string) (standbyDialer, fun
 	}
 	args, copies, networks := standbyRunArgs(shapes[0], copyDir)
 	for _, c := range copies {
+		if from, ok := strings.CutPrefix(c[0], "container:"); ok {
+			if res, err := dockercli.Run(ctx, 30*time.Second, "cp", traefikContainer+":"+from, c[1]); err != nil || res.Code != 0 {
+				return nil, nil, fmt.Errorf("copy the proxy's %s: %s", from, strings.TrimSpace(res.Stderr))
+			}
+			continue
+		}
 		if out, err := exec.CommandContext(ctx, "cp", "-a", c[0], c[1]).CombinedOutput(); err != nil {
 			return nil, nil, fmt.Errorf("copy %s: %s", c[0], strings.TrimSpace(string(out)))
 		}
@@ -157,7 +184,64 @@ func startStandbyProxy(ctx context.Context, agentDir string) (standbyDialer, fun
 		}
 	}
 	time.Sleep(standbySettle)
+	// A cluster App's routes are on the answer entrypoint, behind the PROXY header its visitors come with.
+	port, header := uint32(443), ""
+	if answerPort != 0 {
+		port, header = answerPort, "PROXY TCP4 127.0.0.1 127.0.0.1 1 443\r\n"
+	}
+	if host := routedHost(ctx); host != "" {
+		old := func(ctx context.Context, port uint32) (net.Conn, error) { return dialProxyLoopback(ctx, port) }
+		if want := statusVia(ctx, old, port, header, host); want != 0 && want != 404 {
+			for statusVia(ctx, dial, port, header, host) != want {
+				select {
+				case <-ctx.Done():
+					end()
+					return nil, nil, fmt.Errorf("the standby proxy did not route %s in %s", host, standbyWait)
+				case <-time.After(200 * time.Millisecond):
+				}
+			}
+		}
+	}
 	return dial, end, nil
+}
+
+var routerRule = regexp.MustCompile("Host\\(`([a-z0-9.-]+)`\\)")
+
+// routedHost is one domain a running container asks the proxy to route, read from its labels.
+var routedHost = func(ctx context.Context) string {
+	res, err := dockercli.Run(ctx, 10*time.Second, "ps", "--filter", "label=traefik.enable=true", "--format", "{{.Labels}}")
+	if err != nil || res.Code != 0 {
+		return ""
+	}
+	if m := routerRule.FindStringSubmatch(res.Stdout); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+// statusVia is the status a proxy answers for host over HTTPS, 0 when it does not answer.
+func statusVia(ctx context.Context, dial standbyDialer, port uint32, header, host string) int {
+	actx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	raw, err := dial(actx, port)
+	if err != nil {
+		return 0
+	}
+	defer raw.Close()
+	_ = raw.SetDeadline(time.Now().Add(3 * time.Second))
+	if _, err := io.WriteString(raw, header); err != nil {
+		return 0
+	}
+	c := tls.Client(raw, &tls.Config{ServerName: host, InsecureSkipVerify: true}) //nolint:gosec // only compares two proxies' answers
+	if _, err := fmt.Fprintf(c, "HEAD / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", host); err != nil {
+		return 0
+	}
+	res, err := http.ReadResponse(bufio.NewReader(c), nil)
+	if err != nil {
+		return 0
+	}
+	res.Body.Close()
+	return res.StatusCode
 }
 
 // endStandby stops the standby, letting what it carries finish, and removes it and its copies.

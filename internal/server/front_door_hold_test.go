@@ -1,12 +1,15 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -17,7 +20,7 @@ import (
 // Tests hold nothing on the machine that runs them, except where one swaps in its own redirect.
 func init() {
 	holdRedirect = func(map[uint16]uint16) (func(), func(), error) { return nil, nil, errors.New("tests hold no port") }
-	standbyUp = func(context.Context, string) (standbyDialer, func(), error) {
+	standbyUp = func(context.Context, string, uint32) (standbyDialer, func(), error) {
 		return nil, nil, errors.New("tests run no standby")
 	}
 }
@@ -228,7 +231,7 @@ func TestFrontDoor_aStandbyProxyAnswersAtOnceWhileTheProxyRestarts(t *testing.T)
 func TestStandbyRunArgs_noPortNoAliasAndACopyOfWhatTheProxyWrites(t *testing.T) {
 	var p proxyShape
 	p.Image = "sha256:abc"
-	p.Config.Cmd = []string{"--providers.docker=true"}
+	p.Config.Cmd = []string{"--providers.docker=true", "--providers.file.directory=/deplo-dynamic"}
 	p.Config.Entrypoint = []string{"/entrypoint.sh"}
 	p.HostConfig.Binds = []string{"/t/acme:/acme:rw", "/t/answers.yml:/deplo-dynamic/deplo-answers.yml:ro"}
 	p.NetworkSettings.Networks = map[string]json.RawMessage{"deplo": nil, "traefik_deplo-socket": nil}
@@ -242,12 +245,71 @@ func TestStandbyRunArgs_noPortNoAliasAndACopyOfWhatTheProxyWrites(t *testing.T) 
 		}
 	}
 	for _, want := range []string{"--name " + standbyContainer, "--restart no", "-v /c/0:/acme", "-v /t/answers.yml:/deplo-dynamic/deplo-answers.yml:ro",
-		"--network deplo", "--entrypoint /entrypoint.sh sha256:abc --providers.docker=true"} {
+		"--network deplo", "-v /c/dynamic:/deplo-dynamic:ro", "--entrypoint /entrypoint.sh sha256:abc --providers.docker=true"} {
 		if !strings.Contains(line, want) {
 			t.Fatalf("want %q in %s", want, line)
 		}
 	}
-	if len(copies) != 1 || copies[0] != [2]string{"/t/acme", "/c/0"} || len(networks) != 2 {
+	// c43: compose copies its configs into the proxy (the answer transport, the certificates): the standby lacked them.
+	if len(copies) != 2 || copies[0] != [2]string{"/t/acme", "/c/0"} || copies[1] != [2]string{"container:/deplo-dynamic", "/c/dynamic"} || len(networks) != 2 {
 		t.Fatalf("copies %v networks %v", copies, networks)
+	}
+}
+
+// c43: recreating the whole file recreated the socket proxy too, and the standby answering meanwhile lost every route it
+// reads through it (404 for 3 s on eu-4). Only the proxy's service is recreated; the rest only if it changed.
+func TestTraefikUpArgs_recreatesOnlyTheProxy(t *testing.T) {
+	got := traefikUpArgs("/t/docker-compose.yml", "traefik")
+	if len(got) != 2 || !strings.Contains(strings.Join(got[0], " "), "--force-recreate --no-deps --timeout 1 traefik") ||
+		strings.Contains(strings.Join(got[1], " "), "--force-recreate") {
+		t.Fatalf("%q", got)
+	}
+	if old := traefikUpArgs("/t/docker-compose.yml", ""); len(old) != 1 || !strings.Contains(strings.Join(old[0], " "), "--force-recreate --remove-orphans") {
+		t.Fatalf("with no service known: %q", old)
+	}
+}
+
+// The standby counts ready once it answers a routed domain as the proxy does, on the answer entrypoint behind its
+// PROXY header for a cluster server.
+func TestStatusVia_readsAProxysAnswerBehindTheProxyHeader(t *testing.T) {
+	certs := httptest.NewTLSServer(http.NotFoundHandler())
+	defer certs.Close()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				br := bufio.NewReader(c)
+				line := ""
+				if b, _ := br.Peek(1); len(b) == 1 && b[0] == 'P' {
+					line, _ = br.ReadString('\n')
+				}
+				tc := tls.Server(&bufferedConn{Conn: c, r: br}, &tls.Config{Certificates: certs.TLS.Certificates})
+				req, err := http.ReadRequest(bufio.NewReader(tc))
+				status := "404 Not Found"
+				if err == nil && strings.HasPrefix(line, "PROXY TCP4 ") && req.Host == "shop.example" {
+					status = "200 OK"
+				}
+				_, _ = io.WriteString(tc, "HTTP/1.1 "+status+"\r\nContent-Length: 0\r\n\r\n")
+			}()
+		}
+	}()
+	dial := func(ctx context.Context, _ uint32) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "tcp", ln.Addr().String())
+	}
+	if got := statusVia(context.Background(), dial, 8443, "PROXY TCP4 127.0.0.1 127.0.0.1 1 443\r\n", "shop.example"); got != 200 {
+		t.Fatalf("behind the header: %d", got)
+	}
+	if got := statusVia(context.Background(), dial, 443, "", "shop.example"); got != 404 {
+		t.Fatalf("without it: %d", got)
 	}
 }

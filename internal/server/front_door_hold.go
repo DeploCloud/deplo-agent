@@ -252,7 +252,7 @@ func (s *Service) proxyGoingDown() {
 		s.forwarders().proxyStopping(nil)
 		return
 	}
-	dial, end, err := standbyUp(context.Background(), s.agentDir)
+	dial, end, err := standbyUp(context.Background(), s.agentDir, s.forwarders().state().AnswerPort)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "deplo-agent: no standby proxy: visitors wait for the new one (%v)\n", err)
 	}
