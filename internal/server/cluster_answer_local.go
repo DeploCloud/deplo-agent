@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/DeploCloud/deplo-agent/internal/forwarder"
@@ -33,7 +34,7 @@ func (f *forwarders) carry(appID string, in, up net.Conn) {
 	cluster := f.st.Cluster
 	f.mu.Unlock()
 	here := func() bool { h, _ := f.s.leaseGuard().answerHolders(cluster, appID); return h }
-	forwarder.Join(leased{in, here}, up)
+	forwarder.Join(leased{in, here}, moving{up})
 	f.mu.Lock()
 	delete(f.local[appID], in)
 	if len(f.local[appID]) == 0 {
@@ -51,8 +52,35 @@ type leased struct {
 
 var errNotHere = errors.New("this server no longer runs the App")
 
+// carriedAt is when a visitor this agent carries last moved a byte: an exit waits for it to go quiet.
+var carriedAt atomic.Int64
+
+// carriedQuiet says no carried visitor moved a byte for a moment: what was in flight is through.
+func carriedQuiet() bool { return time.Since(time.Unix(0, carriedAt.Load())) > 150*time.Millisecond }
+
+// moving is a carried visitor's side that notes each byte it reads.
+type moving struct{ net.Conn }
+
+func (c moving) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if n > 0 {
+		carriedAt.Store(time.Now().UnixNano())
+	}
+	return n, err
+}
+
+func (c moving) CloseWrite() error {
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return errors.ErrUnsupported
+}
+
 func (c leased) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
+	if n > 0 {
+		carriedAt.Store(time.Now().UnixNano())
+	}
 	if n > 0 && !c.here() {
 		c.Conn.Close()
 		return 0, errNotHere

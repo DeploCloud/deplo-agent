@@ -157,7 +157,9 @@ func drainLocked() {
 		_ = ln.Close()
 		delete(kept.live, name)
 	}
-	time.Sleep(execDrain)
+	for until := time.Now().Add(execDrain); time.Now().Before(until) && !carriedQuiet(); {
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 // restoreKept hands systemd every listener this run serves again.

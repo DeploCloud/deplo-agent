@@ -417,7 +417,7 @@ func (f *forwarders) answerFor(in net.Conn, cluster string, members map[string]s
 				if via == "" {
 					f.carry(appID, in, up)
 				} else {
-					forwarder.Join(in, up)
+					forwarder.Join(moving{in}, moving{up})
 				}
 				f.release(via)
 				cancel()

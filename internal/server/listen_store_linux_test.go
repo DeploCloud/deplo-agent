@@ -100,3 +100,34 @@ func TestForgetKept_removesTheListenerFromTheStore(t *testing.T) {
 		t.Fatal("a forgotten listener is still handed to the next binary")
 	}
 }
+
+// c43: a fixed second of drain held every visitor of an App on one server past a second at each restart. The drain
+// ends once what the agent carries goes quiet, and waits while bytes still move.
+func TestDrainVisitors_endsOnceWhatItCarriesIsQuiet(t *testing.T) {
+	freshKept(t)
+	execDrain = 2 * time.Second
+	carriedAt.Store(time.Now().Add(-time.Minute).UnixNano())
+	start := time.Now()
+	DrainVisitors()
+	if took := time.Since(start); took > 300*time.Millisecond {
+		t.Fatalf("a quiet agent drained %s", took)
+	}
+	stop := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(20 * time.Millisecond):
+				carriedAt.Store(time.Now().UnixNano())
+			}
+		}
+	}()
+	time.AfterFunc(600*time.Millisecond, func() { close(stop) })
+	carriedAt.Store(time.Now().UnixNano())
+	start = time.Now()
+	DrainVisitors()
+	if took := time.Since(start); took < 600*time.Millisecond || took > 1500*time.Millisecond {
+		t.Fatalf("with bytes moving for 600 ms the drain took %s", took)
+	}
+}
