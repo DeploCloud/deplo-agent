@@ -266,10 +266,10 @@ func (f *forwarders) forgetFiles(gone []proxyCert) error {
 	return f.writeAnswerRoutes()
 }
 
-// stopProxy stops this server's proxy; a var so tests can answer without Docker. It drains 3 s: Traefik waits out
-// every passed-on stream, and its server turned new visitors away for 11 s before (c39).
+// stopProxy stops this server's proxy; a var so tests can answer without Docker. It drains 1 s: the agent holds
+// new visitors meanwhile (startProxy), so Traefik waits out only what it carries (c39: 11 s of refusals).
 var stopProxy = func(ctx context.Context) error {
-	res, err := dockercli.Run(ctx, 60*time.Second, "stop", "-t", "3", traefikContainer)
+	res, err := dockercli.Run(ctx, 60*time.Second, "stop", "-t", "1", traefikContainer)
 	if err != nil {
 		return err
 	}

@@ -8,8 +8,9 @@ import (
 	"testing"
 )
 
-// c39: a recreated proxy refused new visitors for the 10 s Docker gives the old one to drain.
-func TestBringUpTraefik_theOldProxyDrainsThreeSeconds(t *testing.T) {
+// c39: a recreated proxy refused new visitors for the 10 s Docker gives the old one to drain; the agent holds them
+// now (c42), so the old proxy drains only what it carries, 1 s.
+func TestBringUpTraefik_theOldProxyDrainsOneSecond(t *testing.T) {
 	argv := dockerOnPath(t, "")
 	dir := t.TempDir()
 	path := filepath.Join(dir, "docker-compose.yml")
@@ -20,7 +21,7 @@ func TestBringUpTraefik_theOldProxyDrainsThreeSeconds(t *testing.T) {
 	_ = s.bringUpTraefik(context.Background(), path, false)
 	for _, l := range argv() {
 		if strings.HasPrefix(l, "compose -f "+path+" up") {
-			if !strings.HasSuffix(l, "--timeout 3") {
+			if !strings.HasSuffix(l, "--timeout 1") {
 				t.Fatalf("the proxy is recreated with %q", l)
 			}
 			return
@@ -30,10 +31,10 @@ func TestBringUpTraefik_theOldProxyDrainsThreeSeconds(t *testing.T) {
 }
 
 // c39: the proxy stopped to change its certificate store turned new visitors away for 11 s while it drained.
-func TestStopProxy_drainsThreeSeconds(t *testing.T) {
+func TestStopProxy_drainsOneSecond(t *testing.T) {
 	argv := dockerOnPath(t, "")
 	_ = stopProxy(context.Background())
-	if got := strings.Join(argv(), "\n"); got != "stop -t 3 "+traefikContainer {
+	if got := strings.Join(argv(), "\n"); got != "stop -t 1 "+traefikContainer {
 		t.Fatalf("the proxy is stopped with %q", got)
 	}
 }
