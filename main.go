@@ -266,6 +266,8 @@ func serveAgent(ctx context.Context, srv *grpc.Server, lis *link.Port, lc *link.
 	case <-ctx.Done():
 	}
 	log.Printf("deplo-agent: signal received - draining in-flight RPCs…")
+	// Visitors first: new ones wait for the next run in the kept listeners' queue, the ones carried get a second.
+	server.DrainVisitors()
 	// The link closes first: a stream riding it would otherwise hold the drain to its cap.
 	closeLink()
 	<-unlinked

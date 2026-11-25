@@ -855,6 +855,34 @@ func TestAnswers_anUnthrottledProxyTakesAnAppAfterOneSecond(t *testing.T) {
 	}
 }
 
+// c43: an agent restarted under 20 new visitors a second reset the 20 it was carrying for other servers. Ending, it
+// takes none from another member, which holds them until it is back.
+func TestAnswers_aRestartingServerTakesNoVisitorAndTheOtherHoldsIt(t *testing.T) {
+	quickAnswers(t, 5*time.Second)
+	a, b, fa, _, members := answerPair(t)
+	bothAnswer(t, a, b, members)
+	placeOn(t, a, "srvA", appEntry("srvB"))
+	placeOn(t, b, "srvB", appEntry("srvB"))
+	restarting.Store(true)
+	t.Cleanup(func() { restarting.Store(false) })
+	got := make(chan string, 1)
+	go func() { got <- askPort(t, fa.spec(t, answerAlias), shopTLS) }()
+	select {
+	case g := <-got:
+		t.Fatalf("a server ending took the visitor: %q", g)
+	case <-time.After(400 * time.Millisecond):
+	}
+	restarting.Store(false)
+	select {
+	case g := <-got:
+		if g != "proxy-b:PING" {
+			t.Fatalf("once it is back the visitor read %q", g)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the held visitor was not passed on once the server was back")
+	}
+}
+
 // c41: at the thaw of a 2-minute hang, what a kept connection had queued reached the stale copy before the agent's
 // once-a-second look closed it. Each read passed on asks the lease first.
 func TestAnswers_aCarriedVisitorPassesNothingOnceTheLeaseRanOut(t *testing.T) {

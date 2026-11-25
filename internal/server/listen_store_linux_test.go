@@ -20,7 +20,11 @@ func freshKept(t *testing.T) *[]string {
 	was := storeKept
 	var sent []string
 	storeKept = func(state string, fd int) { sent = append(sent, strings.ReplaceAll(state, "\n", " ")) }
-	t.Cleanup(func() { storeKept = was; kept.once, kept.byName, kept.mine, kept.live = sync.Once{}, nil, nil, nil })
+	t.Cleanup(func() {
+		storeKept = was
+		kept.once, kept.byName, kept.mine, kept.live = sync.Once{}, nil, nil, nil
+		restarting.Store(false)
+	})
 	return &sent
 }
 

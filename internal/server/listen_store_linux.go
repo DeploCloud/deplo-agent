@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -136,6 +137,28 @@ func forgetKept(name string) {
 	storeKept("FDSTOREREMOVE=1\nFDNAME="+name, -1)
 }
 
+// restarting is this agent ending or exec'ing: it takes no visitor, and another member holds the ones it passes.
+var restarting atomic.Bool
+
+// DrainVisitors stops taking visitors before the agent exits: what arrives waits in the queue the kept copies hold
+// for the next run, and what it carries gets execDrain to finish.
+func DrainVisitors() {
+	inheritKept()
+	kept.Lock()
+	defer kept.Unlock()
+	drainLocked()
+}
+
+// drainLocked is DrainVisitors; the caller holds kept.
+func drainLocked() {
+	restarting.Store(true)
+	for name, ln := range kept.live {
+		_ = ln.Close()
+		delete(kept.live, name)
+	}
+	time.Sleep(execDrain)
+}
+
 // restoreKept hands systemd every listener this run serves again.
 func restoreKept() {
 	inheritKept()
@@ -151,13 +174,7 @@ func keptForExec() string {
 	inheritKept()
 	kept.Lock()
 	defer kept.Unlock()
-	// No visitor is taken past this point: what arrives waits in the queue the kept copy holds for the new binary.
-	for _, ln := range kept.live {
-		_ = ln.Close()
-	}
-	if len(kept.live) > 0 {
-		time.Sleep(execDrain)
-	}
+	drainLocked()
 	var pairs []string
 	for name, f := range kept.mine {
 		fd := rawFd(f)

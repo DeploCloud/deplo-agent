@@ -724,7 +724,7 @@ func (f *forwarders) serveAnswerStream(from wire.Party, c net.Conn, network, app
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if !f.answers(ctx, appID) || f.proxyIsDown() {
+	if restarting.Load() || !f.answers(ctx, appID) || f.proxyIsDown() {
 		_ = wire.WriteHeader(c, wire.VerbErr, "not ready")
 		return
 	}
