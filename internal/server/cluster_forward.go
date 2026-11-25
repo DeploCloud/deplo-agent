@@ -173,6 +173,8 @@ type forwarders struct {
 	proxyStarted time.Time
 	// stopping is a restart of this server's proxy under way: no App counts ready here until it is back.
 	stopping bool
+	// handoverAt is when what this run knows was last written for the next one.
+	handoverAt time.Time
 	// atOnce is a proxy that routes a change at once: an App counts ready after answerSettleAtOnce.
 	atOnce bool
 	// standby reaches the copy of the proxy that takes its visitors while it restarts; nil when none runs.

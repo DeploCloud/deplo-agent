@@ -646,6 +646,7 @@ func (f *forwarders) ready(ctx context.Context, appID string) bool {
 		rc.until = now.Add(answerRetry)
 		if rc.ok {
 			rc.until = now.Add(answerReadyFor)
+			f.keepHandover()
 		}
 		rc.pending = nil
 		close(done)

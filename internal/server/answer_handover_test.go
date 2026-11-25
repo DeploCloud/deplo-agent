@@ -2,6 +2,9 @@ package server
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -60,4 +63,21 @@ func TestHandover_theNextRunStartsFromWhatTheLastOneKnew(t *testing.T) {
 			t.Fatal("a handover from another boot was taken")
 		}
 	}
+}
+
+// A crash writes nothing as it ends: a ready App has the handover written as it is found ready, at most every 2 s.
+func TestHandover_isWrittenAsAppsAreFoundReady(t *testing.T) {
+	dir := t.TempDir()
+	s := &Service{agentDir: dir}
+	s.fwdOps = forwardOps{ensure: func(context.Context, forwardSpec) error { return nil },
+		ready: func(context.Context, string) appReadiness {
+			return appReadiness{OK: true, Since: time.Now().Add(-time.Hour)}
+		}}
+	if !s.forwarders().ready(context.Background(), "prj1") {
+		t.Fatal("not ready")
+	}
+	eventually(t, "the handover written", func() bool {
+		raw, err := os.ReadFile(filepath.Join(dir, handoverFile))
+		return err == nil && strings.Contains(string(raw), `"prj1"`)
+	})
 }

@@ -46,6 +46,18 @@ func runRestartHooks() {
 	}
 }
 
+// handoverEvery is how often a ready App has what this run knows written down: a crash writes nothing.
+var handoverEvery = 2 * time.Second
+
+// keepHandover writes the handover now and then, so a run after a crash starts from it too; the caller holds f.mu.
+func (f *forwarders) keepHandover() {
+	if time.Since(f.handoverAt) < handoverEvery {
+		return
+	}
+	f.handoverAt = time.Now()
+	go f.saveHandover()
+}
+
 // saveHandover writes what this run knows for the next one.
 func (f *forwarders) saveHandover() {
 	if f.s.agentDir == "" {
