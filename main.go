@@ -151,6 +151,7 @@ func main() {
 	srv := newGRPCServer(certMgr)
 	svc := server.New(*stackDir, *buildTmpDir, *dataDir, *dataBase)
 	server.ClearFrontDoorHold()
+	go server.ClearStandbyProxy(context.Background())
 	if err := svc.PlaceProbe(); err != nil {
 		fmt.Fprintf(os.Stderr, "deplo-agent: could not place the health check probe: %v\n", err)
 	}

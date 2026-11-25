@@ -788,7 +788,7 @@ func TestAnswers_aRestartedProxyGetsNoVisitorUntilItSettles(t *testing.T) {
 	if !f.ready(context.Background(), "prj1") {
 		t.Fatal("an App that ran for an hour is not ready")
 	}
-	f.proxyStopping()
+	f.proxyStopping(nil)
 	if f.ready(context.Background(), "prj1") {
 		t.Fatal("ready while its proxy restarts")
 	}
@@ -797,6 +797,38 @@ func TestAnswers_aRestartedProxyGetsNoVisitorUntilItSettles(t *testing.T) {
 		t.Fatal("ready the moment its proxy restarted")
 	}
 	eventually(t, "ready once the proxy settled", func() bool { return f.ready(context.Background(), "prj1") })
+}
+
+// c42: an App on one server waited the whole restart of that server's proxy. A standby proxy takes its visitors:
+// the App stays ready and is reached through the standby's own answer entrypoint until the new proxy settled.
+func TestAnswers_anAppOnOneServerIsAnsweredByTheStandbyWhileItsProxyRestarts(t *testing.T) {
+	a, _, _, _, _ := answerPair(t)
+	f := a.forwarders()
+	f.s.fwdOps.ready = func(context.Context, string) appReadiness {
+		return appReadiness{OK: true, Since: time.Now().Add(-time.Hour)}
+	}
+	f.mu.Lock()
+	f.st.AnswerPort = 8443
+	f.mu.Unlock()
+	var dialed atomic.Uint32
+	f.proxyStopping(func(_ context.Context, port uint32) (net.Conn, error) {
+		dialed.Store(port)
+		c, _ := net.Pipe()
+		return c, nil
+	})
+	if !f.ready(context.Background(), "prj1") {
+		t.Fatal("not ready while its proxy restarts, though a standby proxy answers")
+	}
+	c, err := f.dialProxy(context.Background(), answerTLS)
+	if err != nil || dialed.Load() != 8443 {
+		t.Fatalf("dialed %d (%v), want the standby's answer entrypoint", dialed.Load(), err)
+	}
+	c.Close()
+	f.proxyRestarted()
+	f.standbyGone()
+	if f.ready(context.Background(), "prj1") {
+		t.Fatal("ready the moment its proxy restarted, with no standby left")
+	}
 }
 
 // c41: at the thaw of a 2-minute hang, what a kept connection had queued reached the stale copy before the agent's

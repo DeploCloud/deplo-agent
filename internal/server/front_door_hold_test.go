@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -16,6 +17,9 @@ import (
 // Tests hold nothing on the machine that runs them, except where one swaps in its own redirect.
 func init() {
 	holdRedirect = func(map[uint16]uint16) (func(), func(), error) { return nil, nil, errors.New("tests hold no port") }
+	standbyUp = func(context.Context, string) (standbyDialer, func(), error) {
+		return nil, nil, errors.New("tests run no standby")
+	}
 }
 
 // c41: every App went unanswered 8-10 s while its server's proxy restarted. A visitor that arrives meanwhile is held,
@@ -58,7 +62,7 @@ func TestFrontDoor_aVisitorArrivingWhileTheProxyRestartsIsHeldAndHandedOver(t *t
 	}
 	holdSettle = 10 * time.Millisecond
 
-	release := holdFrontDoorPassing(nil)
+	release := holdFrontDoorPassing(nil, nil)
 	if redirected[443] == 0 || redirected[80] == 0 {
 		t.Fatalf("ports 80 and 443 are not held: %v", redirected)
 	}
@@ -119,7 +123,7 @@ func TestFrontDoor_aHeldVisitorOfAnAppElsewhereIsPassedOnAtOnce(t *testing.T) {
 		passed <- again
 		c.Close()
 		return true
-	})
+	}, nil)
 	defer func() { go release() }()
 	visit := func(name string) {
 		c, err := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(int(redirected[443])))
@@ -175,3 +179,75 @@ type swapped struct{ net.Conn }
 
 func (s swapped) LocalAddr() net.Addr  { return s.Conn.RemoteAddr() }
 func (s swapped) RemoteAddr() net.Addr { return s.Conn.LocalAddr() }
+
+// c42: an App on one server waited its proxy's whole restart (3-8 s on one core). With a standby proxy running, a
+// visitor arriving meanwhile is answered by it at once, never held for the new proxy.
+func TestFrontDoor_aStandbyProxyAnswersAtOnceWhileTheProxyRestarts(t *testing.T) {
+	standby, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer standby.Close()
+	go func() {
+		for {
+			c, err := standby.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				buf := make([]byte, 64)
+				n, _ := c.Read(buf)
+				_, _ = c.Write([]byte("standby:" + string(buf[:n])))
+			}()
+		}
+	}()
+	var redirected map[uint16]uint16
+	redirect, dial := holdRedirect, frontDoorDial
+	t.Cleanup(func() { holdRedirect, frontDoorDial = redirect, dial })
+	holdRedirect = func(p map[uint16]uint16) (func(), func(), error) { redirected = p; return func() {}, func() {}, nil }
+	frontDoorDial = func(context.Context, uint32) (net.Conn, error) { return nil, errors.New("the proxy is down") }
+	release := holdFrontDoorPassing(nil, func(ctx context.Context, port uint32) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "tcp", standby.Addr().String())
+	})
+	defer func() { go release() }()
+	c, err := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(int(redirected[80])))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_, _ = io.WriteString(c, "GET")
+	_ = c.SetDeadline(time.Now().Add(time.Second))
+	got := make([]byte, 11)
+	if _, err := io.ReadFull(c, got); err != nil || string(got) != "standby:GET" {
+		t.Fatalf("a visitor while the proxy restarts read %q (%v), not the standby's answer", got, err)
+	}
+}
+
+func TestStandbyRunArgs_noPortNoAliasAndACopyOfWhatTheProxyWrites(t *testing.T) {
+	var p proxyShape
+	p.Image = "sha256:abc"
+	p.Config.Cmd = []string{"--providers.docker=true"}
+	p.Config.Entrypoint = []string{"/entrypoint.sh"}
+	p.HostConfig.Binds = []string{"/t/acme:/acme:rw", "/t/answers.yml:/deplo-dynamic/deplo-answers.yml:ro"}
+	p.NetworkSettings.Networks = map[string]json.RawMessage{"deplo": nil, "traefik_deplo-socket": nil}
+	args, copies, networks := standbyRunArgs(p, "/c")
+	line := strings.Join(args, " ")
+	for _, bad := range []string{"-p", "--publish", "--network-alias", "/t/acme:/acme"} {
+		for _, a := range args {
+			if a == bad || strings.HasPrefix(a, bad) {
+				t.Fatalf("the standby has %q: %s", bad, line)
+			}
+		}
+	}
+	for _, want := range []string{"--name " + standbyContainer, "--restart no", "-v /c/0:/acme", "-v /t/answers.yml:/deplo-dynamic/deplo-answers.yml:ro",
+		"--network deplo", "--entrypoint /entrypoint.sh sha256:abc --providers.docker=true"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("want %q in %s", want, line)
+		}
+	}
+	if len(copies) != 1 || copies[0] != [2]string{"/t/acme", "/c/0"} || len(networks) != 2 {
+		t.Fatalf("copies %v networks %v", copies, networks)
+	}
+}

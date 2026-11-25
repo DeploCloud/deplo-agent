@@ -123,10 +123,26 @@ func (f *forwarders) passHeld(c net.Conn, host string) bool {
 
 // proxyStopping notes that this server's proxy is about to stop: no visitor is passed to it, from here or another
 // server, until it is back and settled (c42: a held visitor met the new proxy before it read its routes, 404).
-func (f *forwarders) proxyStopping() {
+func (f *forwarders) proxyStopping(standby standbyDialer) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.stopping = true
+	if standby != nil {
+		f.standby = standby
+	}
+}
+
+// standbyGone is the standby proxy ending: this server's own proxy takes every visitor again.
+func (f *forwarders) standbyGone() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.standby = nil
+}
+
+// settling says whether this server's proxy cannot take a visitor now, and the standby to reach instead; the
+// caller holds f.mu.
+func (f *forwarders) settling() (bool, standbyDialer) {
+	return f.stopping || time.Since(f.proxyStarted) < proxySettle, f.standby
 }
 
 // recreating holds the App's visitors here while a reroute replaces its containers: a ready kept from before passed

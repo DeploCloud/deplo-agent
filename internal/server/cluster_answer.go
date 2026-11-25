@@ -570,9 +570,13 @@ func (f *forwarders) dialProxy(ctx context.Context, port uint32) (net.Conn, erro
 	}
 	f.mu.Lock()
 	to := f.st.AnswerPort
+	settling, standby := f.settling()
 	f.mu.Unlock()
 	if to == 0 {
 		return nil, fmt.Errorf("this server's proxy has no internal entrypoint")
+	}
+	if settling && standby != nil {
+		return standby(ctx, to)
 	}
 	ops := f.ops()
 	if ops.proxyDial == nil {
@@ -586,8 +590,9 @@ func (f *forwarders) dialProxy(ctx context.Context, port uint32) (net.Conn, erro
 func (f *forwarders) ready(ctx context.Context, appID string) bool {
 	for {
 		f.mu.Lock()
-		// A proxy restart changes no container: what was found ready stays, behind the restart and its settle.
-		if f.replacing[appID] > 0 || f.stopping || time.Since(f.proxyStarted) < proxySettle {
+		// A proxy restart changes no container: what was found ready stays, behind the restart and its settle,
+		// and answers through the standby proxy when one runs.
+		if settling, standby := f.settling(); f.replacing[appID] > 0 || (settling && standby == nil) {
 			f.mu.Unlock()
 			return false
 		}
