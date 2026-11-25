@@ -793,3 +793,36 @@ func TestAnswers_aRestartedProxyGetsNoVisitorUntilItSettles(t *testing.T) {
 	}
 	eventually(t, "ready once the proxy settled", func() bool { return f.ready(context.Background(), "prj1") })
 }
+
+// c41: at the thaw of a 2-minute hang, what a kept connection had queued reached the stale copy before the agent's
+// once-a-second look closed it. Each read passed on asks the lease first.
+func TestAnswers_aCarriedVisitorPassesNothingOnceTheLeaseRanOut(t *testing.T) {
+	quickAnswers(t, 2*time.Second)
+	a, b, fa, _, members := answerPair(t)
+	apply(t, a, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members, AnswerPort: backend(t, "proxy-a"),
+		Answers: []*pb.ClusterAnswer{shop()}, ServeAnswers: []string{"prj1"}})
+	apply(t, b, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members, AnswerPort: holdingBackend(t, "proxy-b"),
+		Answers: []*pb.ClusterAnswer{shop()}, ServeAnswers: []string{"prj1"}})
+	placeOn(t, a, "srvA", appEntry("srvB"))
+	placeOn(t, b, "srvB", appEntry("srvB"))
+	c, err := net.DialTimeout("unix", filepath.Join(fa.spec(t, answerAlias).Dir, fwdSocket), 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	_, _ = io.WriteString(c, "PORT "+strconv.Itoa(int(shopTLS))+"\nping")
+	got := make([]byte, len("proxy-b:PING"))
+	if _, err := io.ReadFull(c, got); err != nil || string(got) != "proxy-b:PING" {
+		t.Fatalf("the visitor read %q (%v)", got, err)
+	}
+	g := b.leaseGuard()
+	g.mu.Lock()
+	g.now = func() time.Time { return time.Now().Add(2 * time.Minute) }
+	g.mu.Unlock()
+	_, _ = io.WriteString(c, "pong")
+	_ = c.SetDeadline(time.Now().Add(500 * time.Millisecond))
+	if rest, _ := io.ReadAll(c); strings.Contains(string(rest), "PONG") {
+		t.Fatalf("a server whose lease ran out passed the visitor on to its copy: %q", rest)
+	}
+}

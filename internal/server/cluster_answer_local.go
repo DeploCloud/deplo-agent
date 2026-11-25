@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"net"
@@ -29,14 +30,41 @@ func (f *forwarders) carry(appID string, in, up net.Conn) {
 		f.watching = true
 		go f.watchLocal()
 	}
+	cluster := f.st.Cluster
 	f.mu.Unlock()
-	forwarder.Join(in, up)
+	here := func() bool { h, _ := f.s.leaseGuard().answerHolders(cluster, appID); return h }
+	forwarder.Join(leased{in, here}, up)
 	f.mu.Lock()
 	delete(f.local[appID], in)
 	if len(f.local[appID]) == 0 {
 		delete(f.local, appID)
 	}
 	f.mu.Unlock()
+}
+
+// leased is a visitor carried to this server's own proxy: each read it passes on asks the lease first, so a server
+// thawed after its lease ran out passes nothing more to a copy that may be stale (c41).
+type leased struct {
+	net.Conn
+	here func() bool
+}
+
+var errNotHere = errors.New("this server no longer runs the App")
+
+func (c leased) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if n > 0 && !c.here() {
+		c.Conn.Close()
+		return 0, errNotHere
+	}
+	return n, err
+}
+
+func (c leased) CloseWrite() error {
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return errors.ErrUnsupported
 }
 
 // watchLocal closes, every localCheck, the visitors carried here for an App the placement no longer puts here.
