@@ -24,6 +24,9 @@ const (
 	// memory cap keeps what it writes from piling up unwritten, which a disk with no scheduler flushes all at once.
 	copySlice   = "deplocopy.slice"
 	copyWeights = "CPUWeight=10 IOWeight=1 MemoryHigh=256M"
+	// cliSlice holds every docker and git command the agent runs: level with Docker's own daemon, under the agent.
+	cliSlice   = "deplocli.slice"
+	cliWeights = "CPUWeight=100 IOWeight=100"
 )
 
 // proxyWeight gives the proxy every request crosses the agent's own CPU weight (Docker's default is 100): a copy
@@ -85,6 +88,11 @@ func takePriority(ctx context.Context, cgroup string) {
 		}
 	}
 	proxyFirst(ctx)
+	if systemctl(ctx, "start", cliSlice) == nil &&
+		systemctl(ctx, append([]string{"set-property", "--runtime", cliSlice}, strings.Fields(cliWeights)...)...) == nil &&
+		!dockercli.UseCgroup("/sys/fs/cgroup/"+cliSlice) {
+		fmt.Fprintf(os.Stderr, "deplo-agent: docker commands run beside the agent: %s takes no process\n", cliSlice)
+	}
 	res, err := dockercli.Run(ctx, 10*time.Second, "info", "--format", "{{.CgroupDriver}}")
 	if err != nil || res.Code != 0 || strings.TrimSpace(res.Stdout) != "systemd" {
 		return
