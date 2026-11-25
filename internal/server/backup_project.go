@@ -16,6 +16,7 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
 
+// The panel matches this text word for word to skip, not fail, a live App with no data yet.
 var errNoVolumeFiles = errors.New("the App's data holds no file on this server, so its archive is not a backup")
 
 func (s *Service) backupProject(ctx context.Context, p *pb.ProjectDescriptor, dest *artifactDestination, e *bkEmitter) {
