@@ -61,6 +61,7 @@ const (
 	Agent_CopyClusterImage_FullMethodName      = "/deplo.agent.v1.Agent/CopyClusterImage"
 	Agent_ExpectClusterImage_FullMethodName    = "/deplo.agent.v1.Agent/ExpectClusterImage"
 	Agent_ExpectClusterBackup_FullMethodName   = "/deplo.agent.v1.Agent/ExpectClusterBackup"
+	Agent_ExpectClusterFetch_FullMethodName    = "/deplo.agent.v1.Agent/ExpectClusterFetch"
 	Agent_ExpectClusterVolume_FullMethodName   = "/deplo.agent.v1.Agent/ExpectClusterVolume"
 	Agent_SendClusterVolume_FullMethodName     = "/deplo.agent.v1.Agent/SendClusterVolume"
 	Agent_SetClusterForwarders_FullMethodName  = "/deplo.agent.v1.Agent/SetClusterForwarders"
@@ -248,6 +249,9 @@ type AgentClient interface {
 	// Tell this member to keep one backup from one member in its store, once, within the copy's time
 	// limit (capability "backup-store.member"). A backup stream that matches no such entry is refused.
 	ExpectClusterBackup(ctx context.Context, in *ExpectClusterBackupRequest, opts ...grpc.CallOption) (*ExpectClusterBackupResponse, error)
+	// Tell this member that one member reads one backup from its store, once, within the copy's time
+	// limit (capability "backup-store.fetch"). A read that matches no such entry gets no byte.
+	ExpectClusterFetch(ctx context.Context, in *ExpectClusterFetchRequest, opts ...grpc.CallOption) (*ExpectClusterFetchResponse, error)
 	// Tell this member to take one volume from one member, once, within the copy's time limit
 	// (capability "volume-copy.member"). A volume stream that matches no such entry is refused.
 	ExpectClusterVolume(ctx context.Context, in *ExpectClusterVolumeRequest, opts ...grpc.CallOption) (*ExpectClusterVolumeResponse, error)
@@ -888,6 +892,16 @@ func (c *agentClient) ExpectClusterBackup(ctx context.Context, in *ExpectCluster
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ExpectClusterBackupResponse)
 	err := c.cc.Invoke(ctx, Agent_ExpectClusterBackup_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) ExpectClusterFetch(ctx context.Context, in *ExpectClusterFetchRequest, opts ...grpc.CallOption) (*ExpectClusterFetchResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ExpectClusterFetchResponse)
+	err := c.cc.Invoke(ctx, Agent_ExpectClusterFetch_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1664,6 +1678,9 @@ type AgentServer interface {
 	// Tell this member to keep one backup from one member in its store, once, within the copy's time
 	// limit (capability "backup-store.member"). A backup stream that matches no such entry is refused.
 	ExpectClusterBackup(context.Context, *ExpectClusterBackupRequest) (*ExpectClusterBackupResponse, error)
+	// Tell this member that one member reads one backup from its store, once, within the copy's time
+	// limit (capability "backup-store.fetch"). A read that matches no such entry gets no byte.
+	ExpectClusterFetch(context.Context, *ExpectClusterFetchRequest) (*ExpectClusterFetchResponse, error)
 	// Tell this member to take one volume from one member, once, within the copy's time limit
 	// (capability "volume-copy.member"). A volume stream that matches no such entry is refused.
 	ExpectClusterVolume(context.Context, *ExpectClusterVolumeRequest) (*ExpectClusterVolumeResponse, error)
@@ -1956,6 +1973,9 @@ func (UnimplementedAgentServer) ExpectClusterImage(context.Context, *ExpectClust
 }
 func (UnimplementedAgentServer) ExpectClusterBackup(context.Context, *ExpectClusterBackupRequest) (*ExpectClusterBackupResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ExpectClusterBackup not implemented")
+}
+func (UnimplementedAgentServer) ExpectClusterFetch(context.Context, *ExpectClusterFetchRequest) (*ExpectClusterFetchResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ExpectClusterFetch not implemented")
 }
 func (UnimplementedAgentServer) ExpectClusterVolume(context.Context, *ExpectClusterVolumeRequest) (*ExpectClusterVolumeResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ExpectClusterVolume not implemented")
@@ -2721,6 +2741,24 @@ func _Agent_ExpectClusterBackup_Handler(srv interface{}, ctx context.Context, de
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(AgentServer).ExpectClusterBackup(ctx, req.(*ExpectClusterBackupRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_ExpectClusterFetch_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ExpectClusterFetchRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).ExpectClusterFetch(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_ExpectClusterFetch_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).ExpectClusterFetch(ctx, req.(*ExpectClusterFetchRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -3800,6 +3838,10 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ExpectClusterBackup",
 			Handler:    _Agent_ExpectClusterBackup_Handler,
+		},
+		{
+			MethodName: "ExpectClusterFetch",
+			Handler:    _Agent_ExpectClusterFetch_Handler,
 		},
 		{
 			MethodName: "ExpectClusterVolume",

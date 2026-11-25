@@ -119,8 +119,12 @@ func (s *Service) Backup(req *pb.BackupRequest, stream pb.Agent_BackupServer) er
 
 // Restore restores a database or project from an artifact this host can reach (an S3 object or a local store), in place.
 func (s *Service) Restore(req *pb.RestoreRequest, stream pb.Agent_RestoreServer) error {
-	e := &rsEmitter{send: stream.Send}
 	ctx := stream.Context()
+	if req.GetMemberFingerprint() != "" && req.GetStore() != nil {
+		s.restoreFromMember(ctx, req, stream)
+		return nil
+	}
+	e := &rsEmitter{send: stream.Send}
 
 	src, err := sourceFromRestore(s, req)
 	if err != nil {

@@ -189,6 +189,10 @@ service Agent {
   // limit (capability "backup-store.member"). A backup stream that matches no such entry is refused.
   rpc ExpectClusterBackup(ExpectClusterBackupRequest) returns (ExpectClusterBackupResponse);
 
+  // Tell this member that one member reads one backup from its store, once, within the copy's time
+  // limit (capability "backup-store.fetch"). A read that matches no such entry gets no byte.
+  rpc ExpectClusterFetch(ExpectClusterFetchRequest) returns (ExpectClusterFetchResponse);
+
   // Tell this member to take one volume from one member, once, within the copy's time limit
   // (capability "volume-copy.member"). A volume stream that matches no such entry is refused.
   rpc ExpectClusterVolume(ExpectClusterVolumeRequest) returns (ExpectClusterVolumeResponse);
@@ -1519,6 +1523,9 @@ message RestoreRequest {
   // PROJECT only: put the copy replication keeps on this member in place of the App's Volumes and
   // Files, instead of reading an artifact. Needs `cluster.replicas`; s3 and store are ignored.
   bool from_replica = 9;
+  // With store: the store is on that member, told to expect this server (ExpectClusterFetch), and
+  // the artifact is read from it over the cluster's private network. Capability "backup-store.fetch".
+  string member_fingerprint = 10;
 }
 
 message RestoreEvent {
@@ -1531,6 +1538,9 @@ message RestoreEvent {
 message RestoreResult {
   bool ok = 1;
   string error = 2;
+  // Under member_fingerprint: "direct", "relay", or "none" when that member answered nothing before
+  // a byte was read; empty otherwise.
+  string path = 3;
 }
 
 message S3CheckRequest {
@@ -2645,6 +2655,15 @@ message ExpectClusterBackupRequest {
 }
 
 message ExpectClusterBackupResponse {}
+
+message ExpectClusterFetchRequest {
+  // Where this member keeps it: its store's root and the artifact's key.
+  StoreTarget store = 1;
+  // The reading member's certificate fingerprint (sha256 hex of its DER).
+  string reader_fingerprint = 2;
+}
+
+message ExpectClusterFetchResponse {}
 
 message ExpectClusterVolumeRequest {
   string volume_name = 1;
