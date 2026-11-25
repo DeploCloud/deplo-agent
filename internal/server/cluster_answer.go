@@ -586,7 +586,8 @@ func (f *forwarders) dialProxy(ctx context.Context, port uint32) (net.Conn, erro
 func (f *forwarders) ready(ctx context.Context, appID string) bool {
 	for {
 		f.mu.Lock()
-		if f.replacing[appID] > 0 || f.stopping {
+		// A proxy restart changes no container: what was found ready stays, behind the restart and its settle.
+		if f.replacing[appID] > 0 || f.stopping || time.Since(f.proxyStarted) < proxySettle {
 			f.mu.Unlock()
 			return false
 		}
@@ -630,7 +631,7 @@ func (f *forwarders) ready(ctx context.Context, appID string) bool {
 				since = seen
 			}
 		}
-		rc.ok = r.OK && now.Sub(since) >= answerSettle && now.Sub(f.proxyStarted) >= proxySettle && !f.stopping
+		rc.ok = r.OK && now.Sub(since) >= answerSettle
 		rc.broken = r.Broken
 		rc.until = now.Add(answerRetry)
 		if rc.ok {

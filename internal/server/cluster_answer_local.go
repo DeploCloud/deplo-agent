@@ -90,15 +90,12 @@ func (f *forwarders) watchLocal() {
 	}
 }
 
-// proxyRestarted notes that this server's proxy just started: every App waits answerSettle more before its
+// proxyRestarted notes that this server's proxy just started: every App waits proxySettle more before its
 // visitors reach it, the time the proxy takes to read its routes.
 func (f *forwarders) proxyRestarted() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.proxyStarted, f.stopping = time.Now(), false
-	for _, rc := range f.readiness {
-		rc.until = time.Time{}
-	}
 }
 
 // passHeld takes a visitor held at this server's front door for an App of the cluster, behind the PROXY header its
@@ -130,9 +127,6 @@ func (f *forwarders) proxyStopping() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.stopping = true
-	for _, rc := range f.readiness {
-		rc.until = time.Time{}
-	}
 }
 
 // recreating holds the App's visitors here while a reroute replaces its containers: a ready kept from before passed
