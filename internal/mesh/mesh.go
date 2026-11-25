@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"golang.zx2c4.com/wireguard/device"
-	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
 const (
@@ -85,7 +84,7 @@ type Mesh struct {
 	cfg  Config
 	pub  Key
 	dev  *device.Device
-	tnet *netstack.Net
+	tnet *netTun
 	bind *bind
 
 	mu     sync.RWMutex
@@ -190,7 +189,7 @@ func Start(cfg Config) (*Mesh, error) {
 	if err != nil {
 		return nil, err
 	}
-	tdev, tnet, err := netstack.CreateNetTUN([]netip.Addr{cfg.Address}, nil, MTU)
+	tnet, err := newNetTUN(cfg.Address, MTU)
 	if err != nil {
 		return nil, err
 	}
@@ -209,7 +208,7 @@ func Start(cfg Config) (*Mesh, error) {
 		Verbosef: func(string, ...any) {},
 		Errorf:   func(f string, a ...any) { cfg.Logf("cluster network: "+f, a...) },
 	}
-	m.dev = device.NewDevice(tdev, m.bind, logger)
+	m.dev = device.NewDevice(tnet, m.bind, logger)
 	if err := m.dev.IpcSet(fmt.Sprintf("private_key=%s\nlisten_port=%d\n", cfg.PrivateKey.hex(), cfg.Port)); err != nil {
 		m.dev.Close()
 		return nil, err
