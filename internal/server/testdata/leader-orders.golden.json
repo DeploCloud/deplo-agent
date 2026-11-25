@@ -6,7 +6,7 @@
       "member": "srv_a",
       "epoch": 0,
       "placement": null,
-      "fenceSeconds": 5,
+      "fenceSeconds": 20,
       "announces": true,
       "announce": 370
     }
@@ -19,7 +19,7 @@
       "epoch": 0,
       "placement": null,
       "extendSeconds": 300,
-      "fenceSeconds": 5,
+      "fenceSeconds": 20,
       "announces": true
     }
   },
@@ -75,7 +75,7 @@
       "member": "srv_a",
       "epoch": 0,
       "placement": null,
-      "fenceSeconds": 5,
+      "fenceSeconds": 20,
       "announces": true,
       "noExtension": true
     }
@@ -87,7 +87,7 @@
       "member": "srv_a",
       "epoch": 0,
       "placement": null,
-      "fenceSeconds": 5,
+      "fenceSeconds": 20,
       "announces": true,
       "from": "leader"
     }
@@ -100,7 +100,7 @@
       "epoch": 0,
       "placement": null,
       "extendSeconds": 300,
-      "fenceSeconds": 5,
+      "fenceSeconds": 20,
       "announces": true,
       "return": true
     }
@@ -112,7 +112,7 @@
       "member": "srv_a",
       "epoch": 0,
       "placement": null,
-      "fenceSeconds": 5,
+      "fenceSeconds": 20,
       "announces": true,
       "noExtension": true,
       "return": true,
@@ -126,7 +126,7 @@
       "member": "srv_a",
       "epoch": 0,
       "placement": null,
-      "fenceSeconds": 5,
+      "fenceSeconds": 20,
       "announces": true,
       "start": {
         "deploymentId": "",
@@ -149,7 +149,7 @@
       "member": "srv_a",
       "epoch": 0,
       "placement": null,
-      "fenceSeconds": 5,
+      "fenceSeconds": 20,
       "announces": true,
       "start": {
         "deploymentId": "",
@@ -175,7 +175,7 @@
       "member": "srv_a",
       "epoch": 0,
       "placement": null,
-      "fenceSeconds": 5,
+      "fenceSeconds": 20,
       "announces": true,
       "start": {
         "deploymentId": "",

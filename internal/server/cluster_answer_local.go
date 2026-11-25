@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"net"
@@ -29,14 +30,41 @@ func (f *forwarders) carry(appID string, in, up net.Conn) {
 		f.watching = true
 		go f.watchLocal()
 	}
+	cluster := f.st.Cluster
 	f.mu.Unlock()
-	forwarder.Join(in, up)
+	here := func() bool { h, _ := f.s.leaseGuard().answerHolders(cluster, appID); return h }
+	forwarder.Join(leased{in, here}, up)
 	f.mu.Lock()
 	delete(f.local[appID], in)
 	if len(f.local[appID]) == 0 {
 		delete(f.local, appID)
 	}
 	f.mu.Unlock()
+}
+
+// leased is a visitor carried to this server's own proxy: each read it passes on asks the lease first, so a server
+// thawed after its lease ran out passes nothing more to a copy that may be stale (c41).
+type leased struct {
+	net.Conn
+	here func() bool
+}
+
+var errNotHere = errors.New("this server no longer runs the App")
+
+func (c leased) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if n > 0 && !c.here() {
+		c.Conn.Close()
+		return 0, errNotHere
+	}
+	return n, err
+}
+
+func (c leased) CloseWrite() error {
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return errors.ErrUnsupported
 }
 
 // watchLocal closes, every localCheck, the visitors carried here for an App the placement no longer puts here.
@@ -62,15 +90,43 @@ func (f *forwarders) watchLocal() {
 	}
 }
 
-// proxyRestarted notes that this server's proxy just started: every App waits answerSettle more before its
+// proxyRestarted notes that this server's proxy just started: every App waits proxySettle more before its
 // visitors reach it, the time the proxy takes to read its routes.
 func (f *forwarders) proxyRestarted() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.proxyStarted = time.Now()
-	for _, rc := range f.readiness {
-		rc.until = time.Time{}
+	f.proxyStarted, f.stopping = time.Now(), false
+}
+
+// passHeld takes a visitor held at this server's front door for an App of the cluster, behind the PROXY header its
+// proxy would have sent: to another server that runs it at once, or here once the proxy is back and settled.
+func (f *forwarders) passHeld(c net.Conn, host string) bool {
+	f.mu.Lock()
+	cluster, members := f.st.Cluster, f.st.Members
+	var appID string
+	for _, a := range f.st.Answers {
+		if a.Routes != nil && slices.Contains(a.Routes.hosts(), host) {
+			appID = a.AppID
+		}
 	}
+	f.mu.Unlock()
+	if appID == "" || !f.admit() {
+		return false
+	}
+	go func() {
+		defer f.leave()
+		defer c.Close()
+		f.answerFor(c, cluster, members, appID, answerTLS, proxyHeader(c))
+	}()
+	return true
+}
+
+// proxyStopping notes that this server's proxy is about to stop: no visitor is passed to it, from here or another
+// server, until it is back and settled (c42: a held visitor met the new proxy before it read its routes, 404).
+func (f *forwarders) proxyStopping() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stopping = true
 }
 
 // recreating holds the App's visitors here while a reroute replaces its containers: a ready kept from before passed

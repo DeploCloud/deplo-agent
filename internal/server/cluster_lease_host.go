@@ -24,7 +24,7 @@ func (s *Service) leaseFile() string {
 // leaseGuard is created with the member, so a lease that ran out while the agent was down is still honoured.
 func (s *Service) leaseGuard() *leaseGuard {
 	s.leaseOnce.Do(func() {
-		s.lease = newLeaseGuard(s.leaseFile(), time.Now, s.fenceStacks)
+		s.lease = newLeaseGuard(s.leaseFile(), bootClock, s.fenceStacks)
 		s.lease.start, s.lease.leader = s.startFromBundle, s.leaderPins
 		s.lease.remove, s.lease.resume, s.lease.trim = s.removeMoved, s.resumeHeld, s.trimReplicas
 		s.lease.keep, s.lease.purge, s.lease.stop = s.keepLeft, s.purgeLeft, s.stopMoved

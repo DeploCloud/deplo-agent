@@ -171,6 +171,8 @@ type forwarders struct {
 	// proxyStarted is when this server's proxy last started: no App counts ready here before it had answerSettle
 	// to read its routes (c39: a recreated proxy answered 404 for seconds).
 	proxyStarted time.Time
+	// stopping is a restart of this server's proxy under way: no App counts ready here until it is back.
+	stopping bool
 	// replacing counts, by App, the reroutes replacing its containers here now: its visitors wait meanwhile.
 	replacing map[string]int
 	// local are the visitors carried to this server's own proxy, by App, each with the stream it was joined to.

@@ -151,6 +151,8 @@ var Capabilities = []string{
 	"cluster.relinquish",
 	// A failover start pulls only an image the server lacks, and a copied registry image prunes no other tag.
 	"cluster.images.registry",
+	// HoldFailoverImages: a member pulls its cluster's registry images ahead of a failover, and cleanup spares them.
+	"cluster.failover.images",
 	// ReadProxyCertificates, and a failover's certificates installed as files then moved into the proxy's store.
 	"cluster.answers.certificates",
 	// SetClusterZone: the cluster's DNS zone, answered by an unprivileged process on port 53 (ADR-0049).
@@ -236,6 +238,13 @@ type Service struct {
 	member     *clusterMember
 	// imageOps is the docker side of cluster image copies; tests replace it.
 	imageOps clusterImageOps
+	// failover is the registry images this member keeps ready to take its cluster's workloads over.
+	failover         failoverImages
+	failoverRootOnce sync.Once
+	failoverRoot     string
+	// frontRelease ends the hold of this server's visitors while its proxy restarts.
+	frontMu      sync.Mutex
+	frontRelease func()
 	// expected is the images Deplo told this member to take from another one, by ref.
 	expectedMu sync.Mutex
 	expected   map[string]expectedImage

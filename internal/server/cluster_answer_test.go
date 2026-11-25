@@ -66,9 +66,9 @@ func appEntry(member string) lease.Entry {
 // quickAnswers shortens how long a passed-on connection waits for a ready server.
 func quickAnswers(t *testing.T, wait time.Duration) {
 	t.Helper()
-	w, r, s := answerWait, answerRetry, answerSettle
-	answerWait, answerRetry, answerSettle = wait, 50*time.Millisecond, 0
-	t.Cleanup(func() { answerWait, answerRetry, answerSettle = w, r, s })
+	w, r, s, p := answerWait, answerRetry, answerSettle, proxySettle
+	answerWait, answerRetry, answerSettle, proxySettle = wait, 50*time.Millisecond, 0, 0
+	t.Cleanup(func() { answerWait, answerRetry, answerSettle, proxySettle = w, r, s, p })
 }
 
 // askPort connects as the answer forwarder's container does for a caller that dialed port: the port line, then its bytes.
@@ -774,22 +774,60 @@ func TestAnswers_aConnectionKeptOpenIsClosedOnceTheAppRunsElsewhere(t *testing.T
 	}
 }
 
-// c39: a recreated proxy answered 404 until it had read its routes: its visitors wait for it instead.
+// c39: a recreated proxy answered 404 until it had read its routes; c42: a visitor held through another server met it
+// before. Its visitors wait from the moment it stops until it settled.
 func TestAnswers_aRestartedProxyGetsNoVisitorUntilItSettles(t *testing.T) {
 	a, _, _, _, _ := answerPair(t)
 	f := a.forwarders()
 	f.s.fwdOps.ready = func(context.Context, string) appReadiness {
 		return appReadiness{OK: true, Since: time.Now().Add(-time.Hour)}
 	}
-	old, oldRetry := answerSettle, answerRetry
-	answerSettle, answerRetry = 300*time.Millisecond, 10*time.Millisecond
-	t.Cleanup(func() { answerSettle, answerRetry = old, oldRetry })
+	old, oldRetry := proxySettle, answerRetry
+	proxySettle, answerRetry = 300*time.Millisecond, 10*time.Millisecond
+	t.Cleanup(func() { proxySettle, answerRetry = old, oldRetry })
 	if !f.ready(context.Background(), "prj1") {
 		t.Fatal("an App that ran for an hour is not ready")
+	}
+	f.proxyStopping()
+	if f.ready(context.Background(), "prj1") {
+		t.Fatal("ready while its proxy restarts")
 	}
 	f.proxyRestarted()
 	if f.ready(context.Background(), "prj1") {
 		t.Fatal("ready the moment its proxy restarted")
 	}
 	eventually(t, "ready once the proxy settled", func() bool { return f.ready(context.Background(), "prj1") })
+}
+
+// c41: at the thaw of a 2-minute hang, what a kept connection had queued reached the stale copy before the agent's
+// once-a-second look closed it. Each read passed on asks the lease first.
+func TestAnswers_aCarriedVisitorPassesNothingOnceTheLeaseRanOut(t *testing.T) {
+	quickAnswers(t, 2*time.Second)
+	a, b, fa, _, members := answerPair(t)
+	apply(t, a, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members, AnswerPort: backend(t, "proxy-a"),
+		Answers: []*pb.ClusterAnswer{shop()}, ServeAnswers: []string{"prj1"}})
+	apply(t, b, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members, AnswerPort: holdingBackend(t, "proxy-b"),
+		Answers: []*pb.ClusterAnswer{shop()}, ServeAnswers: []string{"prj1"}})
+	placeOn(t, a, "srvA", appEntry("srvB"))
+	placeOn(t, b, "srvB", appEntry("srvB"))
+	c, err := net.DialTimeout("unix", filepath.Join(fa.spec(t, answerAlias).Dir, fwdSocket), 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	_, _ = io.WriteString(c, "PORT "+strconv.Itoa(int(shopTLS))+"\nping")
+	got := make([]byte, len("proxy-b:PING"))
+	if _, err := io.ReadFull(c, got); err != nil || string(got) != "proxy-b:PING" {
+		t.Fatalf("the visitor read %q (%v)", got, err)
+	}
+	g := b.leaseGuard()
+	g.mu.Lock()
+	g.now = func() time.Time { return time.Now().Add(2 * time.Minute) }
+	g.mu.Unlock()
+	_, _ = io.WriteString(c, "pong")
+	_ = c.SetDeadline(time.Now().Add(500 * time.Millisecond))
+	if rest, _ := io.ReadAll(c); strings.Contains(string(rest), "PONG") {
+		t.Fatalf("a server whose lease ran out passed the visitor on to its copy: %q", rest)
+	}
 }

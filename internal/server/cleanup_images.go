@@ -205,7 +205,7 @@ func cleanUnusedPulledImages(ctx context.Context, p cleanupParams, idx *containe
 
 	var failures scopeFailures
 	for _, im := range images {
-		if idx.images[im.id] || im.managed {
+		if idx.images[im.id] || im.managed || keptForFailover(im, p.failoverKept) {
 			continue
 		}
 		if t, ok := parseDockerTime(im.lastTag); !ok || t.IsZero() {

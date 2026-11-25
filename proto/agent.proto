@@ -185,6 +185,11 @@ service Agent {
   // An image stream that matches no such entry is refused.
   rpc ExpectClusterImage(ExpectClusterImageRequest) returns (ExpectClusterImageResponse);
 
+  // The registry images this member keeps ready to take over its cluster's workloads (capability
+  // "cluster.failover.images"): it pulls the missing ones one at a time while a tenth of its disk stays
+  // free, and cleanup spares every one listed. Each call replaces the list.
+  rpc HoldFailoverImages(HoldFailoverImagesRequest) returns (HoldFailoverImagesResponse);
+
   // Tell this member to keep one backup from one member in its store, once, within the copy's time
   // limit (capability "backup-store.member"). A backup stream that matches no such entry is refused.
   rpc ExpectClusterBackup(ExpectClusterBackupRequest) returns (ExpectClusterBackupResponse);
@@ -2646,6 +2651,23 @@ message ExpectClusterImageRequest {
 }
 
 message ExpectClusterImageResponse {}
+
+message FailoverImage {
+  string image_ref = 1;
+  // Its size where it is held, 0 when unknown: what a pull must leave room for.
+  int64 bytes = 2;
+  // In the response: whether this server holds it now, and why its last pull failed.
+  bool held = 3;
+  string error = 4;
+}
+
+message HoldFailoverImagesRequest {
+  repeated FailoverImage images = 1;
+}
+
+message HoldFailoverImagesResponse {
+  repeated FailoverImage images = 1;
+}
 
 message ExpectClusterBackupRequest {
   // Where this member keeps it: its store's root and the artifact's key.
