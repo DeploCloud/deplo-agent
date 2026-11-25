@@ -152,6 +152,7 @@ func DrainVisitors() {
 // drainLocked is DrainVisitors; the caller holds kept.
 func drainLocked() {
 	restarting.Store(true)
+	runRestartHooks()
 	for name, ln := range kept.live {
 		_ = ln.Close()
 		delete(kept.live, name)

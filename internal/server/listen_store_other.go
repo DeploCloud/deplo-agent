@@ -20,4 +20,4 @@ func keptForExec() string      { return "" }
 var restarting atomic.Bool
 
 // DrainVisitors stops taking visitors before the agent exits.
-func DrainVisitors() { restarting.Store(true) }
+func DrainVisitors() { restarting.Store(true); runRestartHooks() }

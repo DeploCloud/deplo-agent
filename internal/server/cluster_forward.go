@@ -194,6 +194,8 @@ func (s *Service) forwarders() *forwarders {
 				_ = json.Unmarshal(raw, &f.st)
 			}
 		}
+		f.takeHandover()
+		onRestart(f.saveHandover)
 		s.fwd = f
 	})
 	return s.fwd
