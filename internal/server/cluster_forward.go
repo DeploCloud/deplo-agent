@@ -168,6 +168,12 @@ type forwarders struct {
 	// refusing; proxyDownSaid keeps that to one log line per outage.
 	proxyDown     time.Time
 	proxyDownSaid bool
+	// proxyStarted is when this server's proxy last started: no App counts ready here before it had answerSettle
+	// to read its routes (c39: a recreated proxy answered 404 for seconds).
+	proxyStarted time.Time
+	// local are the visitors carried to this server's own proxy, by App, each with the stream it was joined to.
+	local    map[string]map[net.Conn]net.Conn
+	watching bool
 }
 
 func (s *Service) forwarders() *forwarders {

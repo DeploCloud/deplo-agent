@@ -711,3 +711,85 @@ func TestAnswers_aProxyThatRefusesIsDialedOncePerHoldNotPerConnection(t *testing
 		t.Fatalf("B's refusing proxy was dialed %d times for 20 visitors in one hold", n)
 	}
 }
+
+// holdingBackend is a proxy that keeps every connection open: it names itself, then echoes what it reads in capitals.
+func holdingBackend(t *testing.T, name string) uint32 {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				_, _ = io.WriteString(c, name+":")
+				buf := make([]byte, 64)
+				for {
+					n, err := c.Read(buf)
+					if err != nil {
+						return
+					}
+					_, _ = c.Write([]byte(strings.ToUpper(string(buf[:n]))))
+				}
+			}()
+		}
+	}()
+	return uint32(ln.Addr().(*net.TCPAddr).Port)
+}
+
+// c39: a visitor's connection kept open across a move still reached the server the App left, and got its 404.
+func TestAnswers_aConnectionKeptOpenIsClosedOnceTheAppRunsElsewhere(t *testing.T) {
+	quickAnswers(t, 2*time.Second)
+	was := localCheck
+	localCheck = 20 * time.Millisecond
+	t.Cleanup(func() { localCheck = was })
+	a, b, fa, _, members := answerPair(t)
+	apply(t, a, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members, AnswerPort: backend(t, "proxy-a"),
+		Answers: []*pb.ClusterAnswer{shop()}, ServeAnswers: []string{"prj1"}})
+	apply(t, b, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members, AnswerPort: holdingBackend(t, "proxy-b"),
+		Answers: []*pb.ClusterAnswer{shop()}, ServeAnswers: []string{"prj1"}})
+	placeOn(t, a, "srvA", appEntry("srvB"))
+	placeOn(t, b, "srvB", appEntry("srvB"))
+	c, err := net.DialTimeout("unix", filepath.Join(fa.spec(t, answerAlias).Dir, fwdSocket), 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	_, _ = io.WriteString(c, "PORT "+strconv.Itoa(int(shopTLS))+"\nping")
+	got := make([]byte, len("proxy-b:PING"))
+	if _, err := io.ReadFull(c, got); err != nil || string(got) != "proxy-b:PING" {
+		t.Fatalf("the visitor read %q (%v)", got, err)
+	}
+	placeOn(t, b, "srvB", appEntry("srvA"))
+	_ = c.SetDeadline(time.Now().Add(2 * time.Second))
+	if _, err := io.ReadAll(c); err != nil {
+		t.Fatalf("the connection to the server the App left stayed open: %v", err)
+	}
+}
+
+// c39: a recreated proxy answered 404 until it had read its routes: its visitors wait for it instead.
+func TestAnswers_aRestartedProxyGetsNoVisitorUntilItSettles(t *testing.T) {
+	a, _, _, _, _ := answerPair(t)
+	f := a.forwarders()
+	f.s.fwdOps.ready = func(context.Context, string) appReadiness {
+		return appReadiness{OK: true, Since: time.Now().Add(-time.Hour)}
+	}
+	old, oldRetry := answerSettle, answerRetry
+	answerSettle, answerRetry = 300*time.Millisecond, 10*time.Millisecond
+	t.Cleanup(func() { answerSettle, answerRetry = old, oldRetry })
+	if !f.ready(context.Background(), "prj1") {
+		t.Fatal("an App that ran for an hour is not ready")
+	}
+	f.proxyRestarted()
+	if f.ready(context.Background(), "prj1") {
+		t.Fatal("ready the moment its proxy restarted")
+	}
+	eventually(t, "ready once the proxy settled", func() bool { return f.ready(context.Background(), "prj1") })
+}

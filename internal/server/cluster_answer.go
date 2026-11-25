@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
@@ -55,6 +56,8 @@ var (
 	// proxyDownFor is how long a refused dial to this server's own proxy holds: while its proxy is recreated, the
 	// members passing it visitors hear "not answering" at once instead of each connection dialing again (c38).
 	proxyDownFor = time.Second
+	// localCheck is how often the visitors carried to this server's own proxy are checked against the placement.
+	localCheck = time.Second
 	// By default at most this many connections pass through this agent at once, waiting or carried (a quarter of
 	// them may wait), and this many wait for one App: past either, a connection is closed at once. Deplo can set
 	// both per cluster.
@@ -391,7 +394,11 @@ func (f *forwarders) serveAnswer(c net.Conn) {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			up, via := f.reachAnswer(ctx, cluster, members, appID, port)
 			if up != nil {
-				forwarder.Join(in, up)
+				if via == "" {
+					f.carry(appID, in, up)
+				} else {
+					forwarder.Join(in, up)
+				}
 				f.release(via)
 				cancel()
 				return
@@ -594,6 +601,9 @@ func (f *forwarders) ready(ctx context.Context, appID string) bool {
 		now := time.Now()
 		f.mu.Lock()
 		since := r.Since
+		if f.proxyStarted.After(since) {
+			since = f.proxyStarted
+		}
 		if !r.OK {
 			delete(f.readySeen, appID)
 		} else if r.Health {
@@ -696,7 +706,66 @@ func (f *forwarders) serveAnswerStream(from wire.Party, c net.Conn, network, app
 		up.Close()
 		return
 	}
-	forwarder.Join(c, up)
+	f.carry(appID, c, up)
+}
+
+// carry joins a visitor to this server's own proxy until either side ends, or the App runs elsewhere: a connection
+// kept open across a move is closed, so it reconnects, never getting the 404 of a proxy the App left (c39).
+func (f *forwarders) carry(appID string, in, up net.Conn) {
+	f.mu.Lock()
+	if f.local == nil {
+		f.local = map[string]map[net.Conn]net.Conn{}
+	}
+	if f.local[appID] == nil {
+		f.local[appID] = map[net.Conn]net.Conn{}
+	}
+	f.local[appID][in] = up
+	if !f.watching {
+		f.watching = true
+		go f.watchLocal()
+	}
+	f.mu.Unlock()
+	forwarder.Join(in, up)
+	f.mu.Lock()
+	delete(f.local[appID], in)
+	if len(f.local[appID]) == 0 {
+		delete(f.local, appID)
+	}
+	f.mu.Unlock()
+}
+
+// watchLocal closes, every localCheck, the visitors carried here for an App the placement no longer puts here.
+// ponytail: one goroutine for the agent's life, started by the first visitor carried.
+func (f *forwarders) watchLocal() {
+	for {
+		time.Sleep(localCheck)
+		f.mu.Lock()
+		cluster := f.st.Cluster
+		apps := slices.Collect(maps.Keys(f.local))
+		f.mu.Unlock()
+		for _, appID := range apps {
+			if here, _ := f.s.leaseGuard().answerHolders(cluster, appID); here {
+				continue
+			}
+			f.mu.Lock()
+			for in, up := range f.local[appID] {
+				in.Close()
+				up.Close()
+			}
+			f.mu.Unlock()
+		}
+	}
+}
+
+// proxyRestarted notes that this server's proxy just started: every App waits answerSettle more before its
+// visitors reach it, the time the proxy takes to read its routes.
+func (f *forwarders) proxyRestarted() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.proxyStarted = time.Now()
+	for _, rc := range f.readiness {
+		rc.until = time.Time{}
+	}
 }
 
 func (f *forwarders) proxyIsDown() bool {

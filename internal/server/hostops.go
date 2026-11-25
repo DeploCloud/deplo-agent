@@ -229,6 +229,7 @@ func (s *Service) TraefikConfig(ctx context.Context, req *pb.TraefikConfigReques
 }
 
 func (s *Service) applyTraefik(ctx context.Context, path string, restartOnly bool) error {
+	defer s.forwarders().proxyRestarted()
 	if s.traefikApply != nil {
 		return s.traefikApply(ctx, path, restartOnly)
 	}
