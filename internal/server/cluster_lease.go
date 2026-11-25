@@ -194,9 +194,12 @@ type leaseGuard struct {
 	// stores is the archives each cluster's leader last told this member to accept from other members.
 	stores map[string][]lease.Store
 	// has says whether a stack is on this host, running whether it runs now; nil reads as yes.
-	has      func(slug string) bool
-	running  func(ctx context.Context, slug string) bool
-	settling map[string]bool
+	has     func(slug string) bool
+	running func(ctx context.Context, slug string) bool
+	// seenRunning is which unplaced stacks the last look found running; looking, whether one is under way.
+	seenRunning map[string]bool
+	looking     bool
+	settling    map[string]bool
 	// starting are the stacks a start order is bringing up here (zero), or brought up at that time: a renewal
 	// that still places one elsewhere does not remove it until the leader has placed it here.
 	starting map[string]time.Time

@@ -44,25 +44,52 @@ func (g *leaseGuard) runningNow(ctx context.Context, entries []lease.Entry) []st
 
 // unplaced is the stacks an order places on no member that this member still has: running, or stopped by
 // itself when its lease ran out. A leader that took over hears from it who has what its picture calls waiting.
+// Whether one runs is what the last look found: the look goes on beside the answer, so a renewal never waits on
+// Docker (c38: eu-2's renewals came 5.3 s apart while its proxy was recreated, and its Apps were fenced).
 func (g *leaseGuard) unplaced(o lease.Order) []string {
 	g.mu.Lock()
 	var held []string
 	if c := g.clusters[o.Cluster]; c != nil {
 		held = slices.Clone(c.Held)
 	}
+	seen := g.seenRunning
 	g.mu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	var out []string
+	var out, ask []string
 	for _, e := range o.Placement {
-		if e.Slug == "" || slices.Contains(out, e.Slug) || !g.hasUnplaced(o.Placement, e) {
+		if e.Slug == "" || slices.Contains(ask, e.Slug) || !g.hasUnplaced(o.Placement, e) {
 			continue
 		}
-		if slices.Contains(held, e.Slug) || (g.running != nil && g.running(ctx, e.Slug)) {
+		ask = append(ask, e.Slug)
+		if slices.Contains(held, e.Slug) || seen[e.Slug] {
 			out = append(out, e.Slug)
 		}
 	}
+	g.lookRunning(ask)
 	return out
+}
+
+// lookRunning asks Docker, one look at a time, which of slugs run here, for the next renewal to say.
+func (g *leaseGuard) lookRunning(slugs []string) {
+	if g.running == nil || len(slugs) == 0 {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.looking {
+		return
+	}
+	g.looking = true
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		seen := map[string]bool{}
+		for _, slug := range slugs {
+			seen[slug] = g.running(ctx, slug)
+		}
+		g.mu.Lock()
+		g.seenRunning, g.looking = seen, false
+		g.mu.Unlock()
+	}()
 }
 
 // comeBack carries a return across a renewal and starts settling it; the caller holds g.mu.
