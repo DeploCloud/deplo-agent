@@ -339,27 +339,51 @@ func readinessOf(lines []string) appReadiness {
 var proxyPid struct {
 	sync.Mutex
 	pid int
+	// missed is when the last look found no proxy: for a second after it, nobody asks Docker again.
+	missed time.Time
+}
+
+// proxyMissFor is how long a look that found no proxy answers for every dial: while a proxy is recreated, each
+// passed-on visitor ran its own docker inspect, up to 59 a second on a one-core server (c39).
+var proxyMissFor = time.Second
+
+// lookupProxyPid is the proxy's process, looked up one at a time: a caller whose stale pid another caller already
+// replaced takes the new one, and none asks Docker within proxyMissFor of a look that found no proxy.
+func lookupProxyPid(ctx context.Context, stale int) (int, error) {
+	proxyPid.Lock()
+	defer proxyPid.Unlock()
+	if proxyPid.pid != 0 && proxyPid.pid != stale {
+		return proxyPid.pid, nil
+	}
+	if time.Since(proxyPid.missed) < proxyMissFor {
+		return 0, fmt.Errorf("this server's proxy is not running")
+	}
+	res, err := dockercli.Run(ctx, 10*time.Second, "inspect", "--format", "{{.State.Pid}}", traefikContainer)
+	pid := 0
+	if err == nil && res.Code == 0 {
+		pid, _ = strconv.Atoi(strings.TrimSpace(res.Stdout))
+	}
+	if pid <= 0 {
+		proxyPid.pid, proxyPid.missed = 0, time.Now()
+		return 0, fmt.Errorf("this server's proxy is not running")
+	}
+	proxyPid.pid = pid
+	return pid, nil
 }
 
 // dialProxyLoopback connects to the proxy's internal entrypoint, which listens on its own loopback: only a process
 // inside its network, as this agent is for that one call, can reach it, and it trusts the PROXY header from there.
 func dialProxyLoopback(ctx context.Context, port uint32) (net.Conn, error) {
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port)))
+	proxyPid.Lock()
+	pid := proxyPid.pid
+	proxyPid.Unlock()
 	for attempt := 0; attempt < 2; attempt++ {
-		proxyPid.Lock()
-		pid := proxyPid.pid
-		proxyPid.Unlock()
 		if pid == 0 || attempt > 0 {
-			res, err := dockercli.Run(ctx, 10*time.Second, "inspect", "--format", "{{.State.Pid}}", traefikContainer)
-			if err != nil || res.Code != 0 {
-				return nil, fmt.Errorf("this server's proxy is not running")
+			var err error
+			if pid, err = lookupProxyPid(ctx, pid); err != nil {
+				return nil, err
 			}
-			if pid, err = strconv.Atoi(strings.TrimSpace(res.Stdout)); err != nil || pid <= 0 {
-				return nil, fmt.Errorf("this server's proxy is not running")
-			}
-			proxyPid.Lock()
-			proxyPid.pid = pid
-			proxyPid.Unlock()
 		}
 		// A proxy that restarted has a new process: the second attempt looks it up again.
 		if c, err := dialInNetwork(ctx, pid, addr); err == nil {
