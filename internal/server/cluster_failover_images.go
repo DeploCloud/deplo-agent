@@ -43,19 +43,12 @@ type failoverState struct {
 	bytes  int64
 	err    string
 	lookAt time.Time
+	// missingSince is when this member found no other one holding the image, waiting for the first to download it.
+	missingSince time.Time
 }
 
-// failoverPull pulls one image; a var so tests pull nothing.
-var failoverPull = func(ctx context.Context, ref string) error {
-	res, err := dockercli.Run(ctx, failoverPullTimeout, "pull", "--quiet", ref)
-	if err != nil {
-		return err
-	}
-	if res.Code != 0 {
-		return fmt.Errorf("%s", firstLine(res.Stderr))
-	}
-	return nil
-}
+// failoverPull downloads one image from its registry, registryPull when nil; a var so tests download nothing.
+var failoverPull func(ctx context.Context, ref string) error
 
 // imageBytes is an image's size on this server; a var so tests ask no docker.
 var imageBytes = func(ctx context.Context, ref string) int64 {
@@ -153,7 +146,12 @@ func (s *Service) holdFailoverImage(im *pb.FailoverImage) {
 	if !held {
 		if err := room.Check(s.dockerRootPath(ctx), im.GetBytes()); err != nil {
 			next.err = err.Error()
-		} else if err := failoverPull(ctx, ref); err != nil {
+		} else if from, err := s.fetchFromMembers(ctx, ref); err == nil {
+			next.held = true
+			fmt.Fprintf(os.Stderr, "deplo-agent: took %s from the cluster's member %s, not its registry\n", ref, from[:min(12, len(from))])
+		} else if wait := s.mayDownload(st, next.lookAt); wait != "" {
+			next.err, next.missingSince = wait, st.missingSince
+		} else if err := s.downloadFailoverImage(ctx, ref); err != nil {
 			next.err = "could not pull it: " + err.Error()
 		} else {
 			next.held = true
@@ -165,6 +163,30 @@ func (s *Service) holdFailoverImage(im *pb.FailoverImage) {
 	f.mu.Lock()
 	*st = next
 	f.mu.Unlock()
+}
+
+// mayDownload says why this member does not download an image no other member holds yet: the cluster's first
+// member does, and the others take it from there; past pullerGrace this one does too. The caller owns st.
+func (s *Service) mayDownload(st *failoverState, now time.Time) string {
+	if _, first := s.clusterPeers(); first {
+		return ""
+	}
+	s.failover.mu.Lock()
+	defer s.failover.mu.Unlock()
+	if st.missingSince.IsZero() {
+		st.missingSince = now
+	}
+	if now.Sub(st.missingSince) >= pullerGrace {
+		return ""
+	}
+	return "waiting for the cluster's first member to download it, then it comes from there"
+}
+
+func (s *Service) downloadFailoverImage(ctx context.Context, ref string) error {
+	if failoverPull != nil {
+		return failoverPull(ctx, ref)
+	}
+	return registryPull(ctx, s, ref)
 }
 
 // dockerRootPath is the disk Docker keeps its images on, looked up once.
