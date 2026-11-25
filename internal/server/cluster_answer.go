@@ -55,6 +55,8 @@ var (
 	// proxyDownFor is how long a refused dial to this server's own proxy holds: while its proxy is recreated, the
 	// members passing it visitors hear "not answering" at once instead of each connection dialing again (c38).
 	proxyDownFor = time.Second
+	// localCheck is how often the visitors carried to this server's own proxy are checked against the placement.
+	localCheck = time.Second
 	// By default at most this many connections pass through this agent at once, waiting or carried (a quarter of
 	// them may wait), and this many wait for one App: past either, a connection is closed at once. Deplo can set
 	// both per cluster.
@@ -391,7 +393,11 @@ func (f *forwarders) serveAnswer(c net.Conn) {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			up, via := f.reachAnswer(ctx, cluster, members, appID, port)
 			if up != nil {
-				forwarder.Join(in, up)
+				if via == "" {
+					f.carry(appID, in, up)
+				} else {
+					forwarder.Join(in, up)
+				}
 				f.release(via)
 				cancel()
 				return
@@ -594,6 +600,9 @@ func (f *forwarders) ready(ctx context.Context, appID string) bool {
 		now := time.Now()
 		f.mu.Lock()
 		since := r.Since
+		if f.proxyStarted.After(since) {
+			since = f.proxyStarted
+		}
 		if !r.OK {
 			delete(f.readySeen, appID)
 		} else if r.Health {
@@ -696,31 +705,7 @@ func (f *forwarders) serveAnswerStream(from wire.Party, c net.Conn, network, app
 		up.Close()
 		return
 	}
-	forwarder.Join(c, up)
-}
-
-func (f *forwarders) proxyIsDown() bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return time.Now().Before(f.proxyDown)
-}
-
-// proxyAnswered notes how this server's proxy took a passed-on visitor: a refusal holds for proxyDownFor.
-func (f *forwarders) proxyAnswered(appID string, err error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if err == nil {
-		if f.proxyDownSaid {
-			fmt.Fprintf(os.Stderr, "deplo-agent: this server's proxy takes the domains passed on to it again\n")
-		}
-		f.proxyDown, f.proxyDownSaid = time.Time{}, false
-		return
-	}
-	f.proxyDown = time.Now().Add(proxyDownFor)
-	if !f.proxyDownSaid {
-		f.proxyDownSaid = true
-		fmt.Fprintf(os.Stderr, "deplo-agent: a domain of %s was passed on, but %v: the servers passing them wait until this server's proxy answers\n", appID, err)
-	}
+	f.carry(appID, c, up)
 }
 
 func (f *forwarders) authorizeAnswer(from wire.Party, network, appID string) bool {

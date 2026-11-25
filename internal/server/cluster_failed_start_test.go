@@ -88,6 +88,25 @@ func TestFailedStart_aStartThatLaterWorksHereKeepsItsData(t *testing.T) {
 	}
 }
 
+// c39: the leader's own server restarted it with its agent and the next leader's first renewal came 2.4 s later,
+// which nothing said: a new epoch skipped the check.
+func TestRenew_aLateFirstRenewalFromANewLeaderIsSaid(t *testing.T) {
+	f := newGuard(t)
+	var said []string
+	f.g.logf = func(format string, args ...any) { said = append(said, fmt.Sprintf(format, args...)) }
+	f.g.Renew(labPlacedOn("srv_a", 2))
+	f.clk.Add(1500 * time.Millisecond)
+	f.g.Renew(labPlacedOn("srv_a", 3))
+	if len(said) != 0 {
+		t.Fatalf("a hand-over on time was said: %q", said)
+	}
+	f.clk.Add(2400 * time.Millisecond)
+	f.g.Renew(labPlacedOn("srv_a", 4))
+	if len(said) != 1 || !strings.Contains(said[0], "a renewal came 2.4s after the one before, from a new leader") {
+		t.Fatalf("said %q", said)
+	}
+}
+
 func TestRenew_aLateRenewalIsSaid(t *testing.T) {
 	f := newGuard(t)
 	var said []string

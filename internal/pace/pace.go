@@ -1,5 +1,5 @@
-// Package pace runs the agent's copies last: one waits whenever this server's Apps waited for the CPU or the disk,
-// or an App's request crossed the agent, while it moved its last step (deplo ADR-0043).
+// Package pace runs the agent's copies last: one gives way while one of this server's Apps waits for the CPU or the
+// disk more than busyShare of a step, and never drops under Floor (deplo ADR-0043).
 package pace
 
 import (
@@ -21,39 +21,35 @@ const (
 	Every = 50 * time.Millisecond
 )
 
+// Floor is the rate a copy keeps whatever the Apps wait: 300 MB in two and a half minutes (c40, eu at 13 KB/s).
+const Floor = 2 << 20
+
 const (
-	// busyShare is how long, of a step, the Apps may wait before the copy steps aside.
-	busyShare = 20
-	// yieldTimes is how many times its last step a copy waits once the Apps waited: a fifth of the server. Each
-	// step they wait again doubles it, up to maxTimes (a thirtieth); each step they do not halves it (c38: one
+	// busyShare is how much of a step one App may wait for the CPU or the disk before the copy gives way: eu's
+	// Apps waited under 1% with only visitors (c40).
+	busyShare = 0.10
+	// yieldTimes is how many times its last step a copy waits once an App waited: a fifth of the server. Each
+	// step one waits again doubles it, up to maxTimes (a thirtieth); each step none does halves it (c38: one
 	// copy into eu-2, already busy, timed every App out).
 	yieldTimes = 4
 	maxTimes   = 32
 	maxWait    = 2 * time.Second
 )
 
-var lastApp atomic.Int64
-
 // Looks counts every look a copy took, so a test can tell a copy is paced.
 var Looks atomic.Int64
-
-// Touch notes that an App's traffic just crossed this agent.
-func Touch() { lastApp.Store(now().UnixNano()) }
-
-// TouchedSince says whether an App's traffic crossed this agent after t.
-func TouchedSince(t time.Time) bool { return lastApp.Load() > t.UnixNano() }
 
 // Vars so tests drive the clock, the waits and what the Apps waited.
 var (
 	now   = time.Now
 	sleep = time.Sleep
-	// appsWaited is how long, in microseconds since some start, this server's Apps waited for the CPU or the disk.
-	appsWaited = func() int64 {
-		var total int64
+	// appsWaited is how long, in microseconds since some start, each container waited for the CPU or the disk.
+	appsWaited = func() map[string]int64 {
+		out := map[string]int64{}
 		for _, g := range appGroups() {
-			total += waited(filepath.Join(g, "cpu.pressure")) + waited(filepath.Join(g, "io.pressure"))
+			out[g] = waited(filepath.Join(g, "cpu.pressure")) + waited(filepath.Join(g, "io.pressure"))
 		}
-		return total
+		return out
 	}
 )
 
@@ -90,39 +86,49 @@ func waited(path string) int64 {
 	return n
 }
 
+// worst is the largest share of took any one container waited between two looks.
+func worst(before, after map[string]int64, took time.Duration) float64 {
+	var most int64
+	for g, t := range after {
+		if b, ok := before[g]; ok && t-b > most {
+			most = t - b
+		}
+	}
+	return float64(time.Duration(most)*time.Microsecond) / float64(took)
+}
+
 // Pacer is one copy's pace. The zero value is ready.
 type Pacer struct {
 	n     int64
 	last  time.Time
-	stall int64
+	stall map[string]int64
 	// times is how many times its last step the copy waits now.
 	times time.Duration
 }
 
-// Moved notes n bytes the copy moved and, every Step, waits while the Apps were held up during it.
+// Moved notes n bytes the copy moved and, every Step, waits while an App was held up during it.
 func (p *Pacer) Moved(n int) {
 	t := now()
 	if p.n += int64(n); p.n < Step && !p.last.IsZero() && t.Sub(p.last) < Every {
 		return
 	}
+	moved := p.n
 	p.n = 0
 	Looks.Add(1)
 	st := appsWaited()
 	if took := t.Sub(p.last); !p.last.IsZero() && took > 0 {
-		if time.Duration(st-p.stall)*time.Microsecond > took/busyShare {
+		if worst(p.stall, st, took) > busyShare {
 			p.times = min(max(2*p.times, yieldTimes), maxTimes)
 		} else {
 			p.times /= 2
 		}
-		times := p.times
-		if times < yieldTimes {
-			times = 0
+		wait := time.Duration(0)
+		if p.times >= yieldTimes {
+			// Never under Floor: the step and its wait together take no longer than its bytes at that rate.
+			wait = min(took*p.times, maxWait, time.Duration(moved)*time.Second/Floor-took)
 		}
-		if TouchedSince(p.last) {
-			times = max(times, yieldTimes)
-		}
-		if times > 0 {
-			sleep(min(took*times, maxWait))
+		if wait > 0 {
+			sleep(wait)
 			t, st = now(), appsWaited()
 		}
 	}

@@ -9,8 +9,6 @@ import (
 	"io"
 	"net"
 	"time"
-
-	"github.com/DeploCloud/deplo-agent/internal/pace"
 )
 
 // Main runs `deplo-agent forward --listen :port --to /path/to/the/agent's/socket`.
@@ -57,18 +55,10 @@ func Relay(c net.Conn, socket string) {
 
 // Join copies both ways until both directions are done. A side that only stopped sending still gets its answer:
 // the end of one direction closes the other end's sending side, and both ends only when that cannot be done.
-// touching notes every read of an App's traffic, so a copy steps aside while it flows (deplo ADR-0043).
-type touching struct{ r io.Reader }
-
-func (t touching) Read(p []byte) (int, error) {
-	pace.Touch()
-	return t.r.Read(p)
-}
-
 func Join(a, b net.Conn) {
 	done := make(chan bool, 2)
 	cp := func(dst, src net.Conn) {
-		_, _ = io.Copy(dst, touching{src})
+		_, _ = io.Copy(dst, src)
 		cw, ok := dst.(interface{ CloseWrite() error })
 		done <- ok && cw.CloseWrite() == nil
 	}

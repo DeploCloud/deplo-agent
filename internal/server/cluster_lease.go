@@ -445,8 +445,10 @@ func (g *leaseGuard) renew(o lease.Order) (lease.Reply, bool) {
 	prev := g.clusters[o.Cluster]
 	taken := taking(prev, o)
 	// A late renewal is the first sign of a server too busy for its leases: said, so a test can prove there was none.
-	if gap := g.now().Sub(prev.lastRenewed()); !taken && prev.heard && gap > lateRenewal {
-		g.logf("deplo-agent: cluster %s: a renewal came %.1fs after the one before", o.Cluster, gap.Seconds())
+	// A new leader's first one counts too: a hand-over must not cost a renewal either.
+	if gap := g.now().Sub(prev.lastRenewed()); prev != nil && prev.heard && gap > lateRenewal {
+		g.logf("deplo-agent: cluster %s: a renewal came %.1fs after the one before%s", o.Cluster, gap.Seconds(),
+			map[bool]string{true: ", from a new leader"}[taken])
 	}
 	from := o.From
 	// An order that names nobody keeps the leader its epoch was given to: one epoch stays one leader's.
