@@ -21,6 +21,7 @@ import (
 // Tests hold nothing on the machine that runs them, except where one swaps in its own redirect.
 func init() {
 	holdRedirect = func(map[uint16]uint16) (func(), func(), error) { return nil, nil, errors.New("tests hold no port") }
+	afterFailedExec = func() {}
 	standbyUp = func(context.Context, string, uint32) (standbyDialer, func(), error) {
 		return nil, nil, errors.New("tests run no standby")
 	}
