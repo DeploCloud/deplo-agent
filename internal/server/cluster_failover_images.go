@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -146,9 +147,11 @@ func (s *Service) holdFailoverImage(im *pb.FailoverImage) {
 	if !held {
 		if err := room.Check(s.dockerRootPath(ctx), im.GetBytes()); err != nil {
 			next.err = err.Error()
-		} else if from, err := s.fetchFromMembers(ctx, ref); err == nil {
+		} else if from, err := s.fetchWaiting(ctx, ref); err == nil {
 			next.held = true
 			fmt.Fprintf(os.Stderr, "deplo-agent: took %s from the cluster's member %s, not its registry\n", ref, from[:min(12, len(from))])
+		} else if errors.Is(err, errMemberBusy) {
+			next.err = "waiting for a member that holds it to send it"
 		} else if wait := s.mayDownload(st, next.lookAt); wait != "" {
 			next.err, next.missingSince = wait, st.missingSince
 		} else if err := s.downloadFailoverImage(ctx, ref); err != nil {

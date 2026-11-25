@@ -203,3 +203,44 @@ func TestRated_readsAtRegistryRate(t *testing.T) {
 		t.Fatalf("512 KB at 1 MB/s took %s", took)
 	}
 }
+
+// c43 live: eu-1 asked eu-3 for node:22 while eu-3 sent it to eu-2, heard "busy", found no other member with it and,
+// first of its cluster, downloaded 410 MB from the registry. A member that holds it but is busy is waited for.
+func TestHoldFailoverImages_aBusyMemberIsWaitedForNotTheRegistry(t *testing.T) {
+	a, b, src, dst, downloads := imageMembers(t)
+	// The asker is the cluster's first member, the one that would download: the holder is the other.
+	if _, first := a.clusterPeers(); first {
+		a, b, src, dst = b, a, dst, src
+	}
+	src.mu.Lock()
+	src.tags = append(src.tags, "ghcr.io/acme/web:2")
+	src.mu.Unlock()
+	retry := memberBusyRetry
+	memberBusyRetry = 50 * time.Millisecond
+	t.Cleanup(func() { memberBusyRetry = retry })
+	im := &pb.FailoverImage{ImageRef: "ghcr.io/acme/web:2"}
+	holdAll(t, a, im)
+	pullsSettled(t, a)
+	imageServeSlot <- struct{}{} // a is sending another image
+	freed := false
+	free := func() {
+		if !freed {
+			freed = true
+			<-imageServeSlot
+		}
+	}
+	t.Cleanup(free)
+	holdAll(t, b, im)
+	time.Sleep(300 * time.Millisecond)
+	if downloads.Load() != 0 {
+		t.Fatalf("b downloaded from the registry while a member that holds the image was busy")
+	}
+	free()
+	pullsSettled(t, b)
+	dst.mu.Lock()
+	body := dst.archives["ghcr.io/acme/web:2"]
+	dst.mu.Unlock()
+	if body != "ARCHIVE of ghcr.io/acme/web:2" || downloads.Load() != 0 {
+		t.Fatalf("b loaded %q and downloaded %d times", body, downloads.Load())
+	}
+}

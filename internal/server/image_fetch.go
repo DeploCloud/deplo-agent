@@ -21,10 +21,18 @@ import (
 // cluster's network; only the first member of the cluster downloads one no member has (c43).
 // Stream: "IMAGEGET <ref>", answered HAVE then the gzipped archive, or ERR.
 
-const imageGetVerb = "IMAGEGET"
+const (
+	imageGetVerb = "IMAGEGET"
+	imageBusy    = "busy"
+)
 
 var (
 	errNoMemberHolds = errors.New("no other member holds it")
+	// errMemberBusy is a member that holds it sending another image: wait for it, never the registry (c43).
+	errMemberBusy = errors.New("a member that holds it is sending another image")
+	// memberBusyRetry is how often a busy member is asked again, and memberBusyFor for how long in one pass.
+	memberBusyRetry = 10 * time.Second
+	memberBusyFor   = 15 * time.Minute
 	// pullerGrace is how long a member waits for the first member to download an image before it does itself.
 	pullerGrace = 10 * time.Minute
 	memberAsk   = 10 * time.Second
@@ -48,7 +56,7 @@ func (s *Service) serveImageGet(from wire.Party, c net.Conn, ref string) {
 	case imageServeSlot <- struct{}{}:
 		defer func() { <-imageServeSlot }()
 	default:
-		_ = wire.WriteHeader(c, wire.VerbErr, "busy sending another image")
+		_ = wire.WriteHeader(c, wire.VerbErr, imageBusy+" sending another image")
 		return
 	}
 	_ = c.SetDeadline(time.Now().Add(imageCopyTimeout))
@@ -101,6 +109,7 @@ func (s *Service) fetchFromMembers(ctx context.Context, ref string) (string, err
 	if party == nil || len(peers) == 0 {
 		return "", errNoMemberHolds
 	}
+	busy := false
 	for _, fp := range peers {
 		actx, cancel := context.WithTimeout(ctx, memberAsk)
 		conn, err := party.Dial(actx, wire.Party{Fingerprint: fp, Role: wire.RoleMember})
@@ -109,11 +118,12 @@ func (s *Service) fetchFromMembers(ctx context.Context, ref string) (string, err
 			continue
 		}
 		_ = conn.SetDeadline(time.Now().Add(memberAsk))
-		verb := ""
+		verb, arg := "", ""
 		if wire.WriteHeader(conn, imageGetVerb, ref) == nil {
-			verb, _, _ = wire.ReadHeader(conn)
+			verb, arg, _ = wire.ReadHeader(conn)
 		}
 		if verb != imageHave {
+			busy = busy || (verb == wire.VerbErr && strings.HasPrefix(arg, imageBusy))
 			conn.Close()
 			continue
 		}
@@ -128,7 +138,26 @@ func (s *Service) fetchFromMembers(ctx context.Context, ref string) (string, err
 		}
 		fmt.Fprintf(os.Stderr, "deplo-agent: could not take %s from another member: %v\n", ref, err)
 	}
+	if busy {
+		return "", errMemberBusy
+	}
 	return "", errNoMemberHolds
+}
+
+// fetchWaiting is fetchFromMembers, asking again while a member that holds the image sends another one.
+func (s *Service) fetchWaiting(ctx context.Context, ref string) (string, error) {
+	until := time.Now().Add(memberBusyFor)
+	for {
+		from, err := s.fetchFromMembers(ctx, ref)
+		if !errors.Is(err, errMemberBusy) || time.Now().After(until) {
+			return from, err
+		}
+		select {
+		case <-ctx.Done():
+			return "", err
+		case <-time.After(memberBusyRetry):
+		}
+	}
 }
 
 // registryPull downloads ref from its registry at registryRate; docker pulls what that cannot read (a digest, an
