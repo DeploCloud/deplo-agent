@@ -18,6 +18,9 @@ const WaitDelay = 10 * time.Second
 // Command is exec.CommandContext that kills the child's whole process group on cancel, so a
 // plugin or helper the child started cannot keep its pipes open and Wait blocked.
 func Command(ctx context.Context, name string, args ...string) *exec.Cmd {
+	if name == "docker" && changes(args) {
+		forgetReads()
+	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {

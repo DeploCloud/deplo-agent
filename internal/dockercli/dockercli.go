@@ -25,9 +25,77 @@ type Result struct {
 	Code   int
 }
 
-// Run runs `docker <args>` with a timeout, capturing output.
+// Run runs `docker <args>` with a timeout, capturing output. A read Deplo's agent asks again within the read
+// cache's time, with nothing changed since by this agent, is answered from it.
 func Run(ctx context.Context, timeout time.Duration, args ...string) (Result, error) {
-	return capture(ctx, timeout, nil, false, &strings.Builder{}, &strings.Builder{}, args...)
+	if !cacheable(args) {
+		return capture(ctx, timeout, nil, false, &strings.Builder{}, &strings.Builder{}, args...)
+	}
+	key := strings.Join(args, "\x00")
+	reads.Lock()
+	ttl, gen := reads.ttl, reads.gen
+	c, ok := reads.at[key]
+	reads.Unlock()
+	if ok && ttl > 0 && c.gen == gen && time.Since(c.at) < ttl {
+		return c.res, nil
+	}
+	res, err := capture(ctx, timeout, nil, false, &strings.Builder{}, &strings.Builder{}, args...)
+	if err == nil && ttl > 0 {
+		reads.Lock()
+		if reads.gen == gen {
+			if len(reads.at) > 1024 {
+				clear(reads.at)
+			}
+			reads.at[key] = cachedRead{res: res, at: time.Now(), gen: gen}
+		}
+		reads.Unlock()
+	}
+	return res, err
+}
+
+// reads keeps what a read-only docker command printed, for a moment: the agent asked the same ps and inspect
+// several times a second, each a new docker process (c38: 9 a second on eu-2, a quarter of its one core).
+var reads = struct {
+	sync.Mutex
+	ttl time.Duration
+	gen uint64
+	at  map[string]cachedRead
+}{at: map[string]cachedRead{}}
+
+type cachedRead struct {
+	res Result
+	at  time.Time
+	gen uint64
+}
+
+// CacheReads keeps read-only answers for ttl; zero, the default and every test's, asks docker each time.
+func CacheReads(ttl time.Duration) {
+	reads.Lock()
+	reads.ttl = ttl
+	reads.Unlock()
+}
+
+func cacheable(args []string) bool {
+	return len(args) > 0 && (args[0] == "ps" || args[0] == "inspect" || args[0] == "version" || args[0] == "info")
+}
+
+// changes says whether a docker command may change what a read answers: anything but a read.
+func changes(args []string) bool {
+	if len(args) == 0 || cacheable(args) {
+		return false
+	}
+	switch args[0] {
+	case "logs", "stats", "events", "images", "system":
+		return false
+	}
+	return true
+}
+
+func forgetReads() {
+	reads.Lock()
+	reads.gen++
+	clear(reads.at)
+	reads.Unlock()
 }
 
 // RunTail is Run keeping only the last max bytes of each stream, for output a container controls.
