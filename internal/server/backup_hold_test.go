@@ -78,6 +78,10 @@ func TestVolumeBackup_freezesTheAppWhereTheProxyCannotSeeIt(t *testing.T) {
 			}
 			b, _ := os.ReadFile(freeze)
 			v := strings.TrimSpace(string(b))
+			// A plain file read while the agent rewrites it is empty for a moment; the kernel's never is (CI, c41).
+			if v == "" {
+				continue
+			}
 			_ = os.WriteFile(events, []byte("populated 1\nfrozen "+v+"\n"), 0o644)
 			mu.Lock()
 			if len(seen) == 0 || seen[len(seen)-1] != v {

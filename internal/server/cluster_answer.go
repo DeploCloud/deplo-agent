@@ -570,6 +570,10 @@ func (f *forwarders) dialProxy(ctx context.Context, port uint32) (net.Conn, erro
 func (f *forwarders) ready(ctx context.Context, appID string) bool {
 	for {
 		f.mu.Lock()
+		if f.replacing[appID] > 0 {
+			f.mu.Unlock()
+			return false
+		}
 		rc := f.readiness[appID]
 		if rc == nil {
 			rc = &answerReadyCheck{}

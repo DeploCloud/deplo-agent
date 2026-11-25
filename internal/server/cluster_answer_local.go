@@ -73,6 +73,34 @@ func (f *forwarders) proxyRestarted() {
 	}
 }
 
+// recreating holds the App's visitors here while a reroute replaces its containers: a ready kept from before passed
+// them to a proxy still routing the old container (c40: a 502 at each recreate of a domain added). Done looks again.
+func (f *forwarders) recreating(appID string) (done func()) {
+	if appID == "" {
+		return func() {}
+	}
+	forget := func() {
+		if rc := f.readiness[appID]; rc != nil {
+			rc.until = time.Time{}
+		}
+	}
+	f.mu.Lock()
+	if f.replacing == nil {
+		f.replacing = map[string]int{}
+	}
+	f.replacing[appID]++
+	forget()
+	f.mu.Unlock()
+	return func() {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.replacing[appID]--; f.replacing[appID] <= 0 {
+			delete(f.replacing, appID)
+		}
+		forget()
+	}
+}
+
 func (f *forwarders) proxyIsDown() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()

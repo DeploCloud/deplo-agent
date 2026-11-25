@@ -171,6 +171,8 @@ type forwarders struct {
 	// proxyStarted is when this server's proxy last started: no App counts ready here before it had answerSettle
 	// to read its routes (c39: a recreated proxy answered 404 for seconds).
 	proxyStarted time.Time
+	// replacing counts, by App, the reroutes replacing its containers here now: its visitors wait meanwhile.
+	replacing map[string]int
 	// local are the visitors carried to this server's own proxy, by App, each with the stream it was joined to.
 	local    map[string]map[net.Conn]net.Conn
 	watching bool
@@ -718,6 +720,20 @@ func (g *leaseGuard) answerHolders(cluster, id string) (here bool, others []stri
 		here = false
 	}
 	return here, others
+}
+
+// appOf is the App a stack belongs to in any cluster's placement; empty for a stack no cluster places.
+func (g *leaseGuard) appOf(slug string) string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, c := range g.clusters {
+		for _, e := range c.Placement {
+			if e.Kind == "app" && e.Slug == slug && e.Slug != "" {
+				return e.ID
+			}
+		}
+	}
+	return ""
 }
 
 // locate says which member runs a workload now, and whether that is this one, from the placement the last renewal carried.
