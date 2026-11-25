@@ -173,6 +173,12 @@ type forwarders struct {
 	proxyStarted time.Time
 	// stopping is a restart of this server's proxy under way: no App counts ready here until it is back.
 	stopping bool
+	// handoverAt is when what this run knows was last written for the next one.
+	handoverAt time.Time
+	// atOnce is a proxy that routes a change at once: an App counts ready after answerSettleAtOnce.
+	atOnce bool
+	// standby reaches the copy of the proxy that takes its visitors while it restarts; nil when none runs.
+	standby standbyDialer
 	// replacing counts, by App, the reroutes replacing its containers here now: its visitors wait meanwhile.
 	replacing map[string]int
 	// local are the visitors carried to this server's own proxy, by App, each with the stream it was joined to.
@@ -190,6 +196,8 @@ func (s *Service) forwarders() *forwarders {
 				_ = json.Unmarshal(raw, &f.st)
 			}
 		}
+		f.takeHandover()
+		onRestart(f.saveHandover)
 		s.fwd = f
 	})
 	return s.fwd
@@ -311,9 +319,12 @@ func (f *forwarders) Resume() {
 	defer cancel()
 	f.dock.Lock()
 	defer f.dock.Unlock()
-	if st := f.state(); len(st.Hold)+len(st.Answers) == 0 {
+	defer dropUnclaimedKept("fwd-")
+	st := f.state()
+	if len(st.Hold)+len(st.Answers) == 0 {
 		return
 	}
+	f.listenFirst(st)
 	if err := f.reconcile(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "deplo-agent: name forwarders: %v\n", err)
 	}
@@ -348,6 +359,30 @@ func (f *forwarders) Clear() {
 	_ = f.reconcile(ctx)
 	if f.s.agentDir != "" {
 		_ = os.Remove(f.file())
+	}
+}
+
+// listenFirst takes the saved table's listeners back before any docker call: the visitors that waited in their queue
+// while the agent restarted are served at once (c43: 4 s). The caller holds f.dock.
+func (f *forwarders) listenFirst(st forwardState) {
+	ops := f.ops()
+	if len(st.Answers) > 0 {
+		if name := answerContainer(); f.listeners[name] == nil {
+			if ln, err := ops.listen(f.dir(name)); err == nil {
+				l := &heldListener{ln: ln, dir: f.dir(name)}
+				f.listeners[name] = l
+				go f.acceptAnswers(l)
+			}
+		}
+	}
+	for _, h := range st.Hold {
+		if name := containerFor(h); f.listeners[name] == nil {
+			if ln, err := ops.listen(f.dir(name)); err == nil {
+				l := &heldListener{ln: ln, dir: f.dir(name)}
+				f.listeners[name] = l
+				go f.acceptHeld(h.key(), l)
+			}
+		}
 	}
 }
 
@@ -400,6 +435,7 @@ func (f *forwarders) reconcile(ctx context.Context) error {
 	for name, l := range f.listeners {
 		if !wanted[name] {
 			l.ln.Close()
+			forgetKept(keptForwarder(l.dir))
 			_ = os.RemoveAll(l.dir)
 			delete(f.listeners, name)
 			delete(f.redirected, name)
@@ -720,6 +756,21 @@ func (g *leaseGuard) answerHolders(cluster, id string) (here bool, others []stri
 	defer g.mu.Unlock()
 	if c := g.clusters[cluster]; c != nil && c.Returning {
 		here = false
+	}
+	return here, others
+}
+
+// visitorHolders is answerHolders for where a visitor goes: a lease read back after the agent restarted in this boot
+// answers at once; it decides nothing else (no start, no certificate).
+func (g *leaseGuard) visitorHolders(cluster, id string) (here bool, others []string) {
+	here, others = g.answerHolders(cluster, id)
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	c := g.clusters[cluster]
+	if c != nil && !here && !c.Returning && c.answerable(g.now()) {
+		for _, e := range c.Placement {
+			here = here || (e.Kind == "app" && e.ID == id && e.Member == c.Member && !e.Standby)
+		}
 	}
 	return here, others
 }

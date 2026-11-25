@@ -3,10 +3,12 @@ package server
 import (
 	"cmp"
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -160,5 +162,136 @@ func copyFile(t *testing.T, from, to string) {
 	}
 	if err := os.WriteFile(to, raw, 0o755); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// keptHelperEnv makes TestKeptHelper a service that echoes on a kept listener; SIGUSR1 has it exec itself.
+const keptHelperEnv = "DEPLO_KEPT_HELPER"
+
+func TestKeptHelper(t *testing.T) {
+	path := os.Getenv(keptHelperEnv)
+	if path == "" {
+		t.Skip("run by TestSystemd_aVisitorWaitsAcrossAKillAndAnExec as its service")
+	}
+	ln, err := keptUnixListener("fwd-helper", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usr1 := make(chan os.Signal, 1)
+	signal.Notify(usr1, syscall.SIGUSR1)
+	go func() {
+		<-usr1
+		exe, _ := os.Executable()
+		_ = reexec(exe, os.Args, os.Environ())
+	}()
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			select {} // the exec closed it: the new binary takes over
+		}
+		go func() {
+			defer c.Close()
+			buf := make([]byte, 64)
+			n, _ := c.Read(buf)
+			_, _ = c.Write([]byte(strconv.Itoa(os.Getpid()) + ":" + string(buf[:n])))
+		}()
+	}
+}
+
+// c42: a kill -9 of the agent reset the visitors its forwarder handed it meanwhile. Under systemd, a visitor that
+// arrives while the agent is dead, or while it execs a new binary, is answered once it is back.
+func TestSystemd_aVisitorWaitsAcrossAKillAndAnExec(t *testing.T) {
+	if os.Getenv("DEPLO_AGENT_TEST_SYSTEMD") == "" {
+		t.Skip("needs systemd as PID 1")
+	}
+	self, _ := os.Executable()
+	sock := "/run/deplo-kept-test.sock"
+	out, err := exec.Command("systemd-run", "--unit=deplo-kept-test", "-p", "Restart=always", "-p", "RestartSec=1",
+		"-p", "FileDescriptorStoreMax=4", "-p", "FileDescriptorStorePreserve=restart", "-p", "NotifyAccess=main",
+		"--setenv="+keptHelperEnv+"="+sock,
+		self, "-test.run", "^TestKeptHelper$").CombinedOutput()
+	if err != nil {
+		t.Fatalf("systemd-run: %v: %s", err, out)
+	}
+	t.Cleanup(func() { _ = exec.Command("systemctl", "stop", "deplo-kept-test").Run() })
+	visit := func(what string) string {
+		t.Helper()
+		var c net.Conn
+		var err error
+		for i := 0; i < 50; i++ {
+			if c, err = net.Dial("unix", sock); err == nil {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if err != nil {
+			t.Fatalf("%s: refused: %v", what, err)
+		}
+		defer c.Close()
+		_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+		_, _ = c.Write([]byte(what))
+		buf := make([]byte, 64)
+		n, err := c.Read(buf)
+		if err != nil {
+			t.Fatalf("%s: no answer: %v", what, err)
+		}
+		return string(buf[:n])
+	}
+	main := func() int {
+		raw, _ := exec.Command("systemctl", "show", "-p", "MainPID", "--value", "deplo-kept-test").Output()
+		n, _ := strconv.Atoi(strings.TrimSpace(string(raw)))
+		return n
+	}
+	first := visit("before")
+	pid := main()
+	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	c, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatalf("a visitor arriving while the agent is dead was refused: %v", err)
+	}
+	_, _ = c.Write([]byte("meanwhile"))
+	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+	buf := make([]byte, 64)
+	n, err := c.Read(buf)
+	c.Close()
+	if err != nil || !strings.HasSuffix(string(buf[:n]), ":meanwhile") || strings.HasPrefix(string(buf[:n]), strconv.Itoa(pid)+":") {
+		t.Fatalf("after the kill: %q (%v), first %q", buf[:n], err, first)
+	}
+	// An explicit restart keeps the store too (c43: an install by hand reset 7 visitors).
+	restarted := make(chan error, 1)
+	go func() { restarted <- exec.Command("systemctl", "restart", "deplo-kept-test").Run() }()
+	for done := false; !done; {
+		select {
+		case err := <-restarted:
+			if err != nil {
+				t.Fatal(err)
+			}
+			done = true
+		default:
+			c, err := net.Dial("unix", sock)
+			if err != nil {
+				t.Fatalf("a visitor during a restart was refused: %v", err)
+			}
+			c.Close()
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if got := visit("restart"); !strings.HasSuffix(got, ":restart") {
+		t.Fatalf("after a restart: %q", got)
+	}
+	pid = main()
+	if err := syscall.Kill(pid, syscall.SIGUSR1); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 20; i++ {
+		if got := visit("exec" + strconv.Itoa(i)); !strings.HasSuffix(got, ":exec"+strconv.Itoa(i)) {
+			t.Fatalf("across the exec: %q", got)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if main() != pid {
+		t.Fatalf("the exec replaced the process")
 	}
 }

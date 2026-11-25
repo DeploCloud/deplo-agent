@@ -151,6 +151,7 @@ func main() {
 	srv := newGRPCServer(certMgr)
 	svc := server.New(*stackDir, *buildTmpDir, *dataDir, *dataBase)
 	server.ClearFrontDoorHold()
+	go server.ClearStandbyProxy(context.Background())
 	if err := svc.PlaceProbe(); err != nil {
 		fmt.Fprintf(os.Stderr, "deplo-agent: could not place the health check probe: %v\n", err)
 	}
@@ -265,6 +266,8 @@ func serveAgent(ctx context.Context, srv *grpc.Server, lis *link.Port, lc *link.
 	case <-ctx.Done():
 	}
 	log.Printf("deplo-agent: signal received - draining in-flight RPCs…")
+	// Visitors first: new ones wait for the next run in the kept listeners' queue, the ones carried get a second.
+	server.DrainVisitors()
 	// The link closes first: a stream riding it would otherwise hold the drain to its cap.
 	closeLink()
 	<-unlinked

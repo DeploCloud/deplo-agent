@@ -25,6 +25,14 @@ type failoverCert struct {
 // certSettle is how long the proxy takes to load a routes file it watches; a var so tests can shorten it.
 var certSettle = answerSettle
 
+// certSettleFor is certSettle, shorter for a proxy that applies a change at once.
+func (s *Service) certSettleFor() time.Duration {
+	if s.proxyAppliesAtOnce() {
+		return min(certSettle, answerSettleAtOnce)
+	}
+	return certSettle
+}
+
 // installCerts puts a failover's certificates in the routes file, for the proxy to serve before the App's router
 // asks it to order one. Only a pair for hostnames this server passes on goes in, and only one newer than what the
 // proxy has for the same names.

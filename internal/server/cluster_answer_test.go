@@ -788,7 +788,7 @@ func TestAnswers_aRestartedProxyGetsNoVisitorUntilItSettles(t *testing.T) {
 	if !f.ready(context.Background(), "prj1") {
 		t.Fatal("an App that ran for an hour is not ready")
 	}
-	f.proxyStopping()
+	f.proxyStopping(nil)
 	if f.ready(context.Background(), "prj1") {
 		t.Fatal("ready while its proxy restarts")
 	}
@@ -797,6 +797,132 @@ func TestAnswers_aRestartedProxyGetsNoVisitorUntilItSettles(t *testing.T) {
 		t.Fatal("ready the moment its proxy restarted")
 	}
 	eventually(t, "ready once the proxy settled", func() bool { return f.ready(context.Background(), "prj1") })
+}
+
+// c42: an App on one server waited the whole restart of that server's proxy. A standby proxy takes its visitors:
+// the App stays ready and is reached through the standby's own answer entrypoint until the new proxy settled.
+func TestAnswers_anAppOnOneServerIsAnsweredByTheStandbyWhileItsProxyRestarts(t *testing.T) {
+	a, _, _, _, _ := answerPair(t)
+	f := a.forwarders()
+	f.s.fwdOps.ready = func(context.Context, string) appReadiness {
+		return appReadiness{OK: true, Since: time.Now().Add(-time.Hour)}
+	}
+	f.mu.Lock()
+	f.st.AnswerPort = 8443
+	f.mu.Unlock()
+	var dialed atomic.Uint32
+	f.proxyStopping(func(_ context.Context, port uint32) (net.Conn, error) {
+		dialed.Store(port)
+		c, _ := net.Pipe()
+		return c, nil
+	})
+	if !f.ready(context.Background(), "prj1") {
+		t.Fatal("not ready while its proxy restarts, though a standby proxy answers")
+	}
+	c, err := f.dialProxy(context.Background(), answerTLS)
+	if err != nil || dialed.Load() != 8443 {
+		t.Fatalf("dialed %d (%v), want the standby's answer entrypoint", dialed.Load(), err)
+	}
+	c.Close()
+	f.proxyRestarted()
+	f.standbyGone()
+	if f.ready(context.Background(), "prj1") {
+		t.Fatal("ready the moment its proxy restarted, with no standby left")
+	}
+}
+
+// c43: a failover's App waited 3 s ready before its first visitor, for a 2 s throttle its proxy no longer has. A
+// proxy that routes a change at once lets it answer after 1 s; any other still waits the 3 s.
+func TestAnswers_anUnthrottledProxyTakesAnAppAfterOneSecond(t *testing.T) {
+	for _, atOnce := range []bool{false, true} {
+		a, _, _, _, members := answerPair(t)
+		flag := ""
+		if atOnce {
+			flag = "      - --providers.providersthrottleduration=0\n"
+		}
+		if err := os.MkdirAll(a.traefikDir(), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		_ = os.WriteFile(a.traefikCompose(), []byte("services:\n  traefik:\n    command:\n"+flag), 0o600)
+		apply(t, a, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members, AnswerPort: backend(t, "proxy-a"),
+			Answers: []*pb.ClusterAnswer{shop()}, ServeAnswers: []string{"prj1"}})
+		f := a.forwarders()
+		started := time.Now().Add(-1500 * time.Millisecond)
+		f.s.fwdOps.ready = func(context.Context, string) appReadiness { return appReadiness{OK: true, Since: started} }
+		if got := f.ready(context.Background(), "prj1"); got != atOnce {
+			t.Fatalf("throttle off %v: an App up 1.5 s counts ready %v", atOnce, got)
+		}
+	}
+}
+
+// c43: an agent restarted under 20 new visitors a second reset the 20 it was carrying for other servers. Ending, it
+// takes none from another member, which holds them until it is back.
+func TestAnswers_aRestartingServerTakesNoVisitorAndTheOtherHoldsIt(t *testing.T) {
+	quickAnswers(t, 5*time.Second)
+	a, b, fa, _, members := answerPair(t)
+	bothAnswer(t, a, b, members)
+	placeOn(t, a, "srvA", appEntry("srvB"))
+	placeOn(t, b, "srvB", appEntry("srvB"))
+	restarting.Store(true)
+	t.Cleanup(func() { restarting.Store(false) })
+	got := make(chan string, 1)
+	go func() { got <- askPort(t, fa.spec(t, answerAlias), shopTLS) }()
+	select {
+	case g := <-got:
+		t.Fatalf("a server ending took the visitor: %q", g)
+	case <-time.After(400 * time.Millisecond):
+	}
+	restarting.Store(false)
+	select {
+	case g := <-got:
+		if g != "proxy-b:PING" {
+			t.Fatalf("once it is back the visitor read %q", g)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the held visitor was not passed on once the server was back")
+	}
+}
+
+// c43: back from a restart, the agent took its visitors only after a docker call for every name it holds: 4 s on one
+// core. It listens first, so a visitor is served while the containers are still being looked at.
+func TestAnswers_aResumedAgentServesBeforeItLooksAtItsContainers(t *testing.T) {
+	quickAnswers(t, 5*time.Second)
+	a, b, fa, _, members := answerPair(t)
+	bothAnswer(t, a, b, members)
+	apply(t, a, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members, AnswerPort: backend(t, "proxy-a"),
+		Answers: []*pb.ClusterAnswer{shop()}, Hold: []*pb.ClusterHeldName{hold(backend(t, "db"))}})
+	placeOn(t, a, "srvA", appEntry("srvB"))
+	placeOn(t, b, "srvB", appEntry("srvB"))
+	f := a.forwarders()
+	f.dock.Lock()
+	for name, l := range f.listeners {
+		l.ln.Close()
+		delete(f.listeners, name)
+	}
+	f.dock.Unlock()
+	slow := make(chan struct{})
+	fa.mu.Lock()
+	fa.slow = slow
+	fa.mu.Unlock()
+	t.Cleanup(func() { close(slow) })
+	go f.Resume()
+	spec := fa.spec(t, answerAlias)
+	var got string
+	eventually(t, "a visitor served while docker is still asked", func() bool {
+		c, err := net.DialTimeout("unix", filepath.Join(spec.Dir, fwdSocket), time.Second)
+		if err != nil {
+			return false
+		}
+		defer c.Close()
+		_ = c.SetDeadline(time.Now().Add(3 * time.Second))
+		_, _ = io.WriteString(c, "PORT "+strconv.Itoa(int(shopTLS))+"\nping")
+		out, _ := io.ReadAll(c)
+		got = string(out)
+		return got != ""
+	})
+	if got != "proxy-b:PING" {
+		t.Fatalf("the visitor read %q", got)
+	}
 }
 
 // c41: at the thaw of a 2-minute hang, what a kept connection had queued reached the stale copy before the agent's

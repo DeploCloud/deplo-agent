@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"slices"
+	"sync/atomic"
 	"time"
 
 	"github.com/DeploCloud/deplo-agent/internal/forwarder"
@@ -32,8 +33,8 @@ func (f *forwarders) carry(appID string, in, up net.Conn) {
 	}
 	cluster := f.st.Cluster
 	f.mu.Unlock()
-	here := func() bool { h, _ := f.s.leaseGuard().answerHolders(cluster, appID); return h }
-	forwarder.Join(leased{in, here}, up)
+	here := func() bool { h, _ := f.s.leaseGuard().visitorHolders(cluster, appID); return h }
+	forwarder.Join(leased{in, here}, moving{up})
 	f.mu.Lock()
 	delete(f.local[appID], in)
 	if len(f.local[appID]) == 0 {
@@ -51,8 +52,35 @@ type leased struct {
 
 var errNotHere = errors.New("this server no longer runs the App")
 
+// carriedAt is when a visitor this agent carries last moved a byte: an exit waits for it to go quiet.
+var carriedAt atomic.Int64
+
+// carriedQuiet says no carried visitor moved a byte for a moment: what was in flight is through.
+func carriedQuiet() bool { return time.Since(time.Unix(0, carriedAt.Load())) > 150*time.Millisecond }
+
+// moving is a carried visitor's side that notes each byte it reads.
+type moving struct{ net.Conn }
+
+func (c moving) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if n > 0 {
+		carriedAt.Store(time.Now().UnixNano())
+	}
+	return n, err
+}
+
+func (c moving) CloseWrite() error {
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return errors.ErrUnsupported
+}
+
 func (c leased) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
+	if n > 0 {
+		carriedAt.Store(time.Now().UnixNano())
+	}
 	if n > 0 && !c.here() {
 		c.Conn.Close()
 		return 0, errNotHere
@@ -77,7 +105,7 @@ func (f *forwarders) watchLocal() {
 		apps := slices.Collect(maps.Keys(f.local))
 		f.mu.Unlock()
 		for _, appID := range apps {
-			if here, _ := f.s.leaseGuard().answerHolders(cluster, appID); here {
+			if here, _ := f.s.leaseGuard().visitorHolders(cluster, appID); here {
 				continue
 			}
 			f.mu.Lock()
@@ -123,10 +151,26 @@ func (f *forwarders) passHeld(c net.Conn, host string) bool {
 
 // proxyStopping notes that this server's proxy is about to stop: no visitor is passed to it, from here or another
 // server, until it is back and settled (c42: a held visitor met the new proxy before it read its routes, 404).
-func (f *forwarders) proxyStopping() {
+func (f *forwarders) proxyStopping(standby standbyDialer) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.stopping = true
+	if standby != nil {
+		f.standby = standby
+	}
+}
+
+// standbyGone is the standby proxy ending: this server's own proxy takes every visitor again.
+func (f *forwarders) standbyGone() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.standby = nil
+}
+
+// settling says whether this server's proxy cannot take a visitor now, and the standby to reach instead; the
+// caller holds f.mu.
+func (f *forwarders) settling() (bool, standbyDialer) {
+	return f.stopping || time.Since(f.proxyStarted) < proxySettle, f.standby
 }
 
 // recreating holds the App's visitors here while a reroute replaces its containers: a ready kept from before passed

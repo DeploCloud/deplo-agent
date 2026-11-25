@@ -117,6 +117,7 @@ jobs:
           done
           docker exec -e DEPLO_AGENT_TEST_SYSTEMD=/e2e deplo-agent-test-systemd /e2e/server.test -test.run 'TestSystemd_' -test.count=1 -test.v | tee "$d/test.log"
           grep -q -- '--- PASS: TestSystemd_aSelfUpdateRunsTheNewBinaryAndAnyExitStartsItAgain' "$d/test.log"
+          grep -q -- '--- PASS: TestSystemd_aVisitorWaitsAcrossAKillAndAnExec' "$d/test.log"
       - name: Fuzz the name server's packet path
         run: go test ./internal/dnszone -run '^$' -fuzz '^FuzzReply$' -fuzztime 30s
       - name: Fuzz the client subnet a resolver sends

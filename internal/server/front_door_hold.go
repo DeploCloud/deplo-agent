@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/DeploCloud/deplo-agent/internal/forwarder"
@@ -44,6 +45,8 @@ type frontHold struct {
 	drop func()
 	// pass takes a visitor of that hostname for a cluster App, and says whether it did.
 	pass func(c net.Conn, host string) bool
+	// standby, when one runs, takes every other visitor at once instead of holding it.
+	standby standbyDialer
 }
 
 type heldVisitor struct {
@@ -53,12 +56,12 @@ type heldVisitor struct {
 
 // holdFrontDoor holds this server's visitors while its proxy restarts; its release, once the new proxy is up, hands
 // over the ones it kept. A hold that could not start is said once and costs nothing: visitors are turned away.
-func (s *Service) holdFrontDoor() (release func()) {
-	return holdFrontDoorPassing(s.forwarders().passHeld)
+func (s *Service) holdFrontDoor(standby standbyDialer) (release func()) {
+	return holdFrontDoorPassing(s.forwarders().passHeld, standby)
 }
 
-func holdFrontDoorPassing(pass func(net.Conn, string) bool) (release func()) {
-	h := &frontHold{open: true, pass: pass}
+func holdFrontDoorPassing(pass func(net.Conn, string) bool, standby standbyDialer) (release func()) {
+	h := &frontHold{open: true, pass: pass, standby: standby}
 	redirect := map[uint16]uint16{}
 	var lns []net.Listener
 	for _, port := range frontDoorPorts {
@@ -121,13 +124,17 @@ func (h *frontHold) take(c net.Conn, port uint32) {
 		}
 	}
 	h.mu.Lock()
-	if h.open {
+	if h.open && h.standby == nil {
 		h.held = append(h.held, heldVisitor{c, port})
 		h.mu.Unlock()
 		return
 	}
+	dial := frontDoorDial
+	if h.open {
+		dial = h.standby
+	}
 	h.mu.Unlock()
-	handOver(c, port)
+	handOverVia(dial, c, port)
 }
 
 // release waits for the new proxy's front door and its routes, lets new visitors reach it, then hands over every
@@ -161,9 +168,11 @@ func (h *frontHold) release(stop func(), lns []net.Listener) {
 	}
 }
 
-func handOver(c net.Conn, port uint32) {
+func handOver(c net.Conn, port uint32) { handOverVia(frontDoorDial, c, port) }
+
+func handOverVia(dial func(context.Context, uint32) (net.Conn, error), c net.Conn, port uint32) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	up, err := frontDoorDial(ctx, port)
+	up, err := dial(ctx, port)
 	cancel()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "deplo-agent: a visitor held on port %s while the proxy restarted could not reach it: %v\n", strconv.Itoa(int(port)), err)
@@ -238,11 +247,44 @@ func proxyHeader(c net.Conn) string {
 // proxyGoingDown starts holding this server's visitors as its proxy stops, once per restart: none is passed to the
 // proxy until proxyBack.
 func (s *Service) proxyGoingDown() {
-	s.forwarders().proxyStopping()
 	s.frontMu.Lock()
 	defer s.frontMu.Unlock()
-	if s.frontRelease == nil {
-		s.frontRelease = s.holdFrontDoor()
+	if s.frontRelease != nil {
+		s.forwarders().proxyStopping(nil)
+		return
+	}
+	dial, end, err := standbyUp(context.Background(), s.agentDir, s.forwarders().state().AnswerPort)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "deplo-agent: no standby proxy: visitors wait for the new one (%v)\n", err)
+	}
+	if dial != nil {
+		dial, end = countedStandby(dial, end)
+	}
+	s.forwarders().proxyStopping(dial)
+	s.frontRelease = s.holdFrontDoor(dial)
+	s.frontStandbyEnd = end
+}
+
+// standbyDrain bounds how long the standby outlives the restart for a visitor it still carries.
+var standbyDrain = 30 * time.Second
+
+// countedStandby counts the visitors passed to the standby: it ends once none is left, or after standbyDrain (c43: a
+// standby stopped under the visitors handed to it the moment before reset them).
+func countedStandby(dial standbyDialer, end func()) (standbyDialer, func()) {
+	var open atomic.Int64
+	counted := func(ctx context.Context, port uint32) (net.Conn, error) {
+		c, err := dial(ctx, port)
+		if err != nil {
+			return nil, err
+		}
+		open.Add(1)
+		return &tracked{Conn: c, done: func() { open.Add(-1) }}, nil
+	}
+	return counted, func() {
+		for until := time.Now().Add(standbyDrain); open.Load() > 0 && time.Now().Before(until); {
+			time.Sleep(100 * time.Millisecond)
+		}
+		end()
 	}
 }
 
@@ -250,11 +292,19 @@ func (s *Service) proxyGoingDown() {
 func (s *Service) proxyBack() {
 	s.forwarders().proxyRestarted()
 	s.frontMu.Lock()
-	release := s.frontRelease
-	s.frontRelease = nil
+	release, end := s.frontRelease, s.frontStandbyEnd
+	s.frontRelease, s.frontStandbyEnd = nil, nil
 	s.frontMu.Unlock()
 	if release != nil {
 		release()
+	}
+	if end != nil {
+		// The standby serves until the new proxy is settled, then lets what it carries finish.
+		go func() {
+			time.Sleep(proxySettle)
+			s.forwarders().standbyGone()
+			end()
+		}()
 	}
 }
 

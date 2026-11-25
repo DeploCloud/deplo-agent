@@ -29,9 +29,17 @@ import (
 
 const selfUpdateGrace = 750 * time.Millisecond
 
+// afterFailedExec ends an agent whose exec failed after it stopped taking visitors; tests go on.
+var afterFailedExec = func() { os.Exit(1) }
+
 var reexec = func(path string, argv []string, env []string) error {
 	logpipe.Restore()
-	return syscall.Exec(path, argv, env)
+	err := syscall.Exec(path, argv, append(env, keptForExec()))
+	// Its listeners are closed by now: the service starts it again, the binary on disk, the listeners kept.
+	log.Printf("deplo-agent: could not exec %s: %v; exiting so the service starts it again", path, err)
+	restarting.Store(false)
+	afterFailedExec()
+	return err
 }
 
 const maxAgentBinary = 256 << 20

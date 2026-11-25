@@ -28,7 +28,9 @@ func TestEnsureRestart_writesTheDropInOnce(t *testing.T) {
 		}
 	}
 	raw, err := os.ReadFile(filepath.Join(unitDir, "deplo-agent.service.d", "restart.conf"))
-	if err != nil || !strings.Contains(string(raw), "Restart=always") || !strings.Contains(string(raw), "StartLimitIntervalSec=0") {
+	if err != nil || !strings.Contains(string(raw), "Restart=always") || !strings.Contains(string(raw), "StartLimitIntervalSec=0") ||
+		!strings.Contains(string(raw), "FileDescriptorStoreMax=") || !strings.Contains(string(raw), "NotifyAccess=main") ||
+		!strings.Contains(string(raw), "FileDescriptorStorePreserve=restart") {
 		t.Fatalf("drop-in: %q, %v", raw, err)
 	}
 	if len(calls) != 1 || calls[0] != "daemon-reload" {

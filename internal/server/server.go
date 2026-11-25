@@ -245,6 +245,8 @@ type Service struct {
 	// frontRelease ends the hold of this server's visitors while its proxy restarts.
 	frontMu      sync.Mutex
 	frontRelease func()
+	// frontStandbyEnd ends the standby proxy that took this server's visitors during the restart.
+	frontStandbyEnd func()
 	// expected is the images Deplo told this member to take from another one, by ref.
 	expectedMu sync.Mutex
 	expected   map[string]expectedImage
