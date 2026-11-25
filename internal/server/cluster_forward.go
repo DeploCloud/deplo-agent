@@ -724,7 +724,14 @@ func (g *leaseGuard) answerHolders(cluster, id string) (here bool, others []stri
 	here, others = g.holders(cluster, "app", id)
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if c := g.clusters[cluster]; c != nil && c.Returning {
+	c := g.clusters[cluster]
+	if c != nil && !here && c.answerable(g.now()) {
+		// Read back after the agent restarted in this boot: visitors are answered at once, nothing is started.
+		for _, e := range c.Placement {
+			here = here || (e.Kind == "app" && e.ID == id && e.Member == c.Member && !e.Standby)
+		}
+	}
+	if c != nil && c.Returning {
 		here = false
 	}
 	return here, others

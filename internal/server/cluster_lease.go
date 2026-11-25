@@ -83,6 +83,12 @@ func (c *clusterLease) ranOut(now time.Time) bool {
 // current is a lease to act on now: renewed in this run of the agent, and not run out since.
 func (c *clusterLease) current(now time.Time) bool { return c.heard && !c.ranOut(now) }
 
+// answerable is a lease this server answers visitors on: current, or read back after the agent restarted in this
+// boot and not run out, which no leader can have moved a writer away within (c43: 5 s unanswered at a restart).
+func (c *clusterLease) answerable(now time.Time) bool {
+	return c.current(now) || (!c.ranOut(now) && c.Boot != "" && c.Boot == bootID())
+}
+
 // writers is every single-writer stack the leases name, and those a current lease places here and leaves to this
 // member: no return under way, no start order bringing it up. A standby copy shares its database's stack.
 func (g *leaseGuard) writers() (all, mine []string) {
