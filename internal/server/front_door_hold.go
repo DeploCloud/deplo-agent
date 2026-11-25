@@ -12,6 +12,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/DeploCloud/deplo-agent/internal/forwarder"
@@ -256,9 +257,35 @@ func (s *Service) proxyGoingDown() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "deplo-agent: no standby proxy: visitors wait for the new one (%v)\n", err)
 	}
+	if dial != nil {
+		dial, end = countedStandby(dial, end)
+	}
 	s.forwarders().proxyStopping(dial)
 	s.frontRelease = s.holdFrontDoor(dial)
 	s.frontStandbyEnd = end
+}
+
+// standbyDrain bounds how long the standby outlives the restart for a visitor it still carries.
+var standbyDrain = 30 * time.Second
+
+// countedStandby counts the visitors passed to the standby: it ends once none is left, or after standbyDrain (c43: a
+// standby stopped under the visitors handed to it the moment before reset them).
+func countedStandby(dial standbyDialer, end func()) (standbyDialer, func()) {
+	var open atomic.Int64
+	counted := func(ctx context.Context, port uint32) (net.Conn, error) {
+		c, err := dial(ctx, port)
+		if err != nil {
+			return nil, err
+		}
+		open.Add(1)
+		return &tracked{Conn: c, done: func() { open.Add(-1) }}, nil
+	}
+	return counted, func() {
+		for until := time.Now().Add(standbyDrain); open.Load() > 0 && time.Now().Before(until); {
+			time.Sleep(100 * time.Millisecond)
+		}
+		end()
+	}
 }
 
 // proxyBack is the proxy started again: its visitors wait proxySettle more, and the hold hands over what it kept.

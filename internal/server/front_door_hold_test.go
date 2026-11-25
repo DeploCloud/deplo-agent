@@ -313,3 +313,29 @@ func TestStatusVia_readsAProxysAnswerBehindTheProxyHeader(t *testing.T) {
 		t.Fatalf("without it: %d", got)
 	}
 }
+
+// c43: the standby stopped half a second after the restart, under the visitors handed to it just before: 8 resets.
+// It ends once the last visitor it carries is gone.
+func TestCountedStandby_endsOnceItsLastVisitorIsGone(t *testing.T) {
+	ended := make(chan struct{})
+	dial, end := countedStandby(func(context.Context, uint32) (net.Conn, error) {
+		c, _ := net.Pipe()
+		return c, nil
+	}, func() { close(ended) })
+	c, err := dial(context.Background(), 443)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go end()
+	select {
+	case <-ended:
+		t.Fatal("the standby ended under a visitor it carries")
+	case <-time.After(300 * time.Millisecond):
+	}
+	c.Close()
+	select {
+	case <-ended:
+	case <-time.After(time.Second):
+		t.Fatal("the standby outlived its last visitor")
+	}
+}

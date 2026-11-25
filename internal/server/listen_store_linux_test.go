@@ -13,11 +13,14 @@ import (
 
 func freshKept(t *testing.T) *[]string {
 	t.Helper()
-	kept.once, kept.byName, kept.mine = sync.Once{}, nil, nil
+	kept.once, kept.byName, kept.mine, kept.live = sync.Once{}, nil, nil, nil
+	drain := execDrain
+	execDrain = 0
+	t.Cleanup(func() { execDrain = drain })
 	was := storeKept
 	var sent []string
 	storeKept = func(state string, fd int) { sent = append(sent, strings.ReplaceAll(state, "\n", " ")) }
-	t.Cleanup(func() { storeKept = was; kept.once, kept.byName, kept.mine = sync.Once{}, nil, nil })
+	t.Cleanup(func() { storeKept = was; kept.once, kept.byName, kept.mine, kept.live = sync.Once{}, nil, nil, nil })
 	return &sent
 }
 
@@ -51,7 +54,7 @@ func TestForwarderSocket_aVisitorArrivingWhileTheAgentRestartsWaits(t *testing.T
 		t.Fatal(err)
 	}
 
-	kept.once, kept.byName, kept.mine = sync.Once{}, nil, nil
+	kept.once, kept.byName, kept.mine, kept.live = sync.Once{}, nil, nil, nil
 	name, value, _ := strings.Cut(handed, "=")
 	t.Setenv(name, value)
 	second, err := listenForwarder(dir)

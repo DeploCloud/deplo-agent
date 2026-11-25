@@ -187,7 +187,7 @@ func TestKeptHelper(t *testing.T) {
 	for {
 		c, err := ln.Accept()
 		if err != nil {
-			t.Fatal(err)
+			select {} // the exec closed it: the new binary takes over
 		}
 		go func() {
 			defer c.Close()
@@ -207,7 +207,8 @@ func TestSystemd_aVisitorWaitsAcrossAKillAndAnExec(t *testing.T) {
 	self, _ := os.Executable()
 	sock := "/run/deplo-kept-test.sock"
 	out, err := exec.Command("systemd-run", "--unit=deplo-kept-test", "-p", "Restart=always", "-p", "RestartSec=1",
-		"-p", "FileDescriptorStoreMax=4", "-p", "NotifyAccess=main", "--setenv="+keptHelperEnv+"="+sock,
+		"-p", "FileDescriptorStoreMax=4", "-p", "FileDescriptorStorePreserve=restart", "-p", "NotifyAccess=main",
+		"--setenv="+keptHelperEnv+"="+sock,
 		self, "-test.run", "^TestKeptHelper$").CombinedOutput()
 	if err != nil {
 		t.Fatalf("systemd-run: %v: %s", err, out)
@@ -257,6 +258,28 @@ func TestSystemd_aVisitorWaitsAcrossAKillAndAnExec(t *testing.T) {
 	c.Close()
 	if err != nil || !strings.HasSuffix(string(buf[:n]), ":meanwhile") || strings.HasPrefix(string(buf[:n]), strconv.Itoa(pid)+":") {
 		t.Fatalf("after the kill: %q (%v), first %q", buf[:n], err, first)
+	}
+	// An explicit restart keeps the store too (c43: an install by hand reset 7 visitors).
+	restarted := make(chan error, 1)
+	go func() { restarted <- exec.Command("systemctl", "restart", "deplo-kept-test").Run() }()
+	for done := false; !done; {
+		select {
+		case err := <-restarted:
+			if err != nil {
+				t.Fatal(err)
+			}
+			done = true
+		default:
+			c, err := net.Dial("unix", sock)
+			if err != nil {
+				t.Fatalf("a visitor during a restart was refused: %v", err)
+			}
+			c.Close()
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if got := visit("restart"); !strings.HasSuffix(got, ":restart") {
+		t.Fatalf("after a restart: %q", got)
 	}
 	pid = main()
 	if err := syscall.Kill(pid, syscall.SIGUSR1); err != nil {

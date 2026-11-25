@@ -31,7 +31,11 @@ const selfUpdateGrace = 750 * time.Millisecond
 
 var reexec = func(path string, argv []string, env []string) error {
 	logpipe.Restore()
-	return syscall.Exec(path, argv, append(env, keptForExec()))
+	err := syscall.Exec(path, argv, append(env, keptForExec()))
+	// Its listeners are closed by now: the service starts it again, the binary on disk, the listeners kept.
+	log.Printf("deplo-agent: could not exec %s: %v; exiting so the service starts it again", path, err)
+	os.Exit(1)
+	return err
 }
 
 const maxAgentBinary = 256 << 20

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -22,12 +23,17 @@ var kept = struct {
 	once   sync.Once
 	byName map[string]*os.File // inherited from the run before, not claimed yet
 	mine   map[string]*os.File // claimed or made by this run
+	live   map[string]net.Listener
 }{}
+
+// execDrain is what the visitors already taken get to finish before an exec: newer ones wait in the socket's queue.
+// ponytail: a fixed wait, not a count of what is in flight; a kept-open connection still ends at the exec.
+var execDrain = time.Second
 
 // inheritKept reads, once, what systemd (LISTEN_FDS) or the binary before (keptEnv) handed this process.
 func inheritKept() {
 	kept.once.Do(func() {
-		kept.byName, kept.mine = map[string]*os.File{}, map[string]*os.File{}
+		kept.byName, kept.mine, kept.live = map[string]*os.File{}, map[string]*os.File{}, map[string]net.Listener{}
 		if pid, _ := strconv.Atoi(os.Getenv("LISTEN_PID")); pid == os.Getpid() {
 			n, _ := strconv.Atoi(os.Getenv("LISTEN_FDS"))
 			names := strings.Split(os.Getenv("LISTEN_FDNAMES"), ":")
@@ -65,7 +71,7 @@ func keptUnixListener(name, path string) (net.Listener, error) {
 	if f := kept.byName[name]; f != nil {
 		delete(kept.byName, name)
 		if ln, err := net.FileListener(f); err == nil {
-			kept.mine[name] = f
+			kept.mine[name], kept.live[name] = f, ln
 			return ln, nil
 		}
 		_ = f.Close()
@@ -85,7 +91,7 @@ func keptUnixListener(name, path string) (net.Listener, error) {
 	if err != nil {
 		return ln, nil
 	}
-	kept.mine[name] = f
+	kept.mine[name], kept.live[name] = f, ln
 	storeKept("FDSTORE=1\nFDNAME="+name, rawFd(f))
 	return ln, nil
 }
@@ -126,6 +132,7 @@ func forgetKept(name string) {
 			delete(m, name)
 		}
 	}
+	delete(kept.live, name)
 	storeKept("FDSTOREREMOVE=1\nFDNAME="+name, -1)
 }
 
@@ -144,6 +151,13 @@ func keptForExec() string {
 	inheritKept()
 	kept.Lock()
 	defer kept.Unlock()
+	// No visitor is taken past this point: what arrives waits in the queue the kept copy holds for the new binary.
+	for _, ln := range kept.live {
+		_ = ln.Close()
+	}
+	if len(kept.live) > 0 {
+		time.Sleep(execDrain)
+	}
 	var pairs []string
 	for name, f := range kept.mine {
 		fd := rawFd(f)

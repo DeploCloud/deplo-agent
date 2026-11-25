@@ -21,7 +21,7 @@ const (
 	agentUnit     = "deplo-agent.service"
 	restartDropIn = "# Written by deplo-agent: any exit starts it again, its visitors' listeners kept (deplo ADR-0043).\n" +
 		"[Unit]\nStartLimitIntervalSec=0\n\n[Service]\nRestart=always\nRestartSec=1\n" +
-		"FileDescriptorStoreMax=512\nNotifyAccess=main\n"
+		"FileDescriptorStoreMax=512\nFileDescriptorStorePreserve=restart\nNotifyAccess=main\n"
 )
 
 // unitDir is where systemd reads units from; a var so tests write elsewhere.
