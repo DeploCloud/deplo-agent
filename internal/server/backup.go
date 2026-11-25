@@ -28,6 +28,7 @@ type bkEmitter struct {
 	// then a real failure. heldWhy says why the pause lasted the whole copy.
 	holding, staged bool
 	heldWhy         string
+	volumeFiles     int
 }
 
 func (e *bkEmitter) emit(ev *pb.BackupEvent) error {

@@ -3,16 +3,20 @@ package server
 import (
 	"archive/tar"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
+
+var errNoVolumeFiles = errors.New("the App's data holds no file on this server, so its archive is not a backup")
 
 func (s *Service) backupProject(ctx context.Context, p *pb.ProjectDescriptor, dest *artifactDestination, e *bkEmitter) {
 	if p == nil || p.GetSlug() == "" {
@@ -28,6 +32,10 @@ func (s *Service) backupProject(ctx context.Context, p *pb.ProjectDescriptor, de
 	produce := func(w io.Writer) error {
 		tw := tar.NewWriter(w)
 		err := s.writeProjectArchive(ctx, p, tw, e, dest.store != nil)
+		// c43: a stopped copy on a stale server archived its empty volume, kept as a 398 B backup.
+		if err == nil && e.volumeFiles == 0 && slices.ContainsFunc(p.GetVolumeNames(), func(v string) bool { return v != "" }) {
+			err = errNoVolumeFiles
+		}
 		if cerr := tw.Close(); err == nil {
 			err = cerr
 		}
@@ -211,6 +219,7 @@ func (s *Service) archiveVolume(ctx context.Context, argv []string, vol string, 
 			return err
 		}
 		if hdr.Typeflag == tar.TypeReg {
+			e.volumeFiles++
 			if _, err := io.Copy(tw, tr); err != nil {
 				_ = pr.CloseWithError(err)
 				stop()
