@@ -214,7 +214,9 @@ func (s *Service) TraefikConfig(ctx context.Context, req *pb.TraefikConfigReques
 	if _, err := s.startProxy(ctx, path, req.GetRestartOnly()); err != nil {
 		if !req.GetRestartOnly() {
 			if rerr := os.Rename(path+".bak", path); rerr == nil {
+				release := holdFrontDoor()
 				_ = s.applyTraefik(ctx, path, false)
+				release()
 			}
 			return &pb.TraefikConfigResponse{
 				Ok:          false,
@@ -260,9 +262,9 @@ func (s *Service) bringUpTraefik(ctx context.Context, path string, restartOnly b
 			return fmt.Errorf("could not make the proxy's certificate check secret: %v", err)
 		}
 	}
-	// The old proxy refuses every new visitor while it drains: 3 s, not Docker's 10 (c39, eu-4 refused for 11 s).
+	// The agent holds new visitors meanwhile, so the old proxy drains only what it carries: 1 s (c39: 3 s, c41: 1).
 	res, err := dockercli.Run(ctx, 180*time.Second,
-		"compose", "-f", path, "up", "-d", "--force-recreate", "--remove-orphans", "--timeout", "3")
+		"compose", "-f", path, "up", "-d", "--force-recreate", "--remove-orphans", "--timeout", "1")
 	if err != nil {
 		return fmt.Errorf("could not apply the Traefik configuration: %v", err)
 	}

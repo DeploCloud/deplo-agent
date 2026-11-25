@@ -288,6 +288,7 @@ var proxyStartMu sync.Mutex
 func (s *Service) startProxy(ctx context.Context, path string, restartOnly bool) ([]string, error) {
 	proxyStartMu.Lock()
 	defer proxyStartMu.Unlock()
+	defer holdFrontDoor()()
 	s.settleProxyAuthority(ctx, path)
 	f := s.forwarders()
 	plan := f.storePlan(ctx)
