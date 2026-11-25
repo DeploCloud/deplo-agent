@@ -199,7 +199,7 @@ func (s *Service) startFromBundle(ctx context.Context, st *lease.Start) error {
 	if n, err := s.forwarders().installCerts(st.Certificates, time.Now()); err != nil {
 		fmt.Fprintf(os.Stderr, "deplo-agent: failover of %s: %v\n", st.Slug, err)
 	} else if n > 0 {
-		time.Sleep(certSettle)
+		time.Sleep(s.certSettleFor())
 	}
 	var result *pb.DeployResult
 	e := &emitter{send: func(ev *pb.DeployEvent) error {

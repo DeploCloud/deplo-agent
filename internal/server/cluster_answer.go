@@ -51,6 +51,9 @@ var (
 	// answerSettle is how long an App has been ready before its proxy is sure to route it: Traefik applies a
 	// container change up to 2 s after it happens.
 	answerSettle = 3 * time.Second
+	// answerSettleAtOnce is answerSettle for a proxy whose providers are not throttled: it routes a change the
+	// moment it happens (c41), so a failover's App answers 2 s sooner (c43).
+	answerSettleAtOnce = time.Second
 	// proxySettle is how long a restarted proxy gets to read its routes: it reads them at its start (c41).
 	proxySettle = 500 * time.Millisecond
 	// answerReadyFor is how long a ready answer is kept before docker is asked again.
@@ -233,7 +236,9 @@ func (f *forwarders) takeRefusals() []*pb.ClusterAnswerRefusal {
 
 // reconcileAnswers runs the one answer forwarder and writes the proxy's routes file; the caller holds f.dock.
 func (f *forwarders) reconcileAnswers(ctx context.Context, st forwardState, wanted map[string]bool, note func(error)) {
+	atOnce := f.s.proxyAppliesAtOnce()
 	f.mu.Lock()
+	f.atOnce = atOnce
 	note(f.writeAnswerRoutes())
 	f.mu.Unlock()
 	if len(st.Answers) == 0 {
@@ -636,7 +641,7 @@ func (f *forwarders) ready(ctx context.Context, appID string) bool {
 				since = seen
 			}
 		}
-		rc.ok = r.OK && now.Sub(since) >= answerSettle
+		rc.ok = r.OK && now.Sub(since) >= f.settleFor()
 		rc.broken = r.Broken
 		rc.until = now.Add(answerRetry)
 		if rc.ok {
@@ -648,6 +653,20 @@ func (f *forwarders) ready(ctx context.Context, appID string) bool {
 		f.mu.Unlock()
 		return ok
 	}
+}
+
+// settleFor is how long an App runs before this server's proxy surely routes it; the caller holds f.mu.
+func (f *forwarders) settleFor() time.Duration {
+	if f.atOnce {
+		return min(answerSettle, answerSettleAtOnce)
+	}
+	return answerSettle
+}
+
+// proxyAppliesAtOnce says this server's proxy is not throttled, so it routes a container change at once.
+func (s *Service) proxyAppliesAtOnce() bool {
+	raw, err := os.ReadFile(s.traefikCompose())
+	return err == nil && bytes.Contains(raw, []byte("--providers.providersthrottleduration=0"))
 }
 
 // broken says whether the App's last readiness check here found it running but broken.

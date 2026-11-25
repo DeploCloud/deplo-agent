@@ -831,6 +831,30 @@ func TestAnswers_anAppOnOneServerIsAnsweredByTheStandbyWhileItsProxyRestarts(t *
 	}
 }
 
+// c43: a failover's App waited 3 s ready before its first visitor, for a 2 s throttle its proxy no longer has. A
+// proxy that routes a change at once lets it answer after 1 s; any other still waits the 3 s.
+func TestAnswers_anUnthrottledProxyTakesAnAppAfterOneSecond(t *testing.T) {
+	for _, atOnce := range []bool{false, true} {
+		a, _, _, _, members := answerPair(t)
+		flag := ""
+		if atOnce {
+			flag = "      - --providers.providersthrottleduration=0\n"
+		}
+		if err := os.MkdirAll(a.traefikDir(), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		_ = os.WriteFile(a.traefikCompose(), []byte("services:\n  traefik:\n    command:\n"+flag), 0o600)
+		apply(t, a, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members, AnswerPort: backend(t, "proxy-a"),
+			Answers: []*pb.ClusterAnswer{shop()}, ServeAnswers: []string{"prj1"}})
+		f := a.forwarders()
+		started := time.Now().Add(-1500 * time.Millisecond)
+		f.s.fwdOps.ready = func(context.Context, string) appReadiness { return appReadiness{OK: true, Since: started} }
+		if got := f.ready(context.Background(), "prj1"); got != atOnce {
+			t.Fatalf("throttle off %v: an App up 1.5 s counts ready %v", atOnce, got)
+		}
+	}
+}
+
 // c41: at the thaw of a 2-minute hang, what a kept connection had queued reached the stale copy before the agent's
 // once-a-second look closed it. Each read passed on asks the lease first.
 func TestAnswers_aCarriedVisitorPassesNothingOnceTheLeaseRanOut(t *testing.T) {
