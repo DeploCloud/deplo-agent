@@ -259,8 +259,9 @@ func (s *Service) bringUpTraefik(ctx context.Context, path string, restartOnly b
 			return fmt.Errorf("could not make the proxy's certificate check secret: %v", err)
 		}
 	}
+	// The old proxy refuses every new visitor while it drains: 3 s, not Docker's 10 (c39, eu-4 refused for 11 s).
 	res, err := dockercli.Run(ctx, 180*time.Second,
-		"compose", "-f", path, "up", "-d", "--force-recreate", "--remove-orphans")
+		"compose", "-f", path, "up", "-d", "--force-recreate", "--remove-orphans", "--timeout", "3")
 	if err != nil {
 		return fmt.Errorf("could not apply the Traefik configuration: %v", err)
 	}
