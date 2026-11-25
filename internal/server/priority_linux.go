@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -24,6 +25,23 @@ const (
 	copySlice   = "deplocopy.slice"
 	copyWeights = "CPUWeight=10 IOWeight=1 MemoryHigh=256M"
 )
+
+// proxyWeight gives the proxy every request crosses the agent's own CPU weight (Docker's default is 100): a copy
+// inside the agent never outranks it (c37: eu-2's proxy waited for the CPU and every App timed out).
+const proxyWeight = "1000"
+
+// proxyFirst puts the proxy level with the agent on the CPU, in its cgroup: Docker's --cpu-shares maps to a weight
+// that differs between runc versions. Best effort; again whenever the proxy is restarted or recreated.
+// ponytail: a restart Docker makes on its own keeps the default until the agent's next start.
+func proxyFirst(ctx context.Context) {
+	dir, err := containerCgroup(ctx, traefikContainer)
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cpu.weight"), []byte(proxyWeight), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "deplo-agent: could not put the proxy level with the agent on the CPU: %v\n", err)
+	}
+}
 
 // copyParent is the slice helper containers run in, once TakePriority made it; empty, they run where Docker puts them.
 var copyParent atomic.Value
@@ -66,6 +84,7 @@ func takePriority(ctx context.Context, cgroup string) {
 			fmt.Fprintf(os.Stderr, "deplo-agent: could not put the agent first on the CPU and the disk: %v\n", err)
 		}
 	}
+	proxyFirst(ctx)
 	res, err := dockercli.Run(ctx, 10*time.Second, "info", "--format", "{{.CgroupDriver}}")
 	if err != nil || res.Code != 0 || strings.TrimSpace(res.Stdout) != "systemd" {
 		return

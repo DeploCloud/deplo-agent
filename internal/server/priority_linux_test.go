@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -69,5 +71,22 @@ func TestAtLowPriority_yieldsTheDiskButNeverTheCPU(t *testing.T) {
 func TestCopySlice_capsWhatACopyKeepsInMemory(t *testing.T) {
 	if !strings.Contains(copyWeights, "MemoryHigh=") {
 		t.Fatalf("the copy slice is %q", copyWeights)
+	}
+}
+
+// c37: eu-2's proxy waited for the CPU behind the agent's copies, and every App through it timed out.
+func TestProxyFirst_putsTheProxyLevelWithTheAgent(t *testing.T) {
+	dir := t.TempDir()
+	was := containerCgroup
+	containerCgroup = func(_ context.Context, id string) (string, error) {
+		if id != "deplo-traefik" {
+			t.Fatalf("asked for %q", id)
+		}
+		return dir, nil
+	}
+	t.Cleanup(func() { containerCgroup = was })
+	proxyFirst(context.Background())
+	if raw, _ := os.ReadFile(filepath.Join(dir, "cpu.weight")); string(raw) != "1000" {
+		t.Fatalf("the proxy's weight is %q, want the agent's 1000", raw)
 	}
 }

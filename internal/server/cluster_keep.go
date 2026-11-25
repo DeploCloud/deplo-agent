@@ -300,6 +300,8 @@ func (s *Service) keepLeft(ctx context.Context, e lease.Entry, k lease.Keep, mem
 	if !holdsVolume(ctx, req.GetProject().GetVolumeNames()) {
 		return nil, errNothingHeld
 	}
+	ctx, done := s.leftSave(ctx, e.Slug)
+	defer done()
 	if _, err := s.StopStack(stoppedBecause(ctx, "its copy here is saved before it goes"), &pb.StackRef{Slug: e.Slug}); err != nil {
 		return nil, err
 	}
@@ -325,6 +327,35 @@ func (s *Service) keepLeft(ctx context.Context, e lease.Entry, k lease.Keep, mem
 		}
 		time.Sleep(leftWait)
 	}
+}
+
+// leftSave registers one save of a stack's left data, so a delete of that stack can end it (endLeftSave).
+func (s *Service) leftSave(ctx context.Context, slug string) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	s.savingMu.Lock()
+	if s.savingLeft == nil {
+		s.savingLeft = map[string]context.CancelFunc{}
+	}
+	s.savingLeft[slug] = cancel
+	s.savingMu.Unlock()
+	return ctx, func() {
+		s.savingMu.Lock()
+		delete(s.savingLeft, slug)
+		s.savingMu.Unlock()
+		cancel()
+	}
+}
+
+// endLeftSave ends a save of what a return left of slug and forgets the keep: the stack and its data are going.
+// The receiving store drops a cut save (ADR-0043), so nothing of it lands anywhere (c37: 1.68 GB on eu-1).
+func (s *Service) endLeftSave(slug string) {
+	s.savingMu.Lock()
+	cancel := s.savingLeft[slug]
+	s.savingMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	s.leaseGuard().forgetKept(slug)
 }
 
 // purgeLeft takes a saved stack down with the volumes its archive holds.

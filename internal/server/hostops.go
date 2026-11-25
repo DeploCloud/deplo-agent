@@ -244,6 +244,7 @@ func (s *Service) bringUpTraefik(ctx context.Context, path string, restartOnly b
 		if res.Code != 0 {
 			return fmt.Errorf("could not restart Traefik: %s", firstLine(res.Stderr))
 		}
+		proxyFirst(ctx)
 		s.challenge().rebind()
 		return nil
 	}
@@ -271,6 +272,7 @@ func (s *Service) bringUpTraefik(ctx context.Context, path string, restartOnly b
 			return fmt.Errorf("could not reconnect Traefik to %s: %v", n, err)
 		}
 	}
+	proxyFirst(ctx)
 	s.challenge().rebind()
 	return nil
 }

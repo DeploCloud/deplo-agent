@@ -135,3 +135,26 @@ func TestASlowCopyLooksEveryFifthOfASecond(t *testing.T) {
 		t.Fatalf("a slow copy waited %v", slept)
 	}
 }
+
+// c38: one copy into eu-2, whose Apps already waited for the CPU, timed every App through it out.
+func TestACopyBacksOffWhileAppsKeepWaitingAndComesBack(t *testing.T) {
+	slept := fake(t, func(i int) int64 {
+		if i < 6 {
+			return 30_000
+		}
+		return 0
+	})
+	copySteps(&Pacer{}, 10)
+	want := []time.Duration{400, 800, 1600, 2000, 2000, 2000, 1600, 800, 400}
+	for i := range want {
+		want[i] *= time.Millisecond
+	}
+	if len(*slept) != len(want) {
+		t.Fatalf("waited %v, want %v", *slept, want)
+	}
+	for i := range want {
+		if (*slept)[i] != want[i] {
+			t.Fatalf("waited %v, want %v", *slept, want)
+		}
+	}
+}

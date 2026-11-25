@@ -14,18 +14,22 @@ import (
 )
 
 // Step is how much a copy moves between two looks, and Every the longest it goes without one: a slow copy
-// (eu, 24 Nov 2026: 8 MB took 5 s) would otherwise run most of the time between capped waits.
+// (eu, 24 Nov 2026: 8 MB took 5 s) would otherwise run most of the time between capped waits, and the proxy
+// waits at most that long behind one.
 const (
 	Step  = 8 << 20
-	Every = 200 * time.Millisecond
+	Every = 50 * time.Millisecond
 )
 
 const (
 	// busyShare is how long, of a step, the Apps may wait before the copy steps aside.
 	busyShare = 20
-	// yieldTimes is how many times its last step a copy then waits: it takes at most a fifth of the server.
+	// yieldTimes is how many times its last step a copy waits once the Apps waited: a fifth of the server. Each
+	// step they wait again doubles it, up to maxTimes (a thirtieth); each step they do not halves it (c38: one
+	// copy into eu-2, already busy, timed every App out).
 	yieldTimes = 4
-	maxWait    = time.Second
+	maxTimes   = 32
+	maxWait    = 2 * time.Second
 )
 
 var lastApp atomic.Int64
@@ -91,6 +95,8 @@ type Pacer struct {
 	n     int64
 	last  time.Time
 	stall int64
+	// times is how many times its last step the copy waits now.
+	times time.Duration
 }
 
 // Moved notes n bytes the copy moved and, every Step, waits while the Apps were held up during it.
@@ -102,10 +108,21 @@ func (p *Pacer) Moved(n int) {
 	p.n = 0
 	Looks.Add(1)
 	st := appsWaited()
-	if !p.last.IsZero() {
-		took := t.Sub(p.last)
-		if took > 0 && (time.Duration(st-p.stall)*time.Microsecond > took/busyShare || TouchedSince(p.last)) {
-			sleep(min(took*yieldTimes, maxWait))
+	if took := t.Sub(p.last); !p.last.IsZero() && took > 0 {
+		if time.Duration(st-p.stall)*time.Microsecond > took/busyShare {
+			p.times = min(max(2*p.times, yieldTimes), maxTimes)
+		} else {
+			p.times /= 2
+		}
+		times := p.times
+		if times < yieldTimes {
+			times = 0
+		}
+		if TouchedSince(p.last) {
+			times = max(times, yieldTimes)
+		}
+		if times > 0 {
+			sleep(min(took*times, maxWait))
 			t, st = now(), appsWaited()
 		}
 	}

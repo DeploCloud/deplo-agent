@@ -22,6 +22,7 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/bootstrap"
 	"github.com/DeploCloud/deplo-agent/internal/capture"
 	"github.com/DeploCloud/deplo-agent/internal/dnszone"
+	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 	"github.com/DeploCloud/deplo-agent/internal/forwarder"
 	"github.com/DeploCloud/deplo-agent/internal/link"
 	"github.com/DeploCloud/deplo-agent/internal/logpipe"
@@ -98,6 +99,7 @@ func main() {
 		}
 	}
 	go server.TakePriority(context.Background())
+	dockercli.CacheReads(time.Second)
 	go server.EnsureRestart(context.Background())
 
 	if *insecure && !loopbackAddr(*addr) {

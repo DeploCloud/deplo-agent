@@ -655,3 +655,36 @@ func TestRun_aLinkRefusedAsACopyIsNotedForTheInstallerAndClearedOnceTaken(t *tes
 		return os.IsNotExist(err)
 	})
 }
+
+// readsOnce answers one read with err.
+type readsOnce struct {
+	net.Conn
+	err error
+}
+
+func (r readsOnce) Read([]byte) (int, error) { return 0, r.err }
+func (r readsOnce) Close() error             { return nil }
+
+// c37: eu-4's link ended "link closed" mid-move, and nothing said who ended it.
+func TestConn_saysWhoEndedTheLink(t *testing.T) {
+	cases := []struct {
+		err   error
+		first string
+		want  string
+	}{
+		{websocket.CloseError{Code: websocket.StatusNormalClosure, Reason: "channel closed"}, "read", "the panel closed it (1000 channel closed)"},
+		{io.ErrUnexpectedEOF, "read", "its connection ended: unexpected EOF"},
+		{net.ErrClosed, "close", "this agent's gRPC closed it"},
+	}
+	for _, tc := range cases {
+		c := &conn{Conn: readsOnce{err: tc.err}, closed: make(chan struct{})}
+		if tc.first == "close" {
+			_ = c.Close()
+		}
+		_, _ = c.Read(make([]byte, 1))
+		_ = c.Close()
+		if got := c.why(); got != tc.want {
+			t.Errorf("%v: %q, want %q", tc.err, got, tc.want)
+		}
+	}
+}
