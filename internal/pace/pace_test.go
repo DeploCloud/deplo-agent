@@ -19,8 +19,8 @@ func fake(t *testing.T, waitedPerStep func(i int) int64) (slept *[]time.Duration
 	oldNow, oldSleep, oldWaited := now, sleep, appsWaited
 	now = func() time.Time { return clock }
 	sleep = func(d time.Duration) { out = append(out, d); clock = clock.Add(d) }
-	appsWaited = func() int64 { return stall }
-	t.Cleanup(func() { now, sleep, appsWaited = oldNow, oldSleep, oldWaited; lastApp.Store(0) })
+	appsWaited = func() map[string]int64 { return map[string]int64{"app": stall} }
+	t.Cleanup(func() { now, sleep, appsWaited = oldNow, oldSleep, oldWaited })
 	step := func() {
 		clock = clock.Add(100 * time.Millisecond)
 		stall += waitedPerStep(i)
@@ -62,37 +62,69 @@ func TestACopyStepsAsideWhileAppsWait(t *testing.T) {
 	}
 }
 
-func TestAForwardedRequestMakesACopyWait(t *testing.T) {
-	slept := fake(t, func(int) int64 { return 0 })
-	p := &Pacer{}
-	p.Moved(0)
-	stepFn()
-	Touch()
-	p.Moved(Step)
-	stepFn()
-	p.Moved(Step)
-	if len(*slept) != 1 {
-		t.Fatalf("want one wait after the request, got %v", *slept)
+// c39: every visitor crossing the agent paused a copy, and a 300 MB backup ran at 13 KB/s.
+func TestAppsThatBarelyWaitNeverHoldACopy(t *testing.T) {
+	slept := fake(t, func(int) int64 { return 6000 }) // 6 ms of 100
+	copySteps(&Pacer{}, 10)
+	if len(*slept) != 0 {
+		t.Fatalf("waited %v while the Apps waited 6%% of each step", *slept)
 	}
 }
 
-func TestAWaitIsCapped(t *testing.T) {
+// c39: ten containers each waiting a little added up, and the forwarders alone held every copy.
+func TestSmallWaitsOfManyContainersDoNotAddUp(t *testing.T) {
 	slept := fake(t, func(int) int64 { return 0 })
+	var stall int64
+	appsWaited = func() map[string]int64 {
+		out := map[string]int64{}
+		for _, g := range []string{"a", "b", "c", "d", "e", "f", "g", "h", "i", "j"} {
+			out[g] = stall
+		}
+		return out
+	}
 	p := &Pacer{}
 	p.Moved(0)
-	stepFn()
-	now = func() time.Time { return time.Unix(1010, 0) } // a 10 s step
-	Touch()
-	p.Moved(Step)
-	if len(*slept) != 1 || (*slept)[0] != maxWait {
-		t.Fatalf("want a wait of %v, got %v", maxWait, *slept)
+	for range 10 {
+		stepFn()
+		stall += 3000 // 3 ms of 100 each, 30 ms in all
+		p.Moved(Step)
+	}
+	if len(*slept) != 0 {
+		t.Fatalf("waited %v for ten containers that each waited 3%%", *slept)
+	}
+}
+
+// c40: a copy gives way to Apps that keep waiting, but never runs slower than Floor.
+func TestACopyNeverDropsUnderTheFloor(t *testing.T) {
+	clock := time.Unix(1000, 0)
+	var slept []time.Duration
+	var stall int64
+	oldNow, oldSleep, oldWaited := now, sleep, appsWaited
+	now = func() time.Time { return clock }
+	sleep = func(d time.Duration) { slept = append(slept, d); clock = clock.Add(d) }
+	appsWaited = func() map[string]int64 { return map[string]int64{"app": stall} }
+	t.Cleanup(func() { now, sleep, appsWaited = oldNow, oldSleep, oldWaited })
+	p := &Pacer{}
+	p.Moved(0)
+	start := clock
+	const chunk = 1 << 20
+	for range 40 {
+		clock = clock.Add(Every)
+		stall += int64(Every / time.Microsecond / 2) // the Apps wait half of every step
+		p.Moved(chunk)
+	}
+	if len(slept) == 0 {
+		t.Fatal("a copy never gave way to Apps that kept waiting")
+	}
+	if rate := float64(40*chunk) / clock.Sub(start).Seconds(); rate < Floor*0.99 {
+		t.Fatalf("a copy ran at %.0f bytes a second, under the floor of %d", rate, Floor)
 	}
 }
 
 func TestWriterAndReaderPaceWhatTheyMove(t *testing.T) {
 	looks := 0
 	old := appsWaited
-	appsWaited = func() int64 { looks++; return 0 }
+	appsWaited = func() map[string]int64 { looks++; return nil }
 	t.Cleanup(func() { appsWaited = old })
 	data := bytes.Repeat([]byte{1}, 3*Step)
 	if _, err := io.Copy(Writer(io.Discard), Reader(bytes.NewReader(data))); err != nil {
@@ -115,24 +147,22 @@ func TestWaitedReadsSomeTotal(t *testing.T) {
 }
 
 // eu, 24 Nov 2026: one 8 MB step of a copy took 5 s, so a wait capped at a second let it run 83% of the time.
-func TestASlowCopyLooksEveryFifthOfASecond(t *testing.T) {
+func TestASlowCopyLooksEveryFiftiethOfASecond(t *testing.T) {
 	clock := time.Unix(1000, 0)
-	var slept []time.Duration
-	oldNow, oldSleep, oldWaited := now, sleep, appsWaited
+	oldNow, oldWaited := now, appsWaited
 	now = func() time.Time { return clock }
-	sleep = func(d time.Duration) { slept = append(slept, d); clock = clock.Add(d) }
-	appsWaited = func() int64 { return 0 }
-	t.Cleanup(func() { now, sleep, appsWaited = oldNow, oldSleep, oldWaited; lastApp.Store(0) })
+	appsWaited = func() map[string]int64 { return nil }
+	t.Cleanup(func() { now, appsWaited = oldNow, oldWaited })
 	p := &Pacer{}
 	p.Moved(0)
-	// 64 KB every 50 ms while a request crosses the agent: far from a Step, it still looks and waits.
+	before := Looks.Load()
+	// 64 KB every 50 ms: far from a Step, it still looks every time.
 	for range 10 {
-		clock = clock.Add(50 * time.Millisecond)
-		Touch()
+		clock = clock.Add(Every)
 		p.Moved(64 << 10)
 	}
-	if len(slept) < 2 {
-		t.Fatalf("a slow copy waited %v", slept)
+	if got := Looks.Load() - before; got != 10 {
+		t.Fatalf("a slow copy looked %d times in 10 steps", got)
 	}
 }
 
