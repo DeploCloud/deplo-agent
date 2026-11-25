@@ -145,6 +145,16 @@ func TestReply_nothingElse(t *testing.T) {
 	}
 }
 
+// c39: a resolver that asked for a new App's name before it was ready kept "no such name" for 30 s.
+func TestReply_noSuchNameIsKeptSeconds(t *testing.T) {
+	c := mustCompile(t, testTable())
+	r := c.reply(query("nothing.go.example.com.", dns.TypeAAAA), true, visitor{})
+	soa, ok := r.Ns[0].(*dns.SOA)
+	if !ok || soa.Hdr.Ttl > 5 || soa.Minttl > 5 {
+		t.Fatalf("a resolver keeps no such name for longer than 5 s: %v", r.Ns)
+	}
+}
+
 func TestReply_noANY(t *testing.T) {
 	c := mustCompile(t, testTable())
 	r := c.reply(query("shop-example-com.go.example.com.", dns.TypeANY), true, visitor{})
