@@ -267,3 +267,45 @@ func TestReplicas_aCopySaysItsSizeOnDiskAndThatARelayCarriesIt(t *testing.T) {
 		t.Fatal("the App's own data counted as a copy")
 	}
 }
+
+// c38: lab-pd's copy on eu-4, handed while lab-pd was empty, took its 300 MB as followed changes beside a backup into
+// eu-4. Deplo now holds a copy that would move data while its server copies something else: it stays whole, idle.
+func TestReplicas_aHeldCopyStaysWholeAndReceivesNothingUntilItsTurn(t *testing.T) {
+	a, b, vol, _ := replicating(t, true)
+	if err := os.WriteFile(filepath.Join(vol, "data.txt"), []byte("one"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "b to hold a whole copy", func() bool { return replicaStatus(t, b, "prj_1").GetSynced() })
+	hand := func(hold string) {
+		t.Helper()
+		req := &pb.SetClusterReplicasRequest{
+			ClusterId: "cl1",
+			Members: []*pb.ClusterForwarderMember{
+				{ServerId: "srv_a", Fingerprint: sourcePrint[a]},
+				{ServerId: "srv_b", Fingerprint: b.replicas().tab.Members["srv_b"]},
+			},
+			Entries: []*pb.ClusterReplicaEntry{{AppId: "prj_1", Slug: "web", VolumeNames: []string{"deplo-web-data"}, Hold: hold}},
+		}
+		if _, err := b.SetClusterReplicas(context.Background(), req); err != nil {
+			t.Fatal(err)
+		}
+	}
+	hand("Queued: srv_b is busy with a backup of shop")
+	eventually(t, "b to stop receiving", func() bool {
+		st := replicaStatus(t, b, "prj_1")
+		return st.GetRole() == "idle" && st.GetSynced() && strings.HasPrefix(st.GetError(), "Queued:")
+	})
+	if err := os.WriteFile(filepath.Join(vol, "data.txt"), []byte("two"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	copied := filepath.Join(b.replicas().dir("prj_1"), "volume-deplo-web-data", "data.txt")
+	time.Sleep(300 * time.Millisecond)
+	if raw, _ := os.ReadFile(copied); string(raw) != "one" {
+		t.Fatalf("a held copy holds %q", raw)
+	}
+	hand("")
+	eventually(t, "the change to reach b once its turn comes", func() bool {
+		raw, _ := os.ReadFile(copied)
+		return string(raw) == "two"
+	})
+}

@@ -188,6 +188,8 @@ var Capabilities = []string{
 	"teardown.set-aside",
 	// ExpectClusterBackup and BackupRequest.member_fingerprint: a backup goes member to member, not through Deplo.
 	"backup-store.member",
+	// ExpectClusterFetch and RestoreRequest.member_fingerprint: a restore reads a backup member to member.
+	"backup-store.fetch",
 	// ExpectClusterVolume and SendClusterVolume: a move copies a volume member to member, not through Deplo.
 	"volume-copy.member",
 }
@@ -242,6 +244,8 @@ type Service struct {
 	expectedBackups map[string]expectedBackup
 	// expectedVolumes is the volumes Deplo told this member to take from another, by name.
 	expectedVolumes map[string]expectedVolume
+	// expectedFetches is the backups Deplo told this member another one reads from its store, by object key.
+	expectedFetches map[string]expectedBackup
 
 	// savingLeft ends each save of what a return left here, by stack: a delete never waits behind one.
 	savingMu   sync.Mutex

@@ -23,6 +23,10 @@ func Command(ctx context.Context, name string, args ...string) *exec.Cmd {
 	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// A stream that outlives its call stays in the agent's own cgroup, which a stop of the agent ends.
+	if !streams(name, args) {
+		intoCgroup(cmd.SysProcAttr)
+	}
 	cmd.Cancel = func() error {
 		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 			return cmd.Process.Kill()
@@ -30,6 +34,10 @@ func Command(ctx context.Context, name string, args ...string) *exec.Cmd {
 		return nil
 	}
 	return cmd
+}
+
+func streams(name string, args []string) bool {
+	return name == "docker" && len(args) > 0 && (args[0] == "events" || args[0] == "logs" || args[0] == "attach")
 }
 
 // RunLines runs cmd with every output the caller left unset merged into one pipe read line by line

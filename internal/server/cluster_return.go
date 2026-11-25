@@ -44,6 +44,9 @@ func (g *leaseGuard) runningNow(ctx context.Context, entries []lease.Entry) []st
 
 // unplaced is the stacks an order places on no member that this member still has: running, or stopped by
 // itself when its lease ran out. A leader that took over hears from it who has what its picture calls waiting.
+// A stack is looked at in Docker once when it first shows up unplaced; after that the answer is what the last
+// look found and the next look runs beside it, so a renewal never waits on a slow Docker (c38: eu-2's renewals came
+// 5.3 s apart while its proxy was recreated, and its Apps were fenced).
 func (g *leaseGuard) unplaced(o lease.Order) []string {
 	g.mu.Lock()
 	var held []string
@@ -51,18 +54,73 @@ func (g *leaseGuard) unplaced(o lease.Order) []string {
 		held = slices.Clone(c.Held)
 	}
 	g.mu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	var out []string
+	var ask, fresh []string
 	for _, e := range o.Placement {
-		if e.Slug == "" || slices.Contains(out, e.Slug) || !g.hasUnplaced(o.Placement, e) {
+		if e.Slug == "" || slices.Contains(ask, e.Slug) || !g.hasUnplaced(o.Placement, e) {
 			continue
 		}
-		if slices.Contains(held, e.Slug) || (g.running != nil && g.running(ctx, e.Slug)) {
-			out = append(out, e.Slug)
+		ask = append(ask, e.Slug)
+		if !g.seen(e.Slug) {
+			fresh = append(fresh, e.Slug)
 		}
 	}
+	g.lookRunning(fresh, true)
+	g.lookRunning(ask, false)
+	var out []string
+	g.mu.Lock()
+	for _, slug := range ask {
+		if slices.Contains(held, slug) || g.seenRunning[slug] {
+			out = append(out, slug)
+		}
+	}
+	g.mu.Unlock()
 	return out
+}
+
+func (g *leaseGuard) seen(slug string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	_, ok := g.seenRunning[slug]
+	return ok
+}
+
+// lookRunning asks Docker which of slugs run here, for this answer (wait) or, one look at a time, the next one.
+func (g *leaseGuard) lookRunning(slugs []string, wait bool) {
+	if g.running == nil || len(slugs) == 0 {
+		return
+	}
+	look := func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		found := map[string]bool{}
+		for _, slug := range slugs {
+			found[slug] = g.running(ctx, slug)
+		}
+		g.mu.Lock()
+		if g.seenRunning == nil {
+			g.seenRunning = map[string]bool{}
+		}
+		maps.Copy(g.seenRunning, found)
+		g.mu.Unlock()
+	}
+	if wait {
+		look()
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.looking {
+		return
+	}
+	g.looking = true
+	go func() {
+		defer func() {
+			g.mu.Lock()
+			g.looking = false
+			g.mu.Unlock()
+		}()
+		look()
+	}()
 }
 
 // comeBack carries a return across a renewal and starts settling it; the caller holds g.mu.

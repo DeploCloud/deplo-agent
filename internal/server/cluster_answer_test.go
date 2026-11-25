@@ -11,6 +11,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -662,5 +664,50 @@ func TestAnswers_aServersMemoryHoldsTheClustersCap(t *testing.T) {
 		if conns != tc.conns || waiting != tc.conns/4 || bound != tc.bound {
 			t.Errorf("%s: %d connections, %d waiting, held by memory %v", name, conns, waiting, bound)
 		}
+	}
+}
+
+// c38: eu-2's proxy was recreated with fise and memos passed on to it from three members; every waiting connection
+// dialed it again at each look and logged the refusal (3036 lines in 25 s), the agent took 70 to 88% of the core, and
+// its lease renewals came 5.3 s apart. One refusal now holds for proxyDownFor, a probe included.
+func TestAnswers_aProxyThatRefusesIsDialedOncePerHoldNotPerConnection(t *testing.T) {
+	quickAnswers(t, 600*time.Millisecond)
+	was := proxyDownFor
+	proxyDownFor = 10 * time.Second
+	t.Cleanup(func() { proxyDownFor = was })
+	a, b, fa, _, members := answerPair(t)
+	var dials atomic.Int32
+	dial := b.fwdOps.proxyDial
+	b.fwdOps.proxyDial = func(ctx context.Context, port uint32) (net.Conn, error) {
+		dials.Add(1)
+		return dial(ctx, port)
+	}
+	closed, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	down := uint32(closed.Addr().(*net.TCPAddr).Port)
+	closed.Close()
+	apply(t, a, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members, AnswerPort: backend(t, "proxy-a"),
+		Answers: []*pb.ClusterAnswer{shop()}, ServeAnswers: []string{"prj1"}})
+	apply(t, b, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members, AnswerPort: down,
+		Answers: []*pb.ClusterAnswer{shop()}, ServeAnswers: []string{"prj1"}})
+	placeOn(t, a, "srvA", appEntry("srvB"))
+	placeOn(t, b, "srvB", appEntry("srvB"))
+	s := fa.spec(t, answerAlias)
+	var wg sync.WaitGroup
+	for range 20 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if got := askPort(t, s, shopTLS); got != "" {
+				t.Errorf("a visitor reached %q through a proxy that refuses", got)
+			}
+		}()
+	}
+	wg.Wait()
+	// Those already dialing when the first refusal came may dial too; without the hold it was every one, at every look.
+	if n := dials.Load(); n > 3 {
+		t.Fatalf("B's refusing proxy was dialed %d times for 20 visitors in one hold", n)
 	}
 }
