@@ -288,7 +288,6 @@ var proxyStartMu sync.Mutex
 func (s *Service) startProxy(ctx context.Context, path string, restartOnly bool) ([]string, error) {
 	proxyStartMu.Lock()
 	defer proxyStartMu.Unlock()
-	defer holdFrontDoor()()
 	s.settleProxyAuthority(ctx, path)
 	f := s.forwarders()
 	plan := f.storePlan(ctx)
@@ -309,6 +308,7 @@ func (s *Service) mergeStore(ctx context.Context, path string, plan storeMerge) 
 		fmt.Fprintf(os.Stderr, "deplo-agent: proxy certificates: %v\n", err)
 		return nil
 	}
+	s.proxyGoingDown()
 	if err := stopProxy(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "deplo-agent: proxy certificates: %v\n", err)
 		return nil

@@ -214,9 +214,7 @@ func (s *Service) TraefikConfig(ctx context.Context, req *pb.TraefikConfigReques
 	if _, err := s.startProxy(ctx, path, req.GetRestartOnly()); err != nil {
 		if !req.GetRestartOnly() {
 			if rerr := os.Rename(path+".bak", path); rerr == nil {
-				release := holdFrontDoor()
 				_ = s.applyTraefik(ctx, path, false)
-				release()
 			}
 			return &pb.TraefikConfigResponse{
 				Ok:          false,
@@ -231,7 +229,7 @@ func (s *Service) TraefikConfig(ctx context.Context, req *pb.TraefikConfigReques
 }
 
 func (s *Service) applyTraefik(ctx context.Context, path string, restartOnly bool) error {
-	defer s.forwarders().proxyRestarted()
+	defer s.proxyBack()
 	if s.traefikApply != nil {
 		return s.traefikApply(ctx, path, restartOnly)
 	}
@@ -239,6 +237,7 @@ func (s *Service) applyTraefik(ctx context.Context, path string, restartOnly boo
 }
 
 func (s *Service) bringUpTraefik(ctx context.Context, path string, restartOnly bool) error {
+	s.proxyGoingDown()
 	if restartOnly {
 		res, err := dockercli.Run(ctx, 90*time.Second, "restart", traefikContainer)
 		if err != nil {

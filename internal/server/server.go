@@ -242,6 +242,9 @@ type Service struct {
 	failover         failoverImages
 	failoverRootOnce sync.Once
 	failoverRoot     string
+	// frontRelease ends the hold of this server's visitors while its proxy restarts.
+	frontMu      sync.Mutex
+	frontRelease func()
 	// expected is the images Deplo told this member to take from another one, by ref.
 	expectedMu sync.Mutex
 	expected   map[string]expectedImage

@@ -95,7 +95,41 @@ func (f *forwarders) watchLocal() {
 func (f *forwarders) proxyRestarted() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.proxyStarted = time.Now()
+	f.proxyStarted, f.stopping = time.Now(), false
+	for _, rc := range f.readiness {
+		rc.until = time.Time{}
+	}
+}
+
+// passHeld takes a visitor held at this server's front door for an App of the cluster, behind the PROXY header its
+// proxy would have sent: to another server that runs it at once, or here once the proxy is back and settled.
+func (f *forwarders) passHeld(c net.Conn, host string) bool {
+	f.mu.Lock()
+	cluster, members := f.st.Cluster, f.st.Members
+	var appID string
+	for _, a := range f.st.Answers {
+		if a.Routes != nil && slices.Contains(a.Routes.hosts(), host) {
+			appID = a.AppID
+		}
+	}
+	f.mu.Unlock()
+	if appID == "" || !f.admit() {
+		return false
+	}
+	go func() {
+		defer f.leave()
+		defer c.Close()
+		f.answerFor(c, cluster, members, appID, answerTLS, proxyHeader(c))
+	}()
+	return true
+}
+
+// proxyStopping notes that this server's proxy is about to stop: no visitor is passed to it, from here or another
+// server, until it is back and settled (c42: a held visitor met the new proxy before it read its routes, 404).
+func (f *forwarders) proxyStopping() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.stopping = true
 	for _, rc := range f.readiness {
 		rc.until = time.Time{}
 	}

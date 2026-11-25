@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -50,6 +51,8 @@ var (
 	// answerSettle is how long an App has been ready before its proxy is sure to route it: Traefik applies a
 	// container change up to 2 s after it happens.
 	answerSettle = 3 * time.Second
+	// proxySettle is how long a restarted proxy gets to read its routes: it reads them at its start (c41).
+	proxySettle = 500 * time.Millisecond
 	// answerReadyFor is how long a ready answer is kept before docker is asked again.
 	answerReadyFor = 5 * time.Second
 	// proxyDownFor is how long a refused dial to this server's own proxy holds: while its proxy is recreated, the
@@ -387,11 +390,24 @@ func (f *forwarders) serveAnswer(c net.Conn) {
 	if !found {
 		return
 	}
+	f.answerFor(in, cluster, members, appID, port, "")
+}
+
+// answerFor waits for a server that runs the App and carries the visitor there, its PROXY header first when the
+// connection does not start with one (a visitor held at this server's front door).
+func (f *forwarders) answerFor(in net.Conn, cluster string, members map[string]string, appID string, port uint32, header string) {
 	deadline := time.Now().Add(answerWait)
 	for {
 		if f.mayTry(appID) {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			up, via := f.reachAnswer(ctx, cluster, members, appID, port)
+			if up != nil && header != "" {
+				if _, err := io.WriteString(up, header); err != nil {
+					up.Close()
+					up = nil
+					f.release(via)
+				}
+			}
 			if up != nil {
 				if via == "" {
 					f.carry(appID, in, up)
@@ -570,7 +586,7 @@ func (f *forwarders) dialProxy(ctx context.Context, port uint32) (net.Conn, erro
 func (f *forwarders) ready(ctx context.Context, appID string) bool {
 	for {
 		f.mu.Lock()
-		if f.replacing[appID] > 0 {
+		if f.replacing[appID] > 0 || f.stopping {
 			f.mu.Unlock()
 			return false
 		}
@@ -604,9 +620,6 @@ func (f *forwarders) ready(ctx context.Context, appID string) bool {
 		now := time.Now()
 		f.mu.Lock()
 		since := r.Since
-		if f.proxyStarted.After(since) {
-			since = f.proxyStarted
-		}
 		if !r.OK {
 			delete(f.readySeen, appID)
 		} else if r.Health {
@@ -617,7 +630,7 @@ func (f *forwarders) ready(ctx context.Context, appID string) bool {
 				since = seen
 			}
 		}
-		rc.ok = r.OK && now.Sub(since) >= answerSettle
+		rc.ok = r.OK && now.Sub(since) >= answerSettle && now.Sub(f.proxyStarted) >= proxySettle && !f.stopping
 		rc.broken = r.Broken
 		rc.until = now.Add(answerRetry)
 		if rc.ok {

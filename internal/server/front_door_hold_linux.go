@@ -3,6 +3,10 @@
 package server
 
 import (
+	"strconv"
+	"strings"
+	"sync/atomic"
+
 	"github.com/google/nftables"
 	"github.com/google/nftables/binaryutil"
 	"github.com/google/nftables/expr"
@@ -11,15 +15,17 @@ import (
 
 const holdTable = "deplo_proxy_hold"
 
+var holdSeq atomic.Uint64
+
 // redirectFrontDoor sends every new TCP connection to this server's own addresses on a front port to the agent's
-// hold port, ahead of Docker's own redirect to the proxy.
-func redirectFrontDoor(ports map[uint16]uint16) (func(), error) {
+// hold port, ahead of Docker's own redirect to the proxy. stop lets new connections through again; drop removes the
+// table once its visitors are gone: taking the redirect away earlier loses the replies of those it already sent.
+func redirectFrontDoor(ports map[uint16]uint16) (stop, drop func(), err error) {
 	c, err := nftables.New()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	dropHoldTable(c)
-	t := c.AddTable(&nftables.Table{Family: nftables.TableFamilyINet, Name: holdTable})
+	t := c.AddTable(&nftables.Table{Family: nftables.TableFamilyINet, Name: holdTable + "_" + strconv.FormatUint(holdSeq.Add(1), 10)})
 	ch := c.AddChain(&nftables.Chain{Name: "prerouting", Table: t, Type: nftables.ChainTypeNAT,
 		Hooknum: nftables.ChainHookPrerouting, Priority: nftables.ChainPriorityRef(*nftables.ChainPriorityNATDest - 1)})
 	for from, to := range ports {
@@ -35,25 +41,35 @@ func redirectFrontDoor(ports map[uint16]uint16) (func(), error) {
 		}})
 	}
 	if err := c.Flush(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return clearFrontDoorHold, nil
+	stop = func() {
+		if c, err := nftables.New(); err == nil {
+			c.InsertRule(&nftables.Rule{Table: t, Chain: ch, Exprs: []expr.Any{&expr.Verdict{Kind: expr.VerdictAccept}}})
+			_ = c.Flush()
+		}
+	}
+	drop = func() {
+		if c, err := nftables.New(); err == nil {
+			c.DelTable(t)
+			_ = c.Flush()
+		}
+	}
+	return stop, drop, nil
 }
 
-// clearFrontDoorHold ends a hold, also one an agent that stopped mid-restart left behind.
+// clearFrontDoorHold removes what an earlier run of the agent left: its held visitors ended with it.
 func clearFrontDoorHold() {
-	if c, err := nftables.New(); err == nil {
-		dropHoldTable(c)
-		_ = c.Flush()
+	c, err := nftables.New()
+	if err != nil {
+		return
 	}
-}
-
-func dropHoldTable(c *nftables.Conn) {
 	if tables, err := c.ListTablesOfFamily(nftables.TableFamilyINet); err == nil {
 		for _, t := range tables {
-			if t.Name == holdTable {
+			if t.Name == holdTable || strings.HasPrefix(t.Name, holdTable+"_") {
 				c.DelTable(t)
 			}
 		}
 	}
+	_ = c.Flush()
 }

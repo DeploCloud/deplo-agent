@@ -66,9 +66,9 @@ func appEntry(member string) lease.Entry {
 // quickAnswers shortens how long a passed-on connection waits for a ready server.
 func quickAnswers(t *testing.T, wait time.Duration) {
 	t.Helper()
-	w, r, s := answerWait, answerRetry, answerSettle
-	answerWait, answerRetry, answerSettle = wait, 50*time.Millisecond, 0
-	t.Cleanup(func() { answerWait, answerRetry, answerSettle = w, r, s })
+	w, r, s, p := answerWait, answerRetry, answerSettle, proxySettle
+	answerWait, answerRetry, answerSettle, proxySettle = wait, 50*time.Millisecond, 0, 0
+	t.Cleanup(func() { answerWait, answerRetry, answerSettle, proxySettle = w, r, s, p })
 }
 
 // askPort connects as the answer forwarder's container does for a caller that dialed port: the port line, then its bytes.
@@ -774,18 +774,23 @@ func TestAnswers_aConnectionKeptOpenIsClosedOnceTheAppRunsElsewhere(t *testing.T
 	}
 }
 
-// c39: a recreated proxy answered 404 until it had read its routes: its visitors wait for it instead.
+// c39: a recreated proxy answered 404 until it had read its routes; c42: a visitor held through another server met it
+// before. Its visitors wait from the moment it stops until it settled.
 func TestAnswers_aRestartedProxyGetsNoVisitorUntilItSettles(t *testing.T) {
 	a, _, _, _, _ := answerPair(t)
 	f := a.forwarders()
 	f.s.fwdOps.ready = func(context.Context, string) appReadiness {
 		return appReadiness{OK: true, Since: time.Now().Add(-time.Hour)}
 	}
-	old, oldRetry := answerSettle, answerRetry
-	answerSettle, answerRetry = 300*time.Millisecond, 10*time.Millisecond
-	t.Cleanup(func() { answerSettle, answerRetry = old, oldRetry })
+	old, oldRetry := proxySettle, answerRetry
+	proxySettle, answerRetry = 300*time.Millisecond, 10*time.Millisecond
+	t.Cleanup(func() { proxySettle, answerRetry = old, oldRetry })
 	if !f.ready(context.Background(), "prj1") {
 		t.Fatal("an App that ran for an hour is not ready")
+	}
+	f.proxyStopping()
+	if f.ready(context.Background(), "prj1") {
+		t.Fatal("ready while its proxy restarts")
 	}
 	f.proxyRestarted()
 	if f.ready(context.Background(), "prj1") {
