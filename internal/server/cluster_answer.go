@@ -606,6 +606,11 @@ func (f *forwarders) ready(ctx context.Context, appID string) bool {
 			rc = &answerReadyCheck{}
 			f.readiness[appID] = rc
 		}
+		// Nor does it ask docker again meanwhile, busy recreating the proxy (c43: a look then took 3 s).
+		if settling, _ := f.settling(); settling && rc.ok {
+			f.mu.Unlock()
+			return true
+		}
 		if time.Now().Before(rc.until) {
 			ok := rc.ok
 			f.mu.Unlock()
