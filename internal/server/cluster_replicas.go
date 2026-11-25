@@ -100,9 +100,34 @@ type replicas struct {
 	wake   chan struct{}
 	// mountpoint reads where a volume's data lives on this host; tests replace it.
 	mountpoint func(ctx context.Context, volume string, create bool) (string, error)
-	// running says whether an App's stack runs here; tests replace it.
+	// running says whether an App's stack runs here; tests replace it. ran is what each App's last look found.
 	running func(ctx context.Context, slug string) bool
+	ran     map[string]ranAt
 	dial    func(ctx context.Context, fingerprint string) (net.Conn, error)
+}
+
+type ranAt struct {
+	at time.Time
+	ok bool
+}
+
+// stillRuns is running, asked once per App every replReconcileEvery however many members it sends to: each stream
+// asked on its own, three docker processes every 2 s per App on a one-core server (c39).
+func (r *replicas) stillRuns(ctx context.Context, slug string) bool {
+	r.mu.Lock()
+	last, ok := r.ran[slug]
+	r.mu.Unlock()
+	if ok && time.Since(last.at) < replReconcileEvery {
+		return last.ok
+	}
+	runs := r.running(ctx, slug)
+	r.mu.Lock()
+	if r.ran == nil {
+		r.ran = map[string]ranAt{}
+	}
+	r.ran[slug] = ranAt{time.Now(), runs}
+	r.mu.Unlock()
+	return runs
 }
 
 func (s *Service) replicas() *replicas {
@@ -486,7 +511,7 @@ func (s *Service) serveReplica(from wire.Party, c net.Conn, arg string) {
 	}
 	stillHere := func(ctx context.Context) bool {
 		_, here, ok := s.leaseGuard().locate(cluster, "app", appID)
-		return ok && here && !s.leaseGuard().RanOut() && r.running(ctx, entry.Slug)
+		return ok && here && !s.leaseGuard().RanOut() && r.stillRuns(ctx, entry.Slug)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

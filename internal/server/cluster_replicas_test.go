@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -308,4 +309,19 @@ func TestReplicas_aHeldCopyStaysWholeAndReceivesNothingUntilItsTurn(t *testing.T
 		raw, _ := os.ReadFile(copied)
 		return string(raw) == "two"
 	})
+}
+
+// c39: each member's stream asked Docker on its own every 2 s whether the App still ran: three of them for one App.
+func TestReplicas_everyStreamOfAnAppSharesOneLookAtWhetherItRuns(t *testing.T) {
+	r := &replicas{}
+	var asked atomic.Int32
+	r.running = func(context.Context, string) bool { asked.Add(1); return true }
+	for range 3 {
+		if !r.stillRuns(context.Background(), "web") {
+			t.Fatal("a running App reads as stopped")
+		}
+	}
+	if n := asked.Load(); n != 1 {
+		t.Fatalf("Docker was asked %d times for three streams", n)
+	}
 }
