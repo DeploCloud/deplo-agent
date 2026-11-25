@@ -883,6 +883,48 @@ func TestAnswers_aRestartingServerTakesNoVisitorAndTheOtherHoldsIt(t *testing.T)
 	}
 }
 
+// c43: back from a restart, the agent took its visitors only after a docker call for every name it holds: 4 s on one
+// core. It listens first, so a visitor is served while the containers are still being looked at.
+func TestAnswers_aResumedAgentServesBeforeItLooksAtItsContainers(t *testing.T) {
+	quickAnswers(t, 5*time.Second)
+	a, b, fa, _, members := answerPair(t)
+	bothAnswer(t, a, b, members)
+	apply(t, a, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members, AnswerPort: backend(t, "proxy-a"),
+		Answers: []*pb.ClusterAnswer{shop()}, Hold: []*pb.ClusterHeldName{hold(backend(t, "db"))}})
+	placeOn(t, a, "srvA", appEntry("srvB"))
+	placeOn(t, b, "srvB", appEntry("srvB"))
+	f := a.forwarders()
+	f.dock.Lock()
+	for name, l := range f.listeners {
+		l.ln.Close()
+		delete(f.listeners, name)
+	}
+	f.dock.Unlock()
+	slow := make(chan struct{})
+	fa.mu.Lock()
+	fa.slow = slow
+	fa.mu.Unlock()
+	t.Cleanup(func() { close(slow) })
+	go f.Resume()
+	spec := fa.spec(t, answerAlias)
+	var got string
+	eventually(t, "a visitor served while docker is still asked", func() bool {
+		c, err := net.DialTimeout("unix", filepath.Join(spec.Dir, fwdSocket), time.Second)
+		if err != nil {
+			return false
+		}
+		defer c.Close()
+		_ = c.SetDeadline(time.Now().Add(3 * time.Second))
+		_, _ = io.WriteString(c, "PORT "+strconv.Itoa(int(shopTLS))+"\nping")
+		out, _ := io.ReadAll(c)
+		got = string(out)
+		return got != ""
+	})
+	if got != "proxy-b:PING" {
+		t.Fatalf("the visitor read %q", got)
+	}
+}
+
 // c41: at the thaw of a 2-minute hang, what a kept connection had queued reached the stale copy before the agent's
 // once-a-second look closed it. Each read passed on asks the lease first.
 func TestAnswers_aCarriedVisitorPassesNothingOnceTheLeaseRanOut(t *testing.T) {

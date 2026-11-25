@@ -316,9 +316,11 @@ func (f *forwarders) Resume() {
 	f.dock.Lock()
 	defer f.dock.Unlock()
 	defer dropUnclaimedKept("fwd-")
-	if st := f.state(); len(st.Hold)+len(st.Answers) == 0 {
+	st := f.state()
+	if len(st.Hold)+len(st.Answers) == 0 {
 		return
 	}
+	f.listenFirst(st)
 	if err := f.reconcile(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "deplo-agent: name forwarders: %v\n", err)
 	}
@@ -353,6 +355,30 @@ func (f *forwarders) Clear() {
 	_ = f.reconcile(ctx)
 	if f.s.agentDir != "" {
 		_ = os.Remove(f.file())
+	}
+}
+
+// listenFirst takes the saved table's listeners back before any docker call: the visitors that waited in their queue
+// while the agent restarted are served at once (c43: 4 s). The caller holds f.dock.
+func (f *forwarders) listenFirst(st forwardState) {
+	ops := f.ops()
+	if len(st.Answers) > 0 {
+		if name := answerContainer(); f.listeners[name] == nil {
+			if ln, err := ops.listen(f.dir(name)); err == nil {
+				l := &heldListener{ln: ln, dir: f.dir(name)}
+				f.listeners[name] = l
+				go f.acceptAnswers(l)
+			}
+		}
+	}
+	for _, h := range st.Hold {
+		if name := containerFor(h); f.listeners[name] == nil {
+			if ln, err := ops.listen(f.dir(name)); err == nil {
+				l := &heldListener{ln: ln, dir: f.dir(name)}
+				f.listeners[name] = l
+				go f.acceptHeld(h.key(), l)
+			}
+		}
 	}
 }
 
