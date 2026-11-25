@@ -19,8 +19,9 @@ var updateAnswerWithin = 30 * time.Second
 // agentUnit is the service install-agent.sh writes; restartDropIn makes every exit of it start it again.
 const (
 	agentUnit     = "deplo-agent.service"
-	restartDropIn = "# Written by deplo-agent: any exit starts it again (deplo ADR-0043).\n" +
-		"[Unit]\nStartLimitIntervalSec=0\n\n[Service]\nRestart=always\nRestartSec=1\n"
+	restartDropIn = "# Written by deplo-agent: any exit starts it again, its visitors' listeners kept (deplo ADR-0043).\n" +
+		"[Unit]\nStartLimitIntervalSec=0\n\n[Service]\nRestart=always\nRestartSec=1\n" +
+		"FileDescriptorStoreMax=512\nNotifyAccess=main\n"
 )
 
 // unitDir is where systemd reads units from; a var so tests write elsewhere.
@@ -50,7 +51,12 @@ func ensureRestart(ctx context.Context) error {
 	if err := writeFileAtomic(p, []byte(restartDropIn), 0o644); err != nil {
 		return err
 	}
-	return systemctl(ctx, "daemon-reload")
+	if err := systemctl(ctx, "daemon-reload"); err != nil {
+		return err
+	}
+	// What was kept before the store existed was refused: keep it again.
+	restoreKept()
+	return nil
 }
 
 // startGuard runs, outside this agent's service, the binary before the update: it puts itself back unless the new

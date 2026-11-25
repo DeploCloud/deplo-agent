@@ -311,6 +311,7 @@ func (f *forwarders) Resume() {
 	defer cancel()
 	f.dock.Lock()
 	defer f.dock.Unlock()
+	defer dropUnclaimedKept("fwd-")
 	if st := f.state(); len(st.Hold)+len(st.Answers) == 0 {
 		return
 	}
@@ -400,6 +401,7 @@ func (f *forwarders) reconcile(ctx context.Context) error {
 	for name, l := range f.listeners {
 		if !wanted[name] {
 			l.ln.Close()
+			forgetKept(keptForwarder(l.dir))
 			_ = os.RemoveAll(l.dir)
 			delete(f.listeners, name)
 			delete(f.redirected, name)

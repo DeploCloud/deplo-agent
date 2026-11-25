@@ -54,8 +54,7 @@ func listenForwarder(dir string) (net.Listener, error) {
 		return nil, err
 	}
 	sock := filepath.Join(dir, fwdSocket)
-	_ = os.Remove(sock)
-	ln, err := net.Listen("unix", sock)
+	ln, err := keptUnixListener(keptForwarder(dir), sock)
 	if err != nil {
 		return nil, err
 	}
@@ -63,6 +62,9 @@ func listenForwarder(dir string) (net.Listener, error) {
 	_ = os.Chmod(sock, 0o666)
 	return ln, nil
 }
+
+// keptForwarder names a forwarder's listener in systemd's store: a visitor reaching it while the agent restarts waits.
+func keptForwarder(dir string) string { return "fwd-" + filepath.Base(dir) }
 
 func forwarderSpecTag(s forwardSpec) string {
 	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%s|%d|%s", fwdProto, s.Network, s.Alias, s.Port, s.Dir)))

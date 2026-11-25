@@ -31,7 +31,7 @@ const selfUpdateGrace = 750 * time.Millisecond
 
 var reexec = func(path string, argv []string, env []string) error {
 	logpipe.Restore()
-	return syscall.Exec(path, argv, env)
+	return syscall.Exec(path, argv, append(env, keptForExec()))
 }
 
 const maxAgentBinary = 256 << 20
