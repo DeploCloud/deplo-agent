@@ -44,3 +44,24 @@ func TestRun_aReadAskedAgainIsAnsweredUntilSomethingChanges(t *testing.T) {
 		t.Fatal("with no cache a read still came from it")
 	}
 }
+
+// c39: every backup's and cron job's docker exec cleared every read, and the same ps ran again at once.
+func TestRun_anExecLeavesTheReadsAsTheyWere(t *testing.T) {
+	dir := t.TempDir()
+	log := filepath.Join(dir, "argv.log")
+	script := "#!/bin/sh\necho \"$*\" >> " + log + "\necho running\n"
+	if err := os.WriteFile(filepath.Join(dir, "docker"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
+	CacheReads(time.Minute)
+	t.Cleanup(func() { CacheReads(0); forgetReads() })
+	ctx := context.Background()
+	_, _ = Run(ctx, 5*time.Second, "ps", "-q")
+	_, _ = Run(ctx, 5*time.Second, "exec", "deplo-web-1", "true")
+	_, _ = Run(ctx, 5*time.Second, "ps", "-q")
+	raw, _ := os.ReadFile(log)
+	if n := strings.Count(string(raw), "ps -q"); n != 1 {
+		t.Fatalf("ps ran %d times around an exec", n)
+	}
+}

@@ -28,3 +28,12 @@ func TestBringUpTraefik_theOldProxyDrainsThreeSeconds(t *testing.T) {
 	}
 	t.Fatalf("no recreate in %v", argv())
 }
+
+// c39: the proxy stopped to change its certificate store turned new visitors away for 11 s while it drained.
+func TestStopProxy_drainsThreeSeconds(t *testing.T) {
+	argv := dockerOnPath(t, "")
+	_ = stopProxy(context.Background())
+	if got := strings.Join(argv(), "\n"); got != "stop -t 3 "+traefikContainer {
+		t.Fatalf("the proxy is stopped with %q", got)
+	}
+}

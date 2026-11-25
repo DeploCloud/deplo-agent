@@ -85,7 +85,9 @@ func changes(args []string) bool {
 		return false
 	}
 	switch args[0] {
-	case "logs", "stats", "events", "images", "system":
+	// An exec runs inside a container and leaves what ps and inspect say as it was: a backup's or a cron job's no
+	// longer clears every read (c39: half of a one-core server's docker processes were the same ps again).
+	case "logs", "stats", "events", "images", "system", "exec":
 		return false
 	}
 	return true
