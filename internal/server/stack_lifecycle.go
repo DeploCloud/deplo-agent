@@ -282,6 +282,8 @@ func (s *Service) rerouteLocked(ctx context.Context, req *pb.RerouteRequest) (*p
 	if err := s.stripSourceLinks(slug); err != nil {
 		return &pb.StackResult{Ok: false, Error: err.Error()}, nil
 	}
+	// Its visitors here wait for the new containers rather than meet the old ones going (c40).
+	defer s.forwarders().recreating(s.leaseGuard().appOf(slug))()
 	if only := req.GetServices(); len(only) > 0 {
 		for _, svc := range only {
 			if !composeServiceName.MatchString(svc) {
