@@ -675,9 +675,7 @@ func (g *leaseGuard) Check(ctx context.Context) {
 			c.Held = union(c.Held, held)
 			switch {
 			case !c.ranOut(g.now()):
-				if len(c.Held) > 0 {
-					g.logf("deplo-agent: cluster %s: a renewal landed while its stacks were stopping: starting %s again", d.cluster, strings.Join(c.Held, ", "))
-				}
+				// settle says what it starts again: a stack the renewal placed elsewhere does not start (c42).
 				g.settleLocked(d.cluster, c)
 			case err == nil:
 				c.Fenced = true

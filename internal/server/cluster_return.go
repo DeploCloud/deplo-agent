@@ -257,6 +257,7 @@ func (g *leaseGuard) settle(cluster string) {
 			removed = append(removed, slug)
 		}
 	}
+	var resumed []string
 	for _, slug := range held {
 		switch {
 		// A stack the cluster no longer names is not the leader's to start; one waiting for room stays held.
@@ -269,8 +270,11 @@ func (g *leaseGuard) settle(cluster string) {
 				failed = true
 				continue
 			}
-			done = append(done, slug)
+			done, resumed = append(done, slug), append(resumed, slug)
 		}
+	}
+	if len(resumed) > 0 {
+		g.logf("deplo-agent: cluster %s: started %s again: the lease places it here", cluster, strings.Join(resumed, ", "))
 	}
 	removed = union(removed, trimmed)
 	slices.Sort(removed)

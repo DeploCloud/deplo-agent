@@ -66,12 +66,12 @@ func TestStopLog_aLeaseReadFromDiskSaysSo(t *testing.T) {
 	}
 }
 
-// A renewal that lands while the fence stops the stacks starts them again, and the log says it did.
+// A renewal that lands while the fence stops the stacks starts them again, and the log says it did once it did.
 func TestStopLog_aRenewalDuringTheStopIsLogged(t *testing.T) {
-	f := newGuard(t)
+	f := newReturn(t)
 	var log logLines
 	f.g.logf = log.logf
-	f.g.Renew(orderFor(3))
+	f.renew(orderFor(3))
 	f.clk.Add(61 * time.Second)
 	f.g.fence = func(context.Context, []lease.Entry) error {
 		f.g.Renew(orderFor(4))
@@ -79,8 +79,29 @@ func TestStopLog_aRenewalDuringTheStopIsLogged(t *testing.T) {
 	}
 	f.g.Check(context.Background())
 	f.g.work.Wait()
-	if got := log.with("a renewal landed while its stacks were stopping"); len(got) != 1 || !strings.Contains(got[0], "db-main") {
-		t.Fatalf("logged %q", log.lines)
+	if got := log.with("again"); len(got) != 1 || !strings.Contains(got[0], "started db-main") || len(f.started) == 0 {
+		t.Fatalf("logged %q, started %v", log.lines, f.started)
+	}
+}
+
+// c42: at a thaw the log said "starting lab-c, lab-a again" while the renewal had placed both elsewhere and nothing
+// started. A stack that does not start is never said to.
+func TestStopLog_aRenewalThatPlacesTheStacksElsewhereSaysNoStart(t *testing.T) {
+	f := newReturn(t)
+	var log logLines
+	f.g.logf = log.logf
+	f.renew(orderFor(3))
+	f.clk.Add(61 * time.Second)
+	f.g.fence = func(context.Context, []lease.Entry) error {
+		o := movedAway(4)
+		o.Placement[0].Member = "srv_b"
+		f.g.Renew(o)
+		return nil
+	}
+	f.g.Check(context.Background())
+	f.g.work.Wait()
+	if got := log.with("again"); len(got) != 0 || len(f.started) != 0 {
+		t.Fatalf("logged %q, started %v", got, f.started)
 	}
 }
 
