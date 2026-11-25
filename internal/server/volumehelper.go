@@ -54,20 +54,24 @@ func readVolumes(args []string) []string {
 	return out
 }
 
-// missingVolumes is which of names docker does not have; none when docker cannot tell. A var so a test answers.
+// missingVolumes is which of names docker says it does not have; none when it says nothing. A var so a test answers.
 var missingVolumes = func(ctx context.Context, names []string) []string {
 	if len(names) == 0 {
 		return nil
 	}
 	res, err := dockercli.Run(ctx, 15*time.Second, append([]string{"volume", "inspect", "--format", "{{.Name}}"}, names...)...)
-	if err != nil || (res.Code != 0 && !strings.Contains(strings.ToLower(res.Stderr), "no such volume")) {
+	if err != nil {
 		return nil
 	}
-	have := strings.Fields(res.Stdout)
 	var out []string
-	for _, n := range names {
-		if !slices.Contains(have, n) {
-			out = append(out, n)
+	for _, line := range strings.Split(strings.ToLower(res.Stderr), "\n") {
+		if !strings.Contains(line, "no such volume") {
+			continue
+		}
+		for _, n := range names {
+			if strings.Contains(line, strings.ToLower(n)) && !slices.Contains(out, n) {
+				out = append(out, n)
+			}
 		}
 	}
 	return out

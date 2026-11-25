@@ -71,3 +71,16 @@ func TestVolumeHelperRunNeverMakesAVolumeItOnlyReads(t *testing.T) {
 		t.Fatalf("a helper would mount a missing volume read-only, and docker would make it: %q", argv)
 	}
 }
+
+// Only docker's own "no such volume" counts: a docker that answers nothing hides no volume.
+func TestMissingVolumesAreWhatDockerSaysItLacks(t *testing.T) {
+	dockerOnPath(t, `echo deplo-web-data; echo "Error response from daemon: get deplo-lab-a_data: no such volume" >&2; exit 1`)
+	got := missingVolumes(t.Context(), []string{"deplo-web-data", "deplo-lab-a_data"})
+	if strings.Join(got, " ") != "deplo-lab-a_data" {
+		t.Fatalf("missing %q", got)
+	}
+	dockerOnPath(t, `exit 0`)
+	if got := missingVolumes(t.Context(), []string{"deplo-web-data"}); len(got) != 0 {
+		t.Fatalf("a docker that said nothing hid %q", got)
+	}
+}
