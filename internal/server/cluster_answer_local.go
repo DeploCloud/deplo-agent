@@ -33,7 +33,7 @@ func (f *forwarders) carry(appID string, in, up net.Conn) {
 	}
 	cluster := f.st.Cluster
 	f.mu.Unlock()
-	here := func() bool { h, _ := f.s.leaseGuard().answerHolders(cluster, appID); return h }
+	here := func() bool { h, _ := f.s.leaseGuard().visitorHolders(cluster, appID); return h }
 	forwarder.Join(leased{in, here}, moving{up})
 	f.mu.Lock()
 	delete(f.local[appID], in)
@@ -105,7 +105,7 @@ func (f *forwarders) watchLocal() {
 		apps := slices.Collect(maps.Keys(f.local))
 		f.mu.Unlock()
 		for _, appID := range apps {
-			if here, _ := f.s.leaseGuard().answerHolders(cluster, appID); here {
+			if here, _ := f.s.leaseGuard().visitorHolders(cluster, appID); here {
 				continue
 			}
 			f.mu.Lock()

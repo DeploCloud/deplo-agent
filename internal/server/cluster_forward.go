@@ -754,15 +754,23 @@ func (g *leaseGuard) answerHolders(cluster, id string) (here bool, others []stri
 	here, others = g.holders(cluster, "app", id)
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if c := g.clusters[cluster]; c != nil && c.Returning {
+		here = false
+	}
+	return here, others
+}
+
+// visitorHolders is answerHolders for where a visitor goes: a lease read back after the agent restarted in this boot
+// answers at once; it decides nothing else (no start, no certificate).
+func (g *leaseGuard) visitorHolders(cluster, id string) (here bool, others []string) {
+	here, others = g.answerHolders(cluster, id)
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	c := g.clusters[cluster]
-	if c != nil && !here && c.answerable(g.now()) {
-		// Read back after the agent restarted in this boot: visitors are answered at once, nothing is started.
+	if c != nil && !here && !c.Returning && c.answerable(g.now()) {
 		for _, e := range c.Placement {
 			here = here || (e.Kind == "app" && e.ID == id && e.Member == c.Member && !e.Standby)
 		}
-	}
-	if c != nil && c.Returning {
-		here = false
 	}
 	return here, others
 }

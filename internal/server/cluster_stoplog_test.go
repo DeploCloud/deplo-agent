@@ -120,22 +120,22 @@ func TestStopLog_aWriterPlacedElsewhereIsLogged(t *testing.T) {
 
 // c43: after an agent restart its visitors waited 5 s for the first renewal, though the lease it had kept on disk
 // still ran. In the same boot that lease answers them; after a reboot, or once it ran out, it does not.
-func TestAnswerHolders_aLeaseReadBackInTheSameBootAnswersVisitors(t *testing.T) {
+func TestVisitorHolders_aLeaseReadBackInTheSameBootAnswersVisitors(t *testing.T) {
 	f := newGuard(t)
 	f.g.Renew(orderFor(3))
 	f.clk.Add(2 * time.Second)
 	f.reopen()
-	if here, _ := f.g.answerHolders("clu_1", "prj_2"); !here {
+	if here, _ := f.g.visitorHolders("clu_1", "prj_2"); !here {
 		t.Fatal("an agent that restarted does not answer for what its running lease places here")
 	}
 	old := bootID
 	bootID = func() string { return old() + "-next" }
-	if here, _ := f.g.answerHolders("clu_1", "prj_2"); here {
+	if here, _ := f.g.visitorHolders("clu_1", "prj_2"); here {
 		t.Fatal("a lease from before a reboot answers visitors")
 	}
 	bootID = old
 	f.clk.Add(time.Minute)
-	if here, _ := f.g.answerHolders("clu_1", "prj_2"); here {
+	if here, _ := f.g.visitorHolders("clu_1", "prj_2"); here {
 		t.Fatal("a lease that ran out answers visitors")
 	}
 }

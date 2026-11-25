@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"io"
@@ -295,7 +296,7 @@ func TestStatusVia_readsAProxysAnswerBehindTheProxyHeader(t *testing.T) {
 				tc := tls.Server(&bufferedConn{Conn: c, r: br}, &tls.Config{Certificates: certs.TLS.Certificates})
 				req, err := http.ReadRequest(bufio.NewReader(tc))
 				status := "404 Not Found"
-				if err == nil && strings.HasPrefix(line, "PROXY TCP4 ") && req.Host == "shop.example" {
+				if err == nil && strings.HasPrefix(line, "PROXY TCP4 ") && req.Host == "example.com" {
 					status = "200 OK"
 				}
 				_, _ = io.WriteString(tc, "HTTP/1.1 "+status+"\r\nContent-Length: 0\r\n\r\n")
@@ -306,10 +307,15 @@ func TestStatusVia_readsAProxysAnswerBehindTheProxyHeader(t *testing.T) {
 		var d net.Dialer
 		return d.DialContext(ctx, "tcp", ln.Addr().String())
 	}
-	if got := statusVia(context.Background(), dial, 8443, "PROXY TCP4 127.0.0.1 127.0.0.1 1 443\r\n", "shop.example"); got != 200 {
+	roots := x509.NewCertPool()
+	roots.AddCert(certs.Certificate())
+	was := statusRoots
+	statusRoots = roots
+	t.Cleanup(func() { statusRoots = was })
+	if got := statusVia(context.Background(), dial, 8443, "PROXY TCP4 127.0.0.1 127.0.0.1 1 443\r\n", "example.com"); got != 200 {
 		t.Fatalf("behind the header: %d", got)
 	}
-	if got := statusVia(context.Background(), dial, 443, "", "shop.example"); got != 404 {
+	if got := statusVia(context.Background(), dial, 443, "", "example.com"); got != 404 {
 		t.Fatalf("without it: %d", got)
 	}
 }

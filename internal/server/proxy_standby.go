@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -219,6 +220,9 @@ var routedHost = func(ctx context.Context) string {
 	return ""
 }
 
+// statusRoots verifies the proxies' certificates: the system's when nil; tests set their own.
+var statusRoots *x509.CertPool
+
 // statusVia is the status a proxy answers for host over HTTPS, 0 when it does not answer.
 func statusVia(ctx context.Context, dial standbyDialer, port uint32, header, host string) int {
 	actx, cancel := context.WithTimeout(ctx, 3*time.Second)
@@ -232,7 +236,8 @@ func statusVia(ctx context.Context, dial standbyDialer, port uint32, header, hos
 	if _, err := io.WriteString(raw, header); err != nil {
 		return 0
 	}
-	c := tls.Client(raw, &tls.Config{ServerName: host, InsecureSkipVerify: true}) //nolint:gosec // only compares two proxies' answers
+	// A domain with no valid certificate yet answers 0 here: its check is skipped, the settle stands.
+	c := tls.Client(raw, &tls.Config{ServerName: host, MinVersion: tls.VersionTLS12, RootCAs: statusRoots})
 	if _, err := fmt.Fprintf(c, "HEAD / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", host); err != nil {
 		return 0
 	}
