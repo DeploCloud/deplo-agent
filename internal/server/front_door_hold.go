@@ -10,7 +10,9 @@ import (
 	"io"
 	"net"
 	"os"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -264,6 +266,50 @@ func (s *Service) proxyGoingDown() {
 	s.forwarders().proxyStopping(dial)
 	s.frontRelease = s.holdFrontDoor(dial)
 	s.frontStandbyEnd = end
+	if dial != nil {
+		ports := frontDoorPorts
+		if p := s.forwarders().state().AnswerPort; p != 0 {
+			ports = append(slices.Clone(ports), p)
+		}
+		for until := time.Now().Add(oldProxyDrain); proxyCarries(ports) > 0 && time.Now().Before(until); {
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+}
+
+// oldProxyDrain bounds how long the proxy being replaced keeps what it carries once the standby takes every new
+// visitor, before it is stopped (c46: stopped under them, 5 were reset).
+var oldProxyDrain = 5 * time.Second
+
+// proxyCarries counts the visitors this server's proxy still carries on ports; tests replace it.
+var proxyCarries = func(ports []uint32) int {
+	pid, err := lookupProxyPid(context.Background(), 0)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, table := range []string{"tcp", "tcp6"} {
+		if raw, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/net/" + table); err == nil {
+			n += establishedOn(string(raw), ports)
+		}
+	}
+	return n
+}
+
+// establishedOn counts the established connections of a /proc/net/tcp table whose local port is one of ports.
+func establishedOn(table string, ports []uint32) int {
+	n := 0
+	for _, line := range strings.Split(table, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 4 || f[3] != "01" {
+			continue
+		}
+		_, hex, _ := strings.Cut(f[1], ":")
+		if port, err := strconv.ParseUint(hex, 16, 16); err == nil && slices.Contains(ports, uint32(port)) {
+			n++
+		}
+	}
+	return n
 }
 
 // newProxyWeight puts the new proxy at the agent's weight at once when visitors wait for it (c43: 3.6 s to its routes),
