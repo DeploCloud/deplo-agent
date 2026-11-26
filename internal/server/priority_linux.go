@@ -106,12 +106,14 @@ var systemctl = func(ctx context.Context, args ...string) error {
 
 // TakePriority raises this agent's service, until it stops, and makes the slice the copies run in. Best effort: a
 // host without systemd keeps its defaults.
-func TakePriority(ctx context.Context) {
+func (s *Service) TakePriority(ctx context.Context) {
 	raw, _ := os.ReadFile("/proc/self/cgroup")
-	takePriority(ctx, string(raw))
+	takePriority(ctx, string(raw), s.afterStart)
 }
 
-func takePriority(ctx context.Context, cgroup string) {
+// takePriority asks docker only once settled returns: on one core the start's docker calls held its first renewal
+// past 500 ms (c50).
+func takePriority(ctx context.Context, cgroup string, settled func(context.Context)) {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	if unit := ownUnit(cgroup); unit != "" {
@@ -119,12 +121,13 @@ func takePriority(ctx context.Context, cgroup string) {
 			fmt.Fprintf(os.Stderr, "deplo-agent: could not put the agent first on the CPU and the disk: %v\n", err)
 		}
 	}
-	proxyFirst(ctx, traefikContainer)
 	if systemctl(ctx, "start", cliSlice) == nil &&
 		systemctl(ctx, append([]string{"set-property", "--runtime", cliSlice}, strings.Fields(cliWeights)...)...) == nil &&
 		!dockercli.UseCgroup("/sys/fs/cgroup/"+cliSlice) {
 		fmt.Fprintf(os.Stderr, "deplo-agent: docker commands run beside the agent: %s takes no process\n", cliSlice)
 	}
+	settled(ctx)
+	proxyFirst(ctx, traefikContainer)
 	res, err := dockercli.Run(ctx, 10*time.Second, "info", "--format", "{{.CgroupDriver}}")
 	if err != nil || res.Code != 0 || strings.TrimSpace(res.Stdout) != "systemd" {
 		return

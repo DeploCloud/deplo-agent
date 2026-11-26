@@ -25,6 +25,8 @@ const (
 	opDelete   = 'X'
 	// A beat below zero is the size of the next record's file, as -(size+1): a receiver that predates it reads a beat.
 	opBeat = 'B'
+	// What a receiver sends after its manifest: beats, then Q when it stops the stream on purpose.
+	opStop = 'Q'
 	// The sink's manifest, sent first: one M per entry it holds, then Z.
 	opManifest = 'M'
 	opManEnd   = 'Z'

@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
 	"net"
 	"os"
 	"path/filepath"
@@ -37,7 +38,16 @@ func replicaStatus(t *testing.T, s *Service, appID string) *pb.ClusterReplicaSta
 var (
 	directInTest atomic.Bool
 	dialsInTest  atomic.Int32
+	slowInTest   atomic.Bool
 )
+
+// slowConn reads at most 16 KB at a time, 5 ms apart: a busy member.
+type slowConn struct{ net.Conn }
+
+func (c slowConn) Read(p []byte) (int, error) {
+	time.Sleep(5 * time.Millisecond)
+	return c.Conn.Read(p[:min(len(p), 16<<10)])
+}
 
 func replicating(t *testing.T, aRuns bool) (a, b *Service, vol, live string) {
 	return replicatingHanded(t, aRuns, true)
@@ -59,7 +69,11 @@ func replicatingHanded(t *testing.T, aRuns, handB bool) (a, b *Service, vol, liv
 	dial := b.replicas().dial
 	b.replicas().dial = func(ctx context.Context, fp string) (net.Conn, error) {
 		dialsInTest.Add(1)
-		return dial(ctx, fp)
+		c, err := dial(ctx, fp)
+		if err == nil && slowInTest.Load() {
+			c = slowConn{c}
+		}
+		return c, err
 	}
 	app := lease.Entry{Kind: "app", ID: "prj_1", Member: "srv_a", Slug: "web", SingleWriter: true}
 	placeOn(t, a, "srv_a", app)
@@ -286,26 +300,29 @@ func TestReplicas_aCopySaysItsSizeOnDiskAndThatARelayCarriesIt(t *testing.T) {
 
 // c38: lab-pd's copy on eu-4, handed while lab-pd was empty, took its 300 MB as followed changes beside a backup into
 // eu-4. Deplo now holds a copy that would move data while its server copies something else: it stays whole, idle.
+// holdCopy hands b the table of replicating with its copy held for why, or no longer held when why is empty.
+func holdCopy(t *testing.T, a, b *Service, why string) {
+	t.Helper()
+	req := &pb.SetClusterReplicasRequest{
+		ClusterId: "cl1",
+		Members: []*pb.ClusterForwarderMember{
+			{ServerId: "srv_a", Fingerprint: sourcePrint[a]},
+			{ServerId: "srv_b", Fingerprint: b.replicas().tab.Members["srv_b"]},
+		},
+		Entries: []*pb.ClusterReplicaEntry{{AppId: "prj_1", Slug: "web", VolumeNames: []string{"deplo-web-data"}, Hold: why}},
+	}
+	if _, err := b.SetClusterReplicas(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestReplicas_aHeldCopyStaysWholeAndReceivesNothingUntilItsTurn(t *testing.T) {
 	a, b, vol, _ := replicating(t, true)
 	if err := os.WriteFile(filepath.Join(vol, "data.txt"), []byte("one"), 0o640); err != nil {
 		t.Fatal(err)
 	}
 	eventually(t, "b to hold a whole copy", func() bool { return replicaStatus(t, b, "prj_1").GetSynced() })
-	hand := func(hold string) {
-		t.Helper()
-		req := &pb.SetClusterReplicasRequest{
-			ClusterId: "cl1",
-			Members: []*pb.ClusterForwarderMember{
-				{ServerId: "srv_a", Fingerprint: sourcePrint[a]},
-				{ServerId: "srv_b", Fingerprint: b.replicas().tab.Members["srv_b"]},
-			},
-			Entries: []*pb.ClusterReplicaEntry{{AppId: "prj_1", Slug: "web", VolumeNames: []string{"deplo-web-data"}, Hold: hold}},
-		}
-		if _, err := b.SetClusterReplicas(context.Background(), req); err != nil {
-			t.Fatal(err)
-		}
-	}
+	hand := func(hold string) { t.Helper(); holdCopy(t, a, b, hold) }
 	hand("Queued: srv_b is busy with a backup of shop")
 	eventually(t, "b to stop receiving", func() bool {
 		st := replicaStatus(t, b, "prj_1")
@@ -433,9 +450,9 @@ func TestReplicas_aSenderSaysWhyItsLastCopyStopped(t *testing.T) {
 	r.mu.Lock()
 	b := wire.Party{Fingerprint: r.tab.Members["srv_b"], Role: wire.RoleMember}
 	r.mu.Unlock()
+	// Each stream breaks, as a cut does: one its receiver stops is no failure.
 	copyOnce := func(end func(st *replica.Status) bool) {
 		toA, toB := net.Pipe()
-		defer toB.Close()
 		go func() { defer toA.Close(); a.serveReplica(b, toA, "cl1 prj_1") }()
 		if verb, arg, err := wire.ReadHeader(toB); err != nil || verb != wire.VerbOK {
 			t.Fatalf("a answered %q %q %v", verb, arg, err)
@@ -447,10 +464,52 @@ func TestReplicas_aSenderSaysWhyItsLastCopyStopped(t *testing.T) {
 			_ = replica.Receive(ctx, toB, t.TempDir(), []string{replica.VolumeRoot("deplo-web-data")}, st, replica.NewIndex())
 		}()
 		eventually(t, "a whole copy", func() bool { return end(st) })
+		toB.Close()
 	}
 	copyOnce(func(st *replica.Status) bool { _, synced, _, _, _ := st.Snapshot(); return synced })
 	eventually(t, "a to say why its copy stopped", func() bool {
 		return strings.Contains(replicaStatus(t, a, "prj_1").GetError(), "a copy of it stopped")
 	})
 	copyOnce(func(*replica.Status) bool { return replicaStatus(t, a, "prj_1").GetError() == "" })
+}
+
+// c50: lab-kit-b's copy on eu-4, held for its turn while its App took 120 MB, came back on its old 64 MB and read Up
+// to date from its first record: the move then took the whole 120 MiB while the App was down.
+func TestReplicas_aCopyBackFromAHoldIsBehindUntilItCaughtUp(t *testing.T) {
+	a, b, vol, _ := replicating(t, true)
+	if err := os.WriteFile(filepath.Join(vol, "data.txt"), []byte("one"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "b to follow", func() bool { return replicaStatus(t, b, "prj_1").GetAppliedAt() != "" })
+	holdCopy(t, a, b, "Queued: srv_a is busy with a copy of shop")
+	eventually(t, "b to stop receiving", func() bool { return replicaStatus(t, b, "prj_1").GetRole() == "idle" })
+	big := make([]byte, 4<<20)
+	_, _ = rand.Read(big)
+	if err := os.WriteFile(filepath.Join(vol, "z-big"), big, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	slowInTest.Store(true)
+	t.Cleanup(func() { slowInTest.Store(false) })
+	holdCopy(t, a, b, "")
+	eventually(t, "b to take its stream again", func() bool { return replicaStatus(t, b, "prj_1").GetConnected() })
+	if st := replicaStatus(t, b, "prj_1"); st.GetAppliedAt() != "" {
+		t.Fatalf("a copy still taking 4 MB says it was up to date at %s", st.GetAppliedAt())
+	}
+	eventually(t, "b to catch up", func() bool { return replicaStatus(t, b, "prj_1").GetAppliedAt() != "" })
+}
+
+// A relay stream's close only ends its writing half: a sender whose receiver Deplo held went on writing into a
+// stream nobody read, and still counted it. Its receiver's stop ends it.
+func TestReplicas_aHeldCopyEndsItsSendersStream(t *testing.T) {
+	a, b, vol, _ := replicating(t, true)
+	big := make([]byte, 8<<20)
+	_, _ = rand.Read(big)
+	if err := os.WriteFile(filepath.Join(vol, "big"), big, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	slowInTest.Store(true)
+	t.Cleanup(func() { slowInTest.Store(false) })
+	eventually(t, "a to send", func() bool { return replicaStatus(t, a, "prj_1").GetStreams() == 1 })
+	holdCopy(t, a, b, "Queued: srv_a is busy with a copy of shop")
+	eventually(t, "a's stream to end", func() bool { return replicaStatus(t, a, "prj_1").GetStreams() == 0 })
 }

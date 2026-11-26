@@ -724,3 +724,87 @@ func TestReplica_aSenderGoneWithItsCloseLostEndsTheStream(t *testing.T) {
 		t.Fatal("the copy still waits on a sender that is gone")
 	}
 }
+
+// slowConn reads at most 16 KB at a time, 5 ms apart: a busy receiver.
+type slowConn struct{ net.Conn }
+
+func (c slowConn) Read(p []byte) (int, error) {
+	time.Sleep(5 * time.Millisecond)
+	return c.Conn.Read(p[:min(len(p), 16<<10)])
+}
+
+// dialed runs Send over src on a fresh socket, a sender that ends only on its own error; sent says how it ended.
+func dialed(t *testing.T, src string) (c net.Conn, sent <-chan error) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	out := make(chan error, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			out <- err
+			return
+		}
+		defer c.Close()
+		out <- Send(context.Background(), c, []string{VolumeRoot("data")}, []string{src})
+	}()
+	raw, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { raw.Close() })
+	return raw, out
+}
+
+// c50: a copy Deplo held for its turn came back on its old 64 MB and read "Up to date" from its first record, so a
+// move took the App's 120 MiB itself. Until a stream's snapshot lands, its copy is not current.
+func TestReplica_aCopyIsCurrentOnlyOnceItsStreamsSnapshotLanded(t *testing.T) {
+	src, dir := t.TempDir(), t.TempDir()
+	putWhole(t, filepath.Join(src, "a.txt"), []byte("one"))
+	st := &Status{}
+	ctx, cancel := context.WithCancel(context.Background())
+	c, _ := dialed(t, src)
+	got := make(chan error, 1)
+	go func() { got <- Receive(ctx, c, dir, []string{VolumeRoot("data")}, st, NewIndex()) }()
+	eventually(t, "a whole copy", synced(st))
+	cancel()
+	<-got
+
+	putWhole(t, filepath.Join(src, "big"), noise(4<<20, 7))
+	ctx, cancel = context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	c, _ = dialed(t, src)
+	go func() { got <- Receive(ctx, slowConn{c}, dir, []string{VolumeRoot("data")}, st, NewIndex()) }()
+	eventually(t, "the next stream", func() bool { connected, _, _, _, _ := st.Snapshot(); return connected })
+	if _, isSynced, _, _, _ := st.Snapshot(); isSynced {
+		t.Fatal("a copy still taking 4 MB says it is current")
+	}
+	eventually(t, "the next snapshot", synced(st))
+}
+
+// c50: Deplo held three copies of lab-kit-b for their turn; each sender logged "endpoint is closed for send" and
+// said its member dials again, which it did not. A receiver that stops says so, and its sender ends quietly.
+func TestReplica_aReceiverThatStopsEndsItsSenderWithoutAnError(t *testing.T) {
+	src := t.TempDir()
+	putWhole(t, filepath.Join(src, "big"), noise(16<<20, 3))
+	c, sent := dialed(t, src)
+	ctx, cancel := context.WithCancel(context.Background())
+	st := &Status{}
+	got := make(chan error, 1)
+	go func() { got <- Receive(ctx, slowConn{c}, t.TempDir(), []string{VolumeRoot("data")}, st, NewIndex()) }()
+	eventually(t, "the stream", func() bool { connected, _, _, _, _ := st.Snapshot(); return connected })
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	<-got
+	select {
+	case err := <-sent:
+		if err != nil {
+			t.Fatalf("the sender called its receiver's stop a failure: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the sender still sends to a receiver that stopped")
+	}
+}

@@ -144,7 +144,7 @@ func receive(ctx context.Context, conn io.ReadWriter, dir string, names []string
 	}
 	// A copy stopped for room says so until a whole snapshot lands: the next stream would clear it before Deplo reads it.
 	st.set(func(s *Status) {
-		s.Connected = true
+		s.Connected, s.Synced = true, false
 		if !strings.Contains(s.Err, room.Marker) {
 			s.Err = ""
 		}
@@ -159,6 +159,7 @@ func receive(ctx context.Context, conn io.ReadWriter, dir string, names []string
 	go func() {
 		<-ctx.Done()
 		wake()
+		_, _ = conn.Write([]byte{opStop})
 		if c, ok := conn.(io.Closer); ok {
 			c.Close()
 		}

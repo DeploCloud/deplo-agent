@@ -9,7 +9,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -22,12 +24,12 @@ func TestTakePriority_putsTheAgentsServiceFirst(t *testing.T) {
 		return nil
 	}
 	t.Cleanup(func() { systemctl = was; copyParent.Store("") })
-	takePriority(t.Context(), "0::/system.slice/deplo-agent.service\n")
+	takePriority(t.Context(), "0::/system.slice/deplo-agent.service\n", func(context.Context) {})
 	if len(calls) == 0 || calls[0] != "set-property --runtime deplo-agent.service CPUWeight=1000 IOWeight=1000 MemoryLow=128M" {
 		t.Fatalf("systemctl was asked %q", calls)
 	}
 	calls = nil
-	takePriority(t.Context(), "0::/user.slice/user-0.slice/session-4.scope\n")
+	takePriority(t.Context(), "0::/user.slice/user-0.slice/session-4.scope\n", func(context.Context) {})
 	for _, c := range calls {
 		if strings.Contains(c, ".service") || strings.Contains(c, ".scope") {
 			t.Fatalf("a run outside a service changed %q", c)
@@ -184,4 +186,50 @@ func TestCopierFirst_weighsTheCopierLikeTheAgentWhileItsAppIsPaused(t *testing.T
 	if weight(scope) != "1" || weight(slice) != "10" {
 		t.Fatalf("after the pause the copier weighs %s in a slice of %s", weight(scope), weight(slice))
 	}
+}
+
+// c50: back from a kill -9, eu-1's first renewal came 654 to 775 ms after its start on one core, beside the start's
+// own docker calls. They wait for that renewal, at most the start's quiet; the agent's own weight does not.
+func TestStart_dockerWaitsForTheFirstRenewal(t *testing.T) {
+	was := agentStarted
+	agentStarted = time.Now()
+	t.Cleanup(func() { agentStarted = was })
+	bin := t.TempDir()
+	calls := filepath.Join(bin, "calls")
+	if err := os.WriteFile(filepath.Join(bin, "docker"), []byte("#!/bin/sh\necho \"$*\" >> "+calls+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	var mu sync.Mutex
+	var units []string
+	wasCtl := systemctl
+	systemctl = func(_ context.Context, args ...string) error {
+		mu.Lock()
+		units = append(units, strings.Join(args, " "))
+		mu.Unlock()
+		return nil
+	}
+	t.Cleanup(func() { systemctl = wasCtl; copyParent.Store("") })
+	s := New(t.TempDir(), t.TempDir(), "/", "")
+	s.SetAgentDir(t.TempDir())
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go takePriority(ctx, "0::/system.slice/deplo-agent.service\n", s.afterStart)
+	go s.ClearStandbyProxy(ctx)
+	s.StartProxyResync(ctx)
+	asked := func() string { raw, _ := os.ReadFile(calls); return string(raw) }
+	time.Sleep(time.Second)
+	if got := asked(); got != "" {
+		t.Fatalf("before its first renewal the start asked docker %q", got)
+	}
+	mu.Lock()
+	first := slices.Clone(units)
+	mu.Unlock()
+	if len(first) == 0 || !strings.HasPrefix(first[0], "set-property --runtime deplo-agent.service") {
+		t.Fatalf("the agent's weight waited: systemctl was asked %q", first)
+	}
+	eventually(t, "docker once the start settled", func() bool {
+		got := asked()
+		return strings.Contains(got, "inspect") && strings.Contains(got, "info") && strings.Contains(got, standbyLabel) && strings.Contains(got, copierLabel)
+	})
 }

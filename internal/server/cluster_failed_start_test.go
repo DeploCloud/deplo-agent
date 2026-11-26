@@ -95,7 +95,7 @@ func TestRenew_aLateFirstRenewalFromANewLeaderIsSaid(t *testing.T) {
 	var said []string
 	f.g.logf = func(format string, args ...any) { said = append(said, fmt.Sprintf(format, args...)) }
 	f.g.Renew(labPlacedOn("srv_a", 2))
-	f.clk.Add(1500 * time.Millisecond)
+	f.clk.Add(1100 * time.Millisecond)
 	f.g.Renew(labPlacedOn("srv_a", 3))
 	if len(said) != 0 {
 		t.Fatalf("a hand-over on time was said: %q", said)
@@ -117,14 +117,30 @@ func TestRenew_aLateRenewalIsSaid(t *testing.T) {
 	if len(said) != 0 {
 		t.Fatalf("a renewal on time was said: %q", said)
 	}
-	f.clk.Add(2 * time.Second)
+	f.clk.Add(1100 * time.Millisecond)
 	f.g.Renew(labPlacedOn("srv_a", 2))
 	if len(said) != 0 {
-		t.Fatalf("a renewal a second late was said: %q", said)
+		t.Fatalf("a renewal a tenth late was said: %q", said)
 	}
-	f.clk.Add(2200 * time.Millisecond)
+	f.clk.Add(1300 * time.Millisecond)
 	f.g.Renew(labPlacedOn("srv_a", 2))
-	if len(said) != 1 || !strings.Contains(said[0], "a renewal came 2.2s after the one before") {
+	if len(said) != 1 || !strings.Contains(said[0], "a renewal came 1.3s after the one before") {
+		t.Fatalf("said %q", said)
+	}
+}
+
+// c50: every member's renewals came 1.7 and 2.0 s apart with nothing in a journal. A late one says whether the
+// leader sent it late, its stream was slow to arrive, or the lease was busy here.
+func TestRenew_aLateRenewalSaysWhereItsTimeWent(t *testing.T) {
+	f := newGuard(t)
+	var said []string
+	f.g.logf = func(format string, args ...any) { said = append(said, fmt.Sprintf(format, args...)) }
+	f.g.Renew(labPlacedOn("srv_a", 2))
+	f.clk.Add(2 * time.Second)
+	o := labPlacedOn("srv_a", 2)
+	o.Heard = map[string]int64{o.Member: 1980}
+	f.g.renewRead(o, 30*time.Millisecond)
+	if len(said) != 1 || !strings.Contains(said[0], "came 2.0s after the one before: the leader sent it 1980 ms after this server's last answer, its stream took 30 ms to read and the lease 0 ms to be free") {
 		t.Fatalf("said %q", said)
 	}
 }

@@ -3,6 +3,7 @@
 package replica
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -74,8 +75,25 @@ func send(ctx context.Context, conn io.ReadWriter, names, dirs []string, follow 
 	if err != nil {
 		return err
 	}
-	// What the receiver sends after its manifest is its probe: read, so its window never fills.
-	go func() { _, _ = io.Copy(io.Discard, rd.r) }()
+	// What the receiver sends after its manifest is its probe, and its stop: read, so its window never fills.
+	stopped := make(chan struct{})
+	go func() {
+		b := make([]byte, 512)
+		for {
+			n, err := rd.r.Read(b)
+			// A relay stream's close only ends the receiver's writing half: a write blocked on it is woken.
+			if bytes.IndexByte(b[:n], opStop) >= 0 {
+				close(stopped)
+				if c, ok := conn.(interface{ SetWriteDeadline(time.Time) error }); ok {
+					_ = c.SetWriteDeadline(time.Now())
+				}
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
 	if c, ok := conn.(interface{ SetReadDeadline(time.Time) error }); ok {
 		defer c.SetReadDeadline(time.Now())
 	}
@@ -101,10 +119,28 @@ func send(ctx context.Context, conn io.ReadWriter, names, dirs []string, follow 
 	if err := s.w.str(string(raw)); err != nil {
 		return err
 	}
-	if err := s.snapshot(held); err != nil || !follow {
+	err = s.snapshot(held)
+	if err == nil && follow {
+		err = s.follow(ctx)
+	}
+	return byReceiver(ctx, err, stopped)
+}
+
+// stopWait is how long a stream that broke waits for its receiver's stop, which may come just after the break.
+var stopWait = 500 * time.Millisecond
+
+// byReceiver drops the error of a stream its receiver stopped: Deplo held the copy, or it ended, and nothing failed
+// here (c50: every held copy read "endpoint is closed for send" on its sender).
+func byReceiver(ctx context.Context, err error, stopped <-chan struct{}) error {
+	if err == nil || ctx.Err() != nil {
 		return err
 	}
-	return s.follow(ctx)
+	select {
+	case <-stopped:
+		return nil
+	case <-time.After(stopWait):
+		return err
+	}
 }
 
 func (s *sender) closeRoots() {

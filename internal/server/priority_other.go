@@ -8,7 +8,7 @@ import (
 )
 
 // TakePriority needs Linux and systemd; elsewhere the agent keeps its defaults.
-func TakePriority(context.Context) {}
+func (s *Service) TakePriority(context.Context) {}
 
 func helperPriority() []string { return []string{"--cpu-shares=2"} }
 
