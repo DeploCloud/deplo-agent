@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 	"github.com/DeploCloud/deplo-agent/internal/forwarder"
 )
 
@@ -255,9 +256,13 @@ func (s *Service) proxyGoingDown() {
 		s.forwarders().proxyStopping(nil)
 		return
 	}
-	dial, end, err := standbyUp(context.Background(), s.agentDir, s.forwarders().state().AnswerPort)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "deplo-agent: no standby proxy: visitors wait for the new one (%v)\n", err)
+	var dial standbyDialer
+	var end func()
+	if !s.proxyRoutesNothing() {
+		var err error
+		if dial, end, err = standbyUp(context.Background(), s.agentDir, s.forwarders().state().AnswerPort); err != nil {
+			fmt.Fprintf(os.Stderr, "deplo-agent: no standby proxy: visitors wait for the new one (%v)\n", err)
+		}
 	}
 	if dial != nil {
 		dial, end = countedStandby(dial, end)
@@ -275,6 +280,30 @@ func (s *Service) proxyGoingDown() {
 			time.Sleep(100 * time.Millisecond)
 		}
 	}
+}
+
+// proxyRoutesNothing says this server's proxy has no visitor to keep: no App here asks it for a route, it holds no
+// cluster answers and carries no connection. Such a proxy, a joining member's, restarts with no standby (c49: 5 s).
+func (s *Service) proxyRoutesNothing() bool {
+	if len(s.forwarders().state().Answers) > 0 {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if routesAnApp(ctx) {
+		return false
+	}
+	ports := frontDoorPorts
+	if p := s.forwarders().state().AnswerPort; p != 0 {
+		ports = append(slices.Clone(ports), p)
+	}
+	return proxyCarries(ports) == 0
+}
+
+// routesAnApp says a running container asks this server's proxy for a route, or docker could not say; tests replace it.
+var routesAnApp = func(ctx context.Context) bool {
+	res, err := dockercli.Run(ctx, 10*time.Second, "ps", "-q", "--filter", "label=traefik.enable=true")
+	return err != nil || res.Code != 0 || strings.TrimSpace(res.Stdout) != ""
 }
 
 // oldProxyDrain bounds how long the proxy being replaced keeps what it carries once the standby takes every new
