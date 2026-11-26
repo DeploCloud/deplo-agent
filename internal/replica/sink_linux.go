@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/DeploCloud/deplo-agent/internal/pace"
 	"github.com/DeploCloud/deplo-agent/internal/room"
 )
 
@@ -24,10 +25,20 @@ import (
 // stream until ctx ends or the stream breaks; the copy stays as it is between two streams. ix carries what the
 // copy's files hold from one stream to the next, so a reconnect does not read them all again.
 func Receive(ctx context.Context, conn io.ReadWriter, dir string, names []string, st *Status, ix *Index) error {
+	return receive(ctx, conn, dir, names, st, ix, false)
+}
+
+// ReceiveFirst is Receive for a stopped App's last changes: never paced, and every paced copy here waits for it.
+func ReceiveFirst(ctx context.Context, conn io.ReadWriter, dir string, names []string, st *Status, ix *Index) error {
+	defer pace.First()()
+	return receive(ctx, conn, dir, names, st, ix, true)
+}
+
+func receive(ctx context.Context, conn io.ReadWriter, dir string, names []string, st *Status, ix *Index, fast bool) error {
 	if len(names) == 0 || len(names) > maxRoots {
 		return errors.New("replica: no roots to receive")
 	}
-	rc := &receiving{st: st, held: map[Key]Entry{}, buf: make([]byte, maxChunk), next: -1}
+	rc := &receiving{st: st, held: map[Key]Entry{}, buf: make([]byte, maxChunk), next: -1, fast: fast}
 	for _, n := range names {
 		p := filepath.Join(dir, rootDir(n))
 		if err := os.MkdirAll(p, 0o700); err != nil {
@@ -46,12 +57,16 @@ func Receive(ctx context.Context, conn io.ReadWriter, dir string, names []string
 	}
 	for i, r := range rc.roots {
 		err := r.walk(func(rel string, e Entry) error {
+			// A receiver stopped for its App's move must not read the whole copy first.
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			k := Key{uint8(i), rel}
 			if e.Kind == kindFile {
 				list, ok := ix.lookup(names, k, e)
 				if !ok {
 					var err error
-					list, e.Size, err = r.chunksOf(rel)
+					list, e.Size, err = r.chunksOf(rel, fast)
 					if errors.Is(err, os.ErrNotExist) {
 						return nil
 					}
@@ -186,6 +201,7 @@ type receiving struct {
 	wrong bool
 	// next is the size the sender gave the next file, -1 when it gave none.
 	next int64
+	fast bool
 }
 
 func (rc *receiving) apply(op byte, k Key) error {
@@ -272,7 +288,7 @@ func (rc *receiving) file(k Key, e Entry) error {
 	}()
 	sum := sha256.New()
 	var list listOf
-	gw := &gentle{f: t.f, need: max(rc.next, 0)}
+	gw := &gentle{f: t.f, need: max(rc.next, 0), fast: rc.fast}
 	if prev, ok := rc.held[k]; ok && prev.Kind == kindFile && rc.next < 0 {
 		gw.need = prev.Size
 	}

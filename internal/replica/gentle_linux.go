@@ -27,6 +27,8 @@ type gentle struct {
 	off, flushed int64
 	need         int64
 	pace         pace.Pacer
+	// fast is a stopped App's copy: never paced.
+	fast bool
 }
 
 func (g *gentle) Write(p []byte) (int, error) {
@@ -36,7 +38,9 @@ func (g *gentle) Write(p []byte) (int, error) {
 		}
 	}
 	n, err := g.f.Write(p)
-	g.pace.Moved(n)
+	if !g.fast {
+		g.pace.Moved(n)
+	}
 	if g.off += int64(n); g.off-g.flushed >= gentleStep {
 		g.finish()
 		if err == nil {
@@ -63,11 +67,14 @@ type behind struct {
 	f            *os.File
 	off, dropped int64
 	pace         pace.Pacer
+	fast         bool
 }
 
 func (b *behind) Read(p []byte) (int, error) {
 	n, err := b.f.Read(p)
-	b.pace.Moved(n)
+	if !b.fast {
+		b.pace.Moved(n)
+	}
 	if b.off += int64(n); b.off-b.dropped >= gentleStep || err != nil && b.off > b.dropped {
 		dropPages(b.f, b.dropped, b.off-b.dropped)
 		b.dropped = b.off

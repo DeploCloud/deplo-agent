@@ -18,4 +18,8 @@ func Receive(context.Context, io.ReadWriter, string, []string, *Status, *Index) 
 	return errLinuxOnly
 }
 
+func ReceiveFirst(context.Context, io.ReadWriter, string, []string, *Status, *Index) error {
+	return errLinuxOnly
+}
+
 func Promote(string, []string, map[string]string) error { return errLinuxOnly }

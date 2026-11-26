@@ -734,5 +734,5 @@ func (r *replicas) receiveLast(ctx context.Context, cluster string, e replicaEnt
 		return fmt.Errorf("the server the App left refused: %s", arg)
 	}
 	_ = conn.SetDeadline(time.Time{})
-	return replica.Receive(ctx, conn, r.dir(e.AppID), e.roots(), st, ix)
+	return replica.ReceiveFirst(ctx, conn, r.dir(e.AppID), e.roots(), st, ix)
 }

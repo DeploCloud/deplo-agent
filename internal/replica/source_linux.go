@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/DeploCloud/deplo-agent/internal/pace"
 )
 
 // Timing of a sender; vars so tests can hurry them.
@@ -41,6 +43,7 @@ type sender struct {
 	chunks map[Key][]chunk
 	loc    map[[sumLen]byte]place
 	bytes  int64
+	fast   bool
 }
 
 // place is where a receiver holds one chunk: a file, and the offset in it.
@@ -55,8 +58,10 @@ func Send(ctx context.Context, conn io.ReadWriter, names, dirs []string) error {
 	return send(ctx, conn, names, dirs, true)
 }
 
-// SendOnce sends one snapshot of what differs and ends: the last changes of an App stopped for its move.
+// SendOnce sends one snapshot of what differs and ends: the last changes of an App stopped for its move. It is
+// never paced, and every paced copy here waits for it: the App is down until they land (c46).
 func SendOnce(ctx context.Context, conn io.ReadWriter, names, dirs []string) error {
+	defer pace.First()()
 	return send(ctx, conn, names, dirs, false)
 }
 
@@ -69,7 +74,7 @@ func send(ctx context.Context, conn io.ReadWriter, names, dirs []string, follow 
 		return err
 	}
 	s := &sender{w: newWriter(conn), held: map[Key]Entry{}, kids: map[Key]map[string]bool{},
-		chunks: map[Key][]chunk{}, loc: map[[sumLen]byte]place{}}
+		chunks: map[Key][]chunk{}, loc: map[[sumLen]byte]place{}, fast: !follow}
 	for _, d := range dirs {
 		r, err := openRoot(d)
 		if err != nil {
@@ -329,7 +334,7 @@ func (s *sender) sendFile(k Key, e Entry, f *os.File) (Entry, error) {
 	}
 	var c chunker
 	buf := make([]byte, 64<<10)
-	in := &behind{f: f}
+	in := &behind{f: f, fast: s.fast}
 	for {
 		n, err := in.Read(buf)
 		if n > 0 {

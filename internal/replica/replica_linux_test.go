@@ -599,3 +599,54 @@ func TestReplica_aFileThatDoesNotFitIsRefusedBeforeAnyOfItIsWritten(t *testing.T
 		t.Fatalf("%d steps of a file that does not fit were written", flushed)
 	}
 }
+
+// c46: the second move onto one member waited stopped 10 to 17 s; its last changes now go first, never paced.
+func TestReplica_aStoppedAppsLastChangesGoFirst(t *testing.T) {
+	src := t.TempDir()
+	os.WriteFile(filepath.Join(src, "big.bin"), noise(3*gentleStep+5, 14), 0o644)
+	mid, goOn := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	was := flushRange
+	flushRange = func(f *os.File, off, n int64) {
+		once.Do(func() { close(mid); <-goOn })
+		was(f, off, n)
+	}
+	t.Cleanup(func() { flushRange = was })
+	before := pace.Looks.Load()
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	defer ln.Close()
+	go func() {
+		if c, err := ln.Accept(); err == nil {
+			defer c.Close()
+			_ = SendOnce(context.Background(), c, []string{VolumeRoot("data")}, []string{src})
+		}
+	}()
+	c, _ := net.Dial("tcp", ln.Addr().String())
+	defer c.Close()
+	st := &Status{}
+	done := make(chan error, 1)
+	go func() {
+		done <- ReceiveFirst(context.Background(), c, t.TempDir(), []string{VolumeRoot("data")}, st, NewIndex())
+	}()
+	<-mid
+	moved := make(chan struct{})
+	go func() {
+		var p pace.Pacer
+		p.Moved(pace.Step)
+		close(moved)
+	}()
+	select {
+	case <-moved:
+		t.Fatal("another copy went on beside a stopped App's last changes")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(goOn)
+	<-done
+	if _, synced, _, _, _ := st.Snapshot(); !synced {
+		t.Fatal("the last changes did not land")
+	}
+	<-moved
+	if n := pace.Looks.Load() - before; n != 1 {
+		t.Fatalf("the last changes were paced: %d looks", n-1)
+	}
+}

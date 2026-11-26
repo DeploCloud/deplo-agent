@@ -156,14 +156,14 @@ func (r *root) open(rel string) (*os.File, Entry, error) {
 }
 
 // chunksOf reads one file of a copy to say which chunks it holds, and how many bytes.
-func (r *root) chunksOf(rel string) ([]chunk, int64, error) {
+func (r *root) chunksOf(rel string, fast bool) ([]chunk, int64, error) {
 	f, _, err := r.open(rel)
 	if err != nil {
 		return nil, 0, err
 	}
 	defer f.Close()
 	var l listOf
-	n, err := io.Copy(&l, &behind{f: f})
+	n, err := io.Copy(&l, &behind{f: f, fast: fast})
 	if err != nil {
 		return nil, 0, err
 	}
