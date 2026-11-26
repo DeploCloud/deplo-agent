@@ -524,6 +524,7 @@ func composeLabel(labels any, key string) string {
 
 // superviseWriters keeps this member's single-writer stacks to their lease until ctx ends.
 func (s *Service) superviseWriters(ctx context.Context) {
+	s.afterStart(ctx)
 	t := time.NewTicker(superviseEvery)
 	defer t.Stop()
 	for {

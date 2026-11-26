@@ -116,6 +116,8 @@ type forwardOps struct {
 	proxyDial func(ctx context.Context, port uint32) (net.Conn, error)
 	// ready says whether every container of an App here answers, and since when.
 	ready func(ctx context.Context, appID string) appReadiness
+	// readyAll is ready for several Apps in one look, when docker can answer them together.
+	readyAll func(ctx context.Context, appIDs []string) map[string]appReadiness
 	// runs says whether a container of an App runs here: a proxy's store keeps its certificate only then.
 	runs func(ctx context.Context, appID string) (bool, error)
 }
@@ -183,13 +185,16 @@ type forwarders struct {
 	// local are the visitors carried to this server's own proxy, by App, each with the stream it was joined to.
 	local    map[string]map[net.Conn]net.Conn
 	watching bool
+	// looked is closed once this run's first look at what it answers for is done (see lookAtStart).
+	looked     chan struct{}
+	lookedOnce sync.Once
 }
 
 func (s *Service) forwarders() *forwarders {
 	s.fwdOnce.Do(func() {
 		f := &forwarders{s: s, listeners: map[string]*heldListener{}, redirected: map[string]int{}, open: map[string]int{},
 			readiness: map[string]*answerReadyCheck{}, readySeen: map[string]time.Time{}, gates: map[string]*answerGate{},
-			refused: map[refusalKey]*answerRefusal{}}
+			refused: map[refusalKey]*answerRefusal{}, looked: make(chan struct{})}
 		if s.agentDir != "" {
 			if raw, err := os.ReadFile(f.file()); err == nil {
 				_ = json.Unmarshal(raw, &f.st)
@@ -319,11 +324,15 @@ func (f *forwarders) Resume() {
 	f.dock.Lock()
 	defer f.dock.Unlock()
 	defer dropUnclaimedKept("fwd-")
+	defer f.doneLooking()
 	st := f.state()
 	if len(st.Hold)+len(st.Answers) == 0 {
 		return
 	}
 	f.listenFirst(st)
+	f.lookAtStart(ctx, st)
+	f.doneLooking()
+	f.s.afterStart(ctx)
 	if err := f.reconcile(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "deplo-agent: name forwarders: %v\n", err)
 	}

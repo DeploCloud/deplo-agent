@@ -38,6 +38,7 @@ var dockerForwardOps = forwardOps{
 	redirect:  redirectAllPorts,
 	proxyDial: dialProxyLoopback,
 	ready:     appReady,
+	readyAll:  appsReady,
 	runs:      appRunsHere,
 }
 
@@ -231,13 +232,50 @@ func appReady(ctx context.Context, appID string) appReadiness {
 	if err != nil || res.Code != 0 || len(ids) == 0 {
 		return appReadiness{}
 	}
-	args := append([]string{"inspect", "--format", `{"id":{{json .ID}},"name":{{json .Name}},"status":{{json .State.Status}},"started":{{json .State.StartedAt}},"created":{{json .Created}},` +
-		`"health":{{if .State.Health}}{{json .State.Health}}{{else}}null{{end}}}`}, ids...)
-	res, err = dockercli.Run(ctx, 10*time.Second, args...)
+	res, err = dockercli.Run(ctx, 10*time.Second, append([]string{"inspect", "--format", readyFormat}, ids...)...)
 	if err != nil || res.Code != 0 {
 		return appReadiness{}
 	}
 	return readinessOf(strings.Split(strings.TrimSpace(res.Stdout), "\n"))
+}
+
+// readyFormat is one container's line for readinessOf.
+const readyFormat = `{"id":{{json .ID}},"name":{{json .Name}},"status":{{json .State.Status}},"started":{{json .State.StartedAt}},"created":{{json .Created}},` +
+	`"health":{{if .State.Health}}{{json .State.Health}}{{else}}null{{end}}}`
+
+// appsReady is appReady for every App at once, two docker calls whatever their number, and finds the proxy's process
+// when the run before handed none over: what a start reads first.
+func appsReady(ctx context.Context, appIDs []string) map[string]appReadiness {
+	out := map[string]appReadiness{}
+	_, _ = lookupProxyPid(ctx, 0)
+	res, err := dockercli.Run(ctx, 10*time.Second, "ps", "-aq", "--filter", "label=deplo.project")
+	ids := strings.Fields(res.Stdout)
+	if err != nil || res.Code != 0 || len(ids) == 0 {
+		return out
+	}
+	res, err = dockercli.Run(ctx, 10*time.Second, append([]string{"inspect", "--format",
+		`{{index .Config.Labels "deplo.project"}} ` + readyFormat}, ids...)...)
+	if err != nil || res.Code != 0 {
+		return out
+	}
+	return readinessByApp(res.Stdout, appIDs)
+}
+
+// readinessByApp is readinessOf for each App of an inspect whose lines start with the container's App.
+func readinessByApp(out string, appIDs []string) map[string]appReadiness {
+	lines := map[string][]string{}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if app, c, ok := strings.Cut(line, " "); ok {
+			lines[app] = append(lines[app], c)
+		}
+	}
+	got := map[string]appReadiness{}
+	for _, app := range appIDs {
+		if len(lines[app]) > 0 {
+			got[app] = readinessOf(lines[app])
+		}
+	}
+	return got
 }
 
 type containerState struct {
