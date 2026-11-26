@@ -14,6 +14,8 @@ import (
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/clusterlink/lease"
+	"github.com/DeploCloud/deplo-agent/internal/clusterlink/wire"
+	"github.com/DeploCloud/deplo-agent/internal/replica"
 )
 
 func replicaStatus(t *testing.T, s *Service, appID string) *pb.ClusterReplicaState {
@@ -415,4 +417,40 @@ func TestReplicas_aCopyOnTheRelayLeavesItOnceADirectPathAnswers(t *testing.T) {
 		raw, _ := os.ReadFile(copied)
 		return string(raw) == "two"
 	})
+}
+
+// c49: a copy that died on its sender left no word of why on either member. The sender says it until the next
+// stream of that App starts.
+func TestReplicas_aSenderSaysWhyItsLastCopyStopped(t *testing.T) {
+	was := replica.BeatEvery
+	replica.BeatEvery = 50 * time.Millisecond
+	t.Cleanup(func() { replica.BeatEvery = was })
+	a, _, vol, _ := replicating(t, true)
+	if err := os.WriteFile(filepath.Join(vol, "data.txt"), []byte("one"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	r := a.replicas()
+	r.mu.Lock()
+	b := wire.Party{Fingerprint: r.tab.Members["srv_b"], Role: wire.RoleMember}
+	r.mu.Unlock()
+	copyOnce := func(end func(st *replica.Status) bool) {
+		toA, toB := net.Pipe()
+		defer toB.Close()
+		go func() { defer toA.Close(); a.serveReplica(b, toA, "cl1 prj_1") }()
+		if verb, arg, err := wire.ReadHeader(toB); err != nil || verb != wire.VerbOK {
+			t.Fatalf("a answered %q %q %v", verb, arg, err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		st := &replica.Status{}
+		go func() {
+			_ = replica.Receive(ctx, toB, t.TempDir(), []string{replica.VolumeRoot("deplo-web-data")}, st, replica.NewIndex())
+		}()
+		eventually(t, "a whole copy", func() bool { return end(st) })
+	}
+	copyOnce(func(st *replica.Status) bool { _, synced, _, _, _ := st.Snapshot(); return synced })
+	eventually(t, "a to say why its copy stopped", func() bool {
+		return strings.Contains(replicaStatus(t, a, "prj_1").GetError(), "a copy of it stopped")
+	})
+	copyOnce(func(*replica.Status) bool { return replicaStatus(t, a, "prj_1").GetError() == "" })
 }

@@ -69,9 +69,15 @@ func send(ctx context.Context, conn io.ReadWriter, names, dirs []string, follow 
 	if len(names) != len(dirs) || len(names) == 0 || len(names) > maxRoots {
 		return errors.New("replica: no roots to send")
 	}
-	held, err := readManifest(newReader(conn))
+	rd := newReader(conn)
+	held, err := readManifest(rd)
 	if err != nil {
 		return err
+	}
+	// What the receiver sends after its manifest is its probe: read, so its window never fills.
+	go func() { _, _ = io.Copy(io.Discard, rd.r) }()
+	if c, ok := conn.(interface{ SetReadDeadline(time.Time) error }); ok {
+		defer c.SetReadDeadline(time.Now())
 	}
 	s := &sender{w: newWriter(conn), held: map[Key]Entry{}, kids: map[Key]map[string]bool{},
 		chunks: map[Key][]chunk{}, loc: map[[sumLen]byte]place{}, fast: !follow}

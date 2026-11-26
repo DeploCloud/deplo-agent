@@ -5,12 +5,14 @@ package replica
 import (
 	"bytes"
 	"context"
+	"errors"
 	"math/rand/v2"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/DeploCloud/deplo-agent/internal/room"
@@ -648,5 +650,77 @@ func TestReplica_aStoppedAppsLastChangesGoFirst(t *testing.T) {
 	<-moved
 	if n := pace.Looks.Load() - before; n != 1 {
 		t.Fatalf("the last changes were paced: %d looks", n-1)
+	}
+}
+
+// lostClose is a stream whose sender is gone and whose close never arrived: nothing more comes, and what the receiver
+// writes is answered with a reset.
+type lostClose struct {
+	net.Conn
+	gone atomic.Bool
+	once sync.Once
+	woke chan struct{}
+}
+
+func (c *lostClose) Read(p []byte) (int, error) {
+	if c.gone.Load() {
+		<-c.woke
+		return 0, os.ErrDeadlineExceeded
+	}
+	return c.Conn.Read(p)
+}
+
+func (c *lostClose) Write(p []byte) (int, error) {
+	if c.gone.Load() {
+		return 0, errors.New("connection reset by peer")
+	}
+	return c.Conn.Write(p)
+}
+
+func (c *lostClose) SetReadDeadline(t time.Time) error {
+	c.once.Do(func() { close(c.woke) })
+	return c.Conn.SetReadDeadline(t)
+}
+
+// c49: lab-kit-c's copy ended on its sender with "endpoint is closed for send", the close never reached the receiver
+// and it waited on the quiet stream for 15 minutes. The receiver probes its sender: the reset ends the stream.
+func TestReplica_aSenderGoneWithItsCloseLostEndsTheStream(t *testing.T) {
+	was := ProbeEvery
+	ProbeEvery = 50 * time.Millisecond
+	t.Cleanup(func() { ProbeEvery = was })
+	src := t.TempDir()
+	putWhole(t, filepath.Join(src, "a.txt"), []byte("one"))
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		c, err := ln.Accept()
+		if err == nil {
+			defer c.Close()
+			_ = Send(ctx, c, []string{VolumeRoot("data")}, []string{src})
+		}
+	}()
+	raw, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { raw.Close() })
+	c := &lostClose{Conn: raw, woke: make(chan struct{})}
+	st := &Status{}
+	got := make(chan error, 1)
+	go func() { got <- Receive(ctx, c, t.TempDir(), []string{VolumeRoot("data")}, st, NewIndex()) }()
+	eventually(t, "a whole copy", synced(st))
+	c.gone.Store(true)
+	select {
+	case err := <-got:
+		if err == nil || !strings.Contains(err.Error(), "reset") {
+			t.Fatalf("the stream ended with %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the copy still waits on a sender that is gone")
 	}
 }
