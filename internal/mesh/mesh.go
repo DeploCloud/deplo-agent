@@ -252,7 +252,11 @@ func (m *Mesh) Heard() map[string]time.Time {
 func (m *Mesh) Started() time.Time { return m.started }
 
 // PublicKey is what peers know this server by.
-func (m *Mesh) PublicKey() Key { return m.pub }
+func (m *Mesh) PublicKey() Key {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.pub
+}
 
 // Address is this server's address inside the tunnel.
 func (m *Mesh) Address() netip.Addr { return m.cfg.Address }
@@ -823,6 +827,8 @@ func (m *Mesh) crossed(p *peer, pkt []byte) bool {
 	if !isInitiation(pkt) || time.Since(time.Unix(0, p.sentInit.Load())) >= crossWindow {
 		return false
 	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return bytes.Compare(m.pub[:], p.PublicKey[:]) < 0
 }
 
