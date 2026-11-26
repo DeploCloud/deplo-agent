@@ -96,6 +96,8 @@ type replicas struct {
 	runs    map[string]*replicaRun
 	idle    map[string]string
 	sending map[string]int
+	// sendFailed is why an App's last stream to a member ended, until the next one starts.
+	sendFailed map[string]string
 	// holding are the Apps a failover start is putting in place here: nothing receives for them meanwhile.
 	holding map[string]bool
 	// indexes are what each stopped receiver knew of its copy's files: a move's last changes need not read them again.
@@ -140,7 +142,7 @@ func (r *replicas) stillRuns(ctx context.Context, slug string) bool {
 
 func (s *Service) replicas() *replicas {
 	s.replOnce.Do(func() {
-		r := &replicas{s: s, runs: map[string]*replicaRun{}, idle: map[string]string{}, sending: map[string]int{},
+		r := &replicas{s: s, runs: map[string]*replicaRun{}, idle: map[string]string{}, sending: map[string]int{}, sendFailed: map[string]string{},
 			holding: map[string]bool{}, indexes: map[string]*replica.Index{}, wake: make(chan struct{}, 1), mountpoint: volumeMountpoint, running: stackRuns}
 		r.dial, r.direct = r.dialMember, s.reachesDirectly
 		if raw, err := os.ReadFile(r.file()); err == nil {
@@ -260,6 +262,9 @@ func (r *replicas) status() *pb.ClusterReplicaStatusResponse {
 			st.Role, st.Connected, st.Streams = "sending", true, int32(n)
 		} else if _, here, ok := r.s.leaseGuard().locate(r.tab.Cluster, "app", e.AppID); ok && here {
 			st.Role = "sending"
+		}
+		if why := r.sendFailed[e.AppID]; st.Role == "sending" && why != "" {
+			st.Error = "a copy of it stopped, its member dials again: " + why
 		}
 		if run := r.runs[e.AppID]; run != nil {
 			connected, synced, at, bytes, msg := run.status.Snapshot()
@@ -615,6 +620,7 @@ func (s *Service) serveReplica(from wire.Party, c net.Conn, arg string) {
 	}
 	r.mu.Lock()
 	r.sending[appID]++
+	delete(r.sendFailed, appID)
 	r.mu.Unlock()
 	defer func() {
 		r.mu.Lock()
@@ -643,6 +649,9 @@ func (s *Service) serveReplica(from wire.Party, c net.Conn, arg string) {
 	}()
 	if err := atLowPriority(func() error { return replica.Send(ctx, c, entry.roots(), dirs) }); err != nil && ctx.Err() == nil {
 		fmt.Fprintf(os.Stderr, "deplo-agent: replica of %s: %v\n", entry.Slug, err)
+		r.mu.Lock()
+		r.sendFailed[appID] = oneLine(err.Error())
+		r.mu.Unlock()
 	}
 }
 

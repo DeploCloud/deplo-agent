@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/DeploCloud/deplo-agent/internal/pace"
@@ -34,7 +35,28 @@ func ReceiveFirst(ctx context.Context, conn io.ReadWriter, dir string, names []s
 	return receive(ctx, conn, dir, names, st, ix, true)
 }
 
-func receive(ctx context.Context, conn io.ReadWriter, dir string, names []string, st *Status, ix *Index, fast bool) error {
+// ProbeEvery is how often a receiver writes to its sender: a sender gone with its close lost answers it with a reset,
+// so the copy dials again instead of waiting on a quiet stream (c49: 15 minutes).
+var ProbeEvery = 2 * time.Second
+
+// probe beats towards the sender until stop; a write that fails says why.
+func probe(stop <-chan struct{}, conn io.Writer, failed func(error)) {
+	t := time.NewTicker(ProbeEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+			if _, err := conn.Write([]byte{opBeat}); err != nil {
+				failed(err)
+				return
+			}
+		}
+	}
+}
+
+func receive(ctx context.Context, conn io.ReadWriter, dir string, names []string, st *Status, ix *Index, fast bool) (err error) {
 	if len(names) == 0 || len(names) > maxRoots {
 		return errors.New("replica: no roots to receive")
 	}
@@ -128,16 +150,28 @@ func receive(ctx context.Context, conn io.ReadWriter, dir string, names []string
 		}
 	})
 	defer st.set(func(s *Status) { s.Connected = false })
-	// A relay stream's close only ends its writing half: a read waiting on it is woken by a deadline.
-	go func() {
-		<-ctx.Done()
+	wake := func() {
 		if c, ok := conn.(interface{ SetReadDeadline(time.Time) error }); ok {
 			_ = c.SetReadDeadline(time.Now())
 		}
+	}
+	// A relay stream's close only ends its writing half: a read waiting on it is woken by a deadline.
+	go func() {
+		<-ctx.Done()
+		wake()
 		if c, ok := conn.(io.Closer); ok {
 			c.Close()
 		}
 	}()
+	stop := make(chan struct{})
+	defer close(stop)
+	var probed atomic.Value
+	defer func() {
+		if p, _ := probed.Load().(error); p != nil && err != nil {
+			err = p
+		}
+	}()
+	go probe(stop, conn, func(err error) { probed.Store(err); wake() })
 	var seen map[Key]bool
 	for {
 		op, err := rd.byte()
