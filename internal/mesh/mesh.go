@@ -105,6 +105,8 @@ type Mesh struct {
 	lives       map[string]liveness
 	// heardAt outlives lives' reaping: a name server's removal time may be longer than aliveDeadAfter.
 	heardAt map[string]time.Time
+	// backs is closed when each peer's next run is heard (see backOf).
+	backs   map[string]chan struct{}
 	started time.Time
 	connsMu sync.Mutex
 	conns   map[string]map[*tracked]bool
@@ -206,6 +208,7 @@ func Start(cfg Config) (*Mesh, error) {
 		incarnation: newIncarnation(),
 		lives:       map[string]liveness{},
 		heardAt:     map[string]time.Time{},
+		backs:       map[string]chan struct{}{},
 		started:     time.Now(),
 		conns:       map[string]map[*tracked]bool{},
 	}

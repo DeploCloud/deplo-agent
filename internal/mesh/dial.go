@@ -16,7 +16,7 @@ func (m *Mesh) Dial(ctx context.Context, fingerprint string, port uint16) (net.C
 	if p == nil {
 		return nil, fmt.Errorf("that server is not on this cluster's network")
 	}
-	c, err := m.dialTCP(ctx, netip.AddrPortFrom(p.Address, port))
+	c, err := m.dialTCP(ctx, fingerprint, netip.AddrPortFrom(p.Address, port))
 	if err != nil {
 		return nil, err
 	}
@@ -27,8 +27,9 @@ func (m *Mesh) Dial(ctx context.Context, fingerprint string, port uint16) (net.C
 var dialEvery = time.Second
 
 // dialTCP sends a fresh SYN every dialEvery until one connects: TCP's own wait 1, 3, then 7 s, and visitors carried
-// to a member whose agent had just come back got there 4 to 5 s late (c46). An answer that refuses ends it.
-func (m *Mesh) dialTCP(ctx context.Context, to netip.AddrPort) (net.Conn, error) {
+// to a member whose agent had just come back got there 4 to 5 s late (c46). An answer that refuses ends it. The peer's
+// next run heard sends one at once: a renewal waiting on a restarted agent reached it 2 s after its return (c48).
+func (m *Mesh) dialTCP(ctx context.Context, fp string, to netip.AddrPort) (net.Conn, error) {
 	ctx, cancel := context.WithTimeout(ctx, time.Minute)
 	defer cancel()
 	type result struct {
@@ -51,8 +52,14 @@ func (m *Mesh) dialTCP(ctx context.Context, to netip.AddrPort) (net.Conn, error)
 		}()
 	}
 	try()
+	back := m.backOf(fp)
 	for {
 		select {
+		case <-back:
+			back = m.backOf(fp)
+			if pending < 16 {
+				try()
+			}
 		case r := <-results:
 			pending--
 			if r.err != nil && ctx.Err() == nil {
