@@ -81,3 +81,26 @@ func TestHandover_isWrittenAsAppsAreFoundReady(t *testing.T) {
 		return err == nil && strings.Contains(string(raw), `"prj1"`)
 	})
 }
+
+// c50: eu-1 ran lab-kit-a and memos, and its start said "started from what its last run knew of 1 Apps": memos had
+// no visitor in the 5 s before the kill. The handover holds every App the server answers for that its last look
+// found ready.
+func TestHandover_holdsEveryAppItAnswersForThatItLastFoundReady(t *testing.T) {
+	dir := t.TempDir()
+	first := &Service{agentDir: dir}
+	f := first.forwarders()
+	f.mu.Lock()
+	f.st.ServeAnswers = []string{"prj1", "prj2", "prj3"}
+	f.readiness["prj1"] = &answerReadyCheck{ok: true, until: time.Now().Add(time.Second)}
+	f.readiness["prj2"] = &answerReadyCheck{ok: true, until: time.Now().Add(-time.Minute)}
+	f.readiness["prj3"] = &answerReadyCheck{ok: false, until: time.Now().Add(-time.Minute)}
+	f.readiness["prj4"] = &answerReadyCheck{ok: true, until: time.Now().Add(-time.Minute)}
+	f.mu.Unlock()
+	f.saveHandover()
+	next := (&Service{agentDir: dir}).forwarders()
+	for app, want := range map[string]bool{"prj1": true, "prj2": true, "prj3": false, "prj4": false} {
+		if got := next.readiness[app] != nil; got != want {
+			t.Errorf("%s handed over: %v", app, got)
+		}
+	}
+}
