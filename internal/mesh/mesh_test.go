@@ -444,3 +444,42 @@ func TestMesh_aKeyRotatedInPlaceKeepsItsConnections(t *testing.T) {
 		t.Fatal("the peer still knows the old key")
 	}
 }
+
+// c46: after eu-1's agent was killed, visitors carried to it got their answer 4 to 5 s after it was back.
+func TestMesh_aDialReachesAPeerWithinASecondOfItsReturn(t *testing.T) {
+	a, b := start(t, nil, fpA, "fdde:9100::a"), start(t, nil, fpB, "fdde:9100::b")
+	connect(t, a, b, true)
+	echo(t, b)
+	roundTrip(t, dial(t, a, b), "before")
+	port, addr := b.m.Port(), b.m.Address()
+	b.m.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	got := make(chan net.Conn, 1)
+	go func() {
+		c, err := a.m.Dial(ctx, fpB, servicePort)
+		if err != nil {
+			t.Log(err)
+		}
+		got <- c
+	}()
+	time.Sleep(3500 * time.Millisecond)
+	m, err := Start(Config{PrivateKey: b.key, Address: addr, Port: port, Logf: t.Logf})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { m.Close() })
+	echo(t, side{m: m, key: b.key, fp: fpB})
+	back := time.Now()
+	if err := m.SetPeers([]Peer{a.as(true)}); err != nil {
+		t.Fatal(err)
+	}
+	c := <-got
+	if c == nil {
+		t.Fatal("the dial never reached the peer")
+	}
+	c.Close()
+	if late := time.Since(back); late > 1500*time.Millisecond {
+		t.Fatalf("the dial reached the peer %v after it was back", late)
+	}
+}

@@ -403,11 +403,74 @@ func (m *Mesh) Dial(ctx context.Context, fingerprint string, port uint16) (net.C
 	if p == nil {
 		return nil, fmt.Errorf("that server is not on this cluster's network")
 	}
-	c, err := m.tnet.DialContextTCPAddrPort(ctx, netip.AddrPortFrom(p.Address, port))
+	c, err := m.dialTCP(ctx, netip.AddrPortFrom(p.Address, port))
 	if err != nil {
 		return nil, err
 	}
 	return m.open(ctx, fingerprint, c)
+}
+
+// dialEvery is how often a dial that hears nothing sends another SYN beside the first.
+var dialEvery = time.Second
+
+// dialTCP sends a fresh SYN every dialEvery until one connects: TCP's own wait 1, 3, then 7 s, and visitors carried
+// to a member whose agent had just come back got there 4 to 5 s late (c46). An answer that refuses ends it.
+func (m *Mesh) dialTCP(ctx context.Context, to netip.AddrPort) (net.Conn, error) {
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	type result struct {
+		c   net.Conn
+		err error
+	}
+	results := make(chan result, 64)
+	tick := time.NewTicker(dialEvery)
+	defer tick.Stop()
+	pending := 0
+	try := func() {
+		pending++
+		go func() {
+			c, err := m.tnet.DialContextTCPAddrPort(ctx, to)
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			results <- result{c: c}
+		}()
+	}
+	try()
+	for {
+		select {
+		case r := <-results:
+			pending--
+			if r.err != nil && ctx.Err() == nil {
+				return nil, r.err
+			}
+			if r.err == nil {
+				// The slower ones end with ctx; one that connected anyway is closed.
+				go func(n int) {
+					for ; n > 0; n-- {
+						if late := <-results; late.c != nil {
+							late.c.Close()
+						}
+					}
+				}(pending)
+				return r.c, nil
+			}
+		case <-tick.C:
+			if pending < 16 {
+				try()
+			}
+		case <-ctx.Done():
+			go func(n int) {
+				for ; n > 0; n-- {
+					if late := <-results; late.c != nil {
+						late.c.Close()
+					}
+				}
+			}(pending)
+			return nil, ctx.Err()
+		}
+	}
 }
 
 // Has says whether a peer is on the network.
@@ -684,8 +747,9 @@ func (m *Mesh) takeNextLocked(p *peer) (ipc string, again [][]byte) {
 		}
 	}
 	p.heldInits = nil
-	return fmt.Sprintf("public_key=%s\nremove=true\npublic_key=%s\nreplace_allowed_ips=true\nallowed_ip=%s\nendpoint=%s\npersistent_keepalive_interval=%d\n",
-		old.hex(), p.PublicKey.hex(), netip.PrefixFrom(p.Address, p.Address.BitLen()), endpointPrefix+p.Fingerprint, keepalive), again
+	// No keepalive yet: one now would cross the peer's own handshake and cost 5 s; Deplo's next table sets it.
+	return fmt.Sprintf("public_key=%s\nremove=true\npublic_key=%s\nreplace_allowed_ips=true\nallowed_ip=%s\nendpoint=%s\n",
+		old.hex(), p.PublicKey.hex(), netip.PrefixFrom(p.Address, p.Address.BitLen()), endpointPrefix+p.Fingerprint), again
 }
 
 // pick keeps the current direct path while it answers, unless another one is twice as fast.
@@ -773,7 +837,6 @@ func (m *Mesh) handleProbe(b []byte, from netip.AddrPort) {
 			return
 		}
 		ipc, again := m.takeNextLocked(p)
-		fp := p.Fingerprint
 		m.mu.Unlock()
 		if ipc == "" || m.dev.IpcSet(ipc) != nil {
 			return
@@ -781,7 +844,6 @@ func (m *Mesh) handleProbe(b []byte, from netip.AddrPort) {
 		for _, b := range again {
 			m.bind.deliver(p, b)
 		}
-		go m.greetPeer(fp)
 	default:
 		m.mu.Unlock()
 	}
@@ -844,6 +906,8 @@ func (m *Mesh) takeInitiation(p *peer, pkt []byte) bool {
 		return false
 	}
 	if isInitiation(pkt) {
+		// Taking p's undoes this end's own: left noted, it dropped p's next one as crossed (c46, 5 s).
+		p.sentInit.Store(0)
 		p.tookInit.Store(time.Now().UnixNano())
 		m.mu.Lock()
 		if !p.Next.IsZero() {
