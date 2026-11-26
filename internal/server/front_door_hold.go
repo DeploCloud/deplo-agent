@@ -259,10 +259,22 @@ func (s *Service) proxyGoingDown() {
 	}
 	if dial != nil {
 		dial, end = countedStandby(dial, end)
+		proxyFirst(context.Background(), standbyContainer)
 	}
 	s.forwarders().proxyStopping(dial)
 	s.frontRelease = s.holdFrontDoor(dial)
 	s.frontStandbyEnd = end
+}
+
+// newProxyWeight puts the new proxy at the agent's weight at once when visitors wait for it (c43: 3.6 s to its routes),
+// and once it takes them back from a standby otherwise (proxyBack).
+func (s *Service) newProxyWeight(ctx context.Context) {
+	s.frontMu.Lock()
+	standby := s.frontStandbyEnd != nil
+	s.frontMu.Unlock()
+	if !standby {
+		proxyFirst(ctx, traefikContainer)
+	}
 }
 
 // standbyDrain bounds how long the standby outlives the restart for a visitor it still carries.
@@ -295,10 +307,14 @@ func (s *Service) proxyBack() {
 	release, end := s.frontRelease, s.frontStandbyEnd
 	s.frontRelease, s.frontStandbyEnd = nil, nil
 	s.frontMu.Unlock()
+	if end != nil {
+		proxyFirst(context.Background(), traefikContainer)
+	}
 	if release != nil {
 		release()
 	}
 	if end != nil {
+		proxyAside(context.Background(), standbyContainer)
 		// The standby serves until the new proxy is settled, then lets what it carries finish.
 		go func() {
 			time.Sleep(proxySettle)

@@ -36,13 +36,19 @@ const proxyWeight = "1000"
 // proxyFirst puts a proxy (this server's or its standby) level with the agent on the CPU, in its cgroup: Docker's
 // --cpu-shares maps to a weight that differs between runc versions. Best effort; again at every restart or recreate.
 // ponytail: a restart Docker makes on its own keeps the default until the agent's next start.
-func proxyFirst(ctx context.Context, container string) {
+func proxyFirst(ctx context.Context, container string) { proxyWeigh(ctx, container, proxyWeight) }
+
+// proxyAside gives a proxy that carries no visitor Docker's default weight: one starting or draining beside the one
+// that does never takes its CPU (c44: 2.75 s on one core while the standby started at the proxy's weight).
+func proxyAside(ctx context.Context, container string) { proxyWeigh(ctx, container, "100") }
+
+func proxyWeigh(ctx context.Context, container, weight string) {
 	dir, err := containerCgroup(ctx, container)
 	if err != nil {
 		return
 	}
-	if err := os.WriteFile(filepath.Join(dir, "cpu.weight"), []byte(proxyWeight), 0o644); err != nil {
-		fmt.Fprintf(os.Stderr, "deplo-agent: could not put the proxy level with the agent on the CPU: %v\n", err)
+	if err := os.WriteFile(filepath.Join(dir, "cpu.weight"), []byte(weight), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "deplo-agent: could not set the proxy's weight on the CPU: %v\n", err)
 	}
 }
 

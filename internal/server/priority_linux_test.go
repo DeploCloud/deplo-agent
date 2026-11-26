@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -122,15 +124,43 @@ func TestBringUpTraefik_theNewProxyTakesItsWeightOnceCreated(t *testing.T) {
 	t.Fatalf("no weight right after the recreate: %v in %q", *weights, argv())
 }
 
-// c43: the standby carried every visitor at Docker's default weight while the new proxy started beside it.
-func TestStartStandbyProxy_takesTheProxysWeight(t *testing.T) {
+// c44: the standby started at the proxy's weight and took its CPU on one core (2.75 s): it starts aside.
+func TestStartStandbyProxy_startsAsideOfTheProxy(t *testing.T) {
 	argv := dockerOnPath(t, `case "$*" in
 "inspect deplo-traefik") echo '[{"Image":"traefik","Config":{"Cmd":["--log.level=ERROR"]}}]';;
 "run -d"*) echo sid;;
 esac`)
 	weights := weightsAt(t, argv)
 	_, _, _ = startStandbyProxy(context.Background(), t.TempDir(), 0)
-	if !slices.ContainsFunc(*weights, func(w string) bool { return strings.HasSuffix(w, " sid") }) {
-		t.Fatalf("the standby kept the default weight: %v in %q", *weights, argv())
+	if slices.ContainsFunc(*weights, func(w string) bool { return strings.HasSuffix(w, " sid") }) {
+		t.Fatalf("the standby took a weight while it started: %v in %q", *weights, argv())
+	}
+}
+
+// c44: the proxy that carries the visitors comes first on the CPU, the one starting or draining beside it after.
+func TestProxyRestart_theProxyCarryingTheVisitorsComesFirst(t *testing.T) {
+	dirs := map[string]string{traefikContainer: t.TempDir(), standbyContainer: t.TempDir()}
+	was, up := containerCgroup, standbyUp
+	t.Cleanup(func() { containerCgroup, standbyUp = was, up })
+	containerCgroup = func(_ context.Context, id string) (string, error) { return dirs[id], nil }
+	standbyUp = func(context.Context, string, uint32) (standbyDialer, func(), error) {
+		return func(context.Context, uint32) (net.Conn, error) { return nil, errors.New("none") }, func() {}, nil
+	}
+	weight := func(id string) string {
+		raw, _ := os.ReadFile(filepath.Join(dirs[id], "cpu.weight"))
+		return string(raw)
+	}
+	s := New(t.TempDir(), t.TempDir(), "/", t.TempDir())
+	s.proxyGoingDown()
+	if weight(standbyContainer) != "1000" {
+		t.Fatalf("the standby carrying the visitors weighs %q", weight(standbyContainer))
+	}
+	s.newProxyWeight(context.Background())
+	if weight(traefikContainer) != "" {
+		t.Fatalf("the new proxy took %q while the standby carried its visitors", weight(traefikContainer))
+	}
+	s.proxyBack()
+	if weight(traefikContainer) != "1000" || weight(standbyContainer) != "100" {
+		t.Fatalf("after the hand-back: proxy %q, standby %q", weight(traefikContainer), weight(standbyContainer))
 	}
 }
