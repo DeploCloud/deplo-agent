@@ -144,8 +144,18 @@ func (m *Mesh) handleProbe(b []byte, from netip.AddrPort) {
 		}
 		p.pongs++
 		reply := probe{kind: probePong, sender: m.pub, nonce: pr.nonce}.encode(p.pair)
+		// With no path of its own yet, it pings back at once: its next ping came up to 1 s later (c50, a new member).
+		var back []byte
+		if _, direct := p.directLocked(now); !direct && now.Sub(p.pingedBack) >= pingBackEvery {
+			nonce := randomNonce()
+			p.pingedBack, p.waiting[nonce] = now, sentPing{addr: from, at: now}
+			back = probe{kind: probePing, sender: m.pub, nonce: nonce}.encode(p.pair)
+		}
 		m.mu.Unlock()
 		m.bind.sendUDP(reply, from)
+		if back != nil {
+			m.bind.sendUDP(back, from)
+		}
 	case probePong:
 		s, ok := p.waiting[pr.nonce]
 		if !ok || s.addr != from {

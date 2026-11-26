@@ -524,3 +524,37 @@ func TestMesh_aDialReachesAPeerAsSoonAsItsNextRunIsHeard(t *testing.T) {
 		t.Fatalf("the dial reached the peer %v after it was back", late)
 	}
 }
+
+// c50: a new member learns its peers before they learn it; once they do, their ping opens its path, not its own next one.
+func TestMesh_aMemberThePeersLearnLastReachesThemAtOnce(t *testing.T) {
+	// Its own pings never open the path here: only the peer's can.
+	was := pingOther
+	pingOther = time.Minute
+	t.Cleanup(func() { pingOther = was })
+	a, b := start(t, nil, fpA, "fdde:9100::a"), start(t, nil, fpB, "fdde:9100::b")
+	echo(t, b)
+	if err := a.m.SetPeers([]Peer{b.as(true)}); err != nil {
+		t.Fatal(err)
+	}
+	// Its handshakes go unanswered meanwhile: WireGuard tries again only 5 s after each.
+	time.Sleep(2500 * time.Millisecond)
+	learned := time.Now()
+	if err := b.m.SetPeers([]Peer{a.as(true)}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c, err := a.m.Dial(ctx, fpB, servicePort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTrip(t, c, "joined")
+	c.Close()
+	t.Logf("reached %v after the peer learned it", time.Since(learned))
+	waitPath(t, a.m, fpB, PathDirect)
+	waitPath(t, b.m, fpA, PathDirect)
+	t.Logf("direct both ways %v after", time.Since(learned))
+	if late := time.Since(learned); late > 500*time.Millisecond {
+		t.Fatalf("the member reached its peer %v after the peer learned it", late)
+	}
+}

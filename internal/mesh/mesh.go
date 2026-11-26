@@ -23,11 +23,12 @@ const (
 	keepalive = 25
 	// A direct path is pinged every second and is gone after 4 s without an answer: well inside the 5 s a
 	// cluster lease survives.
-	pingLive   = time.Second
-	pingOther  = time.Second
-	liveFor    = 4 * time.Second
-	waitPong   = 5 * time.Second
-	learnedFor = 2 * time.Minute
+	pingLive = time.Second
+	// pingBackEvery bounds the pings sent back to a peer's own.
+	pingBackEvery = 100 * time.Millisecond
+	liveFor       = 4 * time.Second
+	waitPong      = 5 * time.Second
+	learnedFor    = 2 * time.Minute
 	// A relay path is dialed again at most this often, and closed after this long unused.
 	relayRedial = 2 * time.Second
 	relayIdle   = time.Minute
@@ -36,6 +37,9 @@ const (
 	maxPongs       = 20
 	maxFrame       = MTU + 256
 )
+
+// pingOther is how often an address not answering yet is pinged; a var so a test can stretch it.
+var pingOther = time.Second
 
 // Peer is another server on the network.
 type Peer struct {
@@ -141,6 +145,8 @@ type peer struct {
 
 	pongs      int
 	pongWindow time.Time
+	// pingedBack is when this end last answered p's ping with one of its own: its regular one may predate p knowing it.
+	pingedBack time.Time
 	// sentInit is when WireGuard last handed over an initiation for p, held or sent, until p answers it (0 then);
 	// tookInit is when this end last took one of p's. Unix nanoseconds.
 	sentInit atomic.Int64
