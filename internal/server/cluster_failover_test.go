@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -267,5 +268,41 @@ func TestFailover_aNewerEpochEndsAnOlderLeadersStart(t *testing.T) {
 				t.Fatalf("stopped %v: what the stale order started must not stay up", stopped)
 			}
 		})
+	}
+}
+
+// c48: on a one-core member fise's start took 21.7 s beside memos', against about 5 s alone.
+func TestFailover_aMembersStartsRunOnePerCore(t *testing.T) {
+	stubFailover(t)
+	old := startLanes
+	startLanes = func() int { return 1 }
+	t.Cleanup(func() { startLanes = old })
+	var mu sync.Mutex
+	in, most := 0, 0
+	runFailoverDeploy = func(_ *Service, _ context.Context, _ *pb.DeployRequest, e *emitter) {
+		mu.Lock()
+		in++
+		most = max(most, in)
+		mu.Unlock()
+		time.Sleep(50 * time.Millisecond)
+		mu.Lock()
+		in--
+		mu.Unlock()
+		e.result(true, "", "")
+	}
+	start := (&Service{}).leaseGuard().start
+	var wg sync.WaitGroup
+	for _, slug := range []string{"fise", "memos"} {
+		st := *startOrder(1).Start
+		st.Slug = slug
+		wg.Go(func() {
+			if err := start(context.Background(), &st); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+	if most != 1 {
+		t.Fatalf("%d starts ran at once on a one-core member", most)
 	}
 }
