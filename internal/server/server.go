@@ -139,6 +139,8 @@ var Capabilities = []string{
 	"backup.postgres-archive",
 	"cluster.standby",
 	"cluster.replicas",
+	// PromoteClusterReplica: a move takes its App's last changes into the copy here and puts it in place.
+	"cluster.replicas.move",
 	"cluster.network",
 	// SetClusterRotations: a peer that rotated its key is still reached, and still known, by its old one (ADR-0050).
 	"cluster.rotation",

@@ -28,9 +28,11 @@ import (
 // Replication of App data (ADR-0046 in DeploCloud/deplo): Deplo hands every member the table of the cluster's
 // replicated Apps. The member that runs one sends its data as it changes; every other member receives it into a
 // copy of its own, straight from member to member over the relay, with Deplo up or not. A copy is never the App's
-// live data: only a failover start puts it in place, and only on a member that holds no stack of that App.
+// live data: only a failover start or a move puts it in place, and only on a member the leader places it on.
 const (
-	replVerb       = "REPL"
+	replVerb = "REPL"
+	// replLast asks a REPL stream for one snapshot of a stopped App's data: its move's last changes.
+	replLast       = "last"
 	maxReplEntries = 256
 	maxReplVolumes = 32
 )
@@ -490,7 +492,9 @@ func (r *replicas) dialMember(ctx context.Context, fingerprint string) (net.Conn
 // to a member of this cluster, and only for as long as both stay true.
 func (s *Service) serveReplica(from wire.Party, c net.Conn, arg string) {
 	r := s.replicas()
-	cluster, appID, _ := strings.Cut(arg, " ")
+	cluster, rest, _ := strings.Cut(arg, " ")
+	appID, mode, _ := strings.Cut(rest, " ")
+	last := mode == replLast
 	r.mu.Lock()
 	tab := r.tab
 	r.mu.Unlock()
@@ -515,7 +519,14 @@ func (s *Service) serveReplica(from wire.Party, c net.Conn, arg string) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if !stillHere(ctx) {
+	if last {
+		// The last changes go only to the member the leader moved the App to, once it stopped here.
+		member, here, ok := s.leaseGuard().locate(cluster, "app", appID)
+		if !ok || here || !from.Is(tab.Members[member]) || r.running(ctx, entry.Slug) {
+			refuse("the App has not moved to that server, or still runs here")
+			return
+		}
+	} else if !stillHere(ctx) {
 		refuse("the App does not run on this server")
 		return
 	}
@@ -537,6 +548,13 @@ func (s *Service) serveReplica(from wire.Party, c net.Conn, arg string) {
 		dirs = append(dirs, files)
 	}
 	if wire.WriteHeader(c, wire.VerbOK, "") != nil {
+		return
+	}
+	if last {
+		// The App is down until it lands: at full speed, never behind its Apps.
+		if err := replica.SendOnce(ctx, c, entry.roots(), dirs); err != nil {
+			fmt.Fprintf(os.Stderr, "deplo-agent: last changes of %s: %v\n", entry.Slug, err)
+		}
 		return
 	}
 	r.mu.Lock()
@@ -597,25 +615,111 @@ func (s *Service) promoteReplica(ctx context.Context, slug string) (release func
 		r.poke()
 	}
 	r.stop(e.AppID, "")
+	return release, s.putReplicaInPlace(ctx, e)
+}
+
+// putReplicaInPlace moves this member's copy of an App into its Volumes and Files; the caller holds it.
+func (s *Service) putReplicaInPlace(ctx context.Context, e replicaEntry) error {
+	r := s.replicas()
 	live := map[string]string{}
 	for _, v := range e.Volumes {
 		p, err := r.mountpoint(ctx, v, true)
 		if err != nil {
-			return release, err
+			return err
 		}
 		live[replica.VolumeRoot(v)] = p
 	}
 	if e.Files {
 		files := s.filesRoot(e.Slug)
 		if err := os.MkdirAll(files, 0o755); err != nil {
-			return release, err
+			return err
 		}
 		live[replica.FilesRoot] = files
 	}
 	if err := replica.Promote(r.dir(e.AppID), e.roots(), live); err != nil {
-		return release, err
+		return err
 	}
 	// The copy is the App's data now: this member sends from here on.
 	_ = os.RemoveAll(r.dir(e.AppID))
-	return release, nil
+	return nil
+}
+
+// PromoteClusterReplica takes a moved App's last changes from the member it left, then puts the copy in place: a
+// move stops the App only for what changed since (c44: 64 MB copied again in 8 s). See proto/agent.proto.
+func (s *Service) PromoteClusterReplica(ctx context.Context, req *pb.PromoteClusterReplicaRequest) (*pb.PromoteClusterReplicaResponse, error) {
+	r := s.replicas()
+	r.mu.Lock()
+	tab := r.tab
+	var entry *replicaEntry
+	for i := range tab.Entries {
+		if tab.Entries[i].AppID == req.GetAppId() {
+			entry = &tab.Entries[i]
+		}
+	}
+	if entry == nil || r.holding[req.GetAppId()] {
+		r.mu.Unlock()
+		return nil, status.Error(codes.FailedPrecondition, "this server does not replicate that App")
+	}
+	e := *entry
+	var ix *replica.Index
+	if run := r.runs[e.AppID]; run != nil {
+		ix = run.index
+	}
+	r.holding[e.AppID] = true
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		delete(r.holding, e.AppID)
+		r.mu.Unlock()
+		r.poke()
+	}()
+	if _, here, ok := s.leaseGuard().locate(tab.Cluster, "app", e.AppID); !ok || !here {
+		return nil, status.Error(codes.FailedPrecondition, "the cluster's leader does not place that App on this server")
+	}
+	fp := tab.Members[req.GetFromServerId()]
+	if !validFingerprint(fp) {
+		return nil, status.Error(codes.FailedPrecondition, "this server does not know the server the App left")
+	}
+	if !replica.Ready(r.dir(e.AppID)) {
+		return nil, status.Error(codes.FailedPrecondition, "this server has no whole copy of the App's data yet")
+	}
+	r.stop(e.AppID, "")
+	if ix == nil {
+		ix = replica.NewIndex()
+	}
+	st := &replica.Status{}
+	err := r.receiveLast(ctx, tab.Cluster, e, fp, st, ix)
+	if _, synced, _, _, _ := st.Snapshot(); !synced {
+		if err == nil {
+			err = errors.New("the stream ended early")
+		}
+		return nil, status.Errorf(codes.Unavailable, "the last changes did not all arrive: %v", err)
+	}
+	if err := s.putReplicaInPlace(ctx, e); err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	_, _, _, n, _ := st.Snapshot()
+	return &pb.PromoteClusterReplicaResponse{Bytes: n}, nil
+}
+
+// receiveLast takes one snapshot of a stopped App's data into its copy here, at full speed.
+func (r *replicas) receiveLast(ctx context.Context, cluster string, e replicaEntry, fingerprint string, st *replica.Status, ix *replica.Index) error {
+	conn, err := r.dial(ctx, fingerprint)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(wire.HeaderTimeout))
+	if err := wire.WriteHeader(conn, replVerb, cluster+" "+e.AppID+" "+replLast); err != nil {
+		return err
+	}
+	verb, arg, err := wire.ReadHeader(conn)
+	if err != nil {
+		return err
+	}
+	if verb != wire.VerbOK {
+		return fmt.Errorf("the server the App left refused: %s", arg)
+	}
+	_ = conn.SetDeadline(time.Time{})
+	return replica.Receive(ctx, conn, r.dir(e.AppID), e.roots(), st, ix)
 }

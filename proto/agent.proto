@@ -230,6 +230,10 @@ service Agent {
   // How each copy on this member stands.
   rpc ClusterReplicaStatus(ClusterReplicaStatusRequest) returns (ClusterReplicaStatusResponse);
 
+  // A move onto this member (Hello capability "cluster.replicas.move"): the copy here takes the last
+  // changes from the member the App left, once it stopped there, and becomes the App's data.
+  rpc PromoteClusterReplica(PromoteClusterReplicaRequest) returns (PromoteClusterReplicaResponse);
+
   // ---- THE CLUSTER'S NETWORK (ADR-0047, Hello capability "cluster.network") ----
 
   // Put this server on a cluster's private network with every other server of the cluster, or take
@@ -3049,6 +3053,17 @@ message SetClusterReplicasResponse {
 }
 
 message ClusterReplicaStatusRequest {}
+
+message PromoteClusterReplicaRequest {
+  string app_id = 1;
+  // The member the App left, by the server id the leader's placement names it with.
+  string from_server_id = 2;
+}
+
+message PromoteClusterReplicaResponse {
+  // The file data that crossed the network for the last changes.
+  int64 bytes = 1;
+}
 
 message ClusterReplicaStatusResponse {
   repeated ClusterReplicaState replicas = 1;
