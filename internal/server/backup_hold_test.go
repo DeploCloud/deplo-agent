@@ -469,8 +469,8 @@ func TestVolumeBackup_aSecondCopyNoSmallerSaysSo(t *testing.T) {
 	}
 }
 
-// Without room for the copy and a tenth of the disk free, the App is paused for the whole copy as before, and the
-// backup says why; an archive written on the same disk counts too.
+// Without room for the copy and a tenth of the disk free, the App is paused for the whole copy, at most holdBudget,
+// and the backup says why; an archive written on the same disk counts too.
 func TestVolumeBackup_tooLittleDiskPausesForTheWholeCopyAndSaysWhy(t *testing.T) {
 	for _, c := range []struct {
 		name        string
@@ -503,5 +503,63 @@ func TestVolumeBackup_tooLittleDiskPausesForTheWholeCopyAndSaysWhy(t *testing.T)
 				t.Fatalf("the backup must say why the App stayed paused: %q %v", e.heldWhy, logs)
 			}
 		})
+	}
+}
+
+func shortHold(t *testing.T) {
+	t.Helper()
+	was, settle := holdBudget, copierSettle
+	holdBudget, copierSettle = 300*time.Millisecond, 10*time.Millisecond
+	t.Cleanup(func() { holdBudget, copierSettle = was, settle })
+}
+
+// deplo c44: with eu-1 at 90%, fise was paused 4.1 s and lab-kit-a 21.5 s, each for its whole copy. Now a copy that
+// outlasts holdBudget is no backup, and the App runs again once the budget is spent, not once the copy ends.
+func TestVolumeBackup_aWholeCopyLongerThanTheBudgetRunsTheAppAgainAndIsNoBackup(t *testing.T) {
+	shortHold(t)
+	dir := t.TempDir()
+	argv := dockerOnPath(t, `case "$1" in
+ps) echo abc123def456 ;;
+run) case "$*" in *" -d "*) echo cop999 ;; esac ;;
+unpause) date +%s%N > `+dir+`/unpause ;;
+pause) date +%s%N > `+dir+`/pause ;;
+exec) case "$*" in
+  *" du -sk "*) printf '204800\t/v\n' ;;
+  *" tar "*) exec sleep 3 ;;
+  esac ;;
+esac`)
+	stagedFree(t, 100<<20, 20<<30)
+	e := &bkEmitter{send: func(ev *pb.BackupEvent) error { return nil }}
+	err := (&Service{dataBase: t.TempDir()}).writeProjectArchive(context.Background(), &pb.ProjectDescriptor{Slug: "agent-test-web", VolumeNames: []string{"deplo-agent-test-web-data"}}, tar.NewWriter(io.Discard), e, false)
+	if err == nil || !strings.Contains(err.Error(), "could not be copied within") || !strings.Contains(err.Error(), "too little") {
+		t.Fatalf("want a backup refused for its pause, with why: %v", err)
+	}
+	read := func(n string) int64 {
+		b, _ := os.ReadFile(filepath.Join(dir, n))
+		v, _ := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+		return v
+	}
+	if held := time.Duration(read("unpause") - read("pause")); held <= 0 || held > holdBudget+500*time.Millisecond {
+		t.Fatalf("the App was paused %v, its budget is %v: %q", held, holdBudget, argv())
+	}
+}
+
+// What changed while the App was paused is copied within holdBudget too, or the backup is not kept.
+func TestVolumeBackup_aSecondCopyLongerThanTheBudgetIsNoBackup(t *testing.T) {
+	shortHold(t)
+	argv := dockerOnPath(t, strings.Replace(stagingDocker, `*" stage-sync --since "*) echo "3 5242880" ;;`, `*" stage-sync --since "*) exec sleep 3 ;;`, 1))
+	stagedFree(t, 10<<30, 20<<30)
+	e := &bkEmitter{send: func(ev *pb.BackupEvent) error { return nil }}
+	start := time.Now()
+	err := (&Service{dataBase: t.TempDir()}).writeProjectArchive(context.Background(), &pb.ProjectDescriptor{Slug: "agent-test-web", VolumeNames: []string{"deplo-agent-test-web-data"}}, tar.NewWriter(io.Discard), e, false)
+	if err == nil || !strings.Contains(err.Error(), "could not be copied within") {
+		t.Fatalf("want a backup refused for its pause: %v", err)
+	}
+	if took := time.Since(start); took > 2*time.Second {
+		t.Fatalf("the backup waited %v for a copy past its budget", took)
+	}
+	got := strings.Join(argv(), "\n")
+	if !strings.Contains(got, "unpause abc123def456") || strings.Contains(got, "tar -C /stage/0") {
+		t.Fatalf("the App runs again and the unfinished copy is never archived: %q", got)
 	}
 }

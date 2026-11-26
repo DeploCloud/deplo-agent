@@ -306,3 +306,29 @@ func TestPostgresArchive_aBackupThatDoesNotUnpackLeavesTheDatabaseAsItWas(t *tes
 		t.Fatalf("helper steps %q, argv %v", got, a)
 	}
 }
+
+// deplo c44: lab-db's 6.5 MB base backup went through Deplo in 86 s. Sent to a member, it is still a base backup.
+func TestPostgresArchive_aBaseBackupSentToAMemberIsStillOne(t *testing.T) {
+	argv := dockerOnPath(t, pgDocker)
+	s, _ := newStoreService(t)
+	recipient, identity := testKeypair(t)
+	var sent bytes.Buffer
+	res, err := backupLikeTheRPC(s, context.Background(), &pb.BackupRequest{
+		Kind: pb.BackupKind_BACKUP_KIND_DATABASE, Database: pgArchived, Archive: pb.PostgresArchive_POSTGRES_ARCHIVE_BASE,
+		StreamOut: true, AgeRecipient: recipient, Store: &pb.StoreTarget{ObjectKey: "t/database/db_1/a"},
+	}, &sent)
+	if err != nil || !res.GetOk() {
+		t.Fatalf("result %+v, %v", res, err)
+	}
+	rc, err := openArtifactReader(&sent, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rc.Close()
+	if got, _ := io.ReadAll(rc); string(got) != "BASE-BACKUP-TAR" || called(argv(), "pg_dump") >= 0 {
+		t.Fatalf("artifact %q, argv %v", got, argv())
+	}
+	if !slices.Contains(Capabilities, "backup-store.member-archive") {
+		t.Fatal("backup-store.member-archive is not advertised")
+	}
+}
