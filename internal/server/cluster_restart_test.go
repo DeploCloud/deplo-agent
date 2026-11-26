@@ -83,3 +83,26 @@ func TestReadinessByApp_readsEachAppOfOneInspect(t *testing.T) {
 		t.Fatalf("prj1 is %+v, one look of its own says %+v", got["prj1"], want)
 	}
 }
+
+// c48: carried visitors waited 1.2 to 4.4 s past the agent's return, and the journal said nothing of where.
+func TestRestart_saysWhenItLookedAndWhenItFirstTookAVisitor(t *testing.T) {
+	a, b, fa, _, members := answerPair(t)
+	bothAnswer(t, a, b, members)
+	placeOn(t, a, "srvA", appEntry("srvB"))
+	placeOn(t, b, "srvB", appEntry("srvB"))
+	s := fa.spec(t, answerAlias)
+	out := captureStderr(t, func() {
+		b.forwarders().lookAtStart(context.Background(), b.forwarders().state())
+		for range 2 {
+			if got := askPort(t, s, shopTLS); got != "proxy-b:PING" {
+				t.Fatalf("the visitor reached %q", got)
+			}
+		}
+	})
+	if !strings.Contains(out, "looked at its 1 Apps") {
+		t.Fatalf("no line for the start's look in %q", out)
+	}
+	if n := strings.Count(out, "first visitor passed on here"); n != 1 {
+		t.Fatalf("the first visitor passed on was said %d times in %q", n, out)
+	}
+}

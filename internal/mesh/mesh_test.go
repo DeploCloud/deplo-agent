@@ -483,3 +483,44 @@ func TestMesh_aDialReachesAPeerWithinASecondOfItsReturn(t *testing.T) {
 		t.Fatalf("the dial reached the peer %v after it was back", late)
 	}
 }
+
+// c48: a renewal sent while a member's agent was down reached it 2 s after its return, at its dial's next SYN.
+func TestMesh_aDialReachesAPeerAsSoonAsItsNextRunIsHeard(t *testing.T) {
+	was := dialEvery
+	dialEvery = time.Minute
+	t.Cleanup(func() { dialEvery = was })
+	a, b := start(t, nil, fpA, "fdde:9100::a"), start(t, nil, fpB, "fdde:9100::b")
+	connect(t, a, b, true)
+	echo(t, b)
+	roundTrip(t, dial(t, a, b), "before")
+	port, addr := b.m.Port(), b.m.Address()
+	b.m.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	got := make(chan net.Conn, 1)
+	go func() {
+		c, _ := a.m.Dial(ctx, fpB, servicePort)
+		got <- c
+	}()
+	// Back between TCP's own tries of the first SYN, 1 and 3 s after it.
+	time.Sleep(1200 * time.Millisecond)
+	m, err := Start(Config{PrivateKey: b.key, Address: addr, Port: port, Logf: t.Logf})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { m.Close() })
+	echo(t, side{m: m, key: b.key, fp: fpB})
+	back := time.Now()
+	if err := m.SetPeers([]Peer{a.as(true)}); err != nil {
+		t.Fatal(err)
+	}
+	c := <-got
+	if c == nil {
+		t.Fatal("the dial never reached the peer")
+	}
+	roundTrip(t, c, "after")
+	c.Close()
+	if late := time.Since(back); late > 500*time.Millisecond {
+		t.Fatalf("the dial reached the peer %v after it was back", late)
+	}
+}

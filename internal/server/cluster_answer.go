@@ -758,6 +758,9 @@ func (f *forwarders) serveAnswerStream(from wire.Party, c net.Conn, network, app
 		up.Close()
 		return
 	}
+	f.passedOn.Do(func() {
+		stderrf("deplo-agent: cluster: first visitor passed on here %d ms after the agent started", time.Since(agentStarted).Milliseconds())
+	})
 	f.carry(appID, c, up)
 }
 
