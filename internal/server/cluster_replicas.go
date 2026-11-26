@@ -286,6 +286,7 @@ func (r *replicas) poke() {
 
 // Run keeps every copy this member should hold receiving, until ctx ends; then every receiver stops.
 func (r *replicas) Run(ctx context.Context) {
+	r.s.afterStart(ctx)
 	t := time.NewTicker(replReconcileEvery)
 	defer t.Stop()
 	defer r.stopAll()

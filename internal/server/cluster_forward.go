@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -117,6 +116,8 @@ type forwardOps struct {
 	proxyDial func(ctx context.Context, port uint32) (net.Conn, error)
 	// ready says whether every container of an App here answers, and since when.
 	ready func(ctx context.Context, appID string) appReadiness
+	// readyAll is ready for several Apps in one look, when docker can answer them together.
+	readyAll func(ctx context.Context, appIDs []string) map[string]appReadiness
 	// runs says whether a container of an App runs here: a proxy's store keeps its certificate only then.
 	runs func(ctx context.Context, appID string) (bool, error)
 }
@@ -184,13 +185,16 @@ type forwarders struct {
 	// local are the visitors carried to this server's own proxy, by App, each with the stream it was joined to.
 	local    map[string]map[net.Conn]net.Conn
 	watching bool
+	// looked is closed once this run's first look at what it answers for is done (see lookAtStart).
+	looked     chan struct{}
+	lookedOnce sync.Once
 }
 
 func (s *Service) forwarders() *forwarders {
 	s.fwdOnce.Do(func() {
 		f := &forwarders{s: s, listeners: map[string]*heldListener{}, redirected: map[string]int{}, open: map[string]int{},
 			readiness: map[string]*answerReadyCheck{}, readySeen: map[string]time.Time{}, gates: map[string]*answerGate{},
-			refused: map[refusalKey]*answerRefusal{}}
+			refused: map[refusalKey]*answerRefusal{}, looked: make(chan struct{})}
 		if s.agentDir != "" {
 			if raw, err := os.ReadFile(f.file()); err == nil {
 				_ = json.Unmarshal(raw, &f.st)
@@ -320,11 +324,15 @@ func (f *forwarders) Resume() {
 	f.dock.Lock()
 	defer f.dock.Unlock()
 	defer dropUnclaimedKept("fwd-")
+	defer f.doneLooking()
 	st := f.state()
 	if len(st.Hold)+len(st.Answers) == 0 {
 		return
 	}
 	f.listenFirst(st)
+	f.lookAtStart(ctx, st)
+	f.doneLooking()
+	f.s.afterStart(ctx)
 	if err := f.reconcile(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "deplo-agent: name forwarders: %v\n", err)
 	}
@@ -722,98 +730,4 @@ func (s *Service) serveForward(from wire.Party, c net.Conn, arg string) {
 		return
 	}
 	forwarder.Join(c, up)
-}
-
-// holders is every member the leader placed a workload on, from the last renewal: whether this one is among them,
-// and the others in placement order. A standby copy holds the stack, not the name, and is never one. This member
-// holds nothing on a lease that is not current: a copy back from a power cut answers for nobody.
-func (g *leaseGuard) holders(cluster, kind, id string) (here bool, others []string) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	c := g.clusters[cluster]
-	if c == nil {
-		return false, nil
-	}
-	current := c.current(g.now())
-	for _, e := range c.Placement {
-		if e.Kind != kind || e.ID != id || e.Member == "" || e.Standby {
-			continue
-		}
-		if e.Member == c.Member {
-			here = here || current
-		} else if !slices.Contains(others, e.Member) {
-			others = append(others, e.Member)
-		}
-	}
-	return here, others
-}
-
-// answerHolders is holders for a passed-on domain: a server coming back answers none itself until what moved away
-// is gone, or its proxy would pass the check of a renewal its stale store asked for, issuing a certificate twice.
-func (g *leaseGuard) answerHolders(cluster, id string) (here bool, others []string) {
-	here, others = g.holders(cluster, "app", id)
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if c := g.clusters[cluster]; c != nil && c.Returning {
-		here = false
-	}
-	return here, others
-}
-
-// visitorHolders is answerHolders for where a visitor goes: a lease read back after the agent restarted in this boot
-// answers at once; it decides nothing else (no start, no certificate).
-func (g *leaseGuard) visitorHolders(cluster, id string) (here bool, others []string) {
-	here, others = g.answerHolders(cluster, id)
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	c := g.clusters[cluster]
-	if c != nil && !here && !c.Returning && c.answerable(g.now()) {
-		for _, e := range c.Placement {
-			here = here || (e.Kind == "app" && e.ID == id && e.Member == c.Member && !e.Standby)
-		}
-	}
-	return here, others
-}
-
-// appOf is the App a stack belongs to in any cluster's placement; empty for a stack no cluster places.
-func (g *leaseGuard) appOf(slug string) string {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	for _, c := range g.clusters {
-		for _, e := range c.Placement {
-			if e.Kind == "app" && e.Slug == slug && e.Slug != "" {
-				return e.ID
-			}
-		}
-	}
-	return ""
-}
-
-// locate says which member runs a workload now, and whether that is this one, from the placement the last renewal carried.
-// With replicas on several members this one is preferred, then the first in placement order.
-func (g *leaseGuard) locate(cluster, kind, id string) (member string, here, ok bool) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	c := g.clusters[cluster]
-	if c == nil {
-		return "", false, false
-	}
-	current := c.current(g.now())
-	for _, e := range c.Placement {
-		// A standby copy holds the stack, not the name: connections still go to the workload itself.
-		if e.Kind != kind || e.ID != id || e.Member == "" || e.Standby {
-			continue
-		}
-		if e.Member == c.Member {
-			// Not on a lease that is not current: the copy here may be one that moved away.
-			if current {
-				return e.Member, true, true
-			}
-			continue
-		}
-		if !ok {
-			member, ok = e.Member, true
-		}
-	}
-	return member, false, ok
 }

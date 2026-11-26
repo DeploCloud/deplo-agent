@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -28,6 +29,22 @@ import (
 )
 
 const selfUpdateGrace = 750 * time.Millisecond
+
+// A member's exec waits at most renewalWait for its next renewal, then at most execAfterRenewal for its visitors:
+// the new binary is up before the renewal a second later (c47: every member's own lease 2 s apart at its update).
+const (
+	renewalWait      = 1500 * time.Millisecond
+	execAfterRenewal = 300 * time.Millisecond
+)
+
+// drainBy is when, in Unix nanoseconds, an exec's drain ends at the latest; zero leaves it execDrain.
+var drainBy atomic.Int64
+
+func (s *Service) execAfterRenewal() {
+	if at := s.leaseGuard().nextRenewal(renewalWait); !at.IsZero() {
+		drainBy.Store(at.Add(execAfterRenewal).UnixNano())
+	}
+}
 
 // afterFailedExec ends an agent whose exec failed after it stopped taking visitors; tests go on.
 var afterFailedExec = func() { os.Exit(1) }
@@ -139,6 +156,7 @@ func (s *Service) applyUpdate(ctx context.Context, exePath string, req *pb.SelfU
 	env := os.Environ()
 	go func() {
 		time.Sleep(selfUpdateGrace)
+		s.execAfterRenewal()
 		log.Printf("deplo-agent: re-execing %s to complete self-update to v%s", exePath, req.GetVersion())
 		if err := reexec(exePath, argv, env); err != nil {
 			log.Printf("deplo-agent: re-exec failed: %v (new binary is on disk; restart the service to apply)", err)

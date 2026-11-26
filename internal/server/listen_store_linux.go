@@ -157,7 +157,11 @@ func drainLocked() {
 		_ = ln.Close()
 		delete(kept.live, name)
 	}
-	for until := time.Now().Add(execDrain); time.Now().Before(until) && !carriedQuiet(); {
+	until := time.Now().Add(execDrain)
+	if by := drainBy.Load(); by != 0 && time.Unix(0, by).Before(until) {
+		until = time.Unix(0, by)
+	}
+	for time.Now().Before(until) && !carriedQuiet() {
 		time.Sleep(20 * time.Millisecond)
 	}
 }

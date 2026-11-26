@@ -237,13 +237,16 @@ type leaseGuard struct {
 	wmu              sync.Mutex
 	// relinquished is the member each stack was last said to run on, so the stop is said once (see relinquishLocked).
 	relinquished map[string]string
+	// renewals counts the renewals this run took; firstRenewal is closed at the first one (see afterStart).
+	renewals     uint64
+	firstRenewal chan struct{}
 }
 
 // unreadableLease names the lease a file that would not open stands for: one that ran out, of nobody knows what.
 const unreadableLease = "unreadable"
 
 func newLeaseGuard(file string, now func() time.Time, fence func(context.Context, []lease.Entry) error) *leaseGuard {
-	g := &leaseGuard{file: file, now: now, fence: fence, clusters: map[string]*clusterLease{}, settling: map[string]bool{}, relinquishing: map[string]bool{}, starting: map[string]time.Time{}, keeps: map[string]map[string]lease.Keep{}, stores: map[string][]lease.Store{}, retryAt: map[string]time.Time{}, retryWait: map[string]time.Duration{}, logf: stderrf, asking: map[string]bool{}, asked: map[string]string{}, relinquished: map[string]string{}}
+	g := &leaseGuard{file: file, now: now, fence: fence, clusters: map[string]*clusterLease{}, settling: map[string]bool{}, relinquishing: map[string]bool{}, starting: map[string]time.Time{}, keeps: map[string]map[string]lease.Keep{}, stores: map[string][]lease.Store{}, retryAt: map[string]time.Time{}, retryWait: map[string]time.Duration{}, logf: stderrf, asking: map[string]bool{}, asked: map[string]string{}, relinquished: map[string]string{}, firstRenewal: make(chan struct{})}
 	if raw, err := os.ReadFile(file); err == nil {
 		if err := json.Unmarshal(raw, &g.clusters); err != nil {
 			fmt.Fprintf(os.Stderr, "deplo-agent: the cluster lease in %s cannot be read (%v): taken as a lease that ran out\n", file, err)
@@ -455,6 +458,10 @@ func (g *leaseGuard) renew(o lease.Order) (lease.Reply, bool) {
 	}
 	prev := g.clusters[o.Cluster]
 	taken := taking(prev, o)
+	if g.renewals++; g.renewals == 1 {
+		close(g.firstRenewal)
+		stderrf("deplo-agent: cluster %s: first renewal %d ms after the agent started", o.Cluster, time.Since(agentStarted).Milliseconds())
+	}
 	// A late renewal is the first sign of a server too busy for its leases: said, so a test can prove there was none.
 	// A new leader's first one counts too: a hand-over must not cost a renewal either.
 	if gap := g.now().Sub(prev.lastRenewed()); prev != nil && prev.heard && gap > lateRenewal {
