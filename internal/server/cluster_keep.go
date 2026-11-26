@@ -214,9 +214,12 @@ func backupLikeTheRPC(s *Service, ctx context.Context, req *pb.BackupRequest, ou
 	if err != nil {
 		return nil, errors.New(statusMessage(err))
 	}
-	if req.GetKind() == pb.BackupKind_BACKUP_KIND_DATABASE {
+	switch {
+	case req.GetKind() == pb.BackupKind_BACKUP_KIND_DATABASE && req.GetArchive() != pb.PostgresArchive_POSTGRES_ARCHIVE_NONE:
+		s.backupPostgresArchive(ctx, req.GetArchive(), req.GetDatabase(), dest, e)
+	case req.GetKind() == pb.BackupKind_BACKUP_KIND_DATABASE:
 		s.backupDatabase(ctx, req.GetDatabase(), dest, e)
-	} else {
+	default:
 		s.backupProject(ctx, req.GetProject(), dest, e)
 	}
 	switch {

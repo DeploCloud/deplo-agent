@@ -189,6 +189,8 @@ var Capabilities = []string{
 	"teardown.set-aside",
 	// ExpectClusterBackup and BackupRequest.member_fingerprint: a backup goes member to member, not through Deplo.
 	"backup-store.member",
+	// A Postgres base backup or change log goes member to member too, not only a dump (deplo c44).
+	"backup-store.member-archive",
 	// ExpectClusterFetch and RestoreRequest.member_fingerprint: a restore reads a backup member to member.
 	"backup-store.fetch",
 	// ExpectClusterVolume and SendClusterVolume: a move copies a volume member to member, not through Deplo.
