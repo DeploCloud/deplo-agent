@@ -79,6 +79,9 @@ func (s *Service) writeProjectArchive(ctx context.Context, p *pb.ProjectDescript
 			first, copied = n, true
 		}
 	}
+	if copied {
+		copier.readyPass(ctx)
+	}
 	hold, herr := s.holdVolumes(ctx, p.GetSlug(), p.GetVolumeNames(), func(text string) { e.log("info", text) }, skip)
 	if herr != nil {
 		return herr
@@ -124,7 +127,17 @@ func (s *Service) writeProjectArchive(ctx context.Context, p *pb.ProjectDescript
 		why = "it started while its data was being copied, so nothing was copied on the server's own disk first"
 	}
 	if hold != nil && why == "" {
-		if n, err := copier.copyToStage(heldCtx, since); overran.Load() {
+		copyPaused := func() (int64, error) { return copier.copyToStage(heldCtx, since) }
+		if copier.told {
+			copyPaused = func() (int64, error) {
+				files, n, took, err := copier.tellPass(heldCtx, since)
+				if err == nil {
+					e.log("info", fmt.Sprintf("Copied what changed while it was paused: %d files (%s) in %s", files, humanBytes(n), took.Round(time.Millisecond)))
+				}
+				return n, err
+			}
+		}
+		if n, err := copyPaused(); overran.Load() {
 			return overBudget()
 		} else if err != nil {
 			why = "copying the data on the server's own disk failed: " + err.Error()

@@ -2,9 +2,12 @@ package server
 
 import (
 	"bytes"
+	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -154,4 +157,39 @@ func TestStageSync_aFirstPassWritesInStepsItWaitsOn(t *testing.T) {
 	if steps != 0 {
 		t.Fatalf("the pass made while the App is paused must not wait on the disk, it waited %d times", steps)
 	}
+}
+
+// c49: the pass an App is paused for started as a process of its own inside the pause. Started before it, it waits
+// to be told since when, copies what changed and says what it copied.
+func TestStageSync_aPassStartedBeforeThePauseCopiesWhenTold(t *testing.T) {
+	src, dst, ctl := t.TempDir(), t.TempDir(), t.TempDir()
+	writeAt(t, src, "old.txt", "old")
+	if files, _, err := syncTree(src, dst, time.Time{}); err != nil || files != 1 {
+		t.Fatalf("first copy: %d files, %v", files, err)
+	}
+	ended := make(chan int, 1)
+	var errb bytes.Buffer
+	go func() { ended <- StageSync([]string{"--wait", ctl, src, dst}, io.Discard, &errb) }()
+	for end := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		if _, err := os.Stat(filepath.Join(ctl, ".ready")); err == nil {
+			break
+		}
+		if time.Now().After(end) {
+			t.Fatalf("the pass never said it waits: %s", errb.String())
+		}
+	}
+	since := time.Now()
+	writeAt(t, src, "new.txt", "new!")
+	if err := renameInto(filepath.Join(ctl, ".go"), strconv.FormatInt(since.UnixNano(), 10)); err != nil {
+		t.Fatal(err)
+	}
+	if code := <-ended; code != 0 {
+		t.Fatalf("exited %d: %s", code, errb.String())
+	}
+	raw, _ := os.ReadFile(filepath.Join(ctl, ".done"))
+	var files, n, ns int64
+	if _, err := fmt.Sscan(string(raw), &files, &n, &ns); err != nil || files != 1 || n != 4 || ns <= 0 {
+		t.Fatalf("the pass said %q", raw)
+	}
+	sameCopy(t, src, dst)
 }

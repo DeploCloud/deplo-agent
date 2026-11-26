@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -451,16 +452,22 @@ esac`)
 }
 
 // stagingDocker is a copier whose volumes hold 200 MB: du, both copies and the archive all run inside it. The
-// copy made while the App is paused takes 5 MB.
+// copy made while the App is paused takes 5 MB; its pass, started before the pause, logs "told <since>" when told.
 var stagingDocker = stagingDockerSecond("5242880")
 
 func stagingDockerSecond(bytes string) string {
-	return `case "$1" in
+	return stagingDockerTold(`echo "3 ` + bytes + ` 1000000" > "$st/.done.tmp" && mv "$st/.done.tmp" "$st/.done"`)
+}
+
+func stagingDockerTold(done string) string {
+	return `d=$(dirname "$0")
+case "$1" in
 ps) echo abc123def456 ;;
-run) case "$*" in *" -d "*) echo cop999 ;; esac ;;
+run) case "$*" in *" -d "*) echo "$*" | sed -n 's/.* -v \([^ ]*\):\/stage .*/\1/p' > "$d/stage"; echo cop999 ;; esac ;;
 exec) case "$*" in
   *" du -sk "*) printf '204800\t/v\n' ;;
-  *" stage-sync --since "*) echo "3 ` + bytes + `" ;;
+  *" stage-sync --wait "*) st=$(cat "$d/stage"); (touch "$st/.ready"; n=0; while [ ! -f "$st/.go" ] && [ $n -lt 500 ]; do sleep 0.01; n=$((n+1)); done
+    [ -f "$st/.go" ] || exit 0; echo "told $(cat "$st/.go")" >> "$d/argv.log"; ` + done + `) >/dev/null 2>&1 & ;;
   *" stage-sync "*) echo "40 209715200" ;;
   esac ;;
 esac`
@@ -496,10 +503,15 @@ func TestVolumeBackup_pausedOnlyForWhatChanged(t *testing.T) {
 		return strings.HasPrefix(l, "exec cop999 /deplo-agent stage-sync /v/0 /stage/0")
 	})
 	pause := at(func(l string) bool { return l == "pause abc123def456" })
-	changed := at(func(l string) bool {
-		return strings.HasPrefix(l, "exec cop999 /deplo-agent stage-sync --since ") && strings.HasSuffix(l, " /v/0 /stage/0")
-	})
+	ready := at(func(l string) bool { return l == "exec -d cop999 /deplo-agent stage-sync --wait /stage /v/0 /stage/0" })
+	changed := at(func(l string) bool { return strings.HasPrefix(l, "told ") })
 	unpause := at(func(l string) bool { return l == "unpause abc123def456" })
+	// c49: a docker exec inside the pause, its process at the copy slice's weight, took past 1 s on a busy core.
+	if ready < 0 || ready > pause || slices.ContainsFunc(lines[pause+1:max(unpause, pause+1)], func(l string) bool {
+		return strings.HasPrefix(l, "exec ")
+	}) {
+		t.Fatalf("want the pass the App is paused for started before the pause, and no process started inside it; got %q", lines)
+	}
 	archive := at(func(l string) bool {
 		return strings.HasPrefix(l, "exec ") && strings.Contains(l, " cop999 tar -C /stage/0 ")
 	})
@@ -610,7 +622,7 @@ esac`)
 // What changed while the App was paused is copied within holdBudget too, or the backup is not kept.
 func TestVolumeBackup_aSecondCopyLongerThanTheBudgetIsNoBackup(t *testing.T) {
 	shortHold(t)
-	argv := dockerOnPath(t, strings.Replace(stagingDocker, `*" stage-sync --since "*) echo "3 5242880" ;;`, `*" stage-sync --since "*) exec sleep 3 ;;`, 1))
+	argv := dockerOnPath(t, stagingDockerTold("sleep 3"))
 	stagedFree(t, 10<<30, 20<<30)
 	e := &bkEmitter{send: func(ev *pb.BackupEvent) error { return nil }}
 	start := time.Now()

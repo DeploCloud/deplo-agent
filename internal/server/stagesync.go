@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,6 +19,9 @@ import (
 // StageSync is `deplo-agent stage-sync [--since <unix ns>] <from> <to>`, run inside a backup's copier: it makes <to>
 // a copy of <from> and prints the files and bytes it copied.
 func StageSync(args []string, stdout, stderr io.Writer) int {
+	if len(args) >= 4 && args[0] == "--wait" && len(args)%2 == 0 {
+		return stageSyncWhenTold(args[1], args[2:], stderr)
+	}
 	var since int64
 	if len(args) == 4 && args[0] == "--since" {
 		n, err := strconv.ParseInt(args[1], 10, 64)
@@ -46,6 +50,55 @@ func StageSync(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "%d %d\n", files, bytes)
 	return 0
+}
+
+// stageWaitFor is how long a pass started before its App's pause waits to be told to run.
+const stageWaitFor = 2 * time.Minute
+
+// stageSyncWhenTold is `stage-sync --wait <ctl> <from> <to>...`: the pass an App is paused for, started before the
+// pause. It says <ctl>/.ready, waits for <ctl>/.go to say since when, and writes "files bytes ns" to <ctl>/.done.
+func stageSyncWhenTold(ctl string, pairs []string, stderr io.Writer) int {
+	if err := os.WriteFile(filepath.Join(ctl, ".ready"), nil, 0o600); err != nil {
+		fmt.Fprintln(stderr, "stage-sync:", err)
+		return 1
+	}
+	var since int64
+	for end := time.Now().Add(stageWaitFor); ; time.Sleep(2 * time.Millisecond) {
+		if raw, err := os.ReadFile(filepath.Join(ctl, ".go")); err == nil {
+			if since, err = strconv.ParseInt(strings.TrimSpace(string(raw)), 10, 64); err == nil {
+				break
+			}
+		}
+		if time.Now().After(end) {
+			return 1
+		}
+	}
+	start, files, bytes := time.Now(), 0, int64(0)
+	out := ""
+	for i := 0; i < len(pairs) && out == ""; i += 2 {
+		f, b, err := syncTree(pairs[i], pairs[i+1], time.Unix(0, since))
+		if err != nil {
+			out = "error " + strings.ReplaceAll(err.Error(), "\n", " ")
+		}
+		files, bytes = files+f, bytes+b
+	}
+	if out == "" {
+		out = fmt.Sprintf("%d %d %d", files, bytes, time.Since(start).Nanoseconds())
+	}
+	if err := renameInto(filepath.Join(ctl, ".done"), out); err != nil {
+		fmt.Fprintln(stderr, "stage-sync:", err)
+		return 1
+	}
+	return 0
+}
+
+// renameInto writes body whole or not at all, without waiting for the disk: the App is paused meanwhile. Readable
+// by all, inside its 0700 stage: the copier writes as its root.
+func renameInto(path, body string) error {
+	if err := os.WriteFile(path+".tmp", []byte(body), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(path+".tmp", path)
 }
 
 // syncTree makes dst a copy of src: an entry whose type, size, time, mode or owner differ is copied, as is one

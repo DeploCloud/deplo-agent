@@ -26,6 +26,9 @@ type volumeCopier struct {
 	// /stage; staged says they were, and the archive is then read from there with the App running.
 	stage  string
 	staged bool
+	// told is a pass started before the pause, waiting in the copier; cgroup is the copier's, for its CPU weight.
+	told   bool
+	cgroup string
 }
 
 // startCopier runs one helper that mounts every volume read-only and waits; nil when it cannot, and the copy
@@ -107,6 +110,51 @@ func (c *volumeCopier) copyToStage(ctx context.Context, since time.Time) (int64,
 		copied += n
 	}
 	return copied, nil
+}
+
+// readyPass starts, before the pause, the pass the App is paused for: no process starts inside the pause then
+// (c49: past the 1 s on a busy one-core member). False when it could not; the pass then runs as before.
+func (c *volumeCopier) readyPass(ctx context.Context) bool {
+	if c == nil || c.stage == "" {
+		return false
+	}
+	argv := []string{"exec", "-d", c.id, "/deplo-agent", "stage-sync", "--wait", "/stage"}
+	for _, dir := range c.dirs {
+		argv = append(argv, dir, "/stage/"+strings.TrimPrefix(dir, "/v/"))
+	}
+	if res, err := dockercli.Run(ctx, holdStepTimeout, argv...); err != nil || res.Code != 0 {
+		return false
+	}
+	for end := time.Now().Add(holdStepTimeout); time.Now().Before(end) && ctx.Err() == nil; time.Sleep(5 * time.Millisecond) {
+		if _, err := os.Stat(filepath.Join(c.stage, ".ready")); err == nil {
+			c.told = true
+			c.cgroup, _ = containerCgroup(ctx, c.id)
+			return true
+		}
+	}
+	return false
+}
+
+// tellPass runs the pass readyPass started, at the agent's weight on the CPU: what changed since since. It says
+// the files and bytes it copied and how long the copy itself took.
+func (c *volumeCopier) tellPass(ctx context.Context, since time.Time) (files, bytes int64, took time.Duration, err error) {
+	defer copierFirst(c.cgroup)()
+	if err := renameInto(filepath.Join(c.stage, ".go"), strconv.FormatInt(since.UnixNano(), 10)); err != nil {
+		return 0, 0, 0, err
+	}
+	for ; ctx.Err() == nil; time.Sleep(2 * time.Millisecond) {
+		raw, rerr := os.ReadFile(filepath.Join(c.stage, ".done"))
+		if rerr != nil {
+			continue
+		}
+		var ns int64
+		if _, serr := fmt.Sscan(string(raw), &files, &bytes, &ns); serr != nil {
+			c.clearStage(ctx)
+			return 0, 0, 0, fmt.Errorf("the copy said %q", strings.TrimSpace(string(raw)))
+		}
+		return files, bytes, time.Duration(ns), nil
+	}
+	return 0, 0, 0, ctx.Err()
 }
 
 // clearStage stops whatever still copies inside the copier, which wrote the copy as root, and removes the copy
