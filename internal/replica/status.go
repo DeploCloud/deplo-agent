@@ -13,7 +13,7 @@ type Status struct {
 	mu sync.Mutex
 	// Connected is a stream open to the sender now.
 	Connected bool
-	// Synced is set once a whole snapshot landed in this copy; from then on it can be promoted.
+	// Synced is set once this stream's whole snapshot landed: the copy is current. Ready says it can be promoted.
 	Synced bool
 	// AppliedAt is when the last change or beat arrived.
 	AppliedAt time.Time

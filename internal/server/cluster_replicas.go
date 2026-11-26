@@ -270,7 +270,8 @@ func (r *replicas) status() *pb.ClusterReplicaStatusResponse {
 			connected, synced, at, bytes, msg := run.status.Snapshot()
 			st.Role, st.Connected, st.Synced, st.Bytes, st.Error, st.FromServerId = "receiving", connected, synced, bytes, msg, run.from
 			st.Relayed = connected && (run.relayed.Load() || r.s.meshPath(run.fingerprint) == mesh.PathRelay)
-			if !at.IsZero() {
+			// Up to date only once its stream's snapshot landed: a copy back after a hold took 120 MiB at a move (c50).
+			if !at.IsZero() && synced {
 				st.AppliedAt = at.UTC().Format(time.RFC3339Nano)
 			}
 		}
