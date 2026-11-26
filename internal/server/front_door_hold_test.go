@@ -27,6 +27,7 @@ func init() {
 		return nil, nil, errors.New("tests run no standby")
 	}
 	proxyCarries = func([]uint32) int { return 0 }
+	routesAnApp = func(context.Context) bool { return true }
 }
 
 // c41: every App went unanswered 8-10 s while its server's proxy restarted. A visitor that arrives meanwhile is held,
@@ -430,6 +431,43 @@ func TestProxyGoingDown_theOldProxyKeepsItsVisitorsUntilTheyAreDone(t *testing.T
 		}
 		if withStandby && !slices.Equal(ports, []uint32{80, 443, 8443}) {
 			t.Fatalf("watched ports %v, want the front door and the answer entrypoint", ports)
+		}
+	}
+}
+
+// c49: a joining member took 5.2 s from its link to "Added", most of it starting and ending a standby for a proxy that
+// routed nothing yet. A proxy with no App here, no cluster answers and no connection restarts without one.
+func TestProxyGoingDown_aProxyThatRoutesNothingRestartsWithoutAStandby(t *testing.T) {
+	wasUp, wasRedirect, wasDial, wasRoutes := standbyUp, holdRedirect, frontDoorDial, routesAnApp
+	t.Cleanup(func() { standbyUp, holdRedirect, frontDoorDial, routesAnApp = wasUp, wasRedirect, wasDial, wasRoutes })
+	holdRedirect = func(map[uint16]uint16) (func(), func(), error) { return func() {}, func() {}, nil }
+	frontDoorDial = func(context.Context, uint32) (net.Conn, error) { c, _ := net.Pipe(); return c, nil }
+	var started atomic.Int32
+	standbyUp = func(context.Context, string, uint32) (standbyDialer, func(), error) {
+		started.Add(1)
+		return nil, nil, errors.New("counted")
+	}
+	for _, c := range []struct {
+		name         string
+		app, answers bool
+		want         int32
+	}{
+		{"a joining member", false, false, 0},
+		{"an App here", true, false, 1},
+		{"the cluster's answers", false, true, 1},
+	} {
+		routesAnApp = func(context.Context) bool { return c.app }
+		started.Store(0)
+		s := New(t.TempDir(), t.TempDir(), "/", t.TempDir())
+		if c.answers {
+			s.forwarders().mu.Lock()
+			s.forwarders().st.Answers = []answer{{AppID: "prj1"}}
+			s.forwarders().mu.Unlock()
+		}
+		s.proxyGoingDown()
+		s.proxyBack()
+		if got := started.Load(); got != c.want {
+			t.Fatalf("%s: %d standbys started, want %d", c.name, got, c.want)
 		}
 	}
 }
