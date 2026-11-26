@@ -52,6 +52,15 @@ type place struct {
 // Send serves one receiver: it reads its manifest, sends a snapshot of what differs, then every change as it
 // happens, until ctx ends or the stream breaks. names and dirs are the roots, in the order both sides know them.
 func Send(ctx context.Context, conn io.ReadWriter, names, dirs []string) error {
+	return send(ctx, conn, names, dirs, true)
+}
+
+// SendOnce sends one snapshot of what differs and ends: the last changes of an App stopped for its move.
+func SendOnce(ctx context.Context, conn io.ReadWriter, names, dirs []string) error {
+	return send(ctx, conn, names, dirs, false)
+}
+
+func send(ctx context.Context, conn io.ReadWriter, names, dirs []string, follow bool) error {
 	if len(names) != len(dirs) || len(names) == 0 || len(names) > maxRoots {
 		return errors.New("replica: no roots to send")
 	}
@@ -81,7 +90,7 @@ func Send(ctx context.Context, conn io.ReadWriter, names, dirs []string) error {
 	if err := s.w.str(string(raw)); err != nil {
 		return err
 	}
-	if err := s.snapshot(held); err != nil {
+	if err := s.snapshot(held); err != nil || !follow {
 		return err
 	}
 	return s.follow(ctx)

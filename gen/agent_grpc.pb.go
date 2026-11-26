@@ -69,6 +69,7 @@ const (
 	Agent_ReadProxyCertificates_FullMethodName = "/deplo.agent.v1.Agent/ReadProxyCertificates"
 	Agent_SetClusterReplicas_FullMethodName    = "/deplo.agent.v1.Agent/SetClusterReplicas"
 	Agent_ClusterReplicaStatus_FullMethodName  = "/deplo.agent.v1.Agent/ClusterReplicaStatus"
+	Agent_PromoteClusterReplica_FullMethodName = "/deplo.agent.v1.Agent/PromoteClusterReplica"
 	Agent_SetClusterNetwork_FullMethodName     = "/deplo.agent.v1.Agent/SetClusterNetwork"
 	Agent_SetClusterRotations_FullMethodName   = "/deplo.agent.v1.Agent/SetClusterRotations"
 	Agent_SetClusterZone_FullMethodName        = "/deplo.agent.v1.Agent/SetClusterZone"
@@ -278,6 +279,9 @@ type AgentClient interface {
 	SetClusterReplicas(ctx context.Context, in *SetClusterReplicasRequest, opts ...grpc.CallOption) (*SetClusterReplicasResponse, error)
 	// How each copy on this member stands.
 	ClusterReplicaStatus(ctx context.Context, in *ClusterReplicaStatusRequest, opts ...grpc.CallOption) (*ClusterReplicaStatusResponse, error)
+	// A move onto this member (Hello capability "cluster.replicas.move"): the copy here takes the last
+	// changes from the member the App left, once it stopped there, and becomes the App's data.
+	PromoteClusterReplica(ctx context.Context, in *PromoteClusterReplicaRequest, opts ...grpc.CallOption) (*PromoteClusterReplicaResponse, error)
 	// Put this server on a cluster's private network with every other server of the cluster, or take
 	// it off with no peers. The full set each time; it answers with its key and how each peer is reached.
 	SetClusterNetwork(ctx context.Context, in *SetClusterNetworkRequest, opts ...grpc.CallOption) (*SetClusterNetworkResponse, error)
@@ -977,6 +981,16 @@ func (c *agentClient) ClusterReplicaStatus(ctx context.Context, in *ClusterRepli
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ClusterReplicaStatusResponse)
 	err := c.cc.Invoke(ctx, Agent_ClusterReplicaStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *agentClient) PromoteClusterReplica(ctx context.Context, in *PromoteClusterReplicaRequest, opts ...grpc.CallOption) (*PromoteClusterReplicaResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PromoteClusterReplicaResponse)
+	err := c.cc.Invoke(ctx, Agent_PromoteClusterReplica_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1721,6 +1735,9 @@ type AgentServer interface {
 	SetClusterReplicas(context.Context, *SetClusterReplicasRequest) (*SetClusterReplicasResponse, error)
 	// How each copy on this member stands.
 	ClusterReplicaStatus(context.Context, *ClusterReplicaStatusRequest) (*ClusterReplicaStatusResponse, error)
+	// A move onto this member (Hello capability "cluster.replicas.move"): the copy here takes the last
+	// changes from the member the App left, once it stopped there, and becomes the App's data.
+	PromoteClusterReplica(context.Context, *PromoteClusterReplicaRequest) (*PromoteClusterReplicaResponse, error)
 	// Put this server on a cluster's private network with every other server of the cluster, or take
 	// it off with no peers. The full set each time; it answers with its key and how each peer is reached.
 	SetClusterNetwork(context.Context, *SetClusterNetworkRequest) (*SetClusterNetworkResponse, error)
@@ -2016,6 +2033,9 @@ func (UnimplementedAgentServer) SetClusterReplicas(context.Context, *SetClusterR
 }
 func (UnimplementedAgentServer) ClusterReplicaStatus(context.Context, *ClusterReplicaStatusRequest) (*ClusterReplicaStatusResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ClusterReplicaStatus not implemented")
+}
+func (UnimplementedAgentServer) PromoteClusterReplica(context.Context, *PromoteClusterReplicaRequest) (*PromoteClusterReplicaResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PromoteClusterReplica not implemented")
 }
 func (UnimplementedAgentServer) SetClusterNetwork(context.Context, *SetClusterNetworkRequest) (*SetClusterNetworkResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetClusterNetwork not implemented")
@@ -2907,6 +2927,24 @@ func _Agent_ClusterReplicaStatus_Handler(srv interface{}, ctx context.Context, d
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(AgentServer).ClusterReplicaStatus(ctx, req.(*ClusterReplicaStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Agent_PromoteClusterReplica_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PromoteClusterReplicaRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(AgentServer).PromoteClusterReplica(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Agent_PromoteClusterReplica_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(AgentServer).PromoteClusterReplica(ctx, req.(*PromoteClusterReplicaRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -3910,6 +3948,10 @@ var Agent_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ClusterReplicaStatus",
 			Handler:    _Agent_ClusterReplicaStatus_Handler,
+		},
+		{
+			MethodName: "PromoteClusterReplica",
+			Handler:    _Agent_PromoteClusterReplica_Handler,
 		},
 		{
 			MethodName: "SetClusterNetwork",

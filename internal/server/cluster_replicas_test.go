@@ -325,3 +325,51 @@ func TestReplicas_everyStreamOfAnAppSharesOneLookAtWhetherItRuns(t *testing.T) {
 		t.Fatalf("Docker was asked %d times for three streams", n)
 	}
 }
+
+// c44: a move stopped lab-kit-d and copied all 64 MB again though eu-3's copy was current. The copy takes only the
+// last changes from the member the App left, and only once it stopped there.
+func TestReplicas_aMoveTakesOnlyTheLastChangesIntoTheCopyAndPutsItInPlace(t *testing.T) {
+	var aRuns atomic.Bool
+	aRuns.Store(true)
+	a, b, vol, live := replicating(t, true)
+	a.replicas().running = func(context.Context, string) bool { return aRuns.Load() }
+	if err := os.WriteFile(filepath.Join(vol, "data.txt"), []byte("one"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "b to hold a whole copy", func() bool { return replicaStatus(t, b, "prj_1").GetSynced() })
+	moved := lease.Entry{Kind: "app", ID: "prj_1", Member: "srv_b", Slug: "web", SingleWriter: true}
+	placeOn(t, b, "srv_b", moved)
+	eventually(t, "b's stream to end", func() bool { return !replicaStatus(t, b, "prj_1").GetConnected() })
+	b.replicas().mu.Lock()
+	kept := b.replicas().indexes["prj_1"] != nil
+	b.replicas().mu.Unlock()
+	if !kept {
+		t.Fatal("the stopped receiver forgot what its copy's files hold: the move would read them all again")
+	}
+	// What the App wrote as it stopped, after the copy last heard from a.
+	if err := os.WriteFile(filepath.Join(vol, "data.txt"), []byte("last"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	req := &pb.PromoteClusterReplicaRequest{AppId: "prj_1", FromServerId: "srv_a"}
+	placeOn(t, a, "srv_a", moved)
+	if _, err := b.PromoteClusterReplica(context.Background(), req); err == nil || !strings.Contains(err.Error(), "still runs here") {
+		t.Fatalf("a still runs the App, yet: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(live, "data.txt")); !os.IsNotExist(err) {
+		t.Fatal("a refused move put the copy in place")
+	}
+	aRuns.Store(false)
+	res, err := b.PromoteClusterReplica(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ := os.ReadFile(filepath.Join(live, "data.txt")); string(raw) != "last" {
+		t.Fatalf("the live volume holds %q", raw)
+	}
+	if res.GetBytes() != int64(len("last")) {
+		t.Fatalf("%d bytes crossed for a 4-byte change", res.GetBytes())
+	}
+	if _, err := os.Stat(b.replicas().dir("prj_1")); !os.IsNotExist(err) {
+		t.Fatal("the copy outlived its promotion")
+	}
+}
