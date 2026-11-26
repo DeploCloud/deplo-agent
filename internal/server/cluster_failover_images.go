@@ -152,12 +152,13 @@ func (s *Service) holdFailoverImage(im *pb.FailoverImage) {
 			fmt.Fprintf(os.Stderr, "deplo-agent: took %s from the cluster's member %s, not its registry\n", ref, from[:min(12, len(from))])
 		} else if errors.Is(err, errMemberBusy) {
 			next.err = "waiting for a member that holds it to send it"
-		} else if wait := s.mayDownload(st, next.lookAt); wait != "" {
+		} else if wait := s.mayDownload(st, next.lookAt); wait != "" && !errors.Is(err, errMemberSentBroken) {
 			next.err, next.missingSince = wait, st.missingSince
 		} else if err := s.downloadFailoverImage(ctx, ref); err != nil {
 			next.err = "could not pull it: " + err.Error()
 		} else {
 			next.held = true
+			fmt.Fprintf(os.Stderr, "deplo-agent: downloaded %s from its registry\n", ref)
 		}
 	}
 	if next.held {
