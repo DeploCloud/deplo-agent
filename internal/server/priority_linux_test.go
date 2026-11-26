@@ -164,3 +164,24 @@ func TestProxyRestart_theProxyCarryingTheVisitorsComesFirst(t *testing.T) {
 		t.Fatalf("after the hand-back: proxy %q, standby %q", weight(traefikContainer), weight(standbyContainer))
 	}
 }
+
+// c49: the pass a backup paused its App for ran at the copy slice's tenth and waited past 1 s on a busy core. While
+// the App is paused, the copier and its slice weigh what the agent does; after, what they weighed before.
+func TestCopierFirst_weighsTheCopierLikeTheAgentWhileItsAppIsPaused(t *testing.T) {
+	slice := filepath.Join(t.TempDir(), copySlice)
+	scope := filepath.Join(slice, "docker-cop999.scope")
+	mustWrite(t, filepath.Join(scope, "cpu.weight"), "1\n")
+	mustWrite(t, filepath.Join(slice, "cpu.weight"), "10\n")
+	weight := func(d string) string {
+		b, _ := os.ReadFile(filepath.Join(d, "cpu.weight"))
+		return strings.TrimSpace(string(b))
+	}
+	back := copierFirst(scope)
+	if weight(scope) != proxyWeight || weight(slice) != proxyWeight {
+		t.Fatalf("while paused the copier weighs %s in a slice of %s", weight(scope), weight(slice))
+	}
+	back()
+	if weight(scope) != "1" || weight(slice) != "10" {
+		t.Fatalf("after the pause the copier weighs %s in a slice of %s", weight(scope), weight(slice))
+	}
+}

@@ -52,6 +52,32 @@ func proxyWeigh(ctx context.Context, container, weight string) {
 	}
 }
 
+// copierFirst puts a backup's copier, and the copy slice it runs in, level with the agent on the CPU until back:
+// the pass its App is paused for waited past the 1 s pause at a tenth of an App's share (c49).
+func copierFirst(dir string) (back func()) {
+	if dir == "" {
+		return func() {}
+	}
+	dirs := []string{dir}
+	if p := filepath.Dir(dir); filepath.Base(p) == copySlice {
+		dirs = append(dirs, p)
+	}
+	was := make([]string, len(dirs))
+	for i, d := range dirs {
+		b, _ := os.ReadFile(filepath.Join(d, "cpu.weight"))
+		if was[i] = strings.TrimSpace(string(b)); was[i] != "" {
+			_ = os.WriteFile(filepath.Join(d, "cpu.weight"), []byte(proxyWeight), 0o644)
+		}
+	}
+	return func() {
+		for i, d := range dirs {
+			if was[i] != "" {
+				_ = os.WriteFile(filepath.Join(d, "cpu.weight"), []byte(was[i]), 0o644)
+			}
+		}
+	}
+}
+
 // copyParent is the slice helper containers run in, once TakePriority made it; empty, they run where Docker puts them.
 var copyParent atomic.Value
 

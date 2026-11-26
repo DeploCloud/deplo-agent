@@ -23,3 +23,5 @@ func UpdateGuard([]string) int { return 2 }
 func proxyFirst(context.Context, string) {}
 
 func proxyAside(context.Context, string) {}
+
+func copierFirst(string) func() { return func() {} }
