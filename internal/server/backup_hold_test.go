@@ -105,6 +105,69 @@ func TestVolumeBackup_freezesTheAppWhereTheProxyCannotSeeIt(t *testing.T) {
 	}
 }
 
+// c47: a 295 ms hold left visitors waiting 2.8 s. The thaw asked Docker twice more, and neither the freeze's own
+// lookup nor the thaw counted as held.
+func TestVolumeBackup_heldIsTheWholeFreezeAndTheThawAsksDockerNothing(t *testing.T) {
+	dockerOnPath(t, holdDocker("0", "0"))
+	cg := t.TempDir()
+	freeze, events := filepath.Join(cg, "cgroup.freeze"), filepath.Join(cg, "cgroup.events")
+	if os.WriteFile(freeze, []byte("0\n"), 0o644) != nil || os.WriteFile(events, []byte("populated 1\nfrozen 0\n"), 0o644) != nil {
+		t.Fatal("write")
+	}
+	var lookups int
+	t.Cleanup(func(old func(context.Context, string) (string, error)) func() {
+		return func() { containerCgroup = old }
+	}(containerCgroup))
+	containerCgroup = func(context.Context, string) (string, error) {
+		lookups++
+		time.Sleep(30 * time.Millisecond) // a busy Docker
+		return cg, nil
+	}
+	var mu sync.Mutex
+	var on, frozenFor time.Duration
+	var since time.Time
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(time.Millisecond):
+			}
+			b, _ := os.ReadFile(freeze)
+			v := strings.TrimSpace(string(b))
+			if v == "" {
+				continue
+			}
+			_ = os.WriteFile(events, []byte("populated 1\nfrozen "+v+"\n"), 0o644)
+			mu.Lock()
+			if v == "1" && since.IsZero() {
+				since = time.Now()
+			} else if v == "0" && !since.IsZero() {
+				frozenFor, since = time.Since(since), time.Time{}
+			}
+			on = frozenFor
+			mu.Unlock()
+		}
+	}()
+	s := &Service{dataBase: t.TempDir()}
+	var buf bytes.Buffer
+	e := &bkEmitter{send: func(*pb.BackupEvent) error { return nil }}
+	if err := s.writeProjectArchive(context.Background(), &pb.ProjectDescriptor{Slug: "agent-test-web", VolumeNames: []string{"deplo-agent-test-web-data"}}, tar.NewWriter(&buf), e, false); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if lookups != 1 {
+		t.Fatalf("Docker asked %d times for the App's cgroup, want once, before the pause", lookups)
+	}
+	if on == 0 || e.held+5*time.Millisecond < on {
+		t.Fatalf("held %s, but the App was frozen %s", e.held, on)
+	}
+}
+
 func TestVolumeBackup_pausesWhileCopyingThenResumes(t *testing.T) {
 	argv := dockerOnPath(t, holdDocker("0", "0"))
 	s := &Service{dataBase: t.TempDir()}

@@ -20,8 +20,10 @@ import (
 const holdStepTimeout = 30 * time.Second
 
 type volumeHold struct {
-	s       *Service
-	ids     []string
+	s   *Service
+	ids []string
+	// dirs are the cgroups it froze, read before the pause: the thaw then asks Docker nothing.
+	dirs    map[string]string
 	journal string
 	start   time.Time
 	once    sync.Once
@@ -63,7 +65,7 @@ func (s *Service) holdVolumes(ctx context.Context, slug string, vols []string, l
 		leave()
 		return nil, err
 	}
-	h := &volumeHold{s: s, ids: ids, start: time.Now(), leave: leave, healthy: withHealth(ctx, ids, "healthy")}
+	h := &volumeHold{s: s, ids: ids, dirs: map[string]string{}, leave: leave, healthy: withHealth(ctx, ids, "healthy")}
 	if err := os.MkdirAll(s.holdJournalDir(), 0o700); err != nil {
 		leave()
 		return nil, err
@@ -74,8 +76,16 @@ func (s *Service) holdVolumes(ctx context.Context, slug string, vols []string, l
 		leave()
 		return nil, err
 	}
+	dirs := map[string]string{}
 	for _, id := range ids {
-		if freezeContainer(ctx, id, true) == nil {
+		if dir, err := containerCgroup(ctx, id); err == nil {
+			dirs[id] = dir
+		}
+	}
+	h.start = time.Now()
+	for _, id := range ids {
+		if dir := dirs[id]; dir != "" && freezeDir(dir, true) == nil {
+			h.dirs[id] = dir
 			s.markHeld(id, true)
 			continue
 		}
@@ -94,7 +104,6 @@ func (s *Service) holdVolumes(ctx context.Context, slug string, vols []string, l
 		h.release()
 		return nil, &holdError{msg: strings.TrimSpace(msg)}
 	}
-	h.start = time.Now()
 	return h, nil
 }
 
@@ -129,16 +138,24 @@ func (e *holdError) Error() string {
 	return "could not pause the app to copy its data consistently: " + e.msg
 }
 
-// release unpauses what the hold paused, retrying, and is safe to call twice. It returns how long the hold lasted.
+// release unpauses what the hold paused, retrying, and is safe to call twice. It returns how long the hold lasted,
+// from the first freeze to the thaw.
 func (h *volumeHold) release() time.Duration {
 	if h == nil {
 		return 0
 	}
 	h.once.Do(func() {
-		h.held = time.Since(h.start)
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), 2*time.Minute)
 		defer cancel()
-		if !unpauseAll(ctx, h.ids) {
+		var rest []string
+		for _, id := range h.ids {
+			if dir := h.dirs[id]; dir == "" || freezeDir(dir, false) != nil {
+				rest = append(rest, id)
+			}
+		}
+		ok := unpauseAll(ctx, rest)
+		h.held = time.Since(h.start)
+		if !ok {
 			h.done()
 			return
 		}
@@ -199,6 +216,11 @@ func freezeContainer(ctx context.Context, id string, on bool) error {
 	if err != nil {
 		return err
 	}
+	return freezeDir(dir, on)
+}
+
+// freezeDir freezes or thaws one cgroup folder; a freeze returns once every process in it stopped.
+func freezeDir(dir string, on bool) error {
 	v := "0"
 	if on {
 		v = "1"
