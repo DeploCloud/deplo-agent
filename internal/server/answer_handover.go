@@ -99,8 +99,11 @@ func (f *forwarders) takeHandover() {
 		}
 		proxyPid.Unlock()
 	}
+	stderrf("deplo-agent: cluster: started from what its last run knew of %d Apps, docker waits until %d ms after the start",
+		len(h.Ready), startQuiet.Milliseconds())
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.handedOver = true
 	until := time.Now().Add(answerReadyFor)
 	for _, app := range h.Ready {
 		if f.readiness[app] == nil {

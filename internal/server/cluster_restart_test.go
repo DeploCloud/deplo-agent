@@ -106,3 +106,63 @@ func TestRestart_saysWhenItLookedAndWhenItFirstTookAVisitor(t *testing.T) {
 		t.Fatalf("the first visitor passed on was said %d times in %q", n, out)
 	}
 }
+
+// c49: back from a kill -9 on one core, the start's docker look of the Apps nobody visited, and the docker work after
+// it, held the visitors carried meanwhile 1.2 to 2.4 s past its return. A run from a handover answers from it and
+// leaves docker alone until the start's quiet.
+func TestRestart_aRunFromAHandoverLeavesDockerAloneUntilItsQuiet(t *testing.T) {
+	was := agentStarted
+	agentStarted = time.Now()
+	t.Cleanup(func() { agentStarted = was })
+	a, b, _, _, members := answerPair(t)
+	bothAnswer(t, a, b, members)
+	placeOn(t, b, "srvB", appEntry("srvB"), dbEntry("srvB"))
+	f := b.forwarders()
+	f.mu.Lock()
+	f.readiness["prj1"] = &answerReadyCheck{ok: true, until: time.Now().Add(time.Second)}
+	f.mu.Unlock()
+	f.saveHandover()
+
+	next := New(t.TempDir(), t.TempDir(), "/", "")
+	next.SetAgentDir(b.agentDir)
+	var mu sync.Mutex
+	var first time.Time
+	note := func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if first.IsZero() {
+			first = time.Now()
+		}
+	}
+	firstCall := func() time.Time { mu.Lock(); defer mu.Unlock(); return first }
+	ops := newFakeFwdHost().ops()
+	ready := ops.ready
+	ops.ready = func(ctx context.Context, id string) appReadiness { note(); return ready(ctx, id) }
+	next.fwdOps = ops
+	next.leaseGuard().has = func(string) bool { return true }
+	listed := make(chan struct{}, 1)
+	next.supervision().list = func(context.Context, string) ([]writerContainer, error) {
+		note()
+		select {
+		case listed <- struct{}{}:
+		default:
+		}
+		return nil, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go next.forwarders().Resume()
+	go next.superviseWriters(ctx)
+	placeOn(t, next, "srvB", appEntry("srvB"), dbEntry("srvB"))
+	if !next.forwarders().ready(ctx, "prj1") {
+		t.Fatal("the App the last run found ready is not")
+	}
+	select {
+	case <-listed:
+	case <-time.After(startQuiet + 3*time.Second):
+		t.Fatal("the start's docker work never came")
+	}
+	if at := firstCall().Sub(agentStarted); at < startQuiet {
+		t.Fatalf("docker was asked %d ms after the start, before its quiet", at.Milliseconds())
+	}
+}

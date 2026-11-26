@@ -57,11 +57,16 @@ func (f *forwarders) lookAtStart(ctx context.Context, st forwardState) {
 func (f *forwarders) doneLooking() { f.lookedOnce.Do(func() { close(f.looked) }) }
 
 // afterStart waits, at most startQuiet past the agent's start, until this run looked at what it answers for and took
-// its first renewal: the start's other docker calls come after both, so neither waits on them (c47).
+// its first renewal: the start's other docker calls come after both (c47). A run from a handover waits the whole
+// quiet: it answers from the handover, and docker on one core held its visitors 1.2 to 2.4 s (c49).
 func (s *Service) afterStart(ctx context.Context) {
 	t := time.NewTimer(time.Until(agentStarted.Add(startQuiet)))
 	defer t.Stop()
-	for _, first := range []<-chan struct{}{s.forwarders().looked, s.leaseGuard().firstRenewal} {
+	first := []<-chan struct{}{s.forwarders().looked, s.leaseGuard().firstRenewal}
+	if s.forwarders().handedOver {
+		first = []<-chan struct{}{nil}
+	}
+	for _, first := range first {
 		select {
 		case <-first:
 		case <-t.C:
