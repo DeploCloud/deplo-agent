@@ -152,8 +152,6 @@ func startStandbyProxy(ctx context.Context, agentDir string, answerPort uint32) 
 	}
 	id := strings.TrimSpace(res.Stdout)
 	end := func() { endStandby(id, copyDir) }
-	// It carries every visitor while the new proxy starts beside it: never behind Docker's own work (c43).
-	proxyFirst(ctx, id)
 	for _, n := range networks[min(1, len(networks)):] {
 		if err := dockercli.ConnectNetwork(ctx, n, id); err != nil {
 			end()

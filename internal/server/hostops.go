@@ -247,7 +247,7 @@ func (s *Service) bringUpTraefik(ctx context.Context, path string, restartOnly b
 		if res.Code != 0 {
 			return fmt.Errorf("could not restart Traefik: %s", firstLine(res.Stderr))
 		}
-		proxyFirst(ctx, traefikContainer)
+		s.newProxyWeight(ctx)
 		s.challenge().rebind()
 		s.newProxyRoutes(ctx)
 		return nil
@@ -273,8 +273,7 @@ func (s *Service) bringUpTraefik(ctx context.Context, path string, restartOnly b
 		if res.Code != 0 {
 			return fmt.Errorf("could not apply the Traefik configuration: %s", firstLine(res.Stderr))
 		}
-		// The new proxy starts at the agent's weight, not behind the rest of the file (c43: 3.6 s to its routes, 0.6).
-		proxyFirst(ctx, traefikContainer)
+		s.newProxyWeight(ctx)
 	}
 	for _, n := range dockercli.DeploNetworks(ctx) {
 		if err := dockercli.ConnectNetwork(ctx, n, traefikContainer); err != nil {
