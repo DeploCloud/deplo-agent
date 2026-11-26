@@ -340,6 +340,12 @@ func TestReplicas_aMoveTakesOnlyTheLastChangesIntoTheCopyAndPutsItInPlace(t *tes
 	moved := lease.Entry{Kind: "app", ID: "prj_1", Member: "srv_b", Slug: "web", SingleWriter: true}
 	placeOn(t, b, "srv_b", moved)
 	eventually(t, "b's stream to end", func() bool { return !replicaStatus(t, b, "prj_1").GetConnected() })
+	b.replicas().mu.Lock()
+	kept := b.replicas().indexes["prj_1"] != nil
+	b.replicas().mu.Unlock()
+	if !kept {
+		t.Fatal("the stopped receiver forgot what its copy's files hold: the move would read them all again")
+	}
 	// What the App wrote as it stopped, after the copy last heard from a.
 	if err := os.WriteFile(filepath.Join(vol, "data.txt"), []byte("last"), 0o640); err != nil {
 		t.Fatal(err)

@@ -96,6 +96,8 @@ type replicas struct {
 	sending map[string]int
 	// holding are the Apps a failover start is putting in place here: nothing receives for them meanwhile.
 	holding map[string]bool
+	// indexes are what each stopped receiver knew of its copy's files: a move's last changes need not read them again.
+	indexes map[string]*replica.Index
 	// handed is a table from Deplo in this run. Until then no new copy starts: only Deplo checks it fits on this
 	// disk, and a member back from a power cut took a whole new copy beside its set-aside one (deplo ADR-0043).
 	handed bool
@@ -135,7 +137,7 @@ func (r *replicas) stillRuns(ctx context.Context, slug string) bool {
 func (s *Service) replicas() *replicas {
 	s.replOnce.Do(func() {
 		r := &replicas{s: s, runs: map[string]*replicaRun{}, idle: map[string]string{}, sending: map[string]int{},
-			holding: map[string]bool{}, wake: make(chan struct{}, 1), mountpoint: volumeMountpoint, running: stackRuns}
+			holding: map[string]bool{}, indexes: map[string]*replica.Index{}, wake: make(chan struct{}, 1), mountpoint: volumeMountpoint, running: stackRuns}
 		r.dial = r.dialMember
 		if raw, err := os.ReadFile(r.file()); err == nil {
 			_ = json.Unmarshal(raw, &r.tab)
@@ -366,6 +368,12 @@ func (r *replicas) stop(appID, why string) {
 	r.mu.Lock()
 	run := r.runs[appID]
 	delete(r.runs, appID)
+	if run != nil {
+		if r.indexes == nil {
+			r.indexes = map[string]*replica.Index{}
+		}
+		r.indexes[appID] = run.index
+	}
 	if why == "" {
 		delete(r.idle, appID)
 	} else {
@@ -661,7 +669,7 @@ func (s *Service) PromoteClusterReplica(ctx context.Context, req *pb.PromoteClus
 		return nil, status.Error(codes.FailedPrecondition, "this server does not replicate that App")
 	}
 	e := *entry
-	var ix *replica.Index
+	ix := r.indexes[e.AppID]
 	if run := r.runs[e.AppID]; run != nil {
 		ix = run.index
 	}
@@ -687,6 +695,11 @@ func (s *Service) PromoteClusterReplica(ctx context.Context, req *pb.PromoteClus
 	if ix == nil {
 		ix = replica.NewIndex()
 	}
+	defer func() {
+		r.mu.Lock()
+		delete(r.indexes, e.AppID)
+		r.mu.Unlock()
+	}()
 	st := &replica.Status{}
 	err := r.receiveLast(ctx, tab.Cluster, e, fp, st, ix)
 	if _, synced, _, _, _ := st.Snapshot(); !synced {
