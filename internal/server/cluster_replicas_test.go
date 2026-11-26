@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,6 +31,12 @@ func replicaStatus(t *testing.T, s *Service, appID string) *pb.ClusterReplicaSta
 }
 
 // replicating links two members, places "web" on a and hands both the table; a's volume is vol, b's live one live.
+// directInTest is whether b's copies would go direct; dialsInTest counts the streams b dialed.
+var (
+	directInTest atomic.Bool
+	dialsInTest  atomic.Int32
+)
+
 func replicating(t *testing.T, aRuns bool) (a, b *Service, vol, live string) {
 	return replicatingHanded(t, aRuns, true)
 }
@@ -46,6 +53,12 @@ func replicatingHanded(t *testing.T, aRuns, handB bool) (a, b *Service, vol, liv
 	a.replicas().running = func(context.Context, string) bool { return aRuns }
 	b.replicas().mountpoint = func(context.Context, string, bool) (string, error) { return live, nil }
 	b.replicas().running = func(context.Context, string) bool { return false }
+	b.replicas().direct = func(context.Context, string) bool { return directInTest.Load() }
+	dial := b.replicas().dial
+	b.replicas().dial = func(ctx context.Context, fp string) (net.Conn, error) {
+		dialsInTest.Add(1)
+		return dial(ctx, fp)
+	}
 	app := lease.Entry{Kind: "app", ID: "prj_1", Member: "srv_a", Slug: "web", SingleWriter: true}
 	placeOn(t, a, "srv_a", app)
 	placeOn(t, b, "srv_b", app)
@@ -372,4 +385,34 @@ func TestReplicas_aMoveTakesOnlyTheLastChangesIntoTheCopyAndPutsItInPlace(t *tes
 	if _, err := os.Stat(b.replicas().dir("prj_1")); !os.IsNotExist(err) {
 		t.Fatal("the copy outlived its promotion")
 	}
+}
+
+// c46: copies from eu-2 to eu-1 stayed on Deplo's relay for 5 minutes after eu-1 came back, until eu-2 restarted.
+func TestReplicas_aCopyOnTheRelayLeavesItOnceADirectPathAnswers(t *testing.T) {
+	prev := replStallCheck
+	replStallCheck = 20 * time.Millisecond
+	t.Cleanup(func() { replStallCheck = prev; directInTest.Store(false) })
+	_, b, vol, _ := replicating(t, true)
+	if err := os.WriteFile(filepath.Join(vol, "data.txt"), []byte("one"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "b to hold a whole copy over the relay", func() bool {
+		st := replicaStatus(t, b, "prj_1")
+		return st.GetSynced() && st.GetRelayed()
+	})
+	before := dialsInTest.Load()
+	directInTest.Store(true)
+	eventually(t, "the copy to dial again", func() bool { return dialsInTest.Load() == before+1 })
+	time.Sleep(200 * time.Millisecond)
+	if n := dialsInTest.Load() - before; n != 1 {
+		t.Fatalf("a stream that landed on the relay again was left %d times", n)
+	}
+	if err := os.WriteFile(filepath.Join(vol, "data.txt"), []byte("two"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	copied := filepath.Join(b.replicas().dir("prj_1"), "volume-deplo-web-data", "data.txt")
+	eventually(t, "the change to reach b on the new stream", func() bool {
+		raw, _ := os.ReadFile(copied)
+		return string(raw) == "two"
+	})
 }

@@ -462,7 +462,8 @@ func (m *Mesh) Status() []PeerStatus {
 		st := PeerStatus{Fingerprint: p.Fingerprint, Path: PathNone, LastHandshake: handshakes[p.PublicKey]}
 		if a, ok := p.directLocked(now); ok {
 			st.Path, st.Endpoint = PathDirect, a.String()
-		} else if !st.LastHandshake.IsZero() && now.Sub(st.LastHandshake) < handshakeFresh {
+		} else if p.relay != nil && !st.LastHandshake.IsZero() && now.Sub(st.LastHandshake) < handshakeFresh {
+			// Only a relay that is up: a peer cut off read "relay" for 3 minutes, and Deplo moved the leader (c46).
 			st.Path = PathRelay
 		}
 		out = append(out, st)

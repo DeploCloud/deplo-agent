@@ -394,3 +394,18 @@ func TestMesh_aKeyThatMovesToANewCertificateStaysUp(t *testing.T) {
 	defer c.Close()
 	roundTrip(t, c, "after the renewal")
 }
+
+// c46: a member's power cut read as "reaches it through the relay" for 3 minutes, and Deplo moved the leader.
+func TestMesh_aPeerThatWentSilentIsNotReadAsRelayed(t *testing.T) {
+	r := &fakeRelay{}
+	a, b := start(t, r, fpA, "fdde:9100::a"), start(t, r, fpB, "fdde:9100::b")
+	connect(t, a, b, true)
+	echo(t, b)
+	roundTrip(t, dial(t, a, b), "directly")
+	waitPath(t, a.m, fpB, PathDirect)
+	r.mu.Lock()
+	r.off = true
+	r.mu.Unlock()
+	b.m.Close()
+	waitPath(t, a.m, fpB, PathNone)
+}
