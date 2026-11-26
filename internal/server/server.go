@@ -173,6 +173,8 @@ var Capabilities = []string{
 	"panel.claim",
 	// SetClusterNetwork's retire_public_key: a caught copy's network key is replaced with its identity (ADR-0050).
 	"network.rekey",
+	// SetClusterNetwork's next_key and rotate_to_public_key: a network key replaced with no outage.
+	"network.rotate",
 	// A failover start refuses while this server holds no valid certificate a domain of the App has (ADR-0049).
 	"failover.certificates",
 	// A line of succession: pre-votes, one leader per epoch, and a member next in line asks the leader beside it to lead.

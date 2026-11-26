@@ -188,3 +188,25 @@ func TestACopyBacksOffWhileAppsKeepWaitingAndComesBack(t *testing.T) {
 		}
 	}
 }
+
+// c46: the second move onto one member waited stopped 10 to 17 s while other copies took its disk.
+func TestFirst_everyPacedCopyWaitsUntilItEnds(t *testing.T) {
+	release := First()
+	moved := make(chan struct{})
+	go func() {
+		var p Pacer
+		p.Moved(Step)
+		close(moved)
+	}()
+	select {
+	case <-moved:
+		t.Fatal("a paced copy went on while a first one ran")
+	case <-time.After(200 * time.Millisecond):
+	}
+	release()
+	select {
+	case <-moved:
+	case <-time.After(time.Second):
+		t.Fatal("the paced copy still waits after the first one ended")
+	}
+}

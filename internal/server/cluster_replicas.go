@@ -85,6 +85,8 @@ type replicaRun struct {
 	status *replica.Status
 	// index is what the copy's files hold, kept across the run's streams.
 	index *replica.Index
+	// leftRelay is when a stream last left the relay for a direct path: once a minute at most.
+	leftRelay time.Time
 }
 
 type replicas struct {
@@ -108,6 +110,8 @@ type replicas struct {
 	running func(ctx context.Context, slug string) bool
 	ran     map[string]ranAt
 	dial    func(ctx context.Context, fingerprint string) (net.Conn, error)
+	// direct says whether a stream to that member would go direct now; tests replace it.
+	direct func(ctx context.Context, fingerprint string) bool
 }
 
 type ranAt struct {
@@ -138,7 +142,7 @@ func (s *Service) replicas() *replicas {
 	s.replOnce.Do(func() {
 		r := &replicas{s: s, runs: map[string]*replicaRun{}, idle: map[string]string{}, sending: map[string]int{},
 			holding: map[string]bool{}, indexes: map[string]*replica.Index{}, wake: make(chan struct{}, 1), mountpoint: volumeMountpoint, running: stackRuns}
-		r.dial = r.dialMember
+		r.dial, r.direct = r.dialMember, s.reachesDirectly
 		if raw, err := os.ReadFile(r.file()); err == nil {
 			_ = json.Unmarshal(raw, &r.tab)
 		}
@@ -400,6 +404,9 @@ func (r *replicas) start(parent context.Context, cluster string, e replicaEntry,
 			if ctx.Err() != nil {
 				return
 			}
+			if errors.Is(err, errLeftRelay) {
+				continue
+			}
 			if err != nil {
 				run.status.Fail(oneLine(err.Error()))
 			}
@@ -423,7 +430,8 @@ func (r *replicas) receiveOnce(ctx context.Context, cluster string, e replicaEnt
 		return err
 	}
 	defer conn.Close()
-	run.relayed.Store(r.s.copyPath(conn, "") == pathRelay)
+	relayed := r.s.copyPath(conn, "") == pathRelay
+	run.relayed.Store(relayed)
 	_ = conn.SetDeadline(time.Now().Add(wire.HeaderTimeout))
 	if err := wire.WriteHeader(conn, replVerb, cluster+" "+e.AppID); err != nil {
 		return err
@@ -440,6 +448,12 @@ func (r *replicas) receiveOnce(ctx context.Context, cluster string, e replicaEnt
 	in.last.Store(time.Now().UnixNano())
 	done := make(chan struct{})
 	defer close(done)
+	var left atomic.Bool
+	// A relay stream's close only ends its writing half: the read waiting on it needs the deadline.
+	cut := func() {
+		_ = conn.SetDeadline(time.Now())
+		conn.Close()
+	}
 	go func() {
 		t := time.NewTicker(replStallCheck)
 		defer t.Stop()
@@ -451,13 +465,46 @@ func (r *replicas) receiveOnce(ctx context.Context, cluster string, e replicaEnt
 				_, synced, _, _, _ := run.status.Snapshot()
 				if replStalled(synced, time.Unix(0, in.last.Load()), now) {
 					fmt.Fprintf(os.Stderr, "deplo-agent: replica of %s heard nothing for %v: dialing again\n", e.Slug, replStallAfter)
-					conn.Close()
+					cut()
+					return
+				}
+				// c46: a copy dialed while its member came back stayed on Deplo's relay until the sender restarted.
+				if relayed && now.Sub(run.leftRelay) > replDirectEvery && r.direct(ctx, fingerprint) {
+					fmt.Fprintf(os.Stderr, "deplo-agent: replica of %s: a direct path answers: leaving the relay\n", e.Slug)
+					run.leftRelay = now
+					left.Store(true)
+					cut()
 					return
 				}
 			}
 		}
 	}()
-	return atLowPriority(func() error { return replica.Receive(ctx, in, r.dir(e.AppID), e.roots(), run.status, run.index) })
+	err = atLowPriority(func() error { return replica.Receive(ctx, in, r.dir(e.AppID), e.roots(), run.status, run.index) })
+	if left.Load() {
+		return errLeftRelay
+	}
+	return err
+}
+
+// errLeftRelay ends a stream on the relay once a direct one would carry it: the copy dials again at once.
+var errLeftRelay = errors.New("left the relay for a direct path")
+
+// replDirectEvery spaces two moves of one copy off the relay, should a new stream land there again.
+var replDirectEvery = time.Minute
+
+// reachesDirectly says whether the cluster's network reaches that member without a relay, and a stream opens there.
+func (s *Service) reachesDirectly(ctx context.Context, fingerprint string) bool {
+	if s.meshPath(fingerprint) != mesh.PathDirect {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	c, err := s.networkDial(ctx, wire.Party{Fingerprint: fingerprint, Role: wire.RoleMember})
+	if err != nil {
+		return false
+	}
+	c.Close()
+	return true
 }
 
 // A whole copy whose sender says nothing at all, not even the beat it sends every 2 s, dials again: a stream that
@@ -734,5 +781,5 @@ func (r *replicas) receiveLast(ctx context.Context, cluster string, e replicaEnt
 		return fmt.Errorf("the server the App left refused: %s", arg)
 	}
 	_ = conn.SetDeadline(time.Time{})
-	return replica.Receive(ctx, conn, r.dir(e.AppID), e.roots(), st, ix)
+	return replica.ReceiveFirst(ctx, conn, r.dir(e.AppID), e.roots(), st, ix)
 }

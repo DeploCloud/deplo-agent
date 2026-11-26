@@ -48,6 +48,8 @@ type Peer struct {
 	Address     netip.Addr
 	// Endpoints are where it may answer directly; with none it is reached through a relay only.
 	Endpoints []netip.AddrPort
+	// Next is the key it is about to switch to: taken once it says so under its current one, never before.
+	Next Key
 }
 
 // Config is this server's side of the network.
@@ -144,6 +146,13 @@ type peer struct {
 	// tookInit is when this end last took one of p's. Unix nanoseconds.
 	sentInit atomic.Int64
 	tookInit atomic.Int64
+	// heldInits are p's initiations while it has a next key: one made under that key goes in once it is taken.
+	heldInits []heldInit
+}
+
+type heldInit struct {
+	b  []byte
+	at time.Time
 }
 
 const (
@@ -243,7 +252,11 @@ func (m *Mesh) Heard() map[string]time.Time {
 func (m *Mesh) Started() time.Time { return m.started }
 
 // PublicKey is what peers know this server by.
-func (m *Mesh) PublicKey() Key { return m.pub }
+func (m *Mesh) PublicKey() Key {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.pub
+}
 
 // Address is this server's address inside the tunnel.
 func (m *Mesh) Address() netip.Addr { return m.cfg.Address }
@@ -290,7 +303,7 @@ func (m *Mesh) SetPeers(peers []Peer) error {
 			m.peers[np.Fingerprint], m.byKey[np.PublicKey] = p, p
 			fresh = append(fresh, np.Fingerprint)
 		} else {
-			p.Address, p.Endpoints = np.Address, np.Endpoints
+			p.Address, p.Endpoints, p.Next = np.Address, np.Endpoints, np.Next
 		}
 		seen[np.Fingerprint] = true
 		fmt.Fprintf(&ipc, "public_key=%s\nreplace_allowed_ips=true\nallowed_ip=%s\nendpoint=%s\npersistent_keepalive_interval=%d\n",
@@ -390,11 +403,74 @@ func (m *Mesh) Dial(ctx context.Context, fingerprint string, port uint16) (net.C
 	if p == nil {
 		return nil, fmt.Errorf("that server is not on this cluster's network")
 	}
-	c, err := m.tnet.DialContextTCPAddrPort(ctx, netip.AddrPortFrom(p.Address, port))
+	c, err := m.dialTCP(ctx, netip.AddrPortFrom(p.Address, port))
 	if err != nil {
 		return nil, err
 	}
 	return m.open(ctx, fingerprint, c)
+}
+
+// dialEvery is how often a dial that hears nothing sends another SYN beside the first.
+var dialEvery = time.Second
+
+// dialTCP sends a fresh SYN every dialEvery until one connects: TCP's own wait 1, 3, then 7 s, and visitors carried
+// to a member whose agent had just come back got there 4 to 5 s late (c46). An answer that refuses ends it.
+func (m *Mesh) dialTCP(ctx context.Context, to netip.AddrPort) (net.Conn, error) {
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	type result struct {
+		c   net.Conn
+		err error
+	}
+	results := make(chan result, 64)
+	tick := time.NewTicker(dialEvery)
+	defer tick.Stop()
+	pending := 0
+	try := func() {
+		pending++
+		go func() {
+			c, err := m.tnet.DialContextTCPAddrPort(ctx, to)
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			results <- result{c: c}
+		}()
+	}
+	try()
+	for {
+		select {
+		case r := <-results:
+			pending--
+			if r.err != nil && ctx.Err() == nil {
+				return nil, r.err
+			}
+			if r.err == nil {
+				// The slower ones end with ctx; one that connected anyway is closed.
+				go func(n int) {
+					for ; n > 0; n-- {
+						if late := <-results; late.c != nil {
+							late.c.Close()
+						}
+					}
+				}(pending)
+				return r.c, nil
+			}
+		case <-tick.C:
+			if pending < 16 {
+				try()
+			}
+		case <-ctx.Done():
+			go func(n int) {
+				for ; n > 0; n-- {
+					if late := <-results; late.c != nil {
+						late.c.Close()
+					}
+				}
+			}(pending)
+			return nil, ctx.Err()
+		}
+	}
 }
 
 // Has says whether a peer is on the network.
@@ -462,7 +538,8 @@ func (m *Mesh) Status() []PeerStatus {
 		st := PeerStatus{Fingerprint: p.Fingerprint, Path: PathNone, LastHandshake: handshakes[p.PublicKey]}
 		if a, ok := p.directLocked(now); ok {
 			st.Path, st.Endpoint = PathDirect, a.String()
-		} else if !st.LastHandshake.IsZero() && now.Sub(st.LastHandshake) < handshakeFresh {
+		} else if p.relay != nil && !st.LastHandshake.IsZero() && now.Sub(st.LastHandshake) < handshakeFresh {
+			// Only a relay that is up: a peer cut off read "relay" for 3 minutes, and Deplo moved the leader (c46).
 			st.Path = PathRelay
 		}
 		out = append(out, st)
@@ -561,16 +638,7 @@ func (m *Mesh) tick(now time.Time) {
 			}
 		}
 		p.pick()
-		targets := map[netip.AddrPort]bool{}
-		for _, a := range p.Endpoints {
-			targets[norm(a)] = true
-		}
-		for a := range p.learned {
-			targets[a] = true
-		}
-		for a := range p.live {
-			targets[a] = true
-		}
+		targets := p.targetsLocked()
 		for a := range targets {
 			every := pingOther
 			if _, ok := p.live[a]; ok {
@@ -603,6 +671,85 @@ func (m *Mesh) tick(now time.Time) {
 	for _, o := range out {
 		m.bind.sendUDP(o.pkt, o.to)
 	}
+}
+
+// targetsLocked is every address p may answer on directly; the caller holds m.mu.
+func (p *peer) targetsLocked() map[netip.AddrPort]bool {
+	targets := map[netip.AddrPort]bool{}
+	for _, a := range p.Endpoints {
+		targets[norm(a)] = true
+	}
+	for a := range p.learned {
+		targets[a] = true
+	}
+	for a := range p.live {
+		targets[a] = true
+	}
+	return targets
+}
+
+// Rotate moves this end to a new key and closes nothing: a peer that holds it as this end's next key takes it once
+// told, within a round trip, and the others once Deplo hands it to them.
+func (m *Mesh) Rotate(key Key) error {
+	pub, err := key.Public()
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return net.ErrClosed
+	}
+	var out []outPing
+	for _, p := range m.peers {
+		// Under the pair the peer still holds.
+		pkt := probe{kind: probeMoved, sender: m.pub, nonce: randomNonce()}.encode(p.pair)
+		for a := range p.targetsLocked() {
+			out = append(out, outPing{a, pkt})
+		}
+		if pair, err := pairKey(key, p.PublicKey); err == nil {
+			p.pair = pair
+		}
+	}
+	m.cfg.PrivateKey, m.pub = key, pub
+	m.mu.Unlock()
+	if err := m.dev.IpcSet(fmt.Sprintf("private_key=%s\n", key.hex())); err != nil {
+		return err
+	}
+	// Said three times: a datagram may be lost.
+	go func() {
+		for i := 0; i < 3; i++ {
+			for _, o := range out {
+				m.bind.sendUDP(o.pkt, o.to)
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}()
+	return nil
+}
+
+// takeNextLocked makes p's next key its key; the caller holds m.mu, hands ipc to the device, then delivers again
+// the initiations p sent meanwhile: lost, they cost 5 s before WireGuard tries again.
+func (m *Mesh) takeNextLocked(p *peer) (ipc string, again [][]byte) {
+	pair, err := pairKey(m.cfg.PrivateKey, p.Next)
+	if err != nil {
+		return "", nil
+	}
+	old := p.PublicKey
+	if m.byKey[old] == p {
+		delete(m.byKey, old)
+	}
+	p.PublicKey, p.Next, p.pair = p.Next, Key{}, pair
+	m.byKey[p.PublicKey] = p
+	for _, h := range p.heldInits {
+		if time.Since(h.at) < crossWindow {
+			again = append(again, h.b)
+		}
+	}
+	p.heldInits = nil
+	// No keepalive yet: one now would cross the peer's own handshake and cost 5 s; Deplo's next table sets it.
+	return fmt.Sprintf("public_key=%s\nremove=true\npublic_key=%s\nreplace_allowed_ips=true\nallowed_ip=%s\nendpoint=%s\n",
+		old.hex(), p.PublicKey.hex(), netip.PrefixFrom(p.Address, p.Address.BitLen()), endpointPrefix+p.Fingerprint), again
 }
 
 // pick keeps the current direct path while it answers, unless another one is twice as fast.
@@ -684,6 +831,19 @@ func (m *Mesh) handleProbe(b []byte, from netip.AddrPort) {
 		for _, b := range flush {
 			m.bind.sendUDP(b, to)
 		}
+	case probeMoved:
+		if p.Next.IsZero() || m.byKey[p.Next] != nil {
+			m.mu.Unlock()
+			return
+		}
+		ipc, again := m.takeNextLocked(p)
+		m.mu.Unlock()
+		if ipc == "" || m.dev.IpcSet(ipc) != nil {
+			return
+		}
+		for _, b := range again {
+			m.bind.deliver(p, b)
+		}
 	default:
 		m.mu.Unlock()
 	}
@@ -729,6 +889,8 @@ func (m *Mesh) crossed(p *peer, pkt []byte) bool {
 	if !isInitiation(pkt) || time.Since(time.Unix(0, p.sentInit.Load())) >= crossWindow {
 		return false
 	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	return bytes.Compare(m.pub[:], p.PublicKey[:]) < 0
 }
 
@@ -744,8 +906,13 @@ func (m *Mesh) takeInitiation(p *peer, pkt []byte) bool {
 		return false
 	}
 	if isInitiation(pkt) {
+		// Taking p's undoes this end's own: left noted, it dropped p's next one as crossed (c46, 5 s).
+		p.sentInit.Store(0)
 		p.tookInit.Store(time.Now().UnixNano())
 		m.mu.Lock()
+		if !p.Next.IsZero() {
+			p.heldInits = append(p.heldInits[max(len(p.heldInits)-3, 0):], heldInit{append([]byte(nil), pkt...), time.Now()})
+		}
 		kept := p.pending[:0]
 		for _, b := range p.pending {
 			if !isInitiation(b) {

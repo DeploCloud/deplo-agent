@@ -39,6 +39,15 @@ const (
 // Looks counts every look a copy took, so a test can tell a copy is paced.
 var Looks atomic.Int64
 
+// first counts the copies every paced one waits for: a stopped App's last changes, down until they land (c46).
+var first atomic.Int32
+
+// First makes every paced copy wait at its looks, at most maxWait each, until release is called.
+func First() (release func()) {
+	first.Add(1)
+	return sync.OnceFunc(func() { first.Add(-1) })
+}
+
 // Vars so tests drive the clock, the waits and what the Apps waited.
 var (
 	now   = time.Now
@@ -131,6 +140,12 @@ func (p *Pacer) Moved(n int) {
 			sleep(wait)
 			t, st = now(), appsWaited()
 		}
+	}
+	if first.Load() > 0 {
+		for end := time.Now().Add(maxWait); first.Load() > 0 && time.Now().Before(end); {
+			time.Sleep(10 * time.Millisecond)
+		}
+		t, st = now(), appsWaited()
 	}
 	p.last, p.stall = t, st
 }

@@ -2852,6 +2852,10 @@ message SetClusterNetworkRequest {
   repeated ClusterNetworkPeer peers = 3;
   // This server's network key when it must be replaced first, since a caught copy holds it (Hello network.rekey).
   string retire_public_key = 4;
+  // Make a next network key beside the current one, said as next_public_key; nothing changes yet (Hello network.rotate).
+  bool next_key = 5;
+  // Switch to the next key once every peer holds it as that one: the tunnel and its streams stay up.
+  string rotate_to_public_key = 6;
 }
 
 message ClusterNetworkPeer {
@@ -2862,6 +2866,8 @@ message ClusterNetworkPeer {
   string address = 3;
   // host:port pairs it may answer on directly; with none, a relay carries its packets.
   repeated string endpoints = 4;
+  // The key it is about to switch to: taken the moment it says it switched, never before.
+  string next_public_key = 5;
 }
 
 message SetClusterNetworkResponse {
@@ -2871,11 +2877,13 @@ message SetClusterNetworkResponse {
   // This host's own addresses, for its peers to try.
   repeated string addresses = 3;
   repeated ClusterNetworkPeerState peers = 4;
+  // The next key it made at next_key, until it switches to it.
+  string next_public_key = 5;
 }
 
 message ClusterNetworkPeerState {
   string fingerprint = 1;
-  // "direct", "relay" (no direct path answers) or "none".
+  // "direct", "relay" (no direct path answers, a relay carries it) or "none".
   string path = 2;
   // The host:port a direct path uses.
   string endpoint = 3;

@@ -23,7 +23,8 @@ const (
 	opLink     = 'L'
 	opKeep     = 'K'
 	opDelete   = 'X'
-	opBeat     = 'B'
+	// A beat below zero is the size of the next record's file, as -(size+1): a receiver that predates it reads a beat.
+	opBeat = 'B'
 	// The sink's manifest, sent first: one M per entry it holds, then Z.
 	opManifest = 'M'
 	opManEnd   = 'Z'
