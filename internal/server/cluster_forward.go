@@ -188,6 +188,8 @@ type forwarders struct {
 	// looked is closed once this run's first look at what it answers for is done (see lookAtStart).
 	looked     chan struct{}
 	lookedOnce sync.Once
+	// passedOn says once when this run first took a visitor another member passed on.
+	passedOn sync.Once
 }
 
 func (s *Service) forwarders() *forwarders {

@@ -33,6 +33,7 @@ func (f *forwarders) lookAtStart(ctx context.Context, st forwardState) {
 	}
 	ops := f.ops()
 	got := map[string]appReadiness{}
+	asked := time.Now()
 	if ops.readyAll != nil {
 		got = ops.readyAll(ctx, apps)
 	} else if ops.ready != nil {
@@ -40,6 +41,8 @@ func (f *forwarders) lookAtStart(ctx context.Context, st forwardState) {
 			got[app] = ops.ready(ctx, app)
 		}
 	}
+	stderrf("deplo-agent: cluster: looked at its %d Apps %d ms after the agent started, docker answered in %d ms",
+		len(apps), time.Since(agentStarted).Milliseconds(), time.Since(asked).Milliseconds())
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	now = time.Now()
