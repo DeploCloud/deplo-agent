@@ -49,7 +49,8 @@ func (g *leaseGuard) endOlderStarts(cluster string, epoch uint64) {
 // Serve answers an order on one stream, from a leader Deplo named for the cluster the order is about.
 func (g *leaseGuard) Serve(from wire.Party, c net.Conn) {
 	defer c.Close()
-	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+	began := time.Now()
+	_ = c.SetDeadline(began.Add(10 * time.Second))
 	if from.Role != wire.RoleLeader {
 		return
 	}
@@ -61,6 +62,7 @@ func (g *leaseGuard) Serve(from wire.Party, c net.Conn) {
 		}
 	}
 	o, err := lease.ReadOrder(c)
+	read := time.Since(began)
 	if err != nil || o.Cluster == "" || o.Member == "" {
 		_ = lease.WriteReply(c, lease.Reply{Error: "unreadable order"})
 		return
@@ -91,7 +93,7 @@ func (g *leaseGuard) Serve(from wire.Party, c net.Conn) {
 	if o.Start != nil {
 		before = g.placedBefore(o.Cluster, o.Start.Slug)
 	}
-	r := g.Renew(o)
+	r := g.renewRead(o, read)
 	if o.Start != nil && r.OK {
 		r = g.startWorkload(c, o, before)
 	}
