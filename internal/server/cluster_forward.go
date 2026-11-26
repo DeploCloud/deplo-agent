@@ -190,6 +190,8 @@ type forwarders struct {
 	lookedOnce sync.Once
 	// passedOn says once when this run first took a visitor another member passed on.
 	passedOn sync.Once
+	// handedOver is a run that started from its last run's handover: docker waits for the start's quiet.
+	handedOver bool
 }
 
 func (s *Service) forwarders() *forwarders {
@@ -332,7 +334,9 @@ func (f *forwarders) Resume() {
 		return
 	}
 	f.listenFirst(st)
-	f.lookAtStart(ctx, st)
+	if !f.handedOver {
+		f.lookAtStart(ctx, st)
+	}
 	f.doneLooking()
 	f.s.afterStart(ctx)
 	if err := f.reconcile(ctx); err != nil {
