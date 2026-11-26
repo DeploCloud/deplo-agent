@@ -48,6 +48,8 @@ type Peer struct {
 	Address     netip.Addr
 	// Endpoints are where it may answer directly; with none it is reached through a relay only.
 	Endpoints []netip.AddrPort
+	// Next is the key it is about to switch to: taken once it says so under its current one, never before.
+	Next Key
 }
 
 // Config is this server's side of the network.
@@ -144,6 +146,13 @@ type peer struct {
 	// tookInit is when this end last took one of p's. Unix nanoseconds.
 	sentInit atomic.Int64
 	tookInit atomic.Int64
+	// heldInits are p's initiations while it has a next key: one made under that key goes in once it is taken.
+	heldInits []heldInit
+}
+
+type heldInit struct {
+	b  []byte
+	at time.Time
 }
 
 const (
@@ -290,7 +299,7 @@ func (m *Mesh) SetPeers(peers []Peer) error {
 			m.peers[np.Fingerprint], m.byKey[np.PublicKey] = p, p
 			fresh = append(fresh, np.Fingerprint)
 		} else {
-			p.Address, p.Endpoints = np.Address, np.Endpoints
+			p.Address, p.Endpoints, p.Next = np.Address, np.Endpoints, np.Next
 		}
 		seen[np.Fingerprint] = true
 		fmt.Fprintf(&ipc, "public_key=%s\nreplace_allowed_ips=true\nallowed_ip=%s\nendpoint=%s\npersistent_keepalive_interval=%d\n",
@@ -562,16 +571,7 @@ func (m *Mesh) tick(now time.Time) {
 			}
 		}
 		p.pick()
-		targets := map[netip.AddrPort]bool{}
-		for _, a := range p.Endpoints {
-			targets[norm(a)] = true
-		}
-		for a := range p.learned {
-			targets[a] = true
-		}
-		for a := range p.live {
-			targets[a] = true
-		}
+		targets := p.targetsLocked()
 		for a := range targets {
 			every := pingOther
 			if _, ok := p.live[a]; ok {
@@ -604,6 +604,84 @@ func (m *Mesh) tick(now time.Time) {
 	for _, o := range out {
 		m.bind.sendUDP(o.pkt, o.to)
 	}
+}
+
+// targetsLocked is every address p may answer on directly; the caller holds m.mu.
+func (p *peer) targetsLocked() map[netip.AddrPort]bool {
+	targets := map[netip.AddrPort]bool{}
+	for _, a := range p.Endpoints {
+		targets[norm(a)] = true
+	}
+	for a := range p.learned {
+		targets[a] = true
+	}
+	for a := range p.live {
+		targets[a] = true
+	}
+	return targets
+}
+
+// Rotate moves this end to a new key and closes nothing: a peer that holds it as this end's next key takes it once
+// told, within a round trip, and the others once Deplo hands it to them.
+func (m *Mesh) Rotate(key Key) error {
+	pub, err := key.Public()
+	if err != nil {
+		return err
+	}
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return net.ErrClosed
+	}
+	var out []outPing
+	for _, p := range m.peers {
+		// Under the pair the peer still holds.
+		pkt := probe{kind: probeMoved, sender: m.pub, nonce: randomNonce()}.encode(p.pair)
+		for a := range p.targetsLocked() {
+			out = append(out, outPing{a, pkt})
+		}
+		if pair, err := pairKey(key, p.PublicKey); err == nil {
+			p.pair = pair
+		}
+	}
+	m.cfg.PrivateKey, m.pub = key, pub
+	m.mu.Unlock()
+	if err := m.dev.IpcSet(fmt.Sprintf("private_key=%s\n", key.hex())); err != nil {
+		return err
+	}
+	// Said three times: a datagram may be lost.
+	go func() {
+		for i := 0; i < 3; i++ {
+			for _, o := range out {
+				m.bind.sendUDP(o.pkt, o.to)
+			}
+			time.Sleep(200 * time.Millisecond)
+		}
+	}()
+	return nil
+}
+
+// takeNextLocked makes p's next key its key; the caller holds m.mu, hands ipc to the device, then delivers again
+// the initiations p sent meanwhile: lost, they cost 5 s before WireGuard tries again.
+func (m *Mesh) takeNextLocked(p *peer) (ipc string, again [][]byte) {
+	pair, err := pairKey(m.cfg.PrivateKey, p.Next)
+	if err != nil {
+		return "", nil
+	}
+	old := p.PublicKey
+	if m.byKey[old] == p {
+		delete(m.byKey, old)
+	}
+	p.PublicKey, p.Next, p.pair = p.Next, Key{}, pair
+	m.byKey[p.PublicKey] = p
+	for _, h := range p.heldInits {
+		if time.Since(h.at) < crossWindow {
+			again = append(again, h.b)
+		}
+	}
+	p.heldInits = nil
+	return fmt.Sprintf("public_key=%s\nremove=true\npublic_key=%s\nreplace_allowed_ips=true\nallowed_ip=%s\nendpoint=%s\npersistent_keepalive_interval=%d\n",
+		old.hex(), p.PublicKey.hex(), netip.PrefixFrom(p.Address, p.Address.BitLen()), endpointPrefix+p.Fingerprint, keepalive), again
 }
 
 // pick keeps the current direct path while it answers, unless another one is twice as fast.
@@ -685,6 +763,21 @@ func (m *Mesh) handleProbe(b []byte, from netip.AddrPort) {
 		for _, b := range flush {
 			m.bind.sendUDP(b, to)
 		}
+	case probeMoved:
+		if p.Next.IsZero() || m.byKey[p.Next] != nil {
+			m.mu.Unlock()
+			return
+		}
+		ipc, again := m.takeNextLocked(p)
+		fp := p.Fingerprint
+		m.mu.Unlock()
+		if ipc == "" || m.dev.IpcSet(ipc) != nil {
+			return
+		}
+		for _, b := range again {
+			m.bind.deliver(p, b)
+		}
+		go m.greetPeer(fp)
 	default:
 		m.mu.Unlock()
 	}
@@ -747,6 +840,9 @@ func (m *Mesh) takeInitiation(p *peer, pkt []byte) bool {
 	if isInitiation(pkt) {
 		p.tookInit.Store(time.Now().UnixNano())
 		m.mu.Lock()
+		if !p.Next.IsZero() {
+			p.heldInits = append(p.heldInits[max(len(p.heldInits)-3, 0):], heldInit{append([]byte(nil), pkt...), time.Now()})
+		}
 		kept := p.pending[:0]
 		for _, b := range p.pending {
 			if !isInitiation(b) {

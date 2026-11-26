@@ -409,3 +409,38 @@ func TestMesh_aPeerThatWentSilentIsNotReadAsRelayed(t *testing.T) {
 	b.m.Close()
 	waitPath(t, a.m, fpB, PathNone)
 }
+
+// c46 printed eu-1's private key: a key replaced while a connection runs keeps it, and peers take only the named one.
+func TestMesh_aKeyRotatedInPlaceKeepsItsConnections(t *testing.T) {
+	a, b := start(t, nil, fpA, "fdde:9100::a"), start(t, nil, fpB, "fdde:9100::b")
+	connect(t, a, b, true)
+	echo(t, b)
+	c := dial(t, a, b)
+	roundTrip(t, c, "under the first key")
+	next, err := NewPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextPub, _ := next.Public()
+	peer := b.as(true)
+	peer.Next = nextPub
+	if err := a.m.SetPeers([]Peer{peer}); err != nil {
+		t.Fatal(err)
+	}
+	// WireGuard takes one initiation per peer each 20 ms: a rotation comes long after the last one.
+	time.Sleep(100 * time.Millisecond)
+	if err := b.m.Rotate(next); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now()
+	roundTrip(t, c, "under the next key, on the same connection")
+	if took := time.Since(at); took > 2*time.Second {
+		t.Fatalf("the connection stalled %v across the rotation", took)
+	}
+	a.m.mu.RLock()
+	took := a.m.peers[fpB].PublicKey == nextPub
+	a.m.mu.RUnlock()
+	if !took {
+		t.Fatal("the peer still knows the old key")
+	}
+}
