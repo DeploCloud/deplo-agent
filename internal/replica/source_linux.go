@@ -81,8 +81,12 @@ func send(ctx context.Context, conn io.ReadWriter, names, dirs []string, follow 
 		b := make([]byte, 512)
 		for {
 			n, err := rd.r.Read(b)
+			// A relay stream's close only ends the receiver's writing half: a write blocked on it is woken.
 			if bytes.IndexByte(b[:n], opStop) >= 0 {
 				close(stopped)
+				if c, ok := conn.(interface{ SetWriteDeadline(time.Time) error }); ok {
+					_ = c.SetWriteDeadline(time.Now())
+				}
 				return
 			}
 			if err != nil {

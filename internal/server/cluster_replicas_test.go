@@ -497,3 +497,19 @@ func TestReplicas_aCopyBackFromAHoldIsBehindUntilItCaughtUp(t *testing.T) {
 	}
 	eventually(t, "b to catch up", func() bool { return replicaStatus(t, b, "prj_1").GetAppliedAt() != "" })
 }
+
+// A relay stream's close only ends its writing half: a sender whose receiver Deplo held went on writing into a
+// stream nobody read, and still counted it. Its receiver's stop ends it.
+func TestReplicas_aHeldCopyEndsItsSendersStream(t *testing.T) {
+	a, b, vol, _ := replicating(t, true)
+	big := make([]byte, 8<<20)
+	_, _ = rand.Read(big)
+	if err := os.WriteFile(filepath.Join(vol, "big"), big, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	slowInTest.Store(true)
+	t.Cleanup(func() { slowInTest.Store(false) })
+	eventually(t, "a to send", func() bool { return replicaStatus(t, a, "prj_1").GetStreams() == 1 })
+	holdCopy(t, a, b, "Queued: srv_a is busy with a copy of shop")
+	eventually(t, "a's stream to end", func() bool { return replicaStatus(t, a, "prj_1").GetStreams() == 0 })
+}
