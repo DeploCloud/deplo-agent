@@ -574,3 +574,28 @@ func TestReplica_aNewStreamDropsWhatAnEarlierRunLeftHalfRebuilt(t *testing.T) {
 		t.Fatal("the half-rebuilt file of an earlier run is still in the copy")
 	}
 }
+
+// c46: eu-1 wrote 1.3 GB of a copy it had no room for, then refused it at its floor: the file's size comes first now.
+func TestReplica_aFileThatDoesNotFitIsRefusedBeforeAnyOfItIsWritten(t *testing.T) {
+	was, wasFlush := room.StatFile, flushRange
+	room.StatFile = func(*os.File) (int64, int64, bool) { return 1<<30 + 2*gentleStep, 10 << 30, true }
+	var flushed int
+	flushRange = func(f *os.File, off, n int64) { flushed++; wasFlush(f, off, n) }
+	t.Cleanup(func() { room.StatFile, flushRange = was, wasFlush })
+	src := t.TempDir()
+	os.WriteFile(filepath.Join(src, "big.bin"), noise(4*gentleStep, 13), 0o644)
+	dir := t.TempDir()
+	_, got, stop := stream(t, src, dir, NewIndex())
+	defer stop()
+	select {
+	case err := <-got:
+		if err == nil || !strings.Contains(err.Error(), "has 1.0 GB free, too little for this copy (about 32.0 MB)") {
+			t.Fatalf("the copy ended with %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a file that does not fit was copied")
+	}
+	if flushed != 0 {
+		t.Fatalf("%d steps of a file that does not fit were written", flushed)
+	}
+}

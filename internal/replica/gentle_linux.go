@@ -20,8 +20,8 @@ var flushRange = func(f *os.File, off, n int64) {
 	_ = unix.Fadvise(fd, off, n, unix.FADV_DONTNEED)
 }
 
-// gentle writes to f, a step at a time, and stops once its disk is down to a tenth free (deplo ADR-0043). A file
-// rebuilt beside the one it replaces starts only if both fit: need is what the old one holds.
+// gentle writes to f, a step at a time, and stops as soon as the rest of need, or any byte past it, would leave less
+// than a tenth of its disk free (deplo ADR-0043). need is the file's size, or what the old one holds.
 type gentle struct {
 	f            *os.File
 	off, flushed int64
@@ -40,7 +40,7 @@ func (g *gentle) Write(p []byte) (int, error) {
 	if g.off += int64(n); g.off-g.flushed >= gentleStep {
 		g.finish()
 		if err == nil {
-			err = room.Left(g.f)
+			err = room.LeftFor(g.f, max(g.need-g.off, 0))
 		}
 	}
 	return n, err

@@ -27,7 +27,7 @@ func Receive(ctx context.Context, conn io.ReadWriter, dir string, names []string
 	if len(names) == 0 || len(names) > maxRoots {
 		return errors.New("replica: no roots to receive")
 	}
-	rc := &receiving{st: st, held: map[Key]Entry{}, buf: make([]byte, maxChunk)}
+	rc := &receiving{st: st, held: map[Key]Entry{}, buf: make([]byte, maxChunk), next: -1}
 	for _, n := range names {
 		p := filepath.Join(dir, rootDir(n))
 		if err := os.MkdirAll(p, 0o700); err != nil {
@@ -147,8 +147,12 @@ func Receive(ctx context.Context, conn io.ReadWriter, dir string, names []string
 			st.set(func(s *Status) { s.Synced, s.Err = true, "" })
 			touch()
 		case opBeat:
-			if _, err := rd.varint(); err != nil {
+			v, err := rd.varint()
+			if err != nil {
 				return err
+			}
+			if rc.next = -1; v < 0 {
+				rc.next = -v - 1
 			}
 			touch()
 		case opFile, opDir, opLink, opKeep, opDelete:
@@ -159,7 +163,9 @@ func Receive(ctx context.Context, conn io.ReadWriter, dir string, names []string
 			if seen != nil {
 				seen[k] = true
 			}
-			if err := rc.apply(op, k); err != nil {
+			err = rc.apply(op, k)
+			rc.next = -1
+			if err != nil {
 				return fmt.Errorf("replica: %s: %w", k.Path, err)
 			}
 			touch()
@@ -178,6 +184,8 @@ type receiving struct {
 	buf   []byte
 	// wrong is set when the copy turned out not to hold what this side said it did.
 	wrong bool
+	// next is the size the sender gave the next file, -1 when it gave none.
+	next int64
 }
 
 func (rc *receiving) apply(op byte, k Key) error {
@@ -264,8 +272,8 @@ func (rc *receiving) file(k Key, e Entry) error {
 	}()
 	sum := sha256.New()
 	var list listOf
-	gw := &gentle{f: t.f}
-	if prev, ok := rc.held[k]; ok && prev.Kind == kindFile {
+	gw := &gentle{f: t.f, need: max(rc.next, 0)}
+	if prev, ok := rc.held[k]; ok && prev.Kind == kindFile && rc.next < 0 {
 		gw.need = prev.Size
 	}
 	out := bufio.NewWriterSize(io.MultiWriter(gw, sum, &list), 256<<10)

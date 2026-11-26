@@ -262,6 +262,13 @@ func (s *sender) send(k Key, e Entry) error {
 // sendFile writes a file as pieces: each chunk the receiver holds somewhere is a range it copies, the rest its bytes.
 // The end says how big the file is and what its SHA-256 is, so the receiver never keeps one rebuilt wrong.
 func (s *sender) sendFile(k Key, e Entry, f *os.File) (Entry, error) {
+	// Its size first: a receiver without room refuses it before writing any of it (c46: 1.3 GB written, then refused).
+	if err := s.w.byte(opBeat); err != nil {
+		return e, err
+	}
+	if err := s.w.varint(-(e.Size + 1)); err != nil {
+		return e, err
+	}
 	if err := s.w.head(opFile, k); err != nil {
 		return e, err
 	}
