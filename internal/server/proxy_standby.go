@@ -284,8 +284,9 @@ func endStandby(id, copyDir string) {
 	_ = os.RemoveAll(copyDir)
 }
 
-// ClearStandbyProxy removes a standby an agent that stopped mid-restart left running.
-func ClearStandbyProxy(ctx context.Context) {
+// ClearStandbyProxy removes a standby an agent that stopped mid-restart left running, once the start is settled.
+func (s *Service) ClearStandbyProxy(ctx context.Context) {
+	s.afterStart(ctx)
 	res, err := dockercli.Run(ctx, 10*time.Second, "ps", "-aq", "--filter", "label="+standbyLabel+"=1",
 		"--filter", "name=^"+standbyContainer+"$")
 	if err == nil && res.Code == 0 && strings.TrimSpace(res.Stdout) != "" {

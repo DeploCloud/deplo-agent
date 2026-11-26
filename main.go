@@ -98,7 +98,6 @@ func main() {
 			log.Printf("deplo-agent: the log may hold the agent up: %v", err)
 		}
 	}
-	go server.TakePriority(context.Background())
 	dockercli.CacheReads(time.Second)
 	go server.EnsureRestart(context.Background())
 
@@ -151,11 +150,12 @@ func main() {
 	srv := newGRPCServer(certMgr)
 	svc := server.New(*stackDir, *buildTmpDir, *dataDir, *dataBase)
 	server.ClearFrontDoorHold()
-	go server.ClearStandbyProxy(context.Background())
 	if err := svc.PlaceProbe(); err != nil {
 		fmt.Fprintf(os.Stderr, "deplo-agent: could not place the health check probe: %v\n", err)
 	}
 	svc.SetAgentDir(*agentDir)
+	go svc.TakePriority(context.Background())
+	go svc.ClearStandbyProxy(context.Background())
 	go svc.SweepStorePartials()
 	svc.SettlePanel()
 	svc.StartRestartWatch(context.Background())
