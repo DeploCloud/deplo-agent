@@ -10,11 +10,15 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
+
+// holdBudget is the longest a backup keeps its App paused (deplo c44).
+var holdBudget = time.Second
 
 // The panel matches this text word for word to skip, not fail, a live App with no data yet.
 var errNoVolumeFiles = errors.New("the App's data holds no file on this server, so its archive is not a backup")
@@ -75,19 +79,43 @@ func (s *Service) writeProjectArchive(ctx context.Context, p *pb.ProjectDescript
 			first, copied = n, true
 		}
 	}
+	if copied {
+		copier.readyPass(ctx)
+	}
 	hold, herr := s.holdVolumes(ctx, p.GetSlug(), p.GetVolumeNames(), func(text string) { e.log("info", text) }, skip)
 	if herr != nil {
 		return herr
 	}
+	// c44: fise was paused 4.1 s and lab-kit-a 21.5 s for a whole copy. Past holdBudget the App runs again, and the
+	// copy made while it was paused is no backup.
+	heldCtx, cancelHeld := context.WithCancel(ctx)
+	defer cancelHeld()
+	var overran atomic.Bool
+	var watchdog *time.Timer
 	if hold != nil {
 		e.holding = true
 		e.log("info", "Paused the app while its data is copied")
+		watchdog = time.AfterFunc(holdBudget-time.Since(hold.start), func() {
+			overran.Store(true)
+			cancelHeld()
+			hold.release()
+		})
+	}
+	overBudget := func() error {
+		msg := fmt.Sprintf("its data could not be copied within %s of pausing it, so it runs again and this backup was not kept", spoken(holdBudget))
+		if why != "" {
+			msg += ": " + why
+		}
+		return errors.New(msg)
 	}
 	// Also on a panic: an App left paused stays so until the agent restarts.
 	ended := false
 	end := func() {
 		if !ended {
 			ended = true
+			if watchdog != nil {
+				watchdog.Stop()
+			}
 			s.endHold(hold, e)
 			if copier == nil || !copier.staged {
 				copier.remove()
@@ -99,7 +127,19 @@ func (s *Service) writeProjectArchive(ctx context.Context, p *pb.ProjectDescript
 		why = "it started while its data was being copied, so nothing was copied on the server's own disk first"
 	}
 	if hold != nil && why == "" {
-		if n, err := copier.copyToStage(ctx, since); err != nil {
+		copyPaused := func() (int64, error) { return copier.copyToStage(heldCtx, since) }
+		if copier.told {
+			copyPaused = func() (int64, error) {
+				files, n, took, err := copier.tellPass(heldCtx, since)
+				if err == nil {
+					e.log("info", fmt.Sprintf("Copied what changed while it was paused: %d files (%s) in %s", files, humanBytes(n), took.Round(time.Millisecond)))
+				}
+				return n, err
+			}
+		}
+		if n, err := copyPaused(); overran.Load() {
+			return overBudget()
+		} else if err != nil {
 			why = "copying the data on the server's own disk failed: " + err.Error()
 		} else {
 			copier.staged = true
@@ -120,11 +160,18 @@ func (s *Service) writeProjectArchive(ctx context.Context, p *pb.ProjectDescript
 			continue
 		}
 		e.log("info", "Archiving volume "+vol)
-		if err := s.archiveVolume(ctx, copier.tarArgs(ctx, vol), vol, tw, e); err != nil {
+		err := s.archiveVolume(heldCtx, copier.tarArgs(heldCtx, vol), vol, tw, e)
+		if overran.Load() {
+			return overBudget()
+		}
+		if err != nil {
 			return fmt.Errorf("archive volume %q: %w", vol, err)
 		}
 	}
 	end()
+	if overran.Load() {
+		return overBudget()
+	}
 
 	if p.GetIncludeFiles() {
 		root := s.filesRoot(p.GetSlug())

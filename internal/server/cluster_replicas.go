@@ -28,9 +28,11 @@ import (
 // Replication of App data (ADR-0046 in DeploCloud/deplo): Deplo hands every member the table of the cluster's
 // replicated Apps. The member that runs one sends its data as it changes; every other member receives it into a
 // copy of its own, straight from member to member over the relay, with Deplo up or not. A copy is never the App's
-// live data: only a failover start puts it in place, and only on a member that holds no stack of that App.
+// live data: only a failover start or a move puts it in place, and only on a member the leader places it on.
 const (
-	replVerb       = "REPL"
+	replVerb = "REPL"
+	// replLast asks a REPL stream for one snapshot of a stopped App's data: its move's last changes.
+	replLast       = "last"
 	maxReplEntries = 256
 	maxReplVolumes = 32
 )
@@ -83,6 +85,8 @@ type replicaRun struct {
 	status *replica.Status
 	// index is what the copy's files hold, kept across the run's streams.
 	index *replica.Index
+	// leftRelay is when a stream last left the relay for a direct path: once a minute at most.
+	leftRelay time.Time
 }
 
 type replicas struct {
@@ -92,8 +96,12 @@ type replicas struct {
 	runs    map[string]*replicaRun
 	idle    map[string]string
 	sending map[string]int
+	// sendFailed is why an App's last stream to a member ended, until the next one starts.
+	sendFailed map[string]string
 	// holding are the Apps a failover start is putting in place here: nothing receives for them meanwhile.
 	holding map[string]bool
+	// indexes are what each stopped receiver knew of its copy's files: a move's last changes need not read them again.
+	indexes map[string]*replica.Index
 	// handed is a table from Deplo in this run. Until then no new copy starts: only Deplo checks it fits on this
 	// disk, and a member back from a power cut took a whole new copy beside its set-aside one (deplo ADR-0043).
 	handed bool
@@ -104,6 +112,8 @@ type replicas struct {
 	running func(ctx context.Context, slug string) bool
 	ran     map[string]ranAt
 	dial    func(ctx context.Context, fingerprint string) (net.Conn, error)
+	// direct says whether a stream to that member would go direct now; tests replace it.
+	direct func(ctx context.Context, fingerprint string) bool
 }
 
 type ranAt struct {
@@ -132,9 +142,9 @@ func (r *replicas) stillRuns(ctx context.Context, slug string) bool {
 
 func (s *Service) replicas() *replicas {
 	s.replOnce.Do(func() {
-		r := &replicas{s: s, runs: map[string]*replicaRun{}, idle: map[string]string{}, sending: map[string]int{},
-			holding: map[string]bool{}, wake: make(chan struct{}, 1), mountpoint: volumeMountpoint, running: stackRuns}
-		r.dial = r.dialMember
+		r := &replicas{s: s, runs: map[string]*replicaRun{}, idle: map[string]string{}, sending: map[string]int{}, sendFailed: map[string]string{},
+			holding: map[string]bool{}, indexes: map[string]*replica.Index{}, wake: make(chan struct{}, 1), mountpoint: volumeMountpoint, running: stackRuns}
+		r.dial, r.direct = r.dialMember, s.reachesDirectly
 		if raw, err := os.ReadFile(r.file()); err == nil {
 			_ = json.Unmarshal(raw, &r.tab)
 		}
@@ -253,11 +263,15 @@ func (r *replicas) status() *pb.ClusterReplicaStatusResponse {
 		} else if _, here, ok := r.s.leaseGuard().locate(r.tab.Cluster, "app", e.AppID); ok && here {
 			st.Role = "sending"
 		}
+		if why := r.sendFailed[e.AppID]; st.Role == "sending" && why != "" {
+			st.Error = "a copy of it stopped, its member dials again: " + why
+		}
 		if run := r.runs[e.AppID]; run != nil {
 			connected, synced, at, bytes, msg := run.status.Snapshot()
 			st.Role, st.Connected, st.Synced, st.Bytes, st.Error, st.FromServerId = "receiving", connected, synced, bytes, msg, run.from
 			st.Relayed = connected && (run.relayed.Load() || r.s.meshPath(run.fingerprint) == mesh.PathRelay)
-			if !at.IsZero() {
+			// Up to date only once its stream's snapshot landed: a copy back after a hold took 120 MiB at a move (c50).
+			if !at.IsZero() && synced {
 				st.AppliedAt = at.UTC().Format(time.RFC3339Nano)
 			}
 		}
@@ -278,6 +292,7 @@ func (r *replicas) poke() {
 
 // Run keeps every copy this member should hold receiving, until ctx ends; then every receiver stops.
 func (r *replicas) Run(ctx context.Context) {
+	r.s.afterStart(ctx)
 	t := time.NewTicker(replReconcileEvery)
 	defer t.Stop()
 	defer r.stopAll()
@@ -364,6 +379,12 @@ func (r *replicas) stop(appID, why string) {
 	r.mu.Lock()
 	run := r.runs[appID]
 	delete(r.runs, appID)
+	if run != nil {
+		if r.indexes == nil {
+			r.indexes = map[string]*replica.Index{}
+		}
+		r.indexes[appID] = run.index
+	}
 	if why == "" {
 		delete(r.idle, appID)
 	} else {
@@ -390,6 +411,9 @@ func (r *replicas) start(parent context.Context, cluster string, e replicaEntry,
 			if ctx.Err() != nil {
 				return
 			}
+			if errors.Is(err, errLeftRelay) {
+				continue
+			}
 			if err != nil {
 				run.status.Fail(oneLine(err.Error()))
 			}
@@ -413,7 +437,8 @@ func (r *replicas) receiveOnce(ctx context.Context, cluster string, e replicaEnt
 		return err
 	}
 	defer conn.Close()
-	run.relayed.Store(r.s.copyPath(conn, "") == pathRelay)
+	relayed := r.s.copyPath(conn, "") == pathRelay
+	run.relayed.Store(relayed)
 	_ = conn.SetDeadline(time.Now().Add(wire.HeaderTimeout))
 	if err := wire.WriteHeader(conn, replVerb, cluster+" "+e.AppID); err != nil {
 		return err
@@ -430,6 +455,12 @@ func (r *replicas) receiveOnce(ctx context.Context, cluster string, e replicaEnt
 	in.last.Store(time.Now().UnixNano())
 	done := make(chan struct{})
 	defer close(done)
+	var left atomic.Bool
+	// A relay stream's close only ends its writing half: the read waiting on it needs the deadline.
+	cut := func() {
+		_ = conn.SetDeadline(time.Now())
+		conn.Close()
+	}
 	go func() {
 		t := time.NewTicker(replStallCheck)
 		defer t.Stop()
@@ -441,13 +472,46 @@ func (r *replicas) receiveOnce(ctx context.Context, cluster string, e replicaEnt
 				_, synced, _, _, _ := run.status.Snapshot()
 				if replStalled(synced, time.Unix(0, in.last.Load()), now) {
 					fmt.Fprintf(os.Stderr, "deplo-agent: replica of %s heard nothing for %v: dialing again\n", e.Slug, replStallAfter)
-					conn.Close()
+					cut()
+					return
+				}
+				// c46: a copy dialed while its member came back stayed on Deplo's relay until the sender restarted.
+				if relayed && now.Sub(run.leftRelay) > replDirectEvery && r.direct(ctx, fingerprint) {
+					fmt.Fprintf(os.Stderr, "deplo-agent: replica of %s: a direct path answers: leaving the relay\n", e.Slug)
+					run.leftRelay = now
+					left.Store(true)
+					cut()
 					return
 				}
 			}
 		}
 	}()
-	return atLowPriority(func() error { return replica.Receive(ctx, in, r.dir(e.AppID), e.roots(), run.status, run.index) })
+	err = atLowPriority(func() error { return replica.Receive(ctx, in, r.dir(e.AppID), e.roots(), run.status, run.index) })
+	if left.Load() {
+		return errLeftRelay
+	}
+	return err
+}
+
+// errLeftRelay ends a stream on the relay once a direct one would carry it: the copy dials again at once.
+var errLeftRelay = errors.New("left the relay for a direct path")
+
+// replDirectEvery spaces two moves of one copy off the relay, should a new stream land there again.
+var replDirectEvery = time.Minute
+
+// reachesDirectly says whether the cluster's network reaches that member without a relay, and a stream opens there.
+func (s *Service) reachesDirectly(ctx context.Context, fingerprint string) bool {
+	if s.meshPath(fingerprint) != mesh.PathDirect {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	c, err := s.networkDial(ctx, wire.Party{Fingerprint: fingerprint, Role: wire.RoleMember})
+	if err != nil {
+		return false
+	}
+	c.Close()
+	return true
 }
 
 // A whole copy whose sender says nothing at all, not even the beat it sends every 2 s, dials again: a stream that
@@ -490,7 +554,9 @@ func (r *replicas) dialMember(ctx context.Context, fingerprint string) (net.Conn
 // to a member of this cluster, and only for as long as both stay true.
 func (s *Service) serveReplica(from wire.Party, c net.Conn, arg string) {
 	r := s.replicas()
-	cluster, appID, _ := strings.Cut(arg, " ")
+	cluster, rest, _ := strings.Cut(arg, " ")
+	appID, mode, _ := strings.Cut(rest, " ")
+	last := mode == replLast
 	r.mu.Lock()
 	tab := r.tab
 	r.mu.Unlock()
@@ -515,7 +581,14 @@ func (s *Service) serveReplica(from wire.Party, c net.Conn, arg string) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if !stillHere(ctx) {
+	if last {
+		// The last changes go only to the member the leader moved the App to, once it stopped here.
+		member, here, ok := s.leaseGuard().locate(cluster, "app", appID)
+		if !ok || here || !from.Is(tab.Members[member]) || r.running(ctx, entry.Slug) {
+			refuse("the App has not moved to that server, or still runs here")
+			return
+		}
+	} else if !stillHere(ctx) {
 		refuse("the App does not run on this server")
 		return
 	}
@@ -539,8 +612,16 @@ func (s *Service) serveReplica(from wire.Party, c net.Conn, arg string) {
 	if wire.WriteHeader(c, wire.VerbOK, "") != nil {
 		return
 	}
+	if last {
+		// The App is down until it lands: at full speed, never behind its Apps.
+		if err := replica.SendOnce(ctx, c, entry.roots(), dirs); err != nil {
+			fmt.Fprintf(os.Stderr, "deplo-agent: last changes of %s: %v\n", entry.Slug, err)
+		}
+		return
+	}
 	r.mu.Lock()
 	r.sending[appID]++
+	delete(r.sendFailed, appID)
 	r.mu.Unlock()
 	defer func() {
 		r.mu.Lock()
@@ -569,6 +650,9 @@ func (s *Service) serveReplica(from wire.Party, c net.Conn, arg string) {
 	}()
 	if err := atLowPriority(func() error { return replica.Send(ctx, c, entry.roots(), dirs) }); err != nil && ctx.Err() == nil {
 		fmt.Fprintf(os.Stderr, "deplo-agent: replica of %s: %v\n", entry.Slug, err)
+		r.mu.Lock()
+		r.sendFailed[appID] = oneLine(err.Error())
+		r.mu.Unlock()
 	}
 }
 
@@ -597,25 +681,116 @@ func (s *Service) promoteReplica(ctx context.Context, slug string) (release func
 		r.poke()
 	}
 	r.stop(e.AppID, "")
+	return release, s.putReplicaInPlace(ctx, e)
+}
+
+// putReplicaInPlace moves this member's copy of an App into its Volumes and Files; the caller holds it.
+func (s *Service) putReplicaInPlace(ctx context.Context, e replicaEntry) error {
+	r := s.replicas()
 	live := map[string]string{}
 	for _, v := range e.Volumes {
 		p, err := r.mountpoint(ctx, v, true)
 		if err != nil {
-			return release, err
+			return err
 		}
 		live[replica.VolumeRoot(v)] = p
 	}
 	if e.Files {
 		files := s.filesRoot(e.Slug)
 		if err := os.MkdirAll(files, 0o755); err != nil {
-			return release, err
+			return err
 		}
 		live[replica.FilesRoot] = files
 	}
 	if err := replica.Promote(r.dir(e.AppID), e.roots(), live); err != nil {
-		return release, err
+		return err
 	}
 	// The copy is the App's data now: this member sends from here on.
 	_ = os.RemoveAll(r.dir(e.AppID))
-	return release, nil
+	return nil
+}
+
+// PromoteClusterReplica takes a moved App's last changes from the member it left, then puts the copy in place: a
+// move stops the App only for what changed since (c44: 64 MB copied again in 8 s). See proto/agent.proto.
+func (s *Service) PromoteClusterReplica(ctx context.Context, req *pb.PromoteClusterReplicaRequest) (*pb.PromoteClusterReplicaResponse, error) {
+	r := s.replicas()
+	r.mu.Lock()
+	tab := r.tab
+	var entry *replicaEntry
+	for i := range tab.Entries {
+		if tab.Entries[i].AppID == req.GetAppId() {
+			entry = &tab.Entries[i]
+		}
+	}
+	if entry == nil || r.holding[req.GetAppId()] {
+		r.mu.Unlock()
+		return nil, status.Error(codes.FailedPrecondition, "this server does not replicate that App")
+	}
+	e := *entry
+	ix := r.indexes[e.AppID]
+	if run := r.runs[e.AppID]; run != nil {
+		ix = run.index
+	}
+	r.holding[e.AppID] = true
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		delete(r.holding, e.AppID)
+		r.mu.Unlock()
+		r.poke()
+	}()
+	if _, here, ok := s.leaseGuard().locate(tab.Cluster, "app", e.AppID); !ok || !here {
+		return nil, status.Error(codes.FailedPrecondition, "the cluster's leader does not place that App on this server")
+	}
+	fp := tab.Members[req.GetFromServerId()]
+	if !validFingerprint(fp) {
+		return nil, status.Error(codes.FailedPrecondition, "this server does not know the server the App left")
+	}
+	if !replica.Ready(r.dir(e.AppID)) {
+		return nil, status.Error(codes.FailedPrecondition, "this server has no whole copy of the App's data yet")
+	}
+	r.stop(e.AppID, "")
+	if ix == nil {
+		ix = replica.NewIndex()
+	}
+	defer func() {
+		r.mu.Lock()
+		delete(r.indexes, e.AppID)
+		r.mu.Unlock()
+	}()
+	st := &replica.Status{}
+	err := r.receiveLast(ctx, tab.Cluster, e, fp, st, ix)
+	if _, synced, _, _, _ := st.Snapshot(); !synced {
+		if err == nil {
+			err = errors.New("the stream ended early")
+		}
+		return nil, status.Errorf(codes.Unavailable, "the last changes did not all arrive: %v", err)
+	}
+	if err := s.putReplicaInPlace(ctx, e); err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	_, _, _, n, _ := st.Snapshot()
+	return &pb.PromoteClusterReplicaResponse{Bytes: n}, nil
+}
+
+// receiveLast takes one snapshot of a stopped App's data into its copy here, at full speed.
+func (r *replicas) receiveLast(ctx context.Context, cluster string, e replicaEntry, fingerprint string, st *replica.Status, ix *replica.Index) error {
+	conn, err := r.dial(ctx, fingerprint)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(wire.HeaderTimeout))
+	if err := wire.WriteHeader(conn, replVerb, cluster+" "+e.AppID+" "+replLast); err != nil {
+		return err
+	}
+	verb, arg, err := wire.ReadHeader(conn)
+	if err != nil {
+		return err
+	}
+	if verb != wire.VerbOK {
+		return fmt.Errorf("the server the App left refused: %s", arg)
+	}
+	_ = conn.SetDeadline(time.Time{})
+	return replica.ReceiveFirst(ctx, conn, r.dir(e.AppID), e.roots(), st, ix)
 }

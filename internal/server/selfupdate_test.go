@@ -255,3 +255,44 @@ func TestDownloadFileIsHTTPSOnly(t *testing.T) {
 		}
 	}
 }
+
+// c47: each member's own lease went 2 s unrenewed across its update. Its exec waits for the next renewal and comes
+// right after it, its drain cut short, so the new binary is up before the renewal a second later.
+func TestSelfUpdate_aMemberExecsRightAfterARenewal(t *testing.T) {
+	exe := filepath.Join(t.TempDir(), "deplo-agent")
+	if err := os.WriteFile(exe, []byte("OLD-BINARY"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	newBytes := []byte("NEW-BINARY-v1.2.0")
+	stubDownload(t, newBytes, nil)
+	var mu sync.Mutex
+	var execAt time.Time
+	orig := reexec
+	reexec = func(string, []string, []string) error {
+		mu.Lock()
+		execAt = time.Now()
+		mu.Unlock()
+		return nil
+	}
+	t.Cleanup(func() { reexec = orig; drainBy.Store(0) })
+	s := New(t.TempDir(), t.TempDir(), "/", "")
+	placeOn(t, s, "srvA", appEntry("srvA"))
+	start := time.Now()
+	if _, err := s.applyUpdate(context.Background(), exe, &pb.SelfUpdateRequest{Version: "1.2.0",
+		Binaries: binariesFor("https://example/deplo-agent-linux-"+runtime.GOARCH, sha256Hex(newBytes))}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Until(start.Add(selfUpdateGrace + 400*time.Millisecond)))
+	placeOn(t, s, "srvA", appEntry("srvA"))
+	renewed := time.Now()
+	eventually(t, "the exec", func() bool { mu.Lock(); defer mu.Unlock(); return !execAt.IsZero() })
+	mu.Lock()
+	at := execAt
+	mu.Unlock()
+	if at.Before(renewed) || at.Sub(renewed) > 200*time.Millisecond {
+		t.Fatalf("the exec came %v after the renewal", at.Sub(renewed))
+	}
+	if by := time.Unix(0, drainBy.Load()); by.Before(renewed) || by.Sub(renewed) > execAfterRenewal+100*time.Millisecond {
+		t.Fatalf("the drain may last until %v after the renewal", by.Sub(renewed))
+	}
+}

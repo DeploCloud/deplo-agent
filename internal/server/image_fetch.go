@@ -30,6 +30,8 @@ var (
 	errNoMemberHolds = errors.New("no other member holds it")
 	// errMemberBusy is a member that holds it sending another image: wait for it, never the registry (c43).
 	errMemberBusy = errors.New("a member that holds it is sending another image")
+	// errMemberSentBroken is a member's image that would not load here: the registry is next, at once (c44).
+	errMemberSentBroken = errors.New("the image a member sent would not load")
 	// memberBusyRetry is how often a busy member is asked again, and memberBusyFor for how long in one pass.
 	memberBusyRetry = 10 * time.Second
 	memberBusyFor   = 15 * time.Minute
@@ -109,7 +111,7 @@ func (s *Service) fetchFromMembers(ctx context.Context, ref string) (string, err
 	if party == nil || len(peers) == 0 {
 		return "", errNoMemberHolds
 	}
-	busy := false
+	busy, broken := false, error(nil)
 	for _, fp := range peers {
 		actx, cancel := context.WithTimeout(ctx, memberAsk)
 		conn, err := party.Dial(actx, wire.Party{Fingerprint: fp, Role: wire.RoleMember})
@@ -136,7 +138,11 @@ func (s *Service) fetchFromMembers(ctx context.Context, ref string) (string, err
 		if err == nil {
 			return fp, nil
 		}
-		fmt.Fprintf(os.Stderr, "deplo-agent: could not take %s from another member: %v\n", ref, err)
+		fmt.Fprintf(os.Stderr, "deplo-agent: could not take %s from the cluster's member %s: %v\n", ref, fp[:min(12, len(fp))], err)
+		broken = fmt.Errorf("%w: %v", errMemberSentBroken, err)
+	}
+	if broken != nil {
+		return "", broken
 	}
 	if busy {
 		return "", errMemberBusy

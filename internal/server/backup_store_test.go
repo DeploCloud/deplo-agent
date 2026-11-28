@@ -19,6 +19,7 @@ import (
 	"filippo.io/age"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
+	"github.com/DeploCloud/deplo-agent/internal/pace"
 )
 
 func newStoreService(t *testing.T) (*Service, string) {
@@ -1005,3 +1006,28 @@ func TestWriteArtifact_decryptedSizeIsWhatADownloadDelivers(t *testing.T) {
 		})
 	}
 }
+
+// c47: a 64 MB copy flushed whole at its end held eu-3's disk, and every visitor there, for a second.
+func TestStoreWrite_goesToDiskAStepAtATime(t *testing.T) {
+	root := t.TempDir()
+	var at []int64
+	t.Cleanup(func(old func(*os.File) error) func() { return func() { syncLanding = old } }(syncLanding))
+	syncLanding = func(f *os.File) error {
+		st, err := f.Stat()
+		if err == nil {
+			at = append(at, st.Size())
+		}
+		return f.Sync()
+	}
+	size := int64(3*pace.Step + 1)
+	if _, _, err := storeWrite(root, "deplo/t/app/x/a.tar.gz", io.LimitReader(zeroReader{}, size), false); err != nil {
+		t.Fatal(err)
+	}
+	if len(at) < 4 || at[0] > pace.Step+storeChunkBytes || at[len(at)-1] != size {
+		t.Fatalf("flushed at sizes %v, want one every %d bytes and the last at %d", at, pace.Step, size)
+	}
+}
+
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) { clear(p); return len(p), nil }

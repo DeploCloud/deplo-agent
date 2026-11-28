@@ -46,14 +46,18 @@ type meshPeerEntry struct {
 	PublicKey   string   `json:"publicKey"`
 	Address     string   `json:"address"`
 	Endpoints   []string `json:"endpoints,omitempty"`
+	// NextPublicKey is the key the peer is about to switch to.
+	NextPublicKey string `json:"nextPublicKey,omitempty"`
 }
 
 // meshFile is what the network survives a restart with, so it comes back without Deplo.
 type meshFile struct {
-	PrivateKey string                     `json:"privateKey"`
-	Port       uint16                     `json:"port"`
-	Address    string                     `json:"address"`
-	Clusters   map[string][]meshPeerEntry `json:"clusters"`
+	PrivateKey string `json:"privateKey"`
+	// NextPrivateKey is the key Deplo had this server make for its next rotation, until it switches to it.
+	NextPrivateKey string                     `json:"nextPrivateKey,omitempty"`
+	Port           uint16                     `json:"port"`
+	Address        string                     `json:"address"`
+	Clusters       map[string][]meshPeerEntry `json:"clusters"`
 	// SetAt is when Deplo last set each cluster (Unix ns): where two clusters name one key, the newer one is right.
 	SetAt map[string]int64 `json:"setAt,omitempty"`
 }
@@ -170,7 +174,12 @@ func validateMesh(req *pb.SetClusterNetworkRequest) ([]meshPeerEntry, netip.Addr
 		if len(p.GetEndpoints()) > maxMeshEndpoints {
 			return nil, self, fmt.Errorf("at most %d addresses for one server", maxMeshEndpoints)
 		}
-		e := meshPeerEntry{Fingerprint: p.GetFingerprint(), PublicKey: p.GetPublicKey(), Address: a.String()}
+		e := meshPeerEntry{Fingerprint: p.GetFingerprint(), PublicKey: p.GetPublicKey(), Address: a.String(), NextPublicKey: p.GetNextPublicKey()}
+		if e.NextPublicKey != "" {
+			if _, err := mesh.ParseKey(e.NextPublicKey); err != nil {
+				return nil, self, err
+			}
+		}
 		for _, raw := range p.GetEndpoints() {
 			ap, ok := validMeshEndpoint(raw)
 			if !ok {
@@ -210,8 +219,12 @@ func (s *Service) SetClusterNetwork(_ context.Context, req *pb.SetClusterNetwork
 	}
 	// A caught copy holds this key: a new one, and the mesh starts over under it, so the copy is heard by nobody.
 	if old := req.GetRetirePublicKey(); old != "" && n.publicKeyLocked() == old {
-		n.st.PrivateKey = ""
+		n.st.PrivateKey, n.st.NextPrivateKey = "", ""
 		n.stopLocked()
+	}
+	if err := n.rotateLocked(req); err != nil {
+		n.mu.Unlock()
+		return nil, status.Errorf(codes.Internal, "rotate the network key: %v", err)
 	}
 	if n.st.PrivateKey == "" {
 		k, err := mesh.NewPrivateKey()
@@ -261,6 +274,9 @@ func (n *clusterNetwork) peersLocked() []mesh.Peer {
 			}
 			seen[e.Fingerprint] = true
 			p := mesh.Peer{Fingerprint: e.Fingerprint, PublicKey: key, Address: addr}
+			if next, err := mesh.ParseKey(e.NextPublicKey); err == nil {
+				p.Next = next
+			}
 			for _, raw := range e.Endpoints {
 				if ap, ok := validMeshEndpoint(raw); ok {
 					p.Endpoints = append(p.Endpoints, ap)
@@ -362,8 +378,10 @@ func closeMesh(m *mesh.Mesh) {
 	m.Close()
 }
 
-func (n *clusterNetwork) publicKeyLocked() string {
-	if key, err := mesh.ParseKey(n.st.PrivateKey); err == nil {
+func (n *clusterNetwork) publicKeyLocked() string { return publicOf(n.st.PrivateKey) }
+
+func publicOf(private string) string {
+	if key, err := mesh.ParseKey(private); err == nil {
 		if pub, err := key.Public(); err == nil {
 			return pub.String()
 		}
@@ -371,8 +389,34 @@ func (n *clusterNetwork) publicKeyLocked() string {
 	return ""
 }
 
+// rotateLocked makes the next key Deplo asks for, or switches to it in place once Deplo says every peer holds it;
+// the caller holds mu.
+func (n *clusterNetwork) rotateLocked(req *pb.SetClusterNetworkRequest) error {
+	if req.GetNextKey() && n.st.NextPrivateKey == "" {
+		k, err := mesh.NewPrivateKey()
+		if err != nil {
+			return err
+		}
+		n.st.NextPrivateKey = k.String()
+	}
+	to := req.GetRotateToPublicKey()
+	if to == "" || to != publicOf(n.st.NextPrivateKey) {
+		return nil
+	}
+	key, err := mesh.ParseKey(n.st.NextPrivateKey)
+	if err != nil {
+		return err
+	}
+	n.st.PrivateKey, n.st.NextPrivateKey = n.st.NextPrivateKey, ""
+	if n.m != nil && n.m.Rotate(key) != nil {
+		// What could not switch in place starts over under the new key.
+		n.stopLocked()
+	}
+	return nil
+}
+
 func (n *clusterNetwork) responseLocked() *pb.SetClusterNetworkResponse {
-	resp := &pb.SetClusterNetworkResponse{Addresses: hostAddresses(), PublicKey: n.publicKeyLocked()}
+	resp := &pb.SetClusterNetworkResponse{Addresses: hostAddresses(), PublicKey: n.publicKeyLocked(), NextPublicKey: publicOf(n.st.NextPrivateKey)}
 	if n.m == nil {
 		return resp
 	}

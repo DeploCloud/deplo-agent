@@ -347,3 +347,46 @@ func TestNetwork_aRetiredKeyIsReplacedOnceAndTheOthersReachTheNewOne(t *testing.
 		t.Fatalf("under the new key it answered %q", got)
 	}
 }
+
+// c46 printed eu-1's network key: it is replaced in place, the tunnel answering under the new one at once.
+func TestNetwork_aKeyRotatedInPlaceKeepsTheTunnelUp(t *testing.T) {
+	a, b, fa, _, fpA, fpB := memberPair(t)
+	joinNetwork(t, a, b, fpA, fpB, true)
+	forwardDB(t, a, b, fpA, fpB)
+	eventually(t, "a direct path", func() bool { return pathFrom(a, fpB) == mesh.PathDirect })
+	relayOf[a].Refuse(true)
+	if got := ask(t, fa.spec(t, "db-shop")); got != "on-b:PING" {
+		t.Fatalf("before the rotation it answered %q", got)
+	}
+	m := a.network().current()
+	old := m.PublicKey().String()
+	set := func(s *Service, self string, peer *pb.ClusterNetworkPeer, next bool, to string) *pb.SetClusterNetworkResponse {
+		resp, err := s.SetClusterNetwork(context.Background(), &pb.SetClusterNetworkRequest{ClusterId: "cl1", Address: self,
+			Peers: []*pb.ClusterNetworkPeer{peer}, NextKey: next, RotateToPublicKey: to})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+	peerB := meshPeer(fpB, b.network().current().PublicKey().String(), tunnelAddr(2), uint32(b.network().current().Port()), true)
+	made := set(a, tunnelAddr(1), peerB, true, "")
+	if made.GetPublicKey() != old || made.GetNextPublicKey() == "" || made.GetNextPublicKey() == old {
+		t.Fatalf("making the next key answered %+v", made)
+	}
+	peerA := meshPeer(fpA, old, tunnelAddr(1), uint32(m.Port()), true)
+	peerA.NextPublicKey = made.GetNextPublicKey()
+	set(b, tunnelAddr(2), peerA, false, "")
+	time.Sleep(100 * time.Millisecond)
+	switched := set(a, tunnelAddr(1), peerB, false, made.GetNextPublicKey())
+	if switched.GetPublicKey() != made.GetNextPublicKey() || switched.GetNextPublicKey() != "" || a.network().current() != m {
+		t.Fatalf("the switch answered %+v, or started the network over", switched)
+	}
+	at := time.Now()
+	if got := ask(t, fa.spec(t, "db-shop")); got != "on-b:PING" || time.Since(at) > 2*time.Second {
+		t.Fatalf("under the new key it answered %q after %v", got, time.Since(at))
+	}
+	set(b, tunnelAddr(2), meshPeer(fpA, switched.GetPublicKey(), tunnelAddr(1), switched.GetPort(), true), false, "")
+	if got := ask(t, fa.spec(t, "db-shop")); got != "on-b:PING" {
+		t.Fatalf("once Deplo handed the new key it answered %q", got)
+	}
+}

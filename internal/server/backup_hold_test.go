@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -102,6 +103,69 @@ func TestVolumeBackup_freezesTheAppWhereTheProxyCannotSeeIt(t *testing.T) {
 	defer mu.Unlock()
 	if strings.Join(seen, " ") != "0 1 0" {
 		t.Fatalf("freeze states %v, want 0 1 0", seen)
+	}
+}
+
+// c47: a 295 ms hold left visitors waiting 2.8 s. The thaw asked Docker twice more, and neither the freeze's own
+// lookup nor the thaw counted as held.
+func TestVolumeBackup_heldIsTheWholeFreezeAndTheThawAsksDockerNothing(t *testing.T) {
+	dockerOnPath(t, holdDocker("0", "0"))
+	cg := t.TempDir()
+	freeze, events := filepath.Join(cg, "cgroup.freeze"), filepath.Join(cg, "cgroup.events")
+	if os.WriteFile(freeze, []byte("0\n"), 0o644) != nil || os.WriteFile(events, []byte("populated 1\nfrozen 0\n"), 0o644) != nil {
+		t.Fatal("write")
+	}
+	var lookups int
+	t.Cleanup(func(old func(context.Context, string) (string, error)) func() {
+		return func() { containerCgroup = old }
+	}(containerCgroup))
+	containerCgroup = func(context.Context, string) (string, error) {
+		lookups++
+		time.Sleep(30 * time.Millisecond) // a busy Docker
+		return cg, nil
+	}
+	var mu sync.Mutex
+	var on, frozenFor time.Duration
+	var since time.Time
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(time.Millisecond):
+			}
+			b, _ := os.ReadFile(freeze)
+			v := strings.TrimSpace(string(b))
+			if v == "" {
+				continue
+			}
+			_ = os.WriteFile(events, []byte("populated 1\nfrozen "+v+"\n"), 0o644)
+			mu.Lock()
+			if v == "1" && since.IsZero() {
+				since = time.Now()
+			} else if v == "0" && !since.IsZero() {
+				frozenFor, since = time.Since(since), time.Time{}
+			}
+			on = frozenFor
+			mu.Unlock()
+		}
+	}()
+	s := &Service{dataBase: t.TempDir()}
+	var buf bytes.Buffer
+	e := &bkEmitter{send: func(*pb.BackupEvent) error { return nil }}
+	if err := s.writeProjectArchive(context.Background(), &pb.ProjectDescriptor{Slug: "agent-test-web", VolumeNames: []string{"deplo-agent-test-web-data"}}, tar.NewWriter(&buf), e, false); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if lookups != 1 {
+		t.Fatalf("Docker asked %d times for the App's cgroup, want once, before the pause", lookups)
+	}
+	if on == 0 || e.held+5*time.Millisecond < on {
+		t.Fatalf("held %s, but the App was frozen %s", e.held, on)
 	}
 }
 
@@ -388,16 +452,22 @@ esac`)
 }
 
 // stagingDocker is a copier whose volumes hold 200 MB: du, both copies and the archive all run inside it. The
-// copy made while the App is paused takes 5 MB.
+// copy made while the App is paused takes 5 MB; its pass, started before the pause, logs "told <since>" when told.
 var stagingDocker = stagingDockerSecond("5242880")
 
 func stagingDockerSecond(bytes string) string {
-	return `case "$1" in
+	return stagingDockerTold(`echo "3 ` + bytes + ` 1000000" > "$st/.done.tmp" && mv "$st/.done.tmp" "$st/.done"`)
+}
+
+func stagingDockerTold(done string) string {
+	return `d=$(dirname "$0")
+case "$1" in
 ps) echo abc123def456 ;;
-run) case "$*" in *" -d "*) echo cop999 ;; esac ;;
+run) case "$*" in *" -d "*) echo "$*" | sed -n 's/.* -v \([^ ]*\):\/stage .*/\1/p' > "$d/stage"; echo cop999 ;; esac ;;
 exec) case "$*" in
   *" du -sk "*) printf '204800\t/v\n' ;;
-  *" stage-sync --since "*) echo "3 ` + bytes + `" ;;
+  *" stage-sync --wait "*) st=$(cat "$d/stage"); (touch "$st/.ready"; n=0; while [ ! -f "$st/.go" ] && [ $n -lt 500 ]; do sleep 0.01; n=$((n+1)); done
+    [ -f "$st/.go" ] || exit 0; echo "told $(cat "$st/.go")" >> "$d/argv.log"; ` + done + `) >/dev/null 2>&1 & ;;
   *" stage-sync "*) echo "40 209715200" ;;
   esac ;;
 esac`
@@ -433,10 +503,15 @@ func TestVolumeBackup_pausedOnlyForWhatChanged(t *testing.T) {
 		return strings.HasPrefix(l, "exec cop999 /deplo-agent stage-sync /v/0 /stage/0")
 	})
 	pause := at(func(l string) bool { return l == "pause abc123def456" })
-	changed := at(func(l string) bool {
-		return strings.HasPrefix(l, "exec cop999 /deplo-agent stage-sync --since ") && strings.HasSuffix(l, " /v/0 /stage/0")
-	})
+	ready := at(func(l string) bool { return l == "exec -d cop999 /deplo-agent stage-sync --wait /stage /v/0 /stage/0" })
+	changed := at(func(l string) bool { return strings.HasPrefix(l, "told ") })
 	unpause := at(func(l string) bool { return l == "unpause abc123def456" })
+	// c49: a docker exec inside the pause, its process at the copy slice's weight, took past 1 s on a busy core.
+	if ready < 0 || ready > pause || slices.ContainsFunc(lines[pause+1:max(unpause, pause+1)], func(l string) bool {
+		return strings.HasPrefix(l, "exec ")
+	}) {
+		t.Fatalf("want the pass the App is paused for started before the pause, and no process started inside it; got %q", lines)
+	}
 	archive := at(func(l string) bool {
 		return strings.HasPrefix(l, "exec ") && strings.Contains(l, " cop999 tar -C /stage/0 ")
 	})
@@ -469,8 +544,8 @@ func TestVolumeBackup_aSecondCopyNoSmallerSaysSo(t *testing.T) {
 	}
 }
 
-// Without room for the copy and a tenth of the disk free, the App is paused for the whole copy as before, and the
-// backup says why; an archive written on the same disk counts too.
+// Without room for the copy and a tenth of the disk free, the App is paused for the whole copy, at most holdBudget,
+// and the backup says why; an archive written on the same disk counts too.
 func TestVolumeBackup_tooLittleDiskPausesForTheWholeCopyAndSaysWhy(t *testing.T) {
 	for _, c := range []struct {
 		name        string
@@ -503,5 +578,63 @@ func TestVolumeBackup_tooLittleDiskPausesForTheWholeCopyAndSaysWhy(t *testing.T)
 				t.Fatalf("the backup must say why the App stayed paused: %q %v", e.heldWhy, logs)
 			}
 		})
+	}
+}
+
+func shortHold(t *testing.T) {
+	t.Helper()
+	was, settle := holdBudget, copierSettle
+	holdBudget, copierSettle = 300*time.Millisecond, 10*time.Millisecond
+	t.Cleanup(func() { holdBudget, copierSettle = was, settle })
+}
+
+// deplo c44: with eu-1 at 90%, fise was paused 4.1 s and lab-kit-a 21.5 s, each for its whole copy. Now a copy that
+// outlasts holdBudget is no backup, and the App runs again once the budget is spent, not once the copy ends.
+func TestVolumeBackup_aWholeCopyLongerThanTheBudgetRunsTheAppAgainAndIsNoBackup(t *testing.T) {
+	shortHold(t)
+	dir := t.TempDir()
+	argv := dockerOnPath(t, `case "$1" in
+ps) echo abc123def456 ;;
+run) case "$*" in *" -d "*) echo cop999 ;; esac ;;
+unpause) date +%s%N > `+dir+`/unpause ;;
+pause) date +%s%N > `+dir+`/pause ;;
+exec) case "$*" in
+  *" du -sk "*) printf '204800\t/v\n' ;;
+  *" tar "*) exec sleep 3 ;;
+  esac ;;
+esac`)
+	stagedFree(t, 100<<20, 20<<30)
+	e := &bkEmitter{send: func(ev *pb.BackupEvent) error { return nil }}
+	err := (&Service{dataBase: t.TempDir()}).writeProjectArchive(context.Background(), &pb.ProjectDescriptor{Slug: "agent-test-web", VolumeNames: []string{"deplo-agent-test-web-data"}}, tar.NewWriter(io.Discard), e, false)
+	if err == nil || !strings.Contains(err.Error(), "could not be copied within") || !strings.Contains(err.Error(), "too little") {
+		t.Fatalf("want a backup refused for its pause, with why: %v", err)
+	}
+	read := func(n string) int64 {
+		b, _ := os.ReadFile(filepath.Join(dir, n))
+		v, _ := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+		return v
+	}
+	if held := time.Duration(read("unpause") - read("pause")); held <= 0 || held > holdBudget+500*time.Millisecond {
+		t.Fatalf("the App was paused %v, its budget is %v: %q", held, holdBudget, argv())
+	}
+}
+
+// What changed while the App was paused is copied within holdBudget too, or the backup is not kept.
+func TestVolumeBackup_aSecondCopyLongerThanTheBudgetIsNoBackup(t *testing.T) {
+	shortHold(t)
+	argv := dockerOnPath(t, stagingDockerTold("sleep 3"))
+	stagedFree(t, 10<<30, 20<<30)
+	e := &bkEmitter{send: func(ev *pb.BackupEvent) error { return nil }}
+	start := time.Now()
+	err := (&Service{dataBase: t.TempDir()}).writeProjectArchive(context.Background(), &pb.ProjectDescriptor{Slug: "agent-test-web", VolumeNames: []string{"deplo-agent-test-web-data"}}, tar.NewWriter(io.Discard), e, false)
+	if err == nil || !strings.Contains(err.Error(), "could not be copied within") {
+		t.Fatalf("want a backup refused for its pause: %v", err)
+	}
+	if took := time.Since(start); took > 2*time.Second {
+		t.Fatalf("the backup waited %v for a copy past its budget", took)
+	}
+	got := strings.Join(argv(), "\n")
+	if !strings.Contains(got, "unpause abc123def456") || strings.Contains(got, "tar -C /stage/0") {
+		t.Fatalf("the App runs again and the unfinished copy is never archived: %q", got)
 	}
 }

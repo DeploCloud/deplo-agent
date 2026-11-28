@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -25,6 +26,8 @@ func init() {
 	standbyUp = func(context.Context, string, uint32) (standbyDialer, func(), error) {
 		return nil, nil, errors.New("tests run no standby")
 	}
+	proxyCarries = func([]uint32) int { return 0 }
+	routesAnApp = func(context.Context) bool { return true }
 }
 
 // c41: every App went unanswered 8-10 s while its server's proxy restarted. A visitor that arrives meanwhile is held,
@@ -376,5 +379,95 @@ func TestNewProxyRoutes_waitsUntilItRoutesAsTheStandby(t *testing.T) {
 	s.newProxyRoutes(context.Background())
 	if got := asked.Load(); got != 4 {
 		t.Fatalf("the new proxy was asked %d times, want until it routes (4)", got)
+	}
+}
+
+func TestEstablishedOn_countsTheVisitorsOnTheProxysPortsOnly(t *testing.T) {
+	table := `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 00000000:01BB 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 1 1
+   1: 0200A8C0:01BB 0300A8C0:D431 01 00000000:00000000 00:00000000 00000000     0        0 2 1
+   2: 0200A8C0:20FB 0300A8C0:D432 01 00000000:00000000 00:00000000 00000000     0        0 3 1
+   3: 0200A8C0:D433 0300A8C0:1F90 01 00000000:00000000 00:00000000 00000000     0        0 4 1
+   4: 0000000000000000FFFF00000200A8C0:0050 0000000000000000FFFF00000300A8C0:D434 01 00000000:00000000 00:00000000 00000000 0 0 5 1
+   5: 0200A8C0:01BB 0300A8C0:D435 06 00000000:00000000 00:00000000 00000000     0        0 6 1
+`
+	if got := establishedOn(table, []uint32{80, 443, 8443}); got != 3 {
+		t.Fatalf("counted %d, want 3: the 443, 8443 and 80 visitors, no listener, no connection of its own, none closing", got)
+	}
+}
+
+// c46: removing a certificate stopped eu-1's proxy the moment the standby took over, and 5 visitors still inside it
+// were reset. It is stopped once what it carries is done.
+func TestProxyGoingDown_theOldProxyKeepsItsVisitorsUntilTheyAreDone(t *testing.T) {
+	wasUp, wasRedirect, wasCarries, wasCgroup, wasDial := standbyUp, holdRedirect, proxyCarries, containerCgroup, frontDoorDial
+	t.Cleanup(func() {
+		standbyUp, holdRedirect, proxyCarries, containerCgroup, frontDoorDial = wasUp, wasRedirect, wasCarries, wasCgroup, wasDial
+	})
+	frontDoorDial = func(context.Context, uint32) (net.Conn, error) { c, _ := net.Pipe(); return c, nil }
+	containerCgroup = func(context.Context, string) (string, error) { return "", errors.New("no cgroup in tests") }
+	holdRedirect = func(map[uint16]uint16) (func(), func(), error) { return func() {}, func() {}, nil }
+	for _, withStandby := range []bool{true, false} {
+		standbyUp = func(context.Context, string, uint32) (standbyDialer, func(), error) {
+			if !withStandby {
+				return nil, nil, errors.New("no standby")
+			}
+			return func(context.Context, uint32) (net.Conn, error) { return nil, errors.New("unused") }, func() {}, nil
+		}
+		var asked atomic.Int32
+		var ports []uint32
+		proxyCarries = func(p []uint32) int { ports = p; return int(3 - asked.Add(1)) }
+		s := New(t.TempDir(), t.TempDir(), "/", t.TempDir())
+		s.forwarders().mu.Lock()
+		s.forwarders().st.AnswerPort = 8443
+		s.forwarders().mu.Unlock()
+		s.proxyGoingDown()
+		s.proxyBack()
+		want := int32(3)
+		if !withStandby {
+			want = 0
+		}
+		if asked.Load() != want {
+			t.Fatalf("standby %v: asked the old proxy %d times, want %d", withStandby, asked.Load(), want)
+		}
+		if withStandby && !slices.Equal(ports, []uint32{80, 443, 8443}) {
+			t.Fatalf("watched ports %v, want the front door and the answer entrypoint", ports)
+		}
+	}
+}
+
+// c49: a joining member took 5.2 s from its link to "Added", most of it starting and ending a standby for a proxy that
+// routed nothing yet. A proxy with no App here, no cluster answers and no connection restarts without one.
+func TestProxyGoingDown_aProxyThatRoutesNothingRestartsWithoutAStandby(t *testing.T) {
+	wasUp, wasRedirect, wasDial, wasRoutes := standbyUp, holdRedirect, frontDoorDial, routesAnApp
+	t.Cleanup(func() { standbyUp, holdRedirect, frontDoorDial, routesAnApp = wasUp, wasRedirect, wasDial, wasRoutes })
+	holdRedirect = func(map[uint16]uint16) (func(), func(), error) { return func() {}, func() {}, nil }
+	frontDoorDial = func(context.Context, uint32) (net.Conn, error) { c, _ := net.Pipe(); return c, nil }
+	var started atomic.Int32
+	standbyUp = func(context.Context, string, uint32) (standbyDialer, func(), error) {
+		started.Add(1)
+		return nil, nil, errors.New("counted")
+	}
+	for _, c := range []struct {
+		name         string
+		app, answers bool
+		want         int32
+	}{
+		{"a joining member", false, false, 0},
+		{"an App here", true, false, 1},
+		{"the cluster's answers", false, true, 1},
+	} {
+		routesAnApp = func(context.Context) bool { return c.app }
+		started.Store(0)
+		s := New(t.TempDir(), t.TempDir(), "/", t.TempDir())
+		if c.answers {
+			s.forwarders().mu.Lock()
+			s.forwarders().st.Answers = []answer{{AppID: "prj1"}}
+			s.forwarders().mu.Unlock()
+		}
+		s.proxyGoingDown()
+		s.proxyBack()
+		if got := started.Load(); got != c.want {
+			t.Fatalf("%s: %d standbys started, want %d", c.name, got, c.want)
+		}
 	}
 }

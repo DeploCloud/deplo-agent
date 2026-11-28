@@ -3,6 +3,7 @@
 package replica
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -12,6 +13,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/DeploCloud/deplo-agent/internal/pace"
 )
 
 // Timing of a sender; vars so tests can hurry them.
@@ -41,6 +44,7 @@ type sender struct {
 	chunks map[Key][]chunk
 	loc    map[[sumLen]byte]place
 	bytes  int64
+	fast   bool
 }
 
 // place is where a receiver holds one chunk: a file, and the offset in it.
@@ -52,15 +56,49 @@ type place struct {
 // Send serves one receiver: it reads its manifest, sends a snapshot of what differs, then every change as it
 // happens, until ctx ends or the stream breaks. names and dirs are the roots, in the order both sides know them.
 func Send(ctx context.Context, conn io.ReadWriter, names, dirs []string) error {
+	return send(ctx, conn, names, dirs, true)
+}
+
+// SendOnce sends one snapshot of what differs and ends: the last changes of an App stopped for its move. It is
+// never paced, and every paced copy here waits for it: the App is down until they land (c46).
+func SendOnce(ctx context.Context, conn io.ReadWriter, names, dirs []string) error {
+	defer pace.First()()
+	return send(ctx, conn, names, dirs, false)
+}
+
+func send(ctx context.Context, conn io.ReadWriter, names, dirs []string, follow bool) error {
 	if len(names) != len(dirs) || len(names) == 0 || len(names) > maxRoots {
 		return errors.New("replica: no roots to send")
 	}
-	held, err := readManifest(newReader(conn))
+	rd := newReader(conn)
+	held, err := readManifest(rd)
 	if err != nil {
 		return err
 	}
+	// What the receiver sends after its manifest is its probe, and its stop: read, so its window never fills.
+	stopped := make(chan struct{})
+	go func() {
+		b := make([]byte, 512)
+		for {
+			n, err := rd.r.Read(b)
+			// A relay stream's close only ends the receiver's writing half: a write blocked on it is woken.
+			if bytes.IndexByte(b[:n], opStop) >= 0 {
+				close(stopped)
+				if c, ok := conn.(interface{ SetWriteDeadline(time.Time) error }); ok {
+					_ = c.SetWriteDeadline(time.Now())
+				}
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	if c, ok := conn.(interface{ SetReadDeadline(time.Time) error }); ok {
+		defer c.SetReadDeadline(time.Now())
+	}
 	s := &sender{w: newWriter(conn), held: map[Key]Entry{}, kids: map[Key]map[string]bool{},
-		chunks: map[Key][]chunk{}, loc: map[[sumLen]byte]place{}}
+		chunks: map[Key][]chunk{}, loc: map[[sumLen]byte]place{}, fast: !follow}
 	for _, d := range dirs {
 		r, err := openRoot(d)
 		if err != nil {
@@ -81,10 +119,28 @@ func Send(ctx context.Context, conn io.ReadWriter, names, dirs []string) error {
 	if err := s.w.str(string(raw)); err != nil {
 		return err
 	}
-	if err := s.snapshot(held); err != nil {
+	err = s.snapshot(held)
+	if err == nil && follow {
+		err = s.follow(ctx)
+	}
+	return byReceiver(ctx, err, stopped)
+}
+
+// stopWait is how long a stream that broke waits for its receiver's stop, which may come just after the break.
+var stopWait = 500 * time.Millisecond
+
+// byReceiver drops the error of a stream its receiver stopped: Deplo held the copy, or it ended, and nothing failed
+// here (c50: every held copy read "endpoint is closed for send" on its sender).
+func byReceiver(ctx context.Context, err error, stopped <-chan struct{}) error {
+	if err == nil || ctx.Err() != nil {
 		return err
 	}
-	return s.follow(ctx)
+	select {
+	case <-stopped:
+		return nil
+	case <-time.After(stopWait):
+		return err
+	}
 }
 
 func (s *sender) closeRoots() {
@@ -253,6 +309,13 @@ func (s *sender) send(k Key, e Entry) error {
 // sendFile writes a file as pieces: each chunk the receiver holds somewhere is a range it copies, the rest its bytes.
 // The end says how big the file is and what its SHA-256 is, so the receiver never keeps one rebuilt wrong.
 func (s *sender) sendFile(k Key, e Entry, f *os.File) (Entry, error) {
+	// Its size first: a receiver without room refuses it before writing any of it (c46: 1.3 GB written, then refused).
+	if err := s.w.byte(opBeat); err != nil {
+		return e, err
+	}
+	if err := s.w.varint(-(e.Size + 1)); err != nil {
+		return e, err
+	}
 	if err := s.w.head(opFile, k); err != nil {
 		return e, err
 	}
@@ -313,7 +376,7 @@ func (s *sender) sendFile(k Key, e Entry, f *os.File) (Entry, error) {
 	}
 	var c chunker
 	buf := make([]byte, 64<<10)
-	in := &behind{f: f}
+	in := &behind{f: f, fast: s.fast}
 	for {
 		n, err := in.Read(buf)
 		if n > 0 {

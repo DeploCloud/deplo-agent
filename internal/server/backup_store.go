@@ -123,6 +123,26 @@ func storeKeyPath(root, key string) (string, error) {
 	return abs, nil
 }
 
+// stepSync sends a landing file to disk a pace step at a time: flushed whole at its end, it held the disk, and every
+// visitor of that server, for a second (c47).
+type stepSync struct {
+	f *os.File
+	n int64
+}
+
+// syncLanding is a var so a test sees when a landing file goes to disk.
+var syncLanding = (*os.File).Sync
+
+func (s *stepSync) Write(p []byte) (int, error) {
+	if s.n += int64(len(p)); s.n >= pace.Step {
+		s.n = 0
+		if err := syncLanding(s.f); err != nil {
+			return 0, err
+		}
+	}
+	return len(p), nil
+}
+
 // storeWrite lands r at key; check, when set, sees what landed before it is kept, and refuses it with an error.
 func storeWrite(root, key string, r io.Reader, overwrite bool, check ...func(n int64, sum string) error) (int64, string, error) {
 	dst, err := storeKeyPath(root, key)
@@ -151,7 +171,7 @@ func storeWrite(root, key string, r io.Reader, overwrite bool, check ...func(n i
 	}()
 
 	sum := sha256.New()
-	n, err := io.Copy(io.MultiWriter(&room.Writer{F: f}, sum), pace.Reader(r))
+	n, err := io.Copy(io.MultiWriter(&room.Writer{F: f}, sum, &stepSync{f: f}), pace.Reader(r))
 	if err != nil {
 		return 0, "", fmt.Errorf("write backup artifact: %w", err)
 	}
@@ -161,7 +181,7 @@ func storeWrite(root, key string, r io.Reader, overwrite bool, check ...func(n i
 			return 0, "", err
 		}
 	}
-	if err := f.Sync(); err != nil {
+	if err := syncLanding(f); err != nil {
 		return 0, "", fmt.Errorf("flush backup artifact: %w", err)
 	}
 	if err := f.Close(); err != nil {

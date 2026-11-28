@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -70,7 +71,8 @@ func (f *forwarders) saveHandover() {
 	f.mu.Lock()
 	now := time.Now()
 	for app, rc := range f.readiness {
-		if rc.ok && now.Before(rc.until) {
+		// Every App it answers for that its last look found ready, visited lately or not (c50: "1 Apps" of 2).
+		if rc.ok && (now.Before(rc.until) || slices.Contains(f.st.ServeAnswers, app)) {
 			h.Ready = append(h.Ready, app)
 		}
 	}
@@ -99,8 +101,11 @@ func (f *forwarders) takeHandover() {
 		}
 		proxyPid.Unlock()
 	}
+	stderrf("deplo-agent: cluster: started from what its last run knew of %d Apps, docker waits until %d ms after the start",
+		len(h.Ready), startQuiet.Milliseconds())
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.handedOver = true
 	until := time.Now().Add(answerReadyFor)
 	for _, app := range h.Ready {
 		if f.readiness[app] == nil {

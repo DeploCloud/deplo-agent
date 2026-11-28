@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -242,5 +243,38 @@ func TestHoldFailoverImages_aBusyMemberIsWaitedForNotTheRegistry(t *testing.T) {
 	dst.mu.Unlock()
 	if body != "ARCHIVE of ghcr.io/acme/web:2" || downloads.Load() != 0 {
 		t.Fatalf("b loaded %q and downloaded %d times", body, downloads.Load())
+	}
+}
+
+// c44: node:22 sent by a member would not load on a clone ("failed commit ... rename") and turned up 62 s later with
+// no line saying from where. An image that will not load comes from the registry at once, and the log says so.
+func TestHoldFailoverImages_anImageAMemberSentThatWillNotLoadComesFromTheRegistry(t *testing.T) {
+	a, b, src, dst, downloads := imageMembers(t)
+	// The asker is not the cluster's first member: with no failure it would wait for that one to download.
+	if _, first := b.clusterPeers(); first {
+		a, b, src, dst = b, a, dst, src
+	}
+	const ref = "ghcr.io/acme/web:2"
+	src.mu.Lock()
+	src.tags = append(src.tags, ref)
+	src.mu.Unlock()
+	dst.mu.Lock()
+	dst.loadErr = errors.New("failed commit on ref: rename")
+	dst.mu.Unlock()
+	pull := failoverPull
+	failoverPull = func(context.Context, string) error { downloads.Add(1); return nil }
+	t.Cleanup(func() { failoverPull = pull })
+	im := &pb.FailoverImage{ImageRef: ref}
+	holdAll(t, a, im)
+	pullsSettled(t, a)
+	log := captureStderr(t, func() {
+		holdAll(t, b, im)
+		pullsSettled(t, b)
+	})
+	if downloads.Load() != 1 || !holdAll(t, b, im)[ref].GetHeld() {
+		t.Fatalf("downloaded %d times, held %v: the registry is next once a member's image will not load", downloads.Load(), holdAll(t, b, im)[ref])
+	}
+	if !strings.Contains(log, "could not take "+ref+" from the cluster's member") || !strings.Contains(log, "downloaded "+ref+" from its registry") {
+		t.Fatalf("the log does not say where the image came from: %q", log)
 	}
 }

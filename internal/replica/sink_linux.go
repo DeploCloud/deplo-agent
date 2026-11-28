@@ -15,8 +15,10 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/DeploCloud/deplo-agent/internal/pace"
 	"github.com/DeploCloud/deplo-agent/internal/room"
 )
 
@@ -24,10 +26,41 @@ import (
 // stream until ctx ends or the stream breaks; the copy stays as it is between two streams. ix carries what the
 // copy's files hold from one stream to the next, so a reconnect does not read them all again.
 func Receive(ctx context.Context, conn io.ReadWriter, dir string, names []string, st *Status, ix *Index) error {
+	return receive(ctx, conn, dir, names, st, ix, false)
+}
+
+// ReceiveFirst is Receive for a stopped App's last changes: never paced, and every paced copy here waits for it.
+func ReceiveFirst(ctx context.Context, conn io.ReadWriter, dir string, names []string, st *Status, ix *Index) error {
+	defer pace.First()()
+	return receive(ctx, conn, dir, names, st, ix, true)
+}
+
+// ProbeEvery is how often a receiver writes to its sender: a sender gone with its close lost answers it with a reset,
+// so the copy dials again instead of waiting on a quiet stream (c49: 15 minutes).
+var ProbeEvery = 2 * time.Second
+
+// probe beats towards the sender until stop; a write that fails says why.
+func probe(stop <-chan struct{}, conn io.Writer, failed func(error)) {
+	t := time.NewTicker(ProbeEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-t.C:
+			if _, err := conn.Write([]byte{opBeat}); err != nil {
+				failed(err)
+				return
+			}
+		}
+	}
+}
+
+func receive(ctx context.Context, conn io.ReadWriter, dir string, names []string, st *Status, ix *Index, fast bool) (err error) {
 	if len(names) == 0 || len(names) > maxRoots {
 		return errors.New("replica: no roots to receive")
 	}
-	rc := &receiving{st: st, held: map[Key]Entry{}, buf: make([]byte, maxChunk)}
+	rc := &receiving{st: st, held: map[Key]Entry{}, buf: make([]byte, maxChunk), next: -1, fast: fast}
 	for _, n := range names {
 		p := filepath.Join(dir, rootDir(n))
 		if err := os.MkdirAll(p, 0o700); err != nil {
@@ -46,12 +79,16 @@ func Receive(ctx context.Context, conn io.ReadWriter, dir string, names []string
 	}
 	for i, r := range rc.roots {
 		err := r.walk(func(rel string, e Entry) error {
+			// A receiver stopped for its App's move must not read the whole copy first.
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			k := Key{uint8(i), rel}
 			if e.Kind == kindFile {
 				list, ok := ix.lookup(names, k, e)
 				if !ok {
 					var err error
-					list, e.Size, err = r.chunksOf(rel)
+					list, e.Size, err = r.chunksOf(rel, fast)
 					if errors.Is(err, os.ErrNotExist) {
 						return nil
 					}
@@ -107,22 +144,35 @@ func Receive(ctx context.Context, conn io.ReadWriter, dir string, names []string
 	}
 	// A copy stopped for room says so until a whole snapshot lands: the next stream would clear it before Deplo reads it.
 	st.set(func(s *Status) {
-		s.Connected = true
+		s.Connected, s.Synced = true, false
 		if !strings.Contains(s.Err, room.Marker) {
 			s.Err = ""
 		}
 	})
 	defer st.set(func(s *Status) { s.Connected = false })
-	// A relay stream's close only ends its writing half: a read waiting on it is woken by a deadline.
-	go func() {
-		<-ctx.Done()
+	wake := func() {
 		if c, ok := conn.(interface{ SetReadDeadline(time.Time) error }); ok {
 			_ = c.SetReadDeadline(time.Now())
 		}
+	}
+	// A relay stream's close only ends its writing half: a read waiting on it is woken by a deadline.
+	go func() {
+		<-ctx.Done()
+		wake()
+		_, _ = conn.Write([]byte{opStop})
 		if c, ok := conn.(io.Closer); ok {
 			c.Close()
 		}
 	}()
+	stop := make(chan struct{})
+	defer close(stop)
+	var probed atomic.Value
+	defer func() {
+		if p, _ := probed.Load().(error); p != nil && err != nil {
+			err = p
+		}
+	}()
+	go probe(stop, conn, func(err error) { probed.Store(err); wake() })
 	var seen map[Key]bool
 	for {
 		op, err := rd.byte()
@@ -147,8 +197,12 @@ func Receive(ctx context.Context, conn io.ReadWriter, dir string, names []string
 			st.set(func(s *Status) { s.Synced, s.Err = true, "" })
 			touch()
 		case opBeat:
-			if _, err := rd.varint(); err != nil {
+			v, err := rd.varint()
+			if err != nil {
 				return err
+			}
+			if rc.next = -1; v < 0 {
+				rc.next = -v - 1
 			}
 			touch()
 		case opFile, opDir, opLink, opKeep, opDelete:
@@ -159,7 +213,9 @@ func Receive(ctx context.Context, conn io.ReadWriter, dir string, names []string
 			if seen != nil {
 				seen[k] = true
 			}
-			if err := rc.apply(op, k); err != nil {
+			err = rc.apply(op, k)
+			rc.next = -1
+			if err != nil {
 				return fmt.Errorf("replica: %s: %w", k.Path, err)
 			}
 			touch()
@@ -178,6 +234,9 @@ type receiving struct {
 	buf   []byte
 	// wrong is set when the copy turned out not to hold what this side said it did.
 	wrong bool
+	// next is the size the sender gave the next file, -1 when it gave none.
+	next int64
+	fast bool
 }
 
 func (rc *receiving) apply(op byte, k Key) error {
@@ -264,8 +323,8 @@ func (rc *receiving) file(k Key, e Entry) error {
 	}()
 	sum := sha256.New()
 	var list listOf
-	gw := &gentle{f: t.f}
-	if prev, ok := rc.held[k]; ok && prev.Kind == kindFile {
+	gw := &gentle{f: t.f, need: max(rc.next, 0), fast: rc.fast}
+	if prev, ok := rc.held[k]; ok && prev.Kind == kindFile && rc.next < 0 {
 		gw.need = prev.Size
 	}
 	out := bufio.NewWriterSize(io.MultiWriter(gw, sum, &list), 256<<10)

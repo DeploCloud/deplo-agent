@@ -5,12 +5,14 @@ package replica
 import (
 	"bytes"
 	"context"
+	"errors"
 	"math/rand/v2"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/DeploCloud/deplo-agent/internal/room"
@@ -572,5 +574,237 @@ func TestReplica_aNewStreamDropsWhatAnEarlierRunLeftHalfRebuilt(t *testing.T) {
 	eventually(t, "snapshot", synced(st))
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Fatal("the half-rebuilt file of an earlier run is still in the copy")
+	}
+}
+
+// c46: eu-1 wrote 1.3 GB of a copy it had no room for, then refused it at its floor: the file's size comes first now.
+func TestReplica_aFileThatDoesNotFitIsRefusedBeforeAnyOfItIsWritten(t *testing.T) {
+	was, wasFlush := room.StatFile, flushRange
+	room.StatFile = func(*os.File) (int64, int64, bool) { return 1<<30 + 2*gentleStep, 10 << 30, true }
+	var flushed int
+	flushRange = func(f *os.File, off, n int64) { flushed++; wasFlush(f, off, n) }
+	t.Cleanup(func() { room.StatFile, flushRange = was, wasFlush })
+	src := t.TempDir()
+	os.WriteFile(filepath.Join(src, "big.bin"), noise(4*gentleStep, 13), 0o644)
+	dir := t.TempDir()
+	_, got, stop := stream(t, src, dir, NewIndex())
+	defer stop()
+	select {
+	case err := <-got:
+		if err == nil || !strings.Contains(err.Error(), "has 1.0 GB free, too little for this copy (about 32.0 MB)") {
+			t.Fatalf("the copy ended with %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a file that does not fit was copied")
+	}
+	if flushed != 0 {
+		t.Fatalf("%d steps of a file that does not fit were written", flushed)
+	}
+}
+
+// c46: the second move onto one member waited stopped 10 to 17 s; its last changes now go first, never paced.
+func TestReplica_aStoppedAppsLastChangesGoFirst(t *testing.T) {
+	src := t.TempDir()
+	os.WriteFile(filepath.Join(src, "big.bin"), noise(3*gentleStep+5, 14), 0o644)
+	mid, goOn := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	was := flushRange
+	flushRange = func(f *os.File, off, n int64) {
+		once.Do(func() { close(mid); <-goOn })
+		was(f, off, n)
+	}
+	t.Cleanup(func() { flushRange = was })
+	before := pace.Looks.Load()
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	defer ln.Close()
+	go func() {
+		if c, err := ln.Accept(); err == nil {
+			defer c.Close()
+			_ = SendOnce(context.Background(), c, []string{VolumeRoot("data")}, []string{src})
+		}
+	}()
+	c, _ := net.Dial("tcp", ln.Addr().String())
+	defer c.Close()
+	st := &Status{}
+	done := make(chan error, 1)
+	go func() {
+		done <- ReceiveFirst(context.Background(), c, t.TempDir(), []string{VolumeRoot("data")}, st, NewIndex())
+	}()
+	<-mid
+	moved := make(chan struct{})
+	go func() {
+		var p pace.Pacer
+		p.Moved(pace.Step)
+		close(moved)
+	}()
+	select {
+	case <-moved:
+		t.Fatal("another copy went on beside a stopped App's last changes")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(goOn)
+	<-done
+	if _, synced, _, _, _ := st.Snapshot(); !synced {
+		t.Fatal("the last changes did not land")
+	}
+	<-moved
+	if n := pace.Looks.Load() - before; n != 1 {
+		t.Fatalf("the last changes were paced: %d looks", n-1)
+	}
+}
+
+// lostClose is a stream whose sender is gone and whose close never arrived: nothing more comes, and what the receiver
+// writes is answered with a reset.
+type lostClose struct {
+	net.Conn
+	gone atomic.Bool
+	once sync.Once
+	woke chan struct{}
+}
+
+func (c *lostClose) Read(p []byte) (int, error) {
+	if c.gone.Load() {
+		<-c.woke
+		return 0, os.ErrDeadlineExceeded
+	}
+	return c.Conn.Read(p)
+}
+
+func (c *lostClose) Write(p []byte) (int, error) {
+	if c.gone.Load() {
+		return 0, errors.New("connection reset by peer")
+	}
+	return c.Conn.Write(p)
+}
+
+func (c *lostClose) SetReadDeadline(t time.Time) error {
+	c.once.Do(func() { close(c.woke) })
+	return c.Conn.SetReadDeadline(t)
+}
+
+// c49: lab-kit-c's copy ended on its sender with "endpoint is closed for send", the close never reached the receiver
+// and it waited on the quiet stream for 15 minutes. The receiver probes its sender: the reset ends the stream.
+func TestReplica_aSenderGoneWithItsCloseLostEndsTheStream(t *testing.T) {
+	was := ProbeEvery
+	ProbeEvery = 50 * time.Millisecond
+	t.Cleanup(func() { ProbeEvery = was })
+	src := t.TempDir()
+	putWhole(t, filepath.Join(src, "a.txt"), []byte("one"))
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		c, err := ln.Accept()
+		if err == nil {
+			defer c.Close()
+			_ = Send(ctx, c, []string{VolumeRoot("data")}, []string{src})
+		}
+	}()
+	raw, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { raw.Close() })
+	c := &lostClose{Conn: raw, woke: make(chan struct{})}
+	st := &Status{}
+	got := make(chan error, 1)
+	go func() { got <- Receive(ctx, c, t.TempDir(), []string{VolumeRoot("data")}, st, NewIndex()) }()
+	eventually(t, "a whole copy", synced(st))
+	c.gone.Store(true)
+	select {
+	case err := <-got:
+		if err == nil || !strings.Contains(err.Error(), "reset") {
+			t.Fatalf("the stream ended with %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the copy still waits on a sender that is gone")
+	}
+}
+
+// slowConn reads at most 16 KB at a time, 5 ms apart: a busy receiver.
+type slowConn struct{ net.Conn }
+
+func (c slowConn) Read(p []byte) (int, error) {
+	time.Sleep(5 * time.Millisecond)
+	return c.Conn.Read(p[:min(len(p), 16<<10)])
+}
+
+// dialed runs Send over src on a fresh socket, a sender that ends only on its own error; sent says how it ended.
+func dialed(t *testing.T, src string) (c net.Conn, sent <-chan error) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	out := make(chan error, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			out <- err
+			return
+		}
+		defer c.Close()
+		out <- Send(context.Background(), c, []string{VolumeRoot("data")}, []string{src})
+	}()
+	raw, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { raw.Close() })
+	return raw, out
+}
+
+// c50: a copy Deplo held for its turn came back on its old 64 MB and read "Up to date" from its first record, so a
+// move took the App's 120 MiB itself. Until a stream's snapshot lands, its copy is not current.
+func TestReplica_aCopyIsCurrentOnlyOnceItsStreamsSnapshotLanded(t *testing.T) {
+	src, dir := t.TempDir(), t.TempDir()
+	putWhole(t, filepath.Join(src, "a.txt"), []byte("one"))
+	st := &Status{}
+	ctx, cancel := context.WithCancel(context.Background())
+	c, _ := dialed(t, src)
+	got := make(chan error, 1)
+	go func() { got <- Receive(ctx, c, dir, []string{VolumeRoot("data")}, st, NewIndex()) }()
+	eventually(t, "a whole copy", synced(st))
+	cancel()
+	<-got
+
+	putWhole(t, filepath.Join(src, "big"), noise(4<<20, 7))
+	ctx, cancel = context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	c, _ = dialed(t, src)
+	go func() { got <- Receive(ctx, slowConn{c}, dir, []string{VolumeRoot("data")}, st, NewIndex()) }()
+	eventually(t, "the next stream", func() bool { connected, _, _, _, _ := st.Snapshot(); return connected })
+	if _, isSynced, _, _, _ := st.Snapshot(); isSynced {
+		t.Fatal("a copy still taking 4 MB says it is current")
+	}
+	eventually(t, "the next snapshot", synced(st))
+}
+
+// c50: Deplo held three copies of lab-kit-b for their turn; each sender logged "endpoint is closed for send" and
+// said its member dials again, which it did not. A receiver that stops says so, and its sender ends quietly.
+func TestReplica_aReceiverThatStopsEndsItsSenderWithoutAnError(t *testing.T) {
+	src := t.TempDir()
+	putWhole(t, filepath.Join(src, "big"), noise(16<<20, 3))
+	c, sent := dialed(t, src)
+	ctx, cancel := context.WithCancel(context.Background())
+	st := &Status{}
+	got := make(chan error, 1)
+	go func() { got <- Receive(ctx, slowConn{c}, t.TempDir(), []string{VolumeRoot("data")}, st, NewIndex()) }()
+	eventually(t, "the stream", func() bool { connected, _, _, _, _ := st.Snapshot(); return connected })
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	<-got
+	select {
+	case err := <-sent:
+		if err != nil {
+			t.Fatalf("the sender called its receiver's stop a failure: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the sender still sends to a receiver that stopped")
 	}
 }

@@ -10,11 +10,14 @@ import (
 	"io"
 	"net"
 	"os"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 	"github.com/DeploCloud/deplo-agent/internal/forwarder"
 )
 
@@ -253,16 +256,100 @@ func (s *Service) proxyGoingDown() {
 		s.forwarders().proxyStopping(nil)
 		return
 	}
-	dial, end, err := standbyUp(context.Background(), s.agentDir, s.forwarders().state().AnswerPort)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "deplo-agent: no standby proxy: visitors wait for the new one (%v)\n", err)
+	var dial standbyDialer
+	var end func()
+	if !s.proxyRoutesNothing() {
+		var err error
+		if dial, end, err = standbyUp(context.Background(), s.agentDir, s.forwarders().state().AnswerPort); err != nil {
+			fmt.Fprintf(os.Stderr, "deplo-agent: no standby proxy: visitors wait for the new one (%v)\n", err)
+		}
 	}
 	if dial != nil {
 		dial, end = countedStandby(dial, end)
+		proxyFirst(context.Background(), standbyContainer)
 	}
 	s.forwarders().proxyStopping(dial)
 	s.frontRelease = s.holdFrontDoor(dial)
 	s.frontStandbyEnd = end
+	if dial != nil {
+		ports := frontDoorPorts
+		if p := s.forwarders().state().AnswerPort; p != 0 {
+			ports = append(slices.Clone(ports), p)
+		}
+		for until := time.Now().Add(oldProxyDrain); proxyCarries(ports) > 0 && time.Now().Before(until); {
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+}
+
+// proxyRoutesNothing says this server's proxy has no visitor to keep: no App here asks it for a route, it holds no
+// cluster answers and carries no connection. Such a proxy, a joining member's, restarts with no standby (c49: 5 s).
+func (s *Service) proxyRoutesNothing() bool {
+	if len(s.forwarders().state().Answers) > 0 {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if routesAnApp(ctx) {
+		return false
+	}
+	ports := frontDoorPorts
+	if p := s.forwarders().state().AnswerPort; p != 0 {
+		ports = append(slices.Clone(ports), p)
+	}
+	return proxyCarries(ports) == 0
+}
+
+// routesAnApp says a running container asks this server's proxy for a route, or docker could not say; tests replace it.
+var routesAnApp = func(ctx context.Context) bool {
+	res, err := dockercli.Run(ctx, 10*time.Second, "ps", "-q", "--filter", "label=traefik.enable=true")
+	return err != nil || res.Code != 0 || strings.TrimSpace(res.Stdout) != ""
+}
+
+// oldProxyDrain bounds how long the proxy being replaced keeps what it carries once the standby takes every new
+// visitor, before it is stopped (c46: stopped under them, 5 were reset).
+var oldProxyDrain = 5 * time.Second
+
+// proxyCarries counts the visitors this server's proxy still carries on ports; tests replace it.
+var proxyCarries = func(ports []uint32) int {
+	pid, err := lookupProxyPid(context.Background(), 0)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, table := range []string{"tcp", "tcp6"} {
+		if raw, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/net/" + table); err == nil {
+			n += establishedOn(string(raw), ports)
+		}
+	}
+	return n
+}
+
+// establishedOn counts the established connections of a /proc/net/tcp table whose local port is one of ports.
+func establishedOn(table string, ports []uint32) int {
+	n := 0
+	for _, line := range strings.Split(table, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 4 || f[3] != "01" {
+			continue
+		}
+		_, hex, _ := strings.Cut(f[1], ":")
+		if port, err := strconv.ParseUint(hex, 16, 16); err == nil && slices.Contains(ports, uint32(port)) {
+			n++
+		}
+	}
+	return n
+}
+
+// newProxyWeight puts the new proxy at the agent's weight at once when visitors wait for it (c43: 3.6 s to its routes),
+// and once it takes them back from a standby otherwise (proxyBack).
+func (s *Service) newProxyWeight(ctx context.Context) {
+	s.frontMu.Lock()
+	standby := s.frontStandbyEnd != nil
+	s.frontMu.Unlock()
+	if !standby {
+		proxyFirst(ctx, traefikContainer)
+	}
 }
 
 // standbyDrain bounds how long the standby outlives the restart for a visitor it still carries.
@@ -295,10 +382,14 @@ func (s *Service) proxyBack() {
 	release, end := s.frontRelease, s.frontStandbyEnd
 	s.frontRelease, s.frontStandbyEnd = nil, nil
 	s.frontMu.Unlock()
+	if end != nil {
+		proxyFirst(context.Background(), traefikContainer)
+	}
 	if release != nil {
 		release()
 	}
 	if end != nil {
+		proxyAside(context.Background(), standbyContainer)
 		// The standby serves until the new proxy is settled, then lets what it carries finish.
 		go func() {
 			time.Sleep(proxySettle)

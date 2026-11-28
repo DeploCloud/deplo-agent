@@ -634,31 +634,35 @@ func (f *forwarders) ready(ctx context.Context, appID string) bool {
 		if ops := f.ops(); ops.ready != nil {
 			r = ops.ready(ctx, appID)
 		}
-		now := time.Now()
 		f.mu.Lock()
-		since := r.Since
-		if !r.OK {
-			delete(f.readySeen, appID)
-		} else if r.Health {
-			if f.readySeen[appID].IsZero() {
-				f.readySeen[appID] = now
-			}
-			if seen := f.readySeen[appID]; seen.After(since) {
-				since = seen
-			}
-		}
-		rc.ok = r.OK && now.Sub(since) >= f.settleFor()
-		rc.broken = r.Broken
-		rc.until = now.Add(answerRetry)
-		if rc.ok {
-			rc.until = now.Add(answerReadyFor)
-			f.keepHandover()
-		}
+		f.noteReadiness(appID, rc, r, time.Now())
 		rc.pending = nil
 		close(done)
 		ok := rc.ok
 		f.mu.Unlock()
 		return ok
+	}
+}
+
+// noteReadiness keeps what one look found of an App here; the caller holds f.mu.
+func (f *forwarders) noteReadiness(appID string, rc *answerReadyCheck, r appReadiness, now time.Time) {
+	since := r.Since
+	if !r.OK {
+		delete(f.readySeen, appID)
+	} else if r.Health {
+		if f.readySeen[appID].IsZero() {
+			f.readySeen[appID] = now
+		}
+		if seen := f.readySeen[appID]; seen.After(since) {
+			since = seen
+		}
+	}
+	rc.ok = r.OK && now.Sub(since) >= f.settleFor()
+	rc.broken = r.Broken
+	rc.until = now.Add(answerRetry)
+	if rc.ok {
+		rc.until = now.Add(answerReadyFor)
+		f.keepHandover()
 	}
 }
 
@@ -754,6 +758,9 @@ func (f *forwarders) serveAnswerStream(from wire.Party, c net.Conn, network, app
 		up.Close()
 		return
 	}
+	f.passedOn.Do(func() {
+		stderrf("deplo-agent: cluster: first visitor passed on here %d ms after the agent started", time.Since(agentStarted).Milliseconds())
+	})
 	f.carry(appID, c, up)
 }
 

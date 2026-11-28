@@ -139,6 +139,8 @@ var Capabilities = []string{
 	"backup.postgres-archive",
 	"cluster.standby",
 	"cluster.replicas",
+	// PromoteClusterReplica: a move takes its App's last changes into the copy here and puts it in place.
+	"cluster.replicas.move",
 	"cluster.network",
 	// SetClusterRotations: a peer that rotated its key is still reached, and still known, by its old one (ADR-0050).
 	"cluster.rotation",
@@ -171,6 +173,8 @@ var Capabilities = []string{
 	"panel.claim",
 	// SetClusterNetwork's retire_public_key: a caught copy's network key is replaced with its identity (ADR-0050).
 	"network.rekey",
+	// SetClusterNetwork's next_key and rotate_to_public_key: a network key replaced with no outage.
+	"network.rotate",
 	// A failover start refuses while this server holds no valid certificate a domain of the App has (ADR-0049).
 	"failover.certificates",
 	// A line of succession: pre-votes, one leader per epoch, and a member next in line asks the leader beside it to lead.
@@ -189,6 +193,8 @@ var Capabilities = []string{
 	"teardown.set-aside",
 	// ExpectClusterBackup and BackupRequest.member_fingerprint: a backup goes member to member, not through Deplo.
 	"backup-store.member",
+	// A Postgres base backup or change log goes member to member too, not only a dump (deplo c44).
+	"backup-store.member-archive",
 	// ExpectClusterFetch and RestoreRequest.member_fingerprint: a restore reads a backup member to member.
 	"backup-store.fetch",
 	// ExpectClusterVolume and SendClusterVolume: a move copies a volume member to member, not through Deplo.

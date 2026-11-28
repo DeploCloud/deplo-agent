@@ -394,3 +394,167 @@ func TestMesh_aKeyThatMovesToANewCertificateStaysUp(t *testing.T) {
 	defer c.Close()
 	roundTrip(t, c, "after the renewal")
 }
+
+// c46: a member's power cut read as "reaches it through the relay" for 3 minutes, and Deplo moved the leader.
+func TestMesh_aPeerThatWentSilentIsNotReadAsRelayed(t *testing.T) {
+	r := &fakeRelay{}
+	a, b := start(t, r, fpA, "fdde:9100::a"), start(t, r, fpB, "fdde:9100::b")
+	connect(t, a, b, true)
+	echo(t, b)
+	roundTrip(t, dial(t, a, b), "directly")
+	waitPath(t, a.m, fpB, PathDirect)
+	r.mu.Lock()
+	r.off = true
+	r.mu.Unlock()
+	b.m.Close()
+	waitPath(t, a.m, fpB, PathNone)
+}
+
+// c46 printed eu-1's private key: a key replaced while a connection runs keeps it, and peers take only the named one.
+func TestMesh_aKeyRotatedInPlaceKeepsItsConnections(t *testing.T) {
+	a, b := start(t, nil, fpA, "fdde:9100::a"), start(t, nil, fpB, "fdde:9100::b")
+	connect(t, a, b, true)
+	echo(t, b)
+	c := dial(t, a, b)
+	roundTrip(t, c, "under the first key")
+	next, err := NewPrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextPub, _ := next.Public()
+	peer := b.as(true)
+	peer.Next = nextPub
+	if err := a.m.SetPeers([]Peer{peer}); err != nil {
+		t.Fatal(err)
+	}
+	// WireGuard takes one initiation per peer each 20 ms: a rotation comes long after the last one.
+	time.Sleep(100 * time.Millisecond)
+	if err := b.m.Rotate(next); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now()
+	roundTrip(t, c, "under the next key, on the same connection")
+	if took := time.Since(at); took > 2*time.Second {
+		t.Fatalf("the connection stalled %v across the rotation", took)
+	}
+	a.m.mu.RLock()
+	took := a.m.peers[fpB].PublicKey == nextPub
+	a.m.mu.RUnlock()
+	if !took {
+		t.Fatal("the peer still knows the old key")
+	}
+}
+
+// c46: after eu-1's agent was killed, visitors carried to it got their answer 4 to 5 s after it was back.
+func TestMesh_aDialReachesAPeerWithinASecondOfItsReturn(t *testing.T) {
+	a, b := start(t, nil, fpA, "fdde:9100::a"), start(t, nil, fpB, "fdde:9100::b")
+	connect(t, a, b, true)
+	echo(t, b)
+	roundTrip(t, dial(t, a, b), "before")
+	port, addr := b.m.Port(), b.m.Address()
+	b.m.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	got := make(chan net.Conn, 1)
+	go func() {
+		c, err := a.m.Dial(ctx, fpB, servicePort)
+		if err != nil {
+			t.Log(err)
+		}
+		got <- c
+	}()
+	time.Sleep(3500 * time.Millisecond)
+	m, err := Start(Config{PrivateKey: b.key, Address: addr, Port: port, Logf: t.Logf})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { m.Close() })
+	echo(t, side{m: m, key: b.key, fp: fpB})
+	back := time.Now()
+	if err := m.SetPeers([]Peer{a.as(true)}); err != nil {
+		t.Fatal(err)
+	}
+	c := <-got
+	if c == nil {
+		t.Fatal("the dial never reached the peer")
+	}
+	c.Close()
+	if late := time.Since(back); late > 1500*time.Millisecond {
+		t.Fatalf("the dial reached the peer %v after it was back", late)
+	}
+}
+
+// c48: a renewal sent while a member's agent was down reached it 2 s after its return, at its dial's next SYN.
+func TestMesh_aDialReachesAPeerAsSoonAsItsNextRunIsHeard(t *testing.T) {
+	was := dialEvery
+	dialEvery = time.Minute
+	t.Cleanup(func() { dialEvery = was })
+	a, b := start(t, nil, fpA, "fdde:9100::a"), start(t, nil, fpB, "fdde:9100::b")
+	connect(t, a, b, true)
+	echo(t, b)
+	roundTrip(t, dial(t, a, b), "before")
+	port, addr := b.m.Port(), b.m.Address()
+	b.m.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	got := make(chan net.Conn, 1)
+	go func() {
+		c, _ := a.m.Dial(ctx, fpB, servicePort)
+		got <- c
+	}()
+	// Back between TCP's own tries of the first SYN, 1 and 3 s after it.
+	time.Sleep(1200 * time.Millisecond)
+	m, err := Start(Config{PrivateKey: b.key, Address: addr, Port: port, Logf: t.Logf})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { m.Close() })
+	echo(t, side{m: m, key: b.key, fp: fpB})
+	back := time.Now()
+	if err := m.SetPeers([]Peer{a.as(true)}); err != nil {
+		t.Fatal(err)
+	}
+	c := <-got
+	if c == nil {
+		t.Fatal("the dial never reached the peer")
+	}
+	roundTrip(t, c, "after")
+	c.Close()
+	if late := time.Since(back); late > 500*time.Millisecond {
+		t.Fatalf("the dial reached the peer %v after it was back", late)
+	}
+}
+
+// c50: a new member learns its peers before they learn it; once they do, their ping opens its path, not its own next one.
+func TestMesh_aMemberThePeersLearnLastReachesThemAtOnce(t *testing.T) {
+	// Its own pings never open the path here: only the peer's can.
+	was := pingOther
+	pingOther = time.Minute
+	t.Cleanup(func() { pingOther = was })
+	a, b := start(t, nil, fpA, "fdde:9100::a"), start(t, nil, fpB, "fdde:9100::b")
+	echo(t, b)
+	if err := a.m.SetPeers([]Peer{b.as(true)}); err != nil {
+		t.Fatal(err)
+	}
+	// Its handshakes go unanswered meanwhile: WireGuard tries again only 5 s after each.
+	time.Sleep(2500 * time.Millisecond)
+	learned := time.Now()
+	if err := b.m.SetPeers([]Peer{a.as(true)}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c, err := a.m.Dial(ctx, fpB, servicePort)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTrip(t, c, "joined")
+	c.Close()
+	t.Logf("reached %v after the peer learned it", time.Since(learned))
+	waitPath(t, a.m, fpB, PathDirect)
+	waitPath(t, b.m, fpA, PathDirect)
+	t.Logf("direct both ways %v after", time.Since(learned))
+	if late := time.Since(learned); late > 500*time.Millisecond {
+		t.Fatalf("the member reached its peer %v after the peer learned it", late)
+	}
+}

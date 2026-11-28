@@ -237,13 +237,16 @@ type leaseGuard struct {
 	wmu              sync.Mutex
 	// relinquished is the member each stack was last said to run on, so the stop is said once (see relinquishLocked).
 	relinquished map[string]string
+	// renewals counts the renewals this run took; firstRenewal is closed at the first one (see afterStart).
+	renewals     uint64
+	firstRenewal chan struct{}
 }
 
 // unreadableLease names the lease a file that would not open stands for: one that ran out, of nobody knows what.
 const unreadableLease = "unreadable"
 
 func newLeaseGuard(file string, now func() time.Time, fence func(context.Context, []lease.Entry) error) *leaseGuard {
-	g := &leaseGuard{file: file, now: now, fence: fence, clusters: map[string]*clusterLease{}, settling: map[string]bool{}, relinquishing: map[string]bool{}, starting: map[string]time.Time{}, keeps: map[string]map[string]lease.Keep{}, stores: map[string][]lease.Store{}, retryAt: map[string]time.Time{}, retryWait: map[string]time.Duration{}, logf: stderrf, asking: map[string]bool{}, asked: map[string]string{}, relinquished: map[string]string{}}
+	g := &leaseGuard{file: file, now: now, fence: fence, clusters: map[string]*clusterLease{}, settling: map[string]bool{}, relinquishing: map[string]bool{}, starting: map[string]time.Time{}, keeps: map[string]map[string]lease.Keep{}, stores: map[string][]lease.Store{}, retryAt: map[string]time.Time{}, retryWait: map[string]time.Duration{}, logf: stderrf, asking: map[string]bool{}, asked: map[string]string{}, relinquished: map[string]string{}, firstRenewal: make(chan struct{})}
 	if raw, err := os.ReadFile(file); err == nil {
 		if err := json.Unmarshal(raw, &g.clusters); err != nil {
 			fmt.Fprintf(os.Stderr, "deplo-agent: the cluster lease in %s cannot be read (%v): taken as a lease that ran out\n", file, err)
@@ -434,8 +437,11 @@ func (g *leaseGuard) Admit(cluster string, epoch uint64) (held uint64, ok bool) 
 
 // Renew applies one renewal: it takes the epoch and the placement, and starts the lease over. A new epoch, or a
 // new leader, is on disk before it answers; a plain renewal is written after.
-func (g *leaseGuard) Renew(o lease.Order) lease.Reply {
-	r, taken := g.renew(o)
+func (g *leaseGuard) Renew(o lease.Order) lease.Reply { return g.renewRead(o, 0) }
+
+// renewRead is Renew for an order its stream took read to bring: a late renewal says where its time went.
+func (g *leaseGuard) renewRead(o lease.Order, read time.Duration) lease.Reply {
+	r, taken := g.renew(o, read)
 	if taken {
 		g.sync()
 	}
@@ -447,19 +453,29 @@ func taking(c *clusterLease, o lease.Order) bool {
 	return c == nil || c.Epoch != o.Epoch || o.From != "" && c.Leader != o.From
 }
 
-func (g *leaseGuard) renew(o lease.Order) (lease.Reply, bool) {
+func (g *leaseGuard) renew(o lease.Order, read time.Duration) (lease.Reply, bool) {
+	asked := time.Now()
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	waited := time.Since(asked)
 	if c := g.clusters[o.Cluster]; g.refuse(c, o) != "" {
 		return lease.Reply{Error: g.refuse(c, o), Epoch: c.Epoch}, false
 	}
 	prev := g.clusters[o.Cluster]
 	taken := taking(prev, o)
+	if g.renewals++; g.renewals == 1 {
+		close(g.firstRenewal)
+		stderrf("deplo-agent: cluster %s: first renewal %d ms after the agent started", o.Cluster, time.Since(agentStarted).Milliseconds())
+	}
 	// A late renewal is the first sign of a server too busy for its leases: said, so a test can prove there was none.
 	// A new leader's first one counts too: a hand-over must not cost a renewal either.
 	if gap := g.now().Sub(prev.lastRenewed()); prev != nil && prev.heard && gap > lateRenewal {
-		g.logf("deplo-agent: cluster %s: a renewal came %.1fs after the one before%s", o.Cluster, gap.Seconds(),
-			map[bool]string{true: ", from a new leader"}[taken])
+		sent := "the leader had not heard this server"
+		if ago, ok := o.Heard[o.Member]; ok {
+			sent = fmt.Sprintf("the leader sent it %d ms after this server's last answer", ago)
+		}
+		g.logf("deplo-agent: cluster %s: a renewal came %.1fs after the one before%s: %s, its stream took %d ms to read and the lease %d ms to be free",
+			o.Cluster, gap.Seconds(), map[bool]string{true: ", from a new leader"}[taken], sent, read.Milliseconds(), waited.Milliseconds())
 	}
 	from := o.From
 	// An order that names nobody keeps the leader its epoch was given to: one epoch stays one leader's.
@@ -489,8 +505,8 @@ func (g *leaseGuard) renew(o lease.Order) (lease.Reply, bool) {
 	return r, taken
 }
 
-// lateRenewal is a gap between renewals, sent every second, worth saying: one more than a second late.
-const lateRenewal = 2 * time.Second
+// lateRenewal is a gap between renewals, sent every second, worth saying: c50's 1.7 and 2.0 s gaps said nothing.
+const lateRenewal = 1200 * time.Millisecond
 
 func (c *clusterLease) lastRenewed() time.Time {
 	if c == nil {
