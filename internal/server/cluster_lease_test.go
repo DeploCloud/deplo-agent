@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -393,6 +394,30 @@ func TestLease_aMemberSaysHowLongAnExtensionMayStillKeepALeaseAlive(t *testing.T
 	}
 }
 
+// The leader says the extension is over once every member took a plain renewal: nothing is unsure any more, and a
+// probe, which renews nothing, ends nothing.
+func TestLease_aLeaderEndsTheExtensionItAnnounced(t *testing.T) {
+	f := newGuard(t)
+	o := orderFor(3)
+	o.Announces, o.Announce = true, 370
+	if r := f.g.Renew(o); *r.Unsure != 370 {
+		t.Fatalf("after an announcement: %d, want 370", *r.Unsure)
+	}
+	o.Announce = 0
+	o.NoExtension = true
+	probe := o
+	probe.Probe = true
+	if r := f.g.Probe(probe); r.Unsure == nil || *r.Unsure != 370 {
+		t.Fatalf("a probe ended the extension: %v", r.Unsure)
+	}
+	if r := f.g.Renew(o); *r.Unsure != 0 {
+		t.Fatalf("the leader said no lease lives on an extension: %d, want 0", *r.Unsure)
+	}
+	if r := f.reopen().Renew(orderFor(3)); *r.Unsure == 0 {
+		t.Fatal("a leader that announces nothing may extend again")
+	}
+}
+
 // A lease file an older agent wrote kept no count: what leaders did meanwhile is unknown.
 func TestLease_aLeaseAnOlderAgentWroteIsUnsureForTheLongestLease(t *testing.T) {
 	f := newGuard(t)
@@ -436,5 +461,38 @@ func TestLease_ledOnlyWhileALeadingLeaderRenewsIt(t *testing.T) {
 	}
 	if _, ok := g.led("clu_1", time.Now().Add(11*time.Second), 10*time.Second); ok {
 		t.Fatal("led by a renewal older than the removal time")
+	}
+}
+
+// c38: eu-2's lease renewals came 2 to 5.3 s apart while its proxy was recreated and Docker answered slowly, and
+// its agent fenced fise and memos. Once a stack was looked at, what an answer says of it never waits for Docker.
+func TestLease_aRenewalsAnswerNeverWaitsForDocker(t *testing.T) {
+	f := newGuard(t)
+	var slow atomic.Bool
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	f.g.has = func(string) bool { return true }
+	f.g.running = func(ctx context.Context, slug string) bool {
+		if slow.Load() {
+			select {
+			case <-release:
+			case <-ctx.Done():
+			}
+		}
+		return true
+	}
+	o := orderFor(3)
+	o.Placement = append(o.Placement, lease.Entry{Kind: "app", ID: "prj_9", Slug: "waiting", SingleWriter: true})
+	f.g.Renew(o)
+	if got := f.g.unplaced(o); !slices.Equal(got, []string{"waiting"}) {
+		t.Fatalf("first answer %v", got)
+	}
+	slow.Store(true)
+	start := time.Now()
+	if got := f.g.unplaced(o); !slices.Equal(got, []string{"waiting"}) {
+		t.Fatalf("second answer %v", got)
+	}
+	if d := time.Since(start); d > 100*time.Millisecond {
+		t.Fatalf("the answer waited %v for Docker", d)
 	}
 }

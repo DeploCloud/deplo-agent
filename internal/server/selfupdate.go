@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -24,12 +25,38 @@ import (
 	"google.golang.org/grpc/status"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
+	"github.com/DeploCloud/deplo-agent/internal/logpipe"
 )
 
 const selfUpdateGrace = 750 * time.Millisecond
 
+// A member's exec waits at most renewalWait for its next renewal, then at most execAfterRenewal for its visitors:
+// the new binary is up before the renewal a second later (c47: every member's own lease 2 s apart at its update).
+const (
+	renewalWait      = 1500 * time.Millisecond
+	execAfterRenewal = 300 * time.Millisecond
+)
+
+// drainBy is when, in Unix nanoseconds, an exec's drain ends at the latest; zero leaves it execDrain.
+var drainBy atomic.Int64
+
+func (s *Service) execAfterRenewal() {
+	if at := s.leaseGuard().nextRenewal(renewalWait); !at.IsZero() {
+		drainBy.Store(at.Add(execAfterRenewal).UnixNano())
+	}
+}
+
+// afterFailedExec ends an agent whose exec failed after it stopped taking visitors; tests go on.
+var afterFailedExec = func() { os.Exit(1) }
+
 var reexec = func(path string, argv []string, env []string) error {
-	return syscall.Exec(path, argv, env)
+	logpipe.Restore()
+	err := syscall.Exec(path, argv, append(env, keptForExec()))
+	// Its listeners are closed by now: the service starts it again, the binary on disk, the listeners kept.
+	log.Printf("deplo-agent: could not exec %s: %v; exiting so the service starts it again", path, err)
+	restarting.Store(false)
+	afterFailedExec()
+	return err
 }
 
 const maxAgentBinary = 256 << 20
@@ -107,17 +134,29 @@ func (s *Service) applyUpdate(ctx context.Context, exePath string, req *pb.SelfU
 		return nil, err
 	}
 
+	// The binary that runs now stays beside the new one until the new one answers (deplo ADR-0043).
+	prev := exePath + ".previous"
+	_ = os.Remove(prev)
+	kept := os.Link(exePath, prev) == nil
 	if err := os.Rename(staged, exePath); err != nil {
 		os.Remove(staged)
+		os.Remove(prev)
 		return nil, status.Errorf(codes.FailedPrecondition,
 			"cannot replace the agent binary at %s: %v (is the install dir writable? re-run the installer to upgrade)", exePath, err)
 	}
 	log.Printf("deplo-agent: self-update staged v%s at %s; restarting to apply", req.GetVersion(), exePath)
+	if !kept {
+		log.Printf("deplo-agent: could not keep v%s beside v%s: nothing puts it back if v%s does not answer", AgentVersion, req.GetVersion(), req.GetVersion())
+	} else if err := startGuard(prev, exePath, req.GetVersion(), s.answeredFile(exePath)); err != nil {
+		os.Remove(prev)
+		log.Printf("deplo-agent: nothing puts v%s back if v%s does not answer: %v", AgentVersion, req.GetVersion(), err)
+	}
 
 	argv := append([]string{exePath}, os.Args[1:]...)
 	env := os.Environ()
 	go func() {
 		time.Sleep(selfUpdateGrace)
+		s.execAfterRenewal()
 		log.Printf("deplo-agent: re-execing %s to complete self-update to v%s", exePath, req.GetVersion())
 		if err := reexec(exePath, argv, env); err != nil {
 			log.Printf("deplo-agent: re-exec failed: %v (new binary is on disk; restart the service to apply)", err)
@@ -236,4 +275,23 @@ func preNum(s string) (int, bool) {
 	}
 	n, err := strconv.Atoi(s)
 	return n, err == nil
+}
+
+// answeredFile is where a run says its version once it answered a Hello: the guard of an update waits for it.
+func (s *Service) answeredFile(exe string) string {
+	if s.agentDir != "" {
+		return filepath.Join(s.agentDir, "update-answered")
+	}
+	return filepath.Join(filepath.Dir(exe), ".deplo-agent-answered")
+}
+
+// noteAnswered is called by every Hello; the first one of this run leaves its version for an update's guard.
+func (s *Service) noteAnswered() {
+	s.answered.Do(func() {
+		exe, err := os.Executable()
+		if err != nil {
+			return
+		}
+		_ = writeFileAtomic(s.answeredFile(exe), []byte(AgentVersion+"\n"), 0o600)
+	})
 }

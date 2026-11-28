@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -50,8 +51,18 @@ var (
 	// answerSettle is how long an App has been ready before its proxy is sure to route it: Traefik applies a
 	// container change up to 2 s after it happens.
 	answerSettle = 3 * time.Second
+	// answerSettleAtOnce is answerSettle for a proxy whose providers are not throttled: it routes a change the
+	// moment it happens (c41), so a failover's App answers 2 s sooner (c43).
+	answerSettleAtOnce = time.Second
+	// proxySettle is how long a restarted proxy gets to read its routes: it reads them at its start (c41).
+	proxySettle = 500 * time.Millisecond
 	// answerReadyFor is how long a ready answer is kept before docker is asked again.
 	answerReadyFor = 5 * time.Second
+	// proxyDownFor is how long a refused dial to this server's own proxy holds: while its proxy is recreated, the
+	// members passing it visitors hear "not answering" at once instead of each connection dialing again (c38).
+	proxyDownFor = time.Second
+	// localCheck is how often the visitors carried to this server's own proxy are checked against the placement.
+	localCheck = time.Second
 	// By default at most this many connections pass through this agent at once, waiting or carried (a quarter of
 	// them may wait), and this many wait for one App: past either, a connection is closed at once. Deplo can set
 	// both per cluster.
@@ -223,10 +234,14 @@ func (f *forwarders) takeRefusals() []*pb.ClusterAnswerRefusal {
 	return out
 }
 
-// reconcileAnswers runs the one answer forwarder and writes the proxy's routes file; the caller holds f.mu.
-func (f *forwarders) reconcileAnswers(ctx context.Context, wanted map[string]bool, note func(error)) {
+// reconcileAnswers runs the one answer forwarder and writes the proxy's routes file; the caller holds f.dock.
+func (f *forwarders) reconcileAnswers(ctx context.Context, st forwardState, wanted map[string]bool, note func(error)) {
+	atOnce := f.s.proxyAppliesAtOnce()
+	f.mu.Lock()
+	f.atOnce = atOnce
 	note(f.writeAnswerRoutes())
-	if len(f.st.Answers) == 0 {
+	f.mu.Unlock()
+	if len(st.Answers) == 0 {
 		return
 	}
 	ops := f.ops()
@@ -380,13 +395,30 @@ func (f *forwarders) serveAnswer(c net.Conn) {
 	if !found {
 		return
 	}
+	f.answerFor(in, cluster, members, appID, port, "")
+}
+
+// answerFor waits for a server that runs the App and carries the visitor there, its PROXY header first when the
+// connection does not start with one (a visitor held at this server's front door).
+func (f *forwarders) answerFor(in net.Conn, cluster string, members map[string]string, appID string, port uint32, header string) {
 	deadline := time.Now().Add(answerWait)
 	for {
 		if f.mayTry(appID) {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			up, via := f.reachAnswer(ctx, cluster, members, appID, port)
+			if up != nil && header != "" {
+				if _, err := io.WriteString(up, header); err != nil {
+					up.Close()
+					up = nil
+					f.release(via)
+				}
+			}
 			if up != nil {
-				forwarder.Join(in, up)
+				if via == "" {
+					f.carry(appID, in, up)
+				} else {
+					forwarder.Join(moving{in}, moving{up})
+				}
 				f.release(via)
 				cancel()
 				return
@@ -499,7 +531,7 @@ func (f *forwarders) look(appID string) {
 
 // routeOpen asks, without connecting anyone, whether this server or another that runs the App would answer now.
 func (f *forwarders) routeOpen(ctx context.Context, cluster string, members map[string]string, appID string) bool {
-	here, others := f.s.leaseGuard().answerHolders(cluster, appID)
+	here, others := f.s.leaseGuard().visitorHolders(cluster, appID)
 	if here && f.answers(ctx, appID) {
 		return true
 	}
@@ -517,7 +549,7 @@ func (f *forwarders) routeOpen(ctx context.Context, cluster string, members map[
 // the one this agent has the fewest connections open to first. A server that refuses is passed over.
 func (f *forwarders) reachAnswer(ctx context.Context, cluster string, members map[string]string, appID string,
 	port uint32) (net.Conn, string) {
-	here, others := f.s.leaseGuard().answerHolders(cluster, appID)
+	here, others := f.s.leaseGuard().visitorHolders(cluster, appID)
 	if here && f.ready(ctx, appID) {
 		if up, err := f.dialProxy(ctx, port); err == nil {
 			return up, ""
@@ -543,9 +575,13 @@ func (f *forwarders) dialProxy(ctx context.Context, port uint32) (net.Conn, erro
 	}
 	f.mu.Lock()
 	to := f.st.AnswerPort
+	settling, standby := f.settling()
 	f.mu.Unlock()
 	if to == 0 {
 		return nil, fmt.Errorf("this server's proxy has no internal entrypoint")
+	}
+	if settling && standby != nil {
+		return standby(ctx, to)
 	}
 	ops := f.ops()
 	if ops.proxyDial == nil {
@@ -559,10 +595,22 @@ func (f *forwarders) dialProxy(ctx context.Context, port uint32) (net.Conn, erro
 func (f *forwarders) ready(ctx context.Context, appID string) bool {
 	for {
 		f.mu.Lock()
+		// A proxy restart changes no container: what was found ready stays, behind the restart and its settle,
+		// and answers through the standby proxy when one runs.
+		settling, standby := f.settling()
+		if f.replacing[appID] > 0 || (settling && standby == nil) {
+			f.mu.Unlock()
+			return false
+		}
 		rc := f.readiness[appID]
 		if rc == nil {
 			rc = &answerReadyCheck{}
 			f.readiness[appID] = rc
+		}
+		// Nor does it ask docker again meanwhile, busy recreating the proxy (c43: a look then took 3 s).
+		if settling && rc.ok {
+			f.mu.Unlock()
+			return true
 		}
 		if time.Now().Before(rc.until) {
 			ok := rc.ok
@@ -586,31 +634,50 @@ func (f *forwarders) ready(ctx context.Context, appID string) bool {
 		if ops := f.ops(); ops.ready != nil {
 			r = ops.ready(ctx, appID)
 		}
-		now := time.Now()
 		f.mu.Lock()
-		since := r.Since
-		if !r.OK {
-			delete(f.readySeen, appID)
-		} else if r.Health {
-			if f.readySeen[appID].IsZero() {
-				f.readySeen[appID] = now
-			}
-			if seen := f.readySeen[appID]; seen.After(since) {
-				since = seen
-			}
-		}
-		rc.ok = r.OK && now.Sub(since) >= answerSettle
-		rc.broken = r.Broken
-		rc.until = now.Add(answerRetry)
-		if rc.ok {
-			rc.until = now.Add(answerReadyFor)
-		}
+		f.noteReadiness(appID, rc, r, time.Now())
 		rc.pending = nil
 		close(done)
 		ok := rc.ok
 		f.mu.Unlock()
 		return ok
 	}
+}
+
+// noteReadiness keeps what one look found of an App here; the caller holds f.mu.
+func (f *forwarders) noteReadiness(appID string, rc *answerReadyCheck, r appReadiness, now time.Time) {
+	since := r.Since
+	if !r.OK {
+		delete(f.readySeen, appID)
+	} else if r.Health {
+		if f.readySeen[appID].IsZero() {
+			f.readySeen[appID] = now
+		}
+		if seen := f.readySeen[appID]; seen.After(since) {
+			since = seen
+		}
+	}
+	rc.ok = r.OK && now.Sub(since) >= f.settleFor()
+	rc.broken = r.Broken
+	rc.until = now.Add(answerRetry)
+	if rc.ok {
+		rc.until = now.Add(answerReadyFor)
+		f.keepHandover()
+	}
+}
+
+// settleFor is how long an App runs before this server's proxy surely routes it; the caller holds f.mu.
+func (f *forwarders) settleFor() time.Duration {
+	if f.atOnce {
+		return min(answerSettle, answerSettleAtOnce)
+	}
+	return answerSettle
+}
+
+// proxyAppliesAtOnce says this server's proxy is not throttled, so it routes a container change at once.
+func (s *Service) proxyAppliesAtOnce() bool {
+	raw, err := os.ReadFile(s.traefikCompose())
+	return err == nil && bytes.Contains(raw, []byte("--providers.providersthrottleduration=0"))
 }
 
 // broken says whether the App's last readiness check here found it running but broken.
@@ -668,7 +735,7 @@ func (f *forwarders) serveAnswerStream(from wire.Party, c net.Conn, network, app
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if !f.answers(ctx, appID) {
+	if restarting.Load() || !f.answers(ctx, appID) || f.proxyIsDown() {
 		_ = wire.WriteHeader(c, wire.VerbErr, "not ready")
 		return
 	}
@@ -682,8 +749,8 @@ func (f *forwarders) serveAnswerStream(from wire.Party, c net.Conn, network, app
 	}
 	defer f.leave()
 	up, err := f.dialProxy(ctx, port)
+	f.proxyAnswered(appID, err)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "deplo-agent: a domain of %s was passed on, but %v\n", appID, err)
 		_ = wire.WriteHeader(c, wire.VerbErr, "not answering")
 		return
 	}
@@ -691,7 +758,10 @@ func (f *forwarders) serveAnswerStream(from wire.Party, c net.Conn, network, app
 		up.Close()
 		return
 	}
-	forwarder.Join(c, up)
+	f.passedOn.Do(func() {
+		stderrf("deplo-agent: cluster: first visitor passed on here %d ms after the agent started", time.Since(agentStarted).Milliseconds())
+	})
+	f.carry(appID, c, up)
 }
 
 func (f *forwarders) authorizeAnswer(from wire.Party, network, appID string) bool {
@@ -705,6 +775,6 @@ func (f *forwarders) authorizeAnswer(from wire.Party, network, appID string) boo
 	for _, fp := range st.Members {
 		inCluster = inCluster || from.Is(fp)
 	}
-	here, _ := f.s.leaseGuard().answerHolders(st.Cluster, appID)
+	here, _ := f.s.leaseGuard().visitorHolders(st.Cluster, appID)
 	return inCluster && here
 }

@@ -421,3 +421,45 @@ func TestKeepLeft_writesAnArchiveThatHoldsTheVolume(t *testing.T) {
 		t.Fatalf("the volume was not read before it was removed: %q", all)
 	}
 }
+
+// c37: a delete waited behind a 1.6 GB save of what a return left (its teardown failed three times at 180 s), and
+// the save then landed on the other member with nothing to remove it.
+func TestKeepLeft_aDeleteEndsTheSaveAndForgetsTheKeep(t *testing.T) {
+	const slug = "deplo-agent-test-keep"
+	s, _ := keepService(t, slug)
+	saving := make(chan struct{})
+	stubLeft(t, func(*pb.BackupRequest, io.Writer) (*pb.BackupResult, error) { panic("replaced below") })
+	runLeftBackup = func(_ *Service, ctx context.Context, _ *pb.BackupRequest, _ io.Writer) (*pb.BackupResult, error) {
+		close(saving)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	g := s.leaseGuard()
+	g.mu.Lock()
+	g.clusters = map[string]*clusterLease{"clu_1": {Keeping: []lease.Kept{{Slug: slug}}, Late: []lease.Saved{{Slug: slug}}}}
+	g.mu.Unlock()
+	kept := make(chan error, 1)
+	go func() {
+		_, err := s.keepLeft(context.Background(), lease.Entry{Slug: slug, SingleWriter: true}, serviceKeep(slug), "srv_a", func() bool { return true })
+		kept <- err
+	}()
+	<-saving
+	destroyed := make(chan struct{})
+	go func() {
+		_, _ = s.DestroyStack(context.Background(), &pb.StackRef{Slug: slug, RemoveVolumes: true, DropSetAside: true})
+		close(destroyed)
+	}()
+	select {
+	case <-destroyed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the delete waited behind the save")
+	}
+	if err := <-kept; err == nil {
+		t.Fatal("the save went on after the delete")
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if c := g.clusters["clu_1"]; len(c.Keeping) != 0 || len(c.Late) != 0 {
+		t.Fatalf("the keep outlived its delete: %+v", c)
+	}
+}

@@ -22,13 +22,18 @@ import (
 	"github.com/DeploCloud/deplo-agent/internal/bootstrap"
 	"github.com/DeploCloud/deplo-agent/internal/capture"
 	"github.com/DeploCloud/deplo-agent/internal/dnszone"
+	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 	"github.com/DeploCloud/deplo-agent/internal/forwarder"
 	"github.com/DeploCloud/deplo-agent/internal/link"
+	"github.com/DeploCloud/deplo-agent/internal/logpipe"
 	"github.com/DeploCloud/deplo-agent/internal/reap"
 	"github.com/DeploCloud/deplo-agent/internal/server"
 )
 
 func main() {
+	// A self-update from canary.47 hands this run a stderr nobody reads: a log again before the first line.
+	logpipe.Revive(1, "deplo-agent")
+	logpipe.Revive(2, "deplo-agent")
 	// The same binary, mounted into the screenshot browser's container.
 	if len(os.Args) > 1 && os.Args[1] == "capture" {
 		os.Exit(capture.Main(os.Stdin, os.Stdout))
@@ -44,6 +49,14 @@ func main() {
 	// The same binary, mounted into a container as the health check its proxy waits for (deplo#281).
 	if len(os.Args) > 1 && os.Args[1] == "probe" {
 		os.Exit(server.Probe(os.Args[2:]))
+	}
+	// The same binary, mounted into a backup's copier: the copy it pauses an App for (deplo ADR-0043).
+	if len(os.Args) > 1 && os.Args[1] == "stage-sync" {
+		os.Exit(server.StageSync(os.Args[2:], os.Stdout, os.Stderr))
+	}
+	// The binary before a self-update, run beside the new one until it answers (deplo ADR-0043).
+	if len(os.Args) > 1 && os.Args[1] == "update-guard" {
+		os.Exit(server.UpdateGuard(os.Args[2:]))
 	}
 	// The same binary, mounted into a name forwarder's container (#200).
 	if len(os.Args) > 1 && os.Args[1] == "forward" {
@@ -79,6 +92,14 @@ func main() {
 		printCapabilities(os.Stdout)
 		return
 	}
+	// A log that falls behind drops lines rather than holding up a renewal (deplo ADR-0043).
+	for _, fd := range []int{1, 2} {
+		if err := logpipe.Unblock(fd); err != nil {
+			log.Printf("deplo-agent: the log may hold the agent up: %v", err)
+		}
+	}
+	dockercli.CacheReads(time.Second)
+	go server.EnsureRestart(context.Background())
 
 	if *insecure && !loopbackAddr(*addr) {
 		log.Fatalf("deplo-agent: --insecure serves without mTLS, so it needs a loopback --addr (got %q)", *addr)
@@ -128,12 +149,17 @@ func main() {
 
 	srv := newGRPCServer(certMgr)
 	svc := server.New(*stackDir, *buildTmpDir, *dataDir, *dataBase)
+	server.ClearFrontDoorHold()
 	if err := svc.PlaceProbe(); err != nil {
 		fmt.Fprintf(os.Stderr, "deplo-agent: could not place the health check probe: %v\n", err)
 	}
 	svc.SetAgentDir(*agentDir)
+	go svc.TakePriority(context.Background())
+	go svc.ClearStandbyProxy(context.Background())
+	go svc.SweepStorePartials()
 	svc.SettlePanel()
 	svc.StartRestartWatch(context.Background())
+	svc.StartProxyResync(context.Background())
 	svc.StartCluster()
 	svc.StartClusterMember()
 	svc.StartClusterNetwork()
@@ -240,6 +266,8 @@ func serveAgent(ctx context.Context, srv *grpc.Server, lis *link.Port, lc *link.
 	case <-ctx.Done():
 	}
 	log.Printf("deplo-agent: signal received - draining in-flight RPCs…")
+	// Visitors first: new ones wait for the next run in the kept listeners' queue, the ones carried get a second.
+	server.DrainVisitors()
 	// The link closes first: a stream riding it would otherwise hold the drain to its cap.
 	closeLink()
 	<-unlinked

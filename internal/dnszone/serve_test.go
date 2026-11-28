@@ -13,15 +13,22 @@ import (
 // serveLocal runs a Server on a loopback port, UDP and TCP, and returns that address.
 func serveLocal(t *testing.T, tb *Table, before ...func(*Server)) (*Server, string) {
 	t.Helper()
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	var pc net.PacketConn
+	var ln net.Listener
+	// The port UDP got may be taken for TCP: another one is tried.
+	for try := 1; ln == nil; try++ {
+		var err error
+		if pc, err = net.ListenPacket("udp", "127.0.0.1:0"); err != nil {
+			t.Fatal(err)
+		}
+		if ln, err = net.Listen("tcp", pc.LocalAddr().String()); err != nil {
+			pc.Close()
+			if try == 8 {
+				t.Fatal(err)
+			}
+		}
 	}
 	addr := pc.LocalAddr().String()
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
 	s := NewServer()
 	for _, f := range before {
 		f(s)

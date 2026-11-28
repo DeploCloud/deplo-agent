@@ -185,6 +185,27 @@ service Agent {
   // An image stream that matches no such entry is refused.
   rpc ExpectClusterImage(ExpectClusterImageRequest) returns (ExpectClusterImageResponse);
 
+  // The registry images this member keeps ready to take over its cluster's workloads (capability
+  // "cluster.failover.images"): it pulls the missing ones one at a time while a tenth of its disk stays
+  // free, and cleanup spares every one listed. Each call replaces the list.
+  rpc HoldFailoverImages(HoldFailoverImagesRequest) returns (HoldFailoverImagesResponse);
+
+  // Tell this member to keep one backup from one member in its store, once, within the copy's time
+  // limit (capability "backup-store.member"). A backup stream that matches no such entry is refused.
+  rpc ExpectClusterBackup(ExpectClusterBackupRequest) returns (ExpectClusterBackupResponse);
+
+  // Tell this member that one member reads one backup from its store, once, within the copy's time
+  // limit (capability "backup-store.fetch"). A read that matches no such entry gets no byte.
+  rpc ExpectClusterFetch(ExpectClusterFetchRequest) returns (ExpectClusterFetchResponse);
+
+  // Tell this member to take one volume from one member, once, within the copy's time limit
+  // (capability "volume-copy.member"). A volume stream that matches no such entry is refused.
+  rpc ExpectClusterVolume(ExpectClusterVolumeRequest) returns (ExpectClusterVolumeResponse);
+
+  // Copy one of this host's volumes into the same volume on another member, over the cluster's
+  // private network, which was told to expect it. path "none": no path joins them, nothing was read.
+  rpc SendClusterVolume(SendClusterVolumeRequest) returns (SendClusterVolumeResponse);
+
   // ---- CLUSTER NAME FORWARDERS (#200, Hello capability "cluster.forwarders"; a compose service's
   // names, and every port of a name, need "cluster.forwarders.services") ----
 
@@ -208,6 +229,10 @@ service Agent {
 
   // How each copy on this member stands.
   rpc ClusterReplicaStatus(ClusterReplicaStatusRequest) returns (ClusterReplicaStatusResponse);
+
+  // A move onto this member (Hello capability "cluster.replicas.move"): the copy here takes the last
+  // changes from the member the App left, once it stopped there, and becomes the App's data.
+  rpc PromoteClusterReplica(PromoteClusterReplicaRequest) returns (PromoteClusterReplicaResponse);
 
   // ---- THE CLUSTER'S NETWORK (ADR-0047, Hello capability "cluster.network") ----
 
@@ -981,6 +1006,9 @@ message StackRef {
   // -v` finds. Every entry must start with `deplo-` (the agent refuses the rest), so
   // this can only ever reclaim volumes Deplo itself creates.
   repeated string reclaim_volumes = 3;
+  // DestroyStack only: the set-aside copies of those volumes and of the stack's Files
+  // go too, for an App that is deleted (capability `teardown.set-aside`).
+  bool drop_set_aside = 5;
   // StopStack only: stop just these compose services instead of the whole stack. Empty
   // stops everything, which is what every caller before the restart-loop guard meant.
   // Field 4 is ADDITIVE (contract stays V1); gated on the `stack.stop-services` capability.
@@ -1060,6 +1088,8 @@ message VolumeUsage {
   // Set on a set-aside copy: the volume it is a copy of, and when it was made.
   string set_aside_of = 3;
   int64 set_aside_at_ms = 4;
+  // On-disk bytes of its biggest file: a copy that rebuilds it holds it twice meanwhile.
+  int64 largest_file_bytes = 5;
 }
 
 message RemoveSetAsideRequest {
@@ -1434,6 +1464,9 @@ message BackupRequest {
   // segments Postgres archived into <PGDATA>/deplo-wal since the last LOG, then removes them there.
   // A LOG with nothing waiting succeeds with an empty object_key and writes no artifact.
   PostgresArchive archive = 8;
+  // Send the artifact to this member of the cluster over its private network, keyed store.object_key;
+  // that member was told to expect it (ExpectClusterBackup). Capability "backup-store.member".
+  string member_fingerprint = 9;
 }
 
 enum PostgresArchive {
@@ -1472,6 +1505,12 @@ message BackupResult {
   // How long the app's containers were paused so its volumes could be copied
   // consistently, in milliseconds. 0 when nothing was held.
   int64 held_ms = 7;
+  // Why the app stayed paused for the whole copy instead of only while its data was
+  // copied on its own server's disk; empty when it was not.
+  string held_why = 8;
+  // Under member_fingerprint: "direct" or "relay", how it went; "none" when that member could not be
+  // reached and nothing was read, so the caller may send it another way.
+  string path = 9;
 }
 
 message RestoreRequest {
@@ -1493,6 +1532,9 @@ message RestoreRequest {
   // PROJECT only: put the copy replication keeps on this member in place of the App's Volumes and
   // Files, instead of reading an artifact. Needs `cluster.replicas`; s3 and store are ignored.
   bool from_replica = 9;
+  // With store: the store is on that member, told to expect this server (ExpectClusterFetch), and
+  // the artifact is read from it over the cluster's private network. Capability "backup-store.fetch".
+  string member_fingerprint = 10;
 }
 
 message RestoreEvent {
@@ -1505,6 +1547,9 @@ message RestoreEvent {
 message RestoreResult {
   bool ok = 1;
   string error = 2;
+  // Under member_fingerprint: "direct", "relay", or "none" when that member answered nothing before
+  // a byte was read; empty otherwise.
+  string path = 3;
 }
 
 message S3CheckRequest {
@@ -1580,12 +1625,21 @@ message StoreChunk {
     // carry a run id and are unique, so a collision means something is wrong and
     // silently clobbering it would destroy a good backup.
     bool overwrite = 2;
+    // The stream ends with a trailer: the artifact is kept only when it holds
+    // exactly what the trailer names (capability `backup-store.sealed`).
+    bool sealed = 3;
+  }
+  // What the sender sent, the last frame of a sealed stream.
+  message Trailer {
+    int64 size_bytes = 1;
+    string sha256 = 2;
   }
   oneof frame {
     Header header = 1;
     // A raw slice of the (already age-encrypted) artifact. Chunked well under
     // the gRPC max message size; reassembled in order on the destination.
     bytes data = 2;
+    Trailer trailer = 3;
   }
 }
 
@@ -2602,6 +2656,67 @@ message ExpectClusterImageRequest {
 
 message ExpectClusterImageResponse {}
 
+message FailoverImage {
+  string image_ref = 1;
+  // Its size where it is held, 0 when unknown: what a pull must leave room for.
+  int64 bytes = 2;
+  // In the response: whether this server holds it now, and why its last pull failed.
+  bool held = 3;
+  string error = 4;
+}
+
+message HoldFailoverImagesRequest {
+  repeated FailoverImage images = 1;
+}
+
+message HoldFailoverImagesResponse {
+  repeated FailoverImage images = 1;
+}
+
+message ExpectClusterBackupRequest {
+  // Where this member keeps it: its store's root and the artifact's key.
+  StoreTarget store = 1;
+  // The sending member's certificate fingerprint (sha256 hex of its DER).
+  string source_fingerprint = 2;
+}
+
+message ExpectClusterBackupResponse {}
+
+message ExpectClusterFetchRequest {
+  // Where this member keeps it: its store's root and the artifact's key.
+  StoreTarget store = 1;
+  // The reading member's certificate fingerprint (sha256 hex of its DER).
+  string reader_fingerprint = 2;
+}
+
+message ExpectClusterFetchResponse {}
+
+message ExpectClusterVolumeRequest {
+  string volume_name = 1;
+  // Empty the volume before the first byte lands, as ImportVolume's wipe_first does.
+  bool wipe_first = 2;
+  // The sending member's certificate fingerprint (sha256 hex of its DER).
+  string source_fingerprint = 3;
+}
+
+message ExpectClusterVolumeResponse {}
+
+message SendClusterVolumeRequest {
+  string volume_name = 1;
+  // The target member's certificate fingerprint (sha256 hex of its DER).
+  string target_fingerprint = 2;
+}
+
+message SendClusterVolumeResponse {
+  // The gzipped tar's size and sha256, as the target wrote it.
+  int64 bytes = 1;
+  string sha256 = 2;
+  // "direct" or "relay", how it went; "none" when the target could not be reached and nothing was read.
+  string path = 3;
+  // This host holds no such volume.
+  bool missing = 4;
+}
+
 // ---- CLUSTER NAME FORWARDERS (#200) ----
 
 // A cluster member's certificate, by the server id the leader's placement names it with.
@@ -2737,6 +2852,10 @@ message SetClusterNetworkRequest {
   repeated ClusterNetworkPeer peers = 3;
   // This server's network key when it must be replaced first, since a caught copy holds it (Hello network.rekey).
   string retire_public_key = 4;
+  // Make a next network key beside the current one, said as next_public_key; nothing changes yet (Hello network.rotate).
+  bool next_key = 5;
+  // Switch to the next key once every peer holds it as that one: the tunnel and its streams stay up.
+  string rotate_to_public_key = 6;
 }
 
 message ClusterNetworkPeer {
@@ -2747,6 +2866,8 @@ message ClusterNetworkPeer {
   string address = 3;
   // host:port pairs it may answer on directly; with none, a relay carries its packets.
   repeated string endpoints = 4;
+  // The key it is about to switch to: taken the moment it says it switched, never before.
+  string next_public_key = 5;
 }
 
 message SetClusterNetworkResponse {
@@ -2756,11 +2877,13 @@ message SetClusterNetworkResponse {
   // This host's own addresses, for its peers to try.
   repeated string addresses = 3;
   repeated ClusterNetworkPeerState peers = 4;
+  // The next key it made at next_key, until it switches to it.
+  string next_public_key = 5;
 }
 
 message ClusterNetworkPeerState {
   string fingerprint = 1;
-  // "direct", "relay" (no direct path answers) or "none".
+  // "direct", "relay" (no direct path answers, a relay carries it) or "none".
   string path = 2;
   // The host:port a direct path uses.
   string endpoint = 3;
@@ -2928,6 +3051,9 @@ message ClusterReplicaEntry {
   repeated string volume_names = 3;
   // Whether its Files (<stack-dir>/files/<slug>) are part of it.
   bool include_files = 4;
+  // Why this member keeps its copy as it is and receives nothing now: it waits its turn (Deplo's
+  // queue). Its status says this as its error, and the copy stays whole on disk. Empty receives.
+  string hold = 5;
 }
 
 message SetClusterReplicasResponse {
@@ -2935,6 +3061,17 @@ message SetClusterReplicasResponse {
 }
 
 message ClusterReplicaStatusRequest {}
+
+message PromoteClusterReplicaRequest {
+  string app_id = 1;
+  // The member the App left, by the server id the leader's placement names it with.
+  string from_server_id = 2;
+}
+
+message PromoteClusterReplicaResponse {
+  // The file data that crossed the network for the last changes.
+  int64 bytes = 1;
+}
 
 message ClusterReplicaStatusResponse {
   repeated ClusterReplicaState replicas = 1;
@@ -2956,6 +3093,10 @@ message ClusterReplicaState {
   string error = 8;
   // The member it receives from.
   string from_server_id = 9;
+  // A relay carries its stream, or the tunnel's packets under it.
+  bool relayed = 10;
+  // What this copy takes on this member's disk now, in bytes.
+  int64 disk_bytes = 11;
 }
 
 message ClaimServerRequest {

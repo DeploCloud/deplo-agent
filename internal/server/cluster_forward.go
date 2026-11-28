@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -117,6 +116,8 @@ type forwardOps struct {
 	proxyDial func(ctx context.Context, port uint32) (net.Conn, error)
 	// ready says whether every container of an App here answers, and since when.
 	ready func(ctx context.Context, appID string) appReadiness
+	// readyAll is ready for several Apps in one look, when docker can answer them together.
+	readyAll func(ctx context.Context, appIDs []string) map[string]appReadiness
 	// runs says whether a container of an App runs here: a proxy's store keeps its certificate only then.
 	runs func(ctx context.Context, appID string) (bool, error)
 }
@@ -137,8 +138,11 @@ type heldListener struct {
 }
 
 type forwarders struct {
-	s         *Service
-	mu        sync.Mutex
+	s  *Service
+	mu sync.Mutex
+	// dock is held while a table is put in place with docker, and guards listeners and redirected: f.mu stays free
+	// meanwhile, so the connections already passed on never wait for a slow docker (eu, 24 Nov 2026).
+	dock      sync.Mutex
 	st        forwardState
 	listeners map[string]*heldListener
 	// redirected is the process each container's redirect was set up in: a restarted container needs it again.
@@ -161,18 +165,47 @@ type forwarders struct {
 	renewTried time.Time
 	// staleSince is when the store was first seen holding the certificate of a passed-on App that runs elsewhere.
 	staleSince time.Time
+	// proxyDown is until when this server's own proxy counts as not answering, once a passed-on visitor found it
+	// refusing; proxyDownSaid keeps that to one log line per outage.
+	proxyDown     time.Time
+	proxyDownSaid bool
+	// proxyStarted is when this server's proxy last started: no App counts ready here before it had answerSettle
+	// to read its routes (c39: a recreated proxy answered 404 for seconds).
+	proxyStarted time.Time
+	// stopping is a restart of this server's proxy under way: no App counts ready here until it is back.
+	stopping bool
+	// handoverAt is when what this run knows was last written for the next one.
+	handoverAt time.Time
+	// atOnce is a proxy that routes a change at once: an App counts ready after answerSettleAtOnce.
+	atOnce bool
+	// standby reaches the copy of the proxy that takes its visitors while it restarts; nil when none runs.
+	standby standbyDialer
+	// replacing counts, by App, the reroutes replacing its containers here now: its visitors wait meanwhile.
+	replacing map[string]int
+	// local are the visitors carried to this server's own proxy, by App, each with the stream it was joined to.
+	local    map[string]map[net.Conn]net.Conn
+	watching bool
+	// looked is closed once this run's first look at what it answers for is done (see lookAtStart).
+	looked     chan struct{}
+	lookedOnce sync.Once
+	// passedOn says once when this run first took a visitor another member passed on.
+	passedOn sync.Once
+	// handedOver is a run that started from its last run's handover: docker waits for the start's quiet.
+	handedOver bool
 }
 
 func (s *Service) forwarders() *forwarders {
 	s.fwdOnce.Do(func() {
 		f := &forwarders{s: s, listeners: map[string]*heldListener{}, redirected: map[string]int{}, open: map[string]int{},
 			readiness: map[string]*answerReadyCheck{}, readySeen: map[string]time.Time{}, gates: map[string]*answerGate{},
-			refused: map[refusalKey]*answerRefusal{}}
+			refused: map[refusalKey]*answerRefusal{}, looked: make(chan struct{})}
 		if s.agentDir != "" {
 			if raw, err := os.ReadFile(f.file()); err == nil {
 				_ = json.Unmarshal(raw, &f.st)
 			}
 		}
+		f.takeHandover()
+		onRestart(f.saveHandover)
 		s.fwd = f
 	})
 	return s.fwd
@@ -198,7 +231,7 @@ func (f *forwarders) save() {
 	}
 	raw, err := json.Marshal(f.st)
 	if err == nil {
-		err = writeFileAtomic(f.file(), raw, 0o600)
+		keepLater(f.file(), raw)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "deplo-agent: could not keep the name forwarders in %s: %v\n", f.file(), err)
@@ -272,14 +305,18 @@ func (s *Service) SetClusterForwarders(ctx context.Context, req *pb.SetClusterFo
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	f := s.forwarders()
+	f.dock.Lock()
+	defer f.dock.Unlock()
+	f.mu.Lock()
+	f.st = st
+	f.mu.Unlock()
+	err = f.reconcile(ctx)
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.st = st
-	if err := f.reconcile(ctx); err != nil {
-		f.save()
+	f.save()
+	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "run the name forwarders: %v", err)
 	}
-	f.save()
 	return &pb.SetClusterForwardersResponse{Held: int32(len(st.Hold)), Served: int32(len(st.Serve)),
 		AnswerRefusals: f.takeRefusals(), ProxyRestarts: s.proxyRestarts().take(req.GetProxyRestartsSeenMs())}, nil
 }
@@ -288,23 +325,43 @@ func (s *Service) SetClusterForwarders(ctx context.Context, req *pb.SetClusterFo
 func (f *forwarders) Resume() {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if len(f.st.Hold)+len(f.st.Answers) == 0 {
+	f.dock.Lock()
+	defer f.dock.Unlock()
+	defer dropUnclaimedKept("fwd-")
+	defer f.doneLooking()
+	st := f.state()
+	if len(st.Hold)+len(st.Answers) == 0 {
 		return
 	}
+	f.listenFirst(st)
+	if !f.handedOver {
+		f.lookAtStart(ctx, st)
+	}
+	f.doneLooking()
+	f.s.afterStart(ctx)
 	if err := f.reconcile(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "deplo-agent: name forwarders: %v\n", err)
 	}
+	f.mu.Lock()
 	f.save()
+	f.mu.Unlock()
+}
+
+// state is the table as it stands now.
+func (f *forwarders) state() forwardState {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.st
 }
 
 // Clear stops every forwarder and forgets the table: this agent left its cluster.
 func (f *forwarders) Clear() {
+	f.dock.Lock()
+	defer f.dock.Unlock()
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	idle := len(f.st.Hold)+len(f.st.Answers) == 0 && len(f.listeners) == 0
 	f.st = forwardState{}
+	f.mu.Unlock()
 	if idle {
 		if f.s.agentDir != "" {
 			_ = os.Remove(f.file())
@@ -319,9 +376,34 @@ func (f *forwarders) Clear() {
 	}
 }
 
-// reconcile makes the listeners and containers match the table; the caller holds f.mu.
+// listenFirst takes the saved table's listeners back before any docker call: the visitors that waited in their queue
+// while the agent restarted are served at once (c43: 4 s). The caller holds f.dock.
+func (f *forwarders) listenFirst(st forwardState) {
+	ops := f.ops()
+	if len(st.Answers) > 0 {
+		if name := answerContainer(); f.listeners[name] == nil {
+			if ln, err := ops.listen(f.dir(name)); err == nil {
+				l := &heldListener{ln: ln, dir: f.dir(name)}
+				f.listeners[name] = l
+				go f.acceptAnswers(l)
+			}
+		}
+	}
+	for _, h := range st.Hold {
+		if name := containerFor(h); f.listeners[name] == nil {
+			if ln, err := ops.listen(f.dir(name)); err == nil {
+				l := &heldListener{ln: ln, dir: f.dir(name)}
+				f.listeners[name] = l
+				go f.acceptHeld(h.key(), l)
+			}
+		}
+	}
+}
+
+// reconcile makes the listeners and containers match the table; the caller holds f.dock, never f.mu.
 func (f *forwarders) reconcile(ctx context.Context) error {
 	ops := f.ops()
+	st := f.state()
 	var first error
 	note := func(err error) {
 		if err != nil && first == nil {
@@ -329,7 +411,7 @@ func (f *forwarders) reconcile(ctx context.Context) error {
 		}
 	}
 	wanted, networks := map[string]bool{}, map[string]error{}
-	for _, h := range f.st.Hold {
+	for _, h := range st.Hold {
 		name := containerFor(h)
 		wanted[name] = true
 		if _, seen := networks[h.Network]; !seen {
@@ -352,8 +434,8 @@ func (f *forwarders) reconcile(ctx context.Context) error {
 		}
 		note(ops.ensure(ctx, forwardSpec{Container: name, Network: h.Network, Alias: h.Name, Port: h.Port, Dir: l.dir}))
 	}
-	f.reconcileAnswers(ctx, wanted, note)
-	f.redirectLocked(ctx)
+	f.reconcileAnswers(ctx, st, wanted, note)
+	f.redirect(ctx, st)
 	if have, err := ops.list(ctx); err == nil {
 		for _, name := range have {
 			if !wanted[name] {
@@ -367,6 +449,7 @@ func (f *forwarders) reconcile(ctx context.Context) error {
 	for name, l := range f.listeners {
 		if !wanted[name] {
 			l.ln.Close()
+			forgetKept(keptForwarder(l.dir))
 			_ = os.RemoveAll(l.dir)
 			delete(f.listeners, name)
 			delete(f.redirected, name)
@@ -375,22 +458,22 @@ func (f *forwarders) reconcile(ctx context.Context) error {
 	return first
 }
 
-// redirectLocked sends every TCP port of each forwarder container to its one listener, once per container
-// process: a container that restarted lost it with its network. A name whose redirect fails still answers on
-// its own port. The caller holds f.mu.
-func (f *forwarders) redirectLocked(ctx context.Context) {
+// redirect sends every TCP port of each forwarder container to its one listener, once per container process: a
+// container that restarted lost it with its network. A name whose redirect fails still answers on its own port.
+// The caller holds f.dock.
+func (f *forwarders) redirect(ctx context.Context, st forwardState) {
 	ops := f.ops()
-	if ops.pids == nil || ops.redirect == nil || len(f.st.Hold)+len(f.st.Answers) == 0 {
+	if ops.pids == nil || ops.redirect == nil || len(st.Hold)+len(st.Answers) == 0 {
 		return
 	}
 	ports := map[string]uint32{}
-	names := make([]string, 0, len(f.st.Hold)+len(f.st.Answers))
-	for _, h := range f.st.Hold {
+	names := make([]string, 0, len(st.Hold)+len(st.Answers))
+	for _, h := range st.Hold {
 		c := containerFor(h)
 		ports[c] = h.Port
 		names = append(names, c)
 	}
-	if len(f.st.Answers) > 0 {
+	if len(st.Answers) > 0 {
 		ports[answerContainer()] = answerListen
 		names = append(names, answerContainer())
 	}
@@ -418,11 +501,11 @@ func (f *forwarders) Watch(ctx context.Context) {
 			return
 		case <-time.After(fwdWatchEvery):
 		}
-		f.mu.Lock()
+		f.dock.Lock()
 		wctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		f.redirectLocked(wctx)
+		f.redirect(wctx, f.state())
 		cancel()
-		f.mu.Unlock()
+		f.dock.Unlock()
 	}
 }
 
@@ -653,69 +736,4 @@ func (s *Service) serveForward(from wire.Party, c net.Conn, arg string) {
 		return
 	}
 	forwarder.Join(c, up)
-}
-
-// holders is every member the leader placed a workload on, from the last renewal: whether this one is among them,
-// and the others in placement order. A standby copy holds the stack, not the name, and is never one. This member
-// holds nothing on a lease that is not current: a copy back from a power cut answers for nobody.
-func (g *leaseGuard) holders(cluster, kind, id string) (here bool, others []string) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	c := g.clusters[cluster]
-	if c == nil {
-		return false, nil
-	}
-	current := c.current(g.now())
-	for _, e := range c.Placement {
-		if e.Kind != kind || e.ID != id || e.Member == "" || e.Standby {
-			continue
-		}
-		if e.Member == c.Member {
-			here = here || current
-		} else if !slices.Contains(others, e.Member) {
-			others = append(others, e.Member)
-		}
-	}
-	return here, others
-}
-
-// answerHolders is holders for a passed-on domain: a server coming back answers none itself until what moved away
-// is gone, or its proxy would pass the check of a renewal its stale store asked for, issuing a certificate twice.
-func (g *leaseGuard) answerHolders(cluster, id string) (here bool, others []string) {
-	here, others = g.holders(cluster, "app", id)
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if c := g.clusters[cluster]; c != nil && c.Returning {
-		here = false
-	}
-	return here, others
-}
-
-// locate says which member runs a workload now, and whether that is this one, from the placement the last renewal carried.
-// With replicas on several members this one is preferred, then the first in placement order.
-func (g *leaseGuard) locate(cluster, kind, id string) (member string, here, ok bool) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	c := g.clusters[cluster]
-	if c == nil {
-		return "", false, false
-	}
-	current := c.current(g.now())
-	for _, e := range c.Placement {
-		// A standby copy holds the stack, not the name: connections still go to the workload itself.
-		if e.Kind != kind || e.ID != id || e.Member == "" || e.Standby {
-			continue
-		}
-		if e.Member == c.Member {
-			// Not on a lease that is not current: the copy here may be one that moved away.
-			if current {
-				return e.Member, true, true
-			}
-			continue
-		}
-		if !ok {
-			member, ok = e.Member, true
-		}
-	}
-	return member, false, ok
 }

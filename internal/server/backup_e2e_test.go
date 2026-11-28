@@ -434,7 +434,7 @@ func TestE2E_VolumeArchiveRoundTrip(t *testing.T) {
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
-	if err := svc.archiveVolume(ctx, vol, tw, &bkEmitter{send: func(*pb.BackupEvent) error { return nil }}); err != nil {
+	if err := svc.archiveVolume(ctx, (*volumeCopier)(nil).tarArgs(ctx, vol), vol, tw, &bkEmitter{send: func(*pb.BackupEvent) error { return nil }}); err != nil {
 		t.Fatalf("archiveVolume: %v", err)
 	}
 	if err := tw.Close(); err != nil {

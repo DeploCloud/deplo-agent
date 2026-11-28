@@ -14,6 +14,7 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/clusterlink/lease"
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
+	"github.com/DeploCloud/deplo-agent/internal/room"
 )
 
 // What a member that comes back still holds of a database or a Volume App that moved is archived to the
@@ -213,7 +214,14 @@ func backupLikeTheRPC(s *Service, ctx context.Context, req *pb.BackupRequest, ou
 	if err != nil {
 		return nil, errors.New(statusMessage(err))
 	}
-	s.backupProject(ctx, req.GetProject(), dest, e)
+	switch {
+	case req.GetKind() == pb.BackupKind_BACKUP_KIND_DATABASE && req.GetArchive() != pb.PostgresArchive_POSTGRES_ARCHIVE_NONE:
+		s.backupPostgresArchive(ctx, req.GetArchive(), req.GetDatabase(), dest, e)
+	case req.GetKind() == pb.BackupKind_BACKUP_KIND_DATABASE:
+		s.backupDatabase(ctx, req.GetDatabase(), dest, e)
+	default:
+		s.backupProject(ctx, req.GetProject(), dest, e)
+	}
 	switch {
 	case res == nil:
 		return nil, errors.New("the backup ended without a result")
@@ -295,6 +303,8 @@ func (s *Service) keepLeft(ctx context.Context, e lease.Entry, k lease.Keep, mem
 	if !holdsVolume(ctx, req.GetProject().GetVolumeNames()) {
 		return nil, errNothingHeld
 	}
+	ctx, done := s.leftSave(ctx, e.Slug)
+	defer done()
 	if _, err := s.StopStack(stoppedBecause(ctx, "its copy here is saved before it goes"), &pb.StackRef{Slug: e.Slug}); err != nil {
 		return nil, err
 	}
@@ -314,11 +324,41 @@ func (s *Service) keepLeft(ctx context.Context, e lease.Entry, k lease.Keep, mem
 			return &lease.Saved{Slug: e.Slug, Ref: k.Ref, ObjectKey: req.GetS3().GetObjectKey() + req.GetStore().GetObjectKey(), SizeBytes: res.GetSizeBytes(),
 				DecryptedSizeBytes: res.GetDecryptedSizeBytes(), Sha256: res.GetSha256(), At: time.Now().UTC().Format(time.RFC3339)}, nil
 		}
-		if try >= leftTries || ctx.Err() != nil {
+		// No room is no room a moment later either: the next pass asks again.
+		if try >= leftTries || ctx.Err() != nil || errors.Is(err, room.ErrNoRoom) {
 			return nil, err
 		}
 		time.Sleep(leftWait)
 	}
+}
+
+// leftSave registers one save of a stack's left data, so a delete of that stack can end it (endLeftSave).
+func (s *Service) leftSave(ctx context.Context, slug string) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	s.savingMu.Lock()
+	if s.savingLeft == nil {
+		s.savingLeft = map[string]context.CancelFunc{}
+	}
+	s.savingLeft[slug] = cancel
+	s.savingMu.Unlock()
+	return ctx, func() {
+		s.savingMu.Lock()
+		delete(s.savingLeft, slug)
+		s.savingMu.Unlock()
+		cancel()
+	}
+}
+
+// endLeftSave ends a save of what a return left of slug and forgets the keep: the stack and its data are going.
+// The receiving store drops a cut save (ADR-0043), so nothing of it lands anywhere (c37: 1.68 GB on eu-1).
+func (s *Service) endLeftSave(slug string) {
+	s.savingMu.Lock()
+	cancel := s.savingLeft[slug]
+	s.savingMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	s.leaseGuard().forgetKept(slug)
 }
 
 // purgeLeft takes a saved stack down with the volumes its archive holds.

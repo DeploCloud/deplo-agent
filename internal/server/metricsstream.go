@@ -14,6 +14,7 @@ const (
 	defaultStreamInterval = 5 * time.Second
 	minStreamInterval     = 1 * time.Second
 	maxStreamInterval     = 60 * time.Second
+	firstSampleAfter      = time.Second
 )
 
 const (
@@ -39,7 +40,8 @@ func (s *Service) StreamMetrics(req *pb.MetricsStreamRequest, stream pb.Agent_St
 		defer containers.Close()
 	}
 
-	t := time.NewTicker(interval)
+	// The first sample spans only the CPU's window: a server that just linked has its memory and disk known at once.
+	t := time.NewTimer(min(interval, firstSampleAfter))
 	defer t.Stop()
 
 	for {
@@ -47,6 +49,7 @@ func (s *Service) StreamMetrics(req *pb.MetricsStreamRequest, stream pb.Agent_St
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-t.C:
+			t.Reset(interval)
 		}
 
 		sample := buildSample(ctx, host, containers)

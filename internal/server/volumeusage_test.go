@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"google.golang.org/grpc/codes"
@@ -46,5 +48,22 @@ func TestStartedAtUnix_neverStartedIsZero(t *testing.T) {
 	}
 	if got := startedAtUnix("2026-08-27T10:00:00.123456789Z"); got != 1787824800 {
 		t.Errorf("startedAtUnix(real) = %d, want 1787824800", got)
+	}
+}
+
+func TestDirSizes_namesTheBiggestFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a"), make([]byte, 64<<10), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "sub", "b"), make([]byte, 256<<10), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	total, largest := dirSizes(dir)
+	if largest < 256<<10 || largest >= total {
+		t.Fatalf("total %d, largest %d", total, largest)
 	}
 }

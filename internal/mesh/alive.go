@@ -230,8 +230,13 @@ func (m *Mesh) heard(fp string, incarnation uint64) {
 	was, known := m.lives[fp]
 	m.lives[fp] = liveness{incarnation: incarnation, at: now}
 	m.heardAt[fp] = now
+	fresh := !known || was.incarnation != incarnation
+	if back := m.backs[fp]; fresh && back != nil {
+		close(back)
+		delete(m.backs, fp)
+	}
 	m.aliveMu.Unlock()
-	if known && was.incarnation == incarnation {
+	if !fresh {
 		return
 	}
 	if n := m.reap(fp, incarnation); n > 0 {
@@ -261,6 +266,7 @@ func (m *Mesh) sayAlive(now time.Time) {
 	for fp := range m.heardAt {
 		if _, still := addrs[fp]; !still {
 			delete(m.heardAt, fp)
+			delete(m.backs, fp)
 		}
 	}
 	for fp, l := range m.lives {
@@ -279,6 +285,18 @@ func (m *Mesh) sayAlive(now time.Time) {
 		m.cfg.Logf("cluster network: %s fell quiet, its connections are closed", short(fp))
 		m.reap(fp)
 	}
+}
+
+// backOf is closed once fp's next run is heard, or this end first hears it.
+func (m *Mesh) backOf(fp string) <-chan struct{} {
+	m.aliveMu.Lock()
+	defer m.aliveMu.Unlock()
+	back := m.backs[fp]
+	if back == nil {
+		back = make(chan struct{})
+		m.backs[fp] = back
+	}
+	return back
 }
 
 func short(fp string) string {

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"os"
 	"strings"
@@ -171,5 +172,24 @@ func TestKeepRetry_aStartOrderSaysNothingAboutWhatIsKeptOrSaved(t *testing.T) {
 	}
 	if r := f.renew(o); r.Later == nil || len(r.Later.Saved) != 1 {
 		t.Fatalf("the archive was forgotten before the leader heard of it: %+v", r.Later)
+	}
+}
+
+func TestKeepRetry_aDeleteDuringATryIsNotUndoneByThePass(t *testing.T) {
+	f := keptBack(t)
+	o := stillKept(filesKeep())
+	tries := 0
+	f.g.keep = func(_ context.Context, e lease.Entry, _ lease.Keep, _ string, _ func() bool) (*lease.Saved, error) {
+		tries++
+		f.g.forgetKept(e.Slug)
+		return nil, context.Canceled
+	}
+	f.pass(time.Minute, o)
+	f.pass(10*time.Minute, o)
+	if tries != 1 {
+		t.Fatalf("tried %d times after the delete forgot it", tries)
+	}
+	if raw, _ := os.ReadFile(f.file); strings.Contains(string(raw), `"keeping"`) {
+		t.Fatalf("the lease file still keeps it: %s", raw)
 	}
 }

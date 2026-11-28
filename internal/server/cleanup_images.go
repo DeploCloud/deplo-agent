@@ -149,10 +149,14 @@ func cleanUnusedAppImages(ctx context.Context, p cleanupParams, idx *containerIn
 			if !olderThan(im.created, p.appImageCutoff) {
 				continue
 			}
+			refs, ok := im.appRefs()
+			if !ok {
+				continue
+			}
 
 			if !p.dryRun {
 				cctx, cancel := context.WithTimeout(ctx, cleanupRemoveTimeout)
-				rres, rerr := removeObject(cctx, "rmi", im.id)
+				rres, rerr := removeObject(cctx, append([]string{"rmi"}, refs...)...)
 				cancel()
 				if rerr != nil {
 					failures.add(im.id, rerr.Error())
@@ -205,7 +209,7 @@ func cleanUnusedPulledImages(ctx context.Context, p cleanupParams, idx *containe
 
 	var failures scopeFailures
 	for _, im := range images {
-		if idx.images[im.id] || im.managed {
+		if idx.images[im.id] || im.managed || keptForFailover(im, p.failoverKept) {
 			continue
 		}
 		if t, ok := parseDockerTime(im.lastTag); !ok || t.IsZero() {
@@ -258,6 +262,20 @@ type imageInfo struct {
 	lastTag string
 	tags    []string
 	digests []string
+}
+
+// appRefs names the image by every tag: `docker rmi <id>` refuses one tagged twice, as a fully cached
+// rebuild leaves it. False when a tag outside the app's repo would go too.
+func (im imageInfo) appRefs() ([]string, bool) {
+	if len(im.tags) == 0 {
+		return []string{im.id}, true
+	}
+	for _, tag := range im.tags {
+		if repoOf(tag) != im.repo {
+			return nil, false
+		}
+	}
+	return im.tags, true
 }
 
 func (im imageInfo) recoverableFromRegistry(ctx context.Context) bool {

@@ -5,14 +5,21 @@ package replica
 import (
 	"bytes"
 	"context"
+	"errors"
 	"math/rand/v2"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+
+	"github.com/DeploCloud/deplo-agent/internal/room"
+	"golang.org/x/sys/unix"
 	"time"
+
+	"github.com/DeploCloud/deplo-agent/internal/pace"
 )
 
 func init() {
@@ -159,6 +166,37 @@ func TestReplica_aSymlinkTravelsAsOneAndNothingIsWrittenThroughIt(t *testing.T) 
 	}
 	if _, err := os.Stat(filepath.Join(outside, "planted")); !os.IsNotExist(err) {
 		t.Fatal("a file landed outside the copy")
+	}
+}
+
+// eu, 24 Nov 2026: a 2 GB App's copy was copied into place at its failover, and that copy starved every server on
+// the lab's shared disk until their leases ran out. On the same disk a promoted copy is moved, at once, and a copy
+// moved half into place can never be promoted again.
+func TestReplica_aPromotedCopyIsMovedNotCopied(t *testing.T) {
+	src := t.TempDir()
+	os.MkdirAll(filepath.Join(src, "pg"), 0o700)
+	os.WriteFile(filepath.Join(src, "pg", "base.dat"), noise(1<<20, 7), 0o600)
+	dir, st, stop := pair(t, src)
+	eventually(t, "snapshot", func() bool { _, s, _, _, _ := st.Snapshot(); return s })
+	stop()
+	held := filepath.Join(dir, "volume-data", "pg", "base.dat")
+	var before, after unix.Stat_t
+	if err := unix.Stat(held, &before); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(dir, "volume-data", "pg", ".deplo-replica-1-1"), []byte("half"), 0o600)
+	live := t.TempDir()
+	if err := Promote(dir, []string{VolumeRoot("data")}, map[string]string{VolumeRoot("data"): live}); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Stat(filepath.Join(live, "pg", "base.dat"), &after); err != nil || after.Ino != before.Ino {
+		t.Fatalf("the copy was not moved into place (inode %d, was %d): %v", after.Ino, before.Ino, err)
+	}
+	if _, err := os.Stat(filepath.Join(live, "pg", ".deplo-replica-1-1")); !os.IsNotExist(err) {
+		t.Fatal("a half-written file of the copy became data")
+	}
+	if Ready(dir) {
+		t.Fatal("a copy used up by a promote can be promoted again")
 	}
 }
 
@@ -348,4 +386,425 @@ func TestReplica_aCopyThatIsNotWhatItsIndexSaysIsReadAgainAndRepaired(t *testing
 	st3, _, stop3 := stream(t, src, dir, ix)
 	defer stop3()
 	eventually(t, "the copy is repaired", func() bool { _, s, _, _, _ := st3.Snapshot(); return s && read(cp) == string(data) })
+}
+
+// eu, 24 Nov 2026: a 2 GB file rebuilt here at page-cache speed stalled its whole server for 3 s, a renewal with it.
+func TestReplica_aRebuiltFileIsWrittenInStepsItWaitsOn(t *testing.T) {
+	var mu sync.Mutex
+	var steps []int64
+	was := flushRange
+	flushRange = func(f *os.File, off, n int64) {
+		mu.Lock()
+		steps = append(steps, n)
+		mu.Unlock()
+		was(f, off, n)
+	}
+	t.Cleanup(func() { flushRange = was })
+	src := t.TempDir()
+	data := noise(3*gentleStep+5, 4)
+	os.WriteFile(filepath.Join(src, "big.bin"), data, 0o644)
+	dir, st, stop := pair(t, src)
+	defer stop()
+	eventually(t, "snapshot", synced(st))
+	if b, _ := os.ReadFile(filepath.Join(dir, "volume-data", "big.bin")); !bytes.Equal(b, data) {
+		t.Fatal("the copy is not the file")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	var total int64
+	for _, n := range steps {
+		if n > gentleStep+maxChunk+256<<10 {
+			t.Fatalf("a step of %d bytes went to the disk unwaited", n)
+		}
+		total += n
+	}
+	if total != int64(len(data)) || len(steps) < 3 {
+		t.Fatalf("%d bytes in %d steps, for a file of %d", total, len(steps), len(data))
+	}
+}
+
+// eu, 24 Nov 2026: three copies read a 2.2 GB file through the page cache of a 2 GB server, every task stalled on
+// reclaim and the sender's lease ran out. What a copy reads goes from memory as it is read, on both sides.
+func TestReplica_whatACopyReadsLeavesMemoryAsItGoes(t *testing.T) {
+	var mu sync.Mutex
+	dropped := map[string]int64{}
+	was := dropPages
+	dropPages = func(f *os.File, off, n int64) {
+		mu.Lock()
+		dropped[filepath.Base(f.Name())] += n
+		mu.Unlock()
+		was(f, off, n)
+	}
+	t.Cleanup(func() { dropPages = was })
+	src := t.TempDir()
+	data := noise(3*gentleStep+5, 7)
+	os.WriteFile(filepath.Join(src, "big.bin"), data, 0o644)
+	dir, st, stop := pair(t, src)
+	defer stop()
+	eventually(t, "snapshot", synced(st))
+	if b, _ := os.ReadFile(filepath.Join(dir, "volume-data", "big.bin")); !bytes.Equal(b, data) {
+		t.Fatal("the copy is not the file")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if dropped["big.bin"] < int64(len(data)) {
+		t.Fatalf("%d of %d bytes the sender read left memory", dropped["big.bin"], len(data))
+	}
+}
+
+// eu, 24 Nov 2026: a copy that began while its App was small grew with it and took eu-1 to 92%. A copy stops at a
+// tenth of its disk free, the file it was writing goes, and it says why.
+func TestReplica_aGrowingCopyStopsAtATenthFree(t *testing.T) {
+	was := room.StatFile
+	room.StatFile = func(f *os.File) (int64, int64, bool) {
+		info, _ := f.Stat()
+		return 1<<30 + 3*gentleStep/2 - info.Size(), 10 << 30, true
+	}
+	t.Cleanup(func() { room.StatFile = was })
+	src := t.TempDir()
+	os.WriteFile(filepath.Join(src, "big.bin"), noise(4*gentleStep, 9), 0o644)
+	dir := t.TempDir()
+	_, got, stop := stream(t, src, dir, NewIndex())
+	defer stop()
+	select {
+	case err := <-got:
+		if err == nil || !strings.Contains(err.Error(), room.Marker) {
+			t.Fatalf("the copy ended with %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the copy went on past a tenth free")
+	}
+	entries, _ := os.ReadDir(filepath.Join(dir, "volume-data"))
+	if len(entries) != 0 {
+		t.Fatalf("the copy holds %v", entries)
+	}
+}
+
+// Deplo reads a copy's status at its own pace: a stop for room is still said while the copy dials again.
+func TestReplica_aStopForRoomIsSaidUntilAWholeSnapshotLands(t *testing.T) {
+	mid, goOn := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	was := flushRange
+	flushRange = func(f *os.File, off, n int64) {
+		once.Do(func() { close(mid); <-goOn })
+		was(f, off, n)
+	}
+	t.Cleanup(func() { flushRange = was })
+	src := t.TempDir()
+	os.WriteFile(filepath.Join(src, "big.bin"), noise(2*gentleStep, 3), 0o644)
+	dir := t.TempDir()
+	st := &Status{}
+	st.Fail("replica: big: this server has 1.4 GB free, too little to go on with this copy and " + room.Marker)
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	defer ln.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		if c, err := ln.Accept(); err == nil {
+			defer c.Close()
+			_ = Send(ctx, c, []string{VolumeRoot("data")}, []string{src})
+		}
+	}()
+	c, _ := net.Dial("tcp", ln.Addr().String())
+	defer c.Close()
+	go func() { _ = Receive(ctx, c, dir, []string{VolumeRoot("data")}, st, NewIndex()) }()
+	<-mid // the next stream is open and half way through the file
+	connected, _, _, _, err := st.Snapshot()
+	close(goOn)
+	if !connected || !strings.Contains(err, room.Marker) {
+		t.Fatalf("connected=%v: the stop for room was cleared before a snapshot landed: %q", connected, err)
+	}
+	eventually(t, "a whole snapshot to clear it", func() bool {
+		_, synced, _, _, err := st.Snapshot()
+		return synced && err == ""
+	})
+}
+
+// eu, 24 Nov 2026: a 600 MB copy took a 1-core server's CPU and every App through it timed out for 24 s.
+func TestReplica_bothEndsOfACopyArePaced(t *testing.T) {
+	src := t.TempDir()
+	data := noise(3*gentleStep+5, 6)
+	os.WriteFile(filepath.Join(src, "big.bin"), data, 0o644)
+	before := pace.Looks.Load()
+	_, st, stop := pair(t, src)
+	defer stop()
+	eventually(t, "snapshot", synced(st))
+	if n := pace.Looks.Load() - before; n < 6 {
+		t.Fatalf("a copy of 3 steps looked %d times", n)
+	}
+}
+
+// A file rebuilt beside the one it replaces holds both until it goes in place: it starts only if both fit.
+func TestReplica_aRebuildStartsOnlyIfTheOldAndTheNewFit(t *testing.T) {
+	src := t.TempDir()
+	big := filepath.Join(src, "big.bin")
+	putWhole(t, big, noise(4*gentleStep, 11))
+	dir := t.TempDir()
+	st, got, stop := stream(t, src, dir, NewIndex())
+	defer stop()
+	eventually(t, "snapshot", synced(st))
+	was := room.StatFile
+	// What the disk holds now leaves a tenth free, but not a second copy of big.bin.
+	room.StatFile = func(*os.File) (int64, int64, bool) { return 1<<30 + 2*gentleStep, 10 << 30, true }
+	t.Cleanup(func() { room.StatFile = was })
+	putWhole(t, big, noise(4*gentleStep, 12))
+	select {
+	case err := <-got:
+		if err == nil || !strings.Contains(err.Error(), room.Marker) {
+			t.Fatalf("the copy ended with %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the rebuild started without room for both")
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "volume-data", "big.bin")); !bytes.Equal(b, noise(4*gentleStep, 11)) {
+		t.Fatal("the old copy of big.bin went")
+	}
+}
+
+// eu, 24 Nov 2026: an agent restarted mid-rebuild left a 671 MB half-rebuilt file in its copy, beside the next one.
+func TestReplica_aNewStreamDropsWhatAnEarlierRunLeftHalfRebuilt(t *testing.T) {
+	src := t.TempDir()
+	os.WriteFile(filepath.Join(src, "a.txt"), []byte("a"), 0o644)
+	dir := t.TempDir()
+	stale := filepath.Join(dir, "volume-data", ".deplo-replica-4721-17")
+	os.MkdirAll(filepath.Dir(stale), 0o700)
+	os.WriteFile(stale, []byte("half"), 0o600)
+	st, _, stop := stream(t, src, dir, NewIndex())
+	defer stop()
+	eventually(t, "snapshot", synced(st))
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatal("the half-rebuilt file of an earlier run is still in the copy")
+	}
+}
+
+// c46: eu-1 wrote 1.3 GB of a copy it had no room for, then refused it at its floor: the file's size comes first now.
+func TestReplica_aFileThatDoesNotFitIsRefusedBeforeAnyOfItIsWritten(t *testing.T) {
+	was, wasFlush := room.StatFile, flushRange
+	room.StatFile = func(*os.File) (int64, int64, bool) { return 1<<30 + 2*gentleStep, 10 << 30, true }
+	var flushed int
+	flushRange = func(f *os.File, off, n int64) { flushed++; wasFlush(f, off, n) }
+	t.Cleanup(func() { room.StatFile, flushRange = was, wasFlush })
+	src := t.TempDir()
+	os.WriteFile(filepath.Join(src, "big.bin"), noise(4*gentleStep, 13), 0o644)
+	dir := t.TempDir()
+	_, got, stop := stream(t, src, dir, NewIndex())
+	defer stop()
+	select {
+	case err := <-got:
+		if err == nil || !strings.Contains(err.Error(), "has 1.0 GB free, too little for this copy (about 32.0 MB)") {
+			t.Fatalf("the copy ended with %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a file that does not fit was copied")
+	}
+	if flushed != 0 {
+		t.Fatalf("%d steps of a file that does not fit were written", flushed)
+	}
+}
+
+// c46: the second move onto one member waited stopped 10 to 17 s; its last changes now go first, never paced.
+func TestReplica_aStoppedAppsLastChangesGoFirst(t *testing.T) {
+	src := t.TempDir()
+	os.WriteFile(filepath.Join(src, "big.bin"), noise(3*gentleStep+5, 14), 0o644)
+	mid, goOn := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	was := flushRange
+	flushRange = func(f *os.File, off, n int64) {
+		once.Do(func() { close(mid); <-goOn })
+		was(f, off, n)
+	}
+	t.Cleanup(func() { flushRange = was })
+	before := pace.Looks.Load()
+	ln, _ := net.Listen("tcp", "127.0.0.1:0")
+	defer ln.Close()
+	go func() {
+		if c, err := ln.Accept(); err == nil {
+			defer c.Close()
+			_ = SendOnce(context.Background(), c, []string{VolumeRoot("data")}, []string{src})
+		}
+	}()
+	c, _ := net.Dial("tcp", ln.Addr().String())
+	defer c.Close()
+	st := &Status{}
+	done := make(chan error, 1)
+	go func() {
+		done <- ReceiveFirst(context.Background(), c, t.TempDir(), []string{VolumeRoot("data")}, st, NewIndex())
+	}()
+	<-mid
+	moved := make(chan struct{})
+	go func() {
+		var p pace.Pacer
+		p.Moved(pace.Step)
+		close(moved)
+	}()
+	select {
+	case <-moved:
+		t.Fatal("another copy went on beside a stopped App's last changes")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(goOn)
+	<-done
+	if _, synced, _, _, _ := st.Snapshot(); !synced {
+		t.Fatal("the last changes did not land")
+	}
+	<-moved
+	if n := pace.Looks.Load() - before; n != 1 {
+		t.Fatalf("the last changes were paced: %d looks", n-1)
+	}
+}
+
+// lostClose is a stream whose sender is gone and whose close never arrived: nothing more comes, and what the receiver
+// writes is answered with a reset.
+type lostClose struct {
+	net.Conn
+	gone atomic.Bool
+	once sync.Once
+	woke chan struct{}
+}
+
+func (c *lostClose) Read(p []byte) (int, error) {
+	if c.gone.Load() {
+		<-c.woke
+		return 0, os.ErrDeadlineExceeded
+	}
+	return c.Conn.Read(p)
+}
+
+func (c *lostClose) Write(p []byte) (int, error) {
+	if c.gone.Load() {
+		return 0, errors.New("connection reset by peer")
+	}
+	return c.Conn.Write(p)
+}
+
+func (c *lostClose) SetReadDeadline(t time.Time) error {
+	c.once.Do(func() { close(c.woke) })
+	return c.Conn.SetReadDeadline(t)
+}
+
+// c49: lab-kit-c's copy ended on its sender with "endpoint is closed for send", the close never reached the receiver
+// and it waited on the quiet stream for 15 minutes. The receiver probes its sender: the reset ends the stream.
+func TestReplica_aSenderGoneWithItsCloseLostEndsTheStream(t *testing.T) {
+	was := ProbeEvery
+	ProbeEvery = 50 * time.Millisecond
+	t.Cleanup(func() { ProbeEvery = was })
+	src := t.TempDir()
+	putWhole(t, filepath.Join(src, "a.txt"), []byte("one"))
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		c, err := ln.Accept()
+		if err == nil {
+			defer c.Close()
+			_ = Send(ctx, c, []string{VolumeRoot("data")}, []string{src})
+		}
+	}()
+	raw, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { raw.Close() })
+	c := &lostClose{Conn: raw, woke: make(chan struct{})}
+	st := &Status{}
+	got := make(chan error, 1)
+	go func() { got <- Receive(ctx, c, t.TempDir(), []string{VolumeRoot("data")}, st, NewIndex()) }()
+	eventually(t, "a whole copy", synced(st))
+	c.gone.Store(true)
+	select {
+	case err := <-got:
+		if err == nil || !strings.Contains(err.Error(), "reset") {
+			t.Fatalf("the stream ended with %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the copy still waits on a sender that is gone")
+	}
+}
+
+// slowConn reads at most 16 KB at a time, 5 ms apart: a busy receiver.
+type slowConn struct{ net.Conn }
+
+func (c slowConn) Read(p []byte) (int, error) {
+	time.Sleep(5 * time.Millisecond)
+	return c.Conn.Read(p[:min(len(p), 16<<10)])
+}
+
+// dialed runs Send over src on a fresh socket, a sender that ends only on its own error; sent says how it ended.
+func dialed(t *testing.T, src string) (c net.Conn, sent <-chan error) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	out := make(chan error, 1)
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			out <- err
+			return
+		}
+		defer c.Close()
+		out <- Send(context.Background(), c, []string{VolumeRoot("data")}, []string{src})
+	}()
+	raw, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { raw.Close() })
+	return raw, out
+}
+
+// c50: a copy Deplo held for its turn came back on its old 64 MB and read "Up to date" from its first record, so a
+// move took the App's 120 MiB itself. Until a stream's snapshot lands, its copy is not current.
+func TestReplica_aCopyIsCurrentOnlyOnceItsStreamsSnapshotLanded(t *testing.T) {
+	src, dir := t.TempDir(), t.TempDir()
+	putWhole(t, filepath.Join(src, "a.txt"), []byte("one"))
+	st := &Status{}
+	ctx, cancel := context.WithCancel(context.Background())
+	c, _ := dialed(t, src)
+	got := make(chan error, 1)
+	go func() { got <- Receive(ctx, c, dir, []string{VolumeRoot("data")}, st, NewIndex()) }()
+	eventually(t, "a whole copy", synced(st))
+	cancel()
+	<-got
+
+	putWhole(t, filepath.Join(src, "big"), noise(4<<20, 7))
+	ctx, cancel = context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	c, _ = dialed(t, src)
+	go func() { got <- Receive(ctx, slowConn{c}, dir, []string{VolumeRoot("data")}, st, NewIndex()) }()
+	eventually(t, "the next stream", func() bool { connected, _, _, _, _ := st.Snapshot(); return connected })
+	if _, isSynced, _, _, _ := st.Snapshot(); isSynced {
+		t.Fatal("a copy still taking 4 MB says it is current")
+	}
+	eventually(t, "the next snapshot", synced(st))
+}
+
+// c50: Deplo held three copies of lab-kit-b for their turn; each sender logged "endpoint is closed for send" and
+// said its member dials again, which it did not. A receiver that stops says so, and its sender ends quietly.
+func TestReplica_aReceiverThatStopsEndsItsSenderWithoutAnError(t *testing.T) {
+	src := t.TempDir()
+	putWhole(t, filepath.Join(src, "big"), noise(16<<20, 3))
+	c, sent := dialed(t, src)
+	ctx, cancel := context.WithCancel(context.Background())
+	st := &Status{}
+	got := make(chan error, 1)
+	go func() { got <- Receive(ctx, slowConn{c}, t.TempDir(), []string{VolumeRoot("data")}, st, NewIndex()) }()
+	eventually(t, "the stream", func() bool { connected, _, _, _, _ := st.Snapshot(); return connected })
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	<-got
+	select {
+	case err := <-sent:
+		if err != nil {
+			t.Fatalf("the sender called its receiver's stop a failure: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the sender still sends to a receiver that stopped")
+	}
 }

@@ -132,7 +132,7 @@ func (z *clusterZones) file() string { return filepath.Join(z.s.agentDir, "clust
 func (z *clusterZones) save() {
 	raw, err := json.Marshal(z.st)
 	if err == nil {
-		err = writeFileAtomic(z.file(), raw, 0o600)
+		keepLater(z.file(), raw)
 	}
 	if err != nil {
 		log.Printf("deplo-agent: could not keep the cluster's DNS zone in %s: %v", z.file(), err)
@@ -533,11 +533,26 @@ func (z *clusterZones) loop(stop, done chan struct{}, sup *dnszone.Supervisor) {
 	defer close(done)
 	tick := time.NewTicker(zoneTick)
 	defer tick.Stop()
+	// Just started, it decides ten times a second until it answers: within a tenth of a second of hearing more
+	// than half of its cluster, not up to a second later (ADR-0049, eu 24 Nov 2026: 1.4 s).
+	warm := time.NewTicker(zoneTick / 10)
+	defer warm.Stop()
 	rebind := time.Now()
 	for {
 		select {
 		case <-stop:
 			return
+		case now := <-warm.C:
+			z.mu.Lock()
+			z.pushLocked(now)
+			warming := false
+			for _, v := range z.verdicts {
+				warming = warming || v.State == dnszone.StateWarming
+			}
+			z.mu.Unlock()
+			if !warming {
+				warm.Stop()
+			}
 		case now := <-tick.C:
 			if now.Sub(rebind) >= zoneRebindEvery {
 				rebind = now

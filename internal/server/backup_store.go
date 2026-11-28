@@ -16,6 +16,8 @@ import (
 
 	"filippo.io/age"
 	pb "github.com/DeploCloud/deplo-agent/gen"
+	"github.com/DeploCloud/deplo-agent/internal/pace"
+	"github.com/DeploCloud/deplo-agent/internal/room"
 	"github.com/DeploCloud/deplo-agent/internal/s3client"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -121,7 +123,28 @@ func storeKeyPath(root, key string) (string, error) {
 	return abs, nil
 }
 
-func storeWrite(root, key string, r io.Reader, overwrite bool) (int64, string, error) {
+// stepSync sends a landing file to disk a pace step at a time: flushed whole at its end, it held the disk, and every
+// visitor of that server, for a second (c47).
+type stepSync struct {
+	f *os.File
+	n int64
+}
+
+// syncLanding is a var so a test sees when a landing file goes to disk.
+var syncLanding = (*os.File).Sync
+
+func (s *stepSync) Write(p []byte) (int, error) {
+	if s.n += int64(len(p)); s.n >= pace.Step {
+		s.n = 0
+		if err := syncLanding(s.f); err != nil {
+			return 0, err
+		}
+	}
+	return len(p), nil
+}
+
+// storeWrite lands r at key; check, when set, sees what landed before it is kept, and refuses it with an error.
+func storeWrite(root, key string, r io.Reader, overwrite bool, check ...func(n int64, sum string) error) (int64, string, error) {
 	dst, err := storeKeyPath(root, key)
 	if err != nil {
 		return 0, "", err
@@ -148,11 +171,17 @@ func storeWrite(root, key string, r io.Reader, overwrite bool) (int64, string, e
 	}()
 
 	sum := sha256.New()
-	n, err := io.Copy(io.MultiWriter(f, sum), r)
+	n, err := io.Copy(io.MultiWriter(&room.Writer{F: f}, sum, &stepSync{f: f}), pace.Reader(r))
 	if err != nil {
 		return 0, "", fmt.Errorf("write backup artifact: %w", err)
 	}
-	if err := f.Sync(); err != nil {
+	digest := hex.EncodeToString(sum.Sum(nil))
+	for _, c := range check {
+		if err := c(n, digest); err != nil {
+			return 0, "", err
+		}
+	}
+	if err := syncLanding(f); err != nil {
 		return 0, "", fmt.Errorf("flush backup artifact: %w", err)
 	}
 	if err := f.Close(); err != nil {
@@ -162,7 +191,7 @@ func storeWrite(root, key string, r io.Reader, overwrite bool) (int64, string, e
 		return 0, "", fmt.Errorf("commit backup artifact: %w", err)
 	}
 	committed = true
-	return n, hex.EncodeToString(sum.Sum(nil)), nil
+	return n, digest, nil
 }
 
 func storeOpen(root, key string) (io.ReadCloser, error) {
@@ -254,9 +283,20 @@ func pruneEmptyDirs(root, dir string) {
 	}
 }
 
+// SweepStorePartials clears what a run that ended left half-written in this server's own backup store.
+func (s *Service) SweepStorePartials() { sweepPartials(s.managedStoreRoot()) }
+
+// agentStarted dates this run: a partial file older than it is a write a crash or a power cut ended.
+var agentStarted = time.Now()
+
+// sweepPartials removes every partial file no write of this run is on: before a destination takes a copy, nothing
+// half-written of a run that ended is left on it (eu, 24 Nov 2026: one stayed after a power cut mid-send).
 func sweepPartials(root string) int {
 	n := 0
 	cutoff := time.Now().Add(-storePartialStaleAfter)
+	if agentStarted.After(cutoff) {
+		cutoff = agentStarted
+	}
 	_ = filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -277,12 +317,8 @@ func sweepPartials(root string) int {
 }
 
 func storeFreeBytes(root string) (free, total int64) {
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(root, &st); err != nil {
-		return 0, 0
-	}
-	bsize := int64(st.Bsize)
-	return int64(st.Bavail) * bsize, int64(st.Blocks) * bsize
+	free, total, _ = room.Stat(root)
+	return free, total
 }
 
 func verifyStoreDigest(root, key, expected string) error {
@@ -401,18 +437,33 @@ func (s *Service) WriteStoreFile(stream pb.Agent_WriteStoreFileServer) error {
 	if err != nil {
 		return err
 	}
+	sweepPartials(root)
 
 	pr, pw := io.Pipe()
+	// A sealed stream is kept only up to a trailer that names what was sent: a send cut midway, even one that ends
+	// with a clean close, leaves nothing (eu, 24 Nov 2026: a failed relay left its 184-byte header kept).
+	var trailer *pb.StoreChunk_Trailer
 	go func() {
 		var perr error
 		for {
 			msg, rerr := stream.Recv()
 			if rerr == io.EOF {
+				if h.GetSealed() && trailer == nil {
+					perr = errors.New("the backup stream ended before the whole backup arrived")
+				}
 				break
 			}
 			if rerr != nil {
 				perr = rerr
 				break
+			}
+			if trailer != nil {
+				perr = errors.New("the backup stream went on after its end")
+				break
+			}
+			if t := msg.GetTrailer(); t != nil && h.GetSealed() {
+				trailer = t
+				continue
 			}
 			if d := msg.GetData(); len(d) > 0 {
 				if _, werr := pw.Write(d); werr != nil {
@@ -423,8 +474,17 @@ func (s *Service) WriteStoreFile(stream pb.Agent_WriteStoreFileServer) error {
 		}
 		pw.CloseWithError(perr)
 	}()
+	sealed := func(n int64, sum string) error {
+		if !h.GetSealed() {
+			return nil
+		}
+		if trailer.GetSizeBytes() != n || !strings.EqualFold(trailer.GetSha256(), sum) {
+			return fmt.Errorf("what arrived (%d bytes) is not what was sent (%d bytes), so it was not kept", n, trailer.GetSizeBytes())
+		}
+		return nil
+	}
 
-	n, sum, werr := storeWrite(root, h.GetStore().GetObjectKey(), pr, h.GetOverwrite())
+	n, sum, werr := storeWrite(root, h.GetStore().GetObjectKey(), pr, h.GetOverwrite(), sealed)
 	if werr != nil {
 		_ = pr.CloseWithError(werr)
 		return stream.SendAndClose(&pb.StoreResult{Ok: false, Error: werr.Error()})

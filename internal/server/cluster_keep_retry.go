@@ -67,6 +67,17 @@ func (g *leaseGuard) later(o lease.Order, next *clusterLease, r *lease.Reply) {
 	}
 }
 
+// forgetKept drops what stayed here of slug: a delete took it, so no later pass saves it again.
+func (g *leaseGuard) forgetKept(slug string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for _, c := range g.clusters {
+		c.Keeping = slices.DeleteFunc(slices.Clone(c.Keeping), func(k lease.Kept) bool { return k.Slug == slug })
+		c.Late = slices.DeleteFunc(slices.Clone(c.Late), func(sv lease.Saved) bool { return sv.Slug == slug })
+	}
+	g.save()
+}
+
 func (g *leaseGuard) noteLate(cluster string, sv lease.Saved) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -129,7 +140,8 @@ func (g *leaseGuard) retryKept(cluster string) {
 	if c = g.clusters[cluster]; c == nil {
 		return
 	}
-	c.Keeping = stay
+	// What a delete forgot while this pass ran stays forgotten.
+	c.Keeping = slices.DeleteFunc(stay, func(k lease.Kept) bool { return !keeps(c.Keeping, k.Slug) })
 	wait := keepRetryMin
 	if tried && len(stay) > 0 {
 		wait = min(max(2*g.retryWait[cluster], keepRetryMin), keepRetryMax)

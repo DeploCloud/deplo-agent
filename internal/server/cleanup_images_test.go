@@ -508,8 +508,40 @@ func TestDockerCleanup_unusedAppImages_adoptsAnUnlabelledBuild(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := h.argv()
-	if len(got) != 2 || !containsString(got, "rmi sha256:mid") || !containsString(got, "rmi sha256:old") {
+	if len(got) != 2 || !containsString(got, "rmi deplo/web:dpl_99887766aabb") || !containsString(got, "rmi deplo/web:dpl_123456789abc") {
 		t.Fatalf("argv = %q, want the two older generations removed and the newest kept", got)
+	}
+}
+
+// A fully cached rebuild tags the same image again, and Docker refuses `rmi <id>` for it (eu-main-1, 27 Nov 2026).
+func TestDockerCleanup_unusedAppImages_removesEveryTag(t *testing.T) {
+	h := newFixture(t)
+	now := time.Now()
+	row := func(id string, hoursAgo int, tags ...string) string {
+		return "sha256:" + id + "|web|<no value>|" + now.Add(-time.Duration(hoursAgo)*time.Hour).Format(time.RFC3339Nano) +
+			"|100000000|" + tags[0] + "|true|\"\"|" + strings.Join(tags, ",") + ",|"
+	}
+	h.managedImages = []string{"new1111", "dup1111", "own1111"}
+	h.imageRows = map[string]string{
+		"new1111": row("new", 2, "deplo/web:dpl_0a1b2c3d4e5f"),
+		"dup1111": row("dup", 6, "deplo/web:dpl_99887766aabb", "deplo/web:dpl_aabbccddeeff"),
+		"own1111": row("own", 9, "deplo/web:dpl_123456789abc", "registry.example/web:prod"),
+	}
+	h.install(t)
+
+	resp, err := newService(t).DockerCleanup(context.Background(), &pb.DockerCleanupRequest{
+		Scopes:           []pb.CleanupScope{pb.CleanupScope_CLEANUP_SCOPE_UNUSED_APP_IMAGES},
+		KeepImagesPerApp: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "rmi deplo/web:dpl_99887766aabb deplo/web:dpl_aabbccddeeff"
+	if got := h.argv(); len(got) != 1 || got[0] != want {
+		t.Fatalf("argv = %q, want [%s]: every tag of the shared image, none of an image someone else named", got, want)
+	}
+	if r := resultFor(t, resp, pb.CleanupScope_CLEANUP_SCOPE_UNUSED_APP_IMAGES); r.GetItemsRemoved() != 1 {
+		t.Errorf("items_removed = %d, want 1", r.GetItemsRemoved())
 	}
 }
 

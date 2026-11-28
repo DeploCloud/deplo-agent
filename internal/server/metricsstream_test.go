@@ -147,3 +147,24 @@ func TestBuildSample_panicCostsOneFrameNotTheStream(t *testing.T) {
 		t.Error("a recovered frame should still be timestamped, for diagnosability")
 	}
 }
+
+// c47: a member that just joined sent its first metrics a whole interval after the stream opened, and a move onto it
+// waited for them. The first sample spans only the CPU's window.
+func TestStreamMetrics_theFirstSampleComesWithinASecondWhateverTheInterval(t *testing.T) {
+	client, done := dialLocal(t)
+	defer done()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	stream, err := client.StreamMetrics(ctx, &pb.MetricsStreamRequest{IntervalMs: 60_000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	sample, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("no first sample: %v", err)
+	}
+	if took := time.Since(start); took > 3*time.Second || sample.GetHost().GetMemTotal() <= 0 {
+		t.Fatalf("the first sample came after %v with memory %d", took, sample.GetHost().GetMemTotal())
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -37,6 +38,7 @@ var dockerForwardOps = forwardOps{
 	redirect:  redirectAllPorts,
 	proxyDial: dialProxyLoopback,
 	ready:     appReady,
+	readyAll:  appsReady,
 	runs:      appRunsHere,
 }
 
@@ -53,8 +55,7 @@ func listenForwarder(dir string) (net.Listener, error) {
 		return nil, err
 	}
 	sock := filepath.Join(dir, fwdSocket)
-	_ = os.Remove(sock)
-	ln, err := net.Listen("unix", sock)
+	ln, err := keptUnixListener(keptForwarder(dir), sock)
 	if err != nil {
 		return nil, err
 	}
@@ -62,6 +63,9 @@ func listenForwarder(dir string) (net.Listener, error) {
 	_ = os.Chmod(sock, 0o666)
 	return ln, nil
 }
+
+// keptForwarder names a forwarder's listener in systemd's store: a visitor reaching it while the agent restarts waits.
+func keptForwarder(dir string) string { return "fwd-" + filepath.Base(dir) }
 
 func forwarderSpecTag(s forwardSpec) string {
 	sum := sha256.Sum256([]byte(fmt.Sprintf("%s|%s|%s|%d|%s", fwdProto, s.Network, s.Alias, s.Port, s.Dir)))
@@ -181,6 +185,7 @@ func forwarderPids(ctx context.Context, containers []string) (map[string]int, er
 	if len(containers) == 0 {
 		return map[string]int{}, nil
 	}
+	// .ID, never .Id: a field the typed container lacks makes docker read the raw map, where a missing Health fails.
 	args := append([]string{"inspect", "--format", "{{.Name}} {{.State.Pid}}"}, containers...)
 	res, err := dockercli.Run(ctx, 15*time.Second, args...)
 	if err != nil {
@@ -227,16 +232,55 @@ func appReady(ctx context.Context, appID string) appReadiness {
 	if err != nil || res.Code != 0 || len(ids) == 0 {
 		return appReadiness{}
 	}
-	args := append([]string{"inspect", "--format", `{"status":{{json .State.Status}},"started":{{json .State.StartedAt}},"created":{{json .Created}},` +
-		`"health":{{if .State.Health}}{{json .State.Health}}{{else}}null{{end}}}`}, ids...)
-	res, err = dockercli.Run(ctx, 10*time.Second, args...)
+	res, err = dockercli.Run(ctx, 10*time.Second, append([]string{"inspect", "--format", readyFormat}, ids...)...)
 	if err != nil || res.Code != 0 {
 		return appReadiness{}
 	}
 	return readinessOf(strings.Split(strings.TrimSpace(res.Stdout), "\n"))
 }
 
+// readyFormat is one container's line for readinessOf.
+const readyFormat = `{"id":{{json .ID}},"name":{{json .Name}},"status":{{json .State.Status}},"started":{{json .State.StartedAt}},"created":{{json .Created}},` +
+	`"health":{{if .State.Health}}{{json .State.Health}}{{else}}null{{end}}}`
+
+// appsReady is appReady for every App at once, two docker calls whatever their number, and finds the proxy's process
+// when the run before handed none over: what a start reads first.
+func appsReady(ctx context.Context, appIDs []string) map[string]appReadiness {
+	out := map[string]appReadiness{}
+	_, _ = lookupProxyPid(ctx, 0)
+	res, err := dockercli.Run(ctx, 10*time.Second, "ps", "-aq", "--filter", "label=deplo.project")
+	ids := strings.Fields(res.Stdout)
+	if err != nil || res.Code != 0 || len(ids) == 0 {
+		return out
+	}
+	res, err = dockercli.Run(ctx, 10*time.Second, append([]string{"inspect", "--format",
+		`{{index .Config.Labels "deplo.project"}} ` + readyFormat}, ids...)...)
+	if err != nil || res.Code != 0 {
+		return out
+	}
+	return readinessByApp(res.Stdout, appIDs)
+}
+
+// readinessByApp is readinessOf for each App of an inspect whose lines start with the container's App.
+func readinessByApp(out string, appIDs []string) map[string]appReadiness {
+	lines := map[string][]string{}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if app, c, ok := strings.Cut(line, " "); ok {
+			lines[app] = append(lines[app], c)
+		}
+	}
+	got := map[string]appReadiness{}
+	for _, app := range appIDs {
+		if len(lines[app]) > 0 {
+			got[app] = readinessOf(lines[app])
+		}
+	}
+	return got
+}
+
 type containerState struct {
+	ID      string    `json:"id"`
+	Name    string    `json:"name"`
 	Status  string    `json:"status"`
 	Started time.Time `json:"started"`
 	Created time.Time `json:"created"`
@@ -250,6 +294,9 @@ type containerState struct {
 	} `json:"health"`
 }
 
+// recreated is the name compose gives a container's replacement until the old one is gone.
+var recreated = regexp.MustCompile(`^/([0-9a-f]{12})_(.+)$`)
+
 // readinessOf is the rule appReady applies, one container per line. A container without a health check counts
 // from its start; one with a check from the oldest check docker keeps, when every one kept passed. One whose check
 // fails, or one created answerStuck ago and never started (its dependency never came up), makes the App broken.
@@ -262,16 +309,29 @@ func readinessOf(lines []string) appReadiness {
 			r.Since = t
 		}
 	}
+	all := make([]containerState, 0, len(lines))
+	runs := map[string]string{}
 	for _, line := range lines {
 		var c containerState
 		if json.Unmarshal([]byte(line), &c) != nil {
 			return appReadiness{}
 		}
+		all = append(all, c)
+		if c.Status == "running" {
+			runs[c.Name] = c.ID
+		}
+	}
+	for _, c := range all {
 		switch c.Status {
 		case "exited", "dead":
 			continue
 		case "running":
 		case "created":
+			// A routing change recreates a container: the copy that will replace it waits beside it as
+			// <its id>_<its name>, and the one running answers until then (eu, 24 Nov 2026: 13 s held on a new domain).
+			if m := recreated.FindStringSubmatch(c.Name); m != nil && strings.HasPrefix(runs["/"+m[2]], m[1]) {
+				continue
+			}
 			if !c.Created.IsZero() && time.Since(c.Created) >= answerStuck {
 				broken = true
 			} else {
@@ -319,27 +379,51 @@ func readinessOf(lines []string) appReadiness {
 var proxyPid struct {
 	sync.Mutex
 	pid int
+	// missed is when the last look found no proxy: for a second after it, nobody asks Docker again.
+	missed time.Time
+}
+
+// proxyMissFor is how long a look that found no proxy answers for every dial: while a proxy is recreated, each
+// passed-on visitor ran its own docker inspect, up to 59 a second on a one-core server (c39).
+var proxyMissFor = time.Second
+
+// lookupProxyPid is the proxy's process, looked up one at a time: a caller whose stale pid another caller already
+// replaced takes the new one, and none asks Docker within proxyMissFor of a look that found no proxy.
+func lookupProxyPid(ctx context.Context, stale int) (int, error) {
+	proxyPid.Lock()
+	defer proxyPid.Unlock()
+	if proxyPid.pid != 0 && proxyPid.pid != stale {
+		return proxyPid.pid, nil
+	}
+	if time.Since(proxyPid.missed) < proxyMissFor {
+		return 0, fmt.Errorf("this server's proxy is not running")
+	}
+	res, err := dockercli.Run(ctx, 10*time.Second, "inspect", "--format", "{{.State.Pid}}", traefikContainer)
+	pid := 0
+	if err == nil && res.Code == 0 {
+		pid, _ = strconv.Atoi(strings.TrimSpace(res.Stdout))
+	}
+	if pid <= 0 {
+		proxyPid.pid, proxyPid.missed = 0, time.Now()
+		return 0, fmt.Errorf("this server's proxy is not running")
+	}
+	proxyPid.pid = pid
+	return pid, nil
 }
 
 // dialProxyLoopback connects to the proxy's internal entrypoint, which listens on its own loopback: only a process
 // inside its network, as this agent is for that one call, can reach it, and it trusts the PROXY header from there.
 func dialProxyLoopback(ctx context.Context, port uint32) (net.Conn, error) {
 	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(int(port)))
+	proxyPid.Lock()
+	pid := proxyPid.pid
+	proxyPid.Unlock()
 	for attempt := 0; attempt < 2; attempt++ {
-		proxyPid.Lock()
-		pid := proxyPid.pid
-		proxyPid.Unlock()
 		if pid == 0 || attempt > 0 {
-			res, err := dockercli.Run(ctx, 10*time.Second, "inspect", "--format", "{{.State.Pid}}", traefikContainer)
-			if err != nil || res.Code != 0 {
-				return nil, fmt.Errorf("this server's proxy is not running")
+			var err error
+			if pid, err = lookupProxyPid(ctx, pid); err != nil {
+				return nil, err
 			}
-			if pid, err = strconv.Atoi(strings.TrimSpace(res.Stdout)); err != nil || pid <= 0 {
-				return nil, fmt.Errorf("this server's proxy is not running")
-			}
-			proxyPid.Lock()
-			proxyPid.pid = pid
-			proxyPid.Unlock()
 		}
 		// A proxy that restarted has a new process: the second attempt looks it up again.
 		if c, err := dialInNetwork(ctx, pid, addr); err == nil {

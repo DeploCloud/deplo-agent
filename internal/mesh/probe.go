@@ -12,6 +12,8 @@ const (
 	probeMagic = 0xde
 	probePing  = 1
 	probePong  = 2
+	// probeMoved says the sender switched to the next key Deplo gave its peers for it (Mesh.Rotate).
+	probeMoved = 3
 	probeLen   = 1 + 1 + 32 + 8 + 16
 )
 
@@ -41,7 +43,7 @@ func isProbe(b []byte) bool { return len(b) > 0 && b[0] == probeMagic }
 
 // parseProbe reads a probe's claims; the caller checks the MAC with the claimed sender's pair key.
 func parseProbe(b []byte) (probe, bool) {
-	if len(b) != probeLen || b[0] != probeMagic || (b[1] != probePing && b[1] != probePong) {
+	if len(b) != probeLen || b[0] != probeMagic || (b[1] != probePing && b[1] != probePong && b[1] != probeMoved) {
 		return probe{}, false
 	}
 	var p probe

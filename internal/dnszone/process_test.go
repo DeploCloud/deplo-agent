@@ -451,3 +451,21 @@ func TestSupervisor_placesVisitorsWithTheTableItIsHanded(t *testing.T) {
 	s.Reload()
 	eventually(t, 5*time.Second, "every server again", func() bool { return len(strings.Fields(nearestFrom(addr, geotest.MilanV4))) == 3 })
 }
+
+// The flaky "port already in use": with any port, the TCP half of the one UDP got may be taken by another program.
+func TestBind_anyPortTriesAnotherWhenItsTCPHalfIsTaken(t *testing.T) {
+	was := listenTCP
+	calls := 0
+	listenTCP = func(network string, a *net.TCPAddr) (*net.TCPListener, error) {
+		if calls++; calls == 1 {
+			return nil, &net.OpError{Op: "listen", Net: network, Err: syscall.EADDRINUSE}
+		}
+		return was(network, a)
+	}
+	t.Cleanup(func() { listenTCP = was })
+	s, err := bind(netip.MustParseAddr("127.0.0.1"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.close()
+}

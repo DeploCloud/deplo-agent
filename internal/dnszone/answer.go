@@ -9,8 +9,9 @@ import (
 )
 
 const (
-	// negTTL is how long a resolver keeps "no such name": a name added a moment ago appears quickly.
-	negTTL = 30
+	// negTTL is how long a resolver keeps "no such name": one that asked before a new App was ready finds it
+	// within seconds (c39: 31 s at 30).
+	negTTL = 5
 	// nsTTL is the registrar's side, which changes only when a name server leaves.
 	nsTTL = 86400
 	// maxUDP is the largest answer sent over UDP whatever a resolver offers (DNS flag day 2020); past it, TCP.
