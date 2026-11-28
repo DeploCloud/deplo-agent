@@ -11,6 +11,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -64,9 +66,9 @@ func appEntry(member string) lease.Entry {
 // quickAnswers shortens how long a passed-on connection waits for a ready server.
 func quickAnswers(t *testing.T, wait time.Duration) {
 	t.Helper()
-	w, r, s := answerWait, answerRetry, answerSettle
-	answerWait, answerRetry, answerSettle = wait, 50*time.Millisecond, 0
-	t.Cleanup(func() { answerWait, answerRetry, answerSettle = w, r, s })
+	w, r, s, p := answerWait, answerRetry, answerSettle, proxySettle
+	answerWait, answerRetry, answerSettle, proxySettle = wait, 50*time.Millisecond, 0, 0
+	t.Cleanup(func() { answerWait, answerRetry, answerSettle, proxySettle = w, r, s, p })
 }
 
 // askPort connects as the answer forwarder's container does for a caller that dialed port: the port line, then its bytes.
@@ -127,6 +129,53 @@ func TestAnswers_passADomainOnToTheProxyOfTheServerThatRunsTheApp(t *testing.T) 
 		!strings.Contains(string(file), `"address": "deplo-answer:10001"`) {
 		t.Fatalf("the proxy's routes file is %q (%v)", file, err)
 	}
+}
+
+// eu, 24 Nov 2026: a domain added to one App cut every App passed on through the other servers for 1 to 2 s. A
+// new table held the forwarders' lock while docker answered slowly, and every connection waited on it.
+func TestAnswers_aNewTableWhileDockerIsSlowHoldsUpNoConnection(t *testing.T) {
+	a, b, fa, fb, members := answerPair(t)
+	bothAnswer(t, a, b, members)
+	placeOn(t, a, "srvA", appEntry("srvB"))
+	placeOn(t, b, "srvB", appEntry("srvB"))
+	s := fa.spec(t, answerAlias)
+
+	slow := make(chan struct{})
+	defer func() {
+		if slow != nil {
+			close(slow)
+		}
+	}()
+	for _, h := range []*fakeFwdHost{fa, fb} {
+		h.mu.Lock()
+		h.slow = slow
+		h.mu.Unlock()
+	}
+	blog := &pb.ClusterAnswer{AppId: "prj2", TlsPort: 10003, WebPort: 10004, Routes: routesFor("prj2", 10003, 10004, "blog.example.com")}
+	done := make(chan struct{}, 2)
+	for _, srv := range []*Service{a, b} {
+		go func() {
+			_, _ = srv.SetClusterForwarders(context.Background(), &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members,
+				AnswerPort: srv.forwarders().state().AnswerPort, Answers: []*pb.ClusterAnswer{shop(), blog}, ServeAnswers: []string{"prj1", "prj2"}})
+			done <- struct{}{}
+		}()
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	got := make(chan string, 1)
+	go func() { got <- askPort(t, s, shopTLS) }()
+	select {
+	case g := <-got:
+		if g != "proxy-b:PING" {
+			t.Fatalf("while the new table waited on docker, shop reached %q", g)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("shop's connection waited for the new table, which waited for docker")
+	}
+	close(slow)
+	slow = nil
+	<-done
+	<-done
 }
 
 // After a failover the App may run on the server a visitor reached: its proxy gets the connection back.
@@ -519,6 +568,10 @@ func TestAnswers_readyOnlyWhenEveryContainerIs(t *testing.T) {
 			ts(at), status, streak, strings.Join(log, ","))
 	}
 	stuck := `{"status":"created","started":"0001-01-01T00:00:00Z","created":"` + ts(at) + `","health":null}`
+	// A routing change recreates the container: its replacement waits, created, under the old one's id and name.
+	old := `{"id":"be6b0bf9408e5a1c","name":"/deplo-shop-web-1","status":"running","started":"` + ts(at) + `","health":null}`
+	next := `{"id":"77aa","name":"/be6b0bf9408e_deplo-shop-web-1","status":"created","started":"0001-01-01T00:00:00Z","created":"` + ts(time.Now()) + `","health":null}`
+	other := `{"id":"77aa","name":"/0123456789ab_deplo-shop-web-1","status":"created","started":"0001-01-01T00:00:00Z","created":"` + ts(time.Now()) + `","health":null}`
 	for name, tc := range map[string]struct {
 		lines []string
 		ok    bool
@@ -526,18 +579,20 @@ func TestAnswers_readyOnlyWhenEveryContainerIs(t *testing.T) {
 		// unknown: healthy, with no kept check to say since when.
 		unknown bool
 	}{
-		"one without a health check":                {[]string{plain("running")}, true, at, false},
-		"healthy since its oldest kept check":       {[]string{health("healthy", 0, 0, 0, 0)}, true, checked, false},
-		"healthy after a failed check":              {[]string{health("healthy", 0, 1, 0, 0)}, true, time.Time{}, true},
-		"a healthy one beside a starting one":       {[]string{health("healthy", 0, 0), health("starting", 0)}, false, time.Time{}, false},
-		"no health check beside an unhealthy one":   {[]string{plain("running"), health("unhealthy", 3, 1, 1, 1)}, false, time.Time{}, false},
-		"a job that ran beside a healthy one":       {[]string{plain("exited"), health("healthy", 0, 0)}, true, checked, false},
-		"one restarting":                            {[]string{health("healthy", 0, 0), plain("restarting")}, false, time.Time{}, false},
-		"one still being created":                   {[]string{plain("created")}, false, time.Time{}, false},
-		"broken: one never started":                 {[]string{plain("running"), stuck}, false, time.Time{}, false},
-		"broken: unhealthy beside one just created": {[]string{plain("created"), health("unhealthy", 3, 1, 1, 1)}, false, time.Time{}, false},
-		"nothing running":                           {[]string{plain("exited")}, false, time.Time{}, false},
-		"a line docker did not write":               {[]string{"running " + ts(at)}, false, time.Time{}, false},
+		"one without a health check":                  {[]string{plain("running")}, true, at, false},
+		"healthy since its oldest kept check":         {[]string{health("healthy", 0, 0, 0, 0)}, true, checked, false},
+		"healthy after a failed check":                {[]string{health("healthy", 0, 1, 0, 0)}, true, time.Time{}, true},
+		"a healthy one beside a starting one":         {[]string{health("healthy", 0, 0), health("starting", 0)}, false, time.Time{}, false},
+		"no health check beside an unhealthy one":     {[]string{plain("running"), health("unhealthy", 3, 1, 1, 1)}, false, time.Time{}, false},
+		"a job that ran beside a healthy one":         {[]string{plain("exited"), health("healthy", 0, 0)}, true, checked, false},
+		"one restarting":                              {[]string{health("healthy", 0, 0), plain("restarting")}, false, time.Time{}, false},
+		"one still being created":                     {[]string{plain("created")}, false, time.Time{}, false},
+		"the one running while its replacement waits": {[]string{old, next}, true, at, false},
+		"a waiting copy of another container":         {[]string{old, other}, false, time.Time{}, false},
+		"broken: one never started":                   {[]string{plain("running"), stuck}, false, time.Time{}, false},
+		"broken: unhealthy beside one just created":   {[]string{plain("created"), health("unhealthy", 3, 1, 1, 1)}, false, time.Time{}, false},
+		"nothing running":                             {[]string{plain("exited")}, false, time.Time{}, false},
+		"a line docker did not write":                 {[]string{"running " + ts(at)}, false, time.Time{}, false},
 	} {
 		r := readinessOf(tc.lines)
 		if r.OK != tc.ok || (r.OK && (!r.Since.Equal(tc.since) || r.Health != tc.unknown)) {
@@ -609,5 +664,325 @@ func TestAnswers_aServersMemoryHoldsTheClustersCap(t *testing.T) {
 		if conns != tc.conns || waiting != tc.conns/4 || bound != tc.bound {
 			t.Errorf("%s: %d connections, %d waiting, held by memory %v", name, conns, waiting, bound)
 		}
+	}
+}
+
+// c38: eu-2's proxy was recreated with fise and memos passed on to it from three members; every waiting connection
+// dialed it again at each look and logged the refusal (3036 lines in 25 s), the agent took 70 to 88% of the core, and
+// its lease renewals came 5.3 s apart. One refusal now holds for proxyDownFor, a probe included.
+func TestAnswers_aProxyThatRefusesIsDialedOncePerHoldNotPerConnection(t *testing.T) {
+	quickAnswers(t, 600*time.Millisecond)
+	was := proxyDownFor
+	proxyDownFor = 10 * time.Second
+	t.Cleanup(func() { proxyDownFor = was })
+	a, b, fa, _, members := answerPair(t)
+	var dials atomic.Int32
+	dial := b.fwdOps.proxyDial
+	b.fwdOps.proxyDial = func(ctx context.Context, port uint32) (net.Conn, error) {
+		dials.Add(1)
+		return dial(ctx, port)
+	}
+	closed, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	down := uint32(closed.Addr().(*net.TCPAddr).Port)
+	closed.Close()
+	apply(t, a, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members, AnswerPort: backend(t, "proxy-a"),
+		Answers: []*pb.ClusterAnswer{shop()}, ServeAnswers: []string{"prj1"}})
+	apply(t, b, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members, AnswerPort: down,
+		Answers: []*pb.ClusterAnswer{shop()}, ServeAnswers: []string{"prj1"}})
+	placeOn(t, a, "srvA", appEntry("srvB"))
+	placeOn(t, b, "srvB", appEntry("srvB"))
+	s := fa.spec(t, answerAlias)
+	// The first visitor finds the refusal; the hold is noted before its answer, so no later one dials.
+	// Visitors racing the first refusal may each dial: CPU load decides how many (#132).
+	if got := askPort(t, s, shopTLS); got != "" {
+		t.Fatalf("a visitor reached %q through a proxy that refuses", got)
+	}
+	if n := dials.Load(); n != 1 {
+		t.Fatalf("B's refusing proxy was dialed %d times for the first visitor", n)
+	}
+	var wg sync.WaitGroup
+	for range 20 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if got := askPort(t, s, shopTLS); got != "" {
+				t.Errorf("a visitor reached %q through a proxy that refuses", got)
+			}
+		}()
+	}
+	wg.Wait()
+	if n := dials.Load(); n != 1 {
+		t.Fatalf("B's refusing proxy was dialed %d times for 21 visitors in one hold", n)
+	}
+}
+
+// holdingBackend is a proxy that keeps every connection open: it names itself, then echoes what it reads in capitals.
+func holdingBackend(t *testing.T, name string) uint32 {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				_, _ = io.WriteString(c, name+":")
+				buf := make([]byte, 64)
+				for {
+					n, err := c.Read(buf)
+					if err != nil {
+						return
+					}
+					_, _ = c.Write([]byte(strings.ToUpper(string(buf[:n]))))
+				}
+			}()
+		}
+	}()
+	return uint32(ln.Addr().(*net.TCPAddr).Port)
+}
+
+// c39: a visitor's connection kept open across a move still reached the server the App left, and got its 404.
+func TestAnswers_aConnectionKeptOpenIsClosedOnceTheAppRunsElsewhere(t *testing.T) {
+	quickAnswers(t, 2*time.Second)
+	was := localCheck
+	localCheck = 20 * time.Millisecond
+	t.Cleanup(func() { localCheck = was })
+	a, b, fa, _, members := answerPair(t)
+	apply(t, a, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members, AnswerPort: backend(t, "proxy-a"),
+		Answers: []*pb.ClusterAnswer{shop()}, ServeAnswers: []string{"prj1"}})
+	apply(t, b, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members, AnswerPort: holdingBackend(t, "proxy-b"),
+		Answers: []*pb.ClusterAnswer{shop()}, ServeAnswers: []string{"prj1"}})
+	placeOn(t, a, "srvA", appEntry("srvB"))
+	placeOn(t, b, "srvB", appEntry("srvB"))
+	c, err := net.DialTimeout("unix", filepath.Join(fa.spec(t, answerAlias).Dir, fwdSocket), 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	_, _ = io.WriteString(c, "PORT "+strconv.Itoa(int(shopTLS))+"\nping")
+	got := make([]byte, len("proxy-b:PING"))
+	if _, err := io.ReadFull(c, got); err != nil || string(got) != "proxy-b:PING" {
+		t.Fatalf("the visitor read %q (%v)", got, err)
+	}
+	placeOn(t, b, "srvB", appEntry("srvA"))
+	_ = c.SetDeadline(time.Now().Add(2 * time.Second))
+	if _, err := io.ReadAll(c); err != nil {
+		t.Fatalf("the connection to the server the App left stayed open: %v", err)
+	}
+}
+
+// c39: a recreated proxy answered 404 until it had read its routes; c42: a visitor held through another server met it
+// before. Its visitors wait from the moment it stops until it settled.
+func TestAnswers_aRestartedProxyGetsNoVisitorUntilItSettles(t *testing.T) {
+	a, _, _, _, _ := answerPair(t)
+	f := a.forwarders()
+	f.s.fwdOps.ready = func(context.Context, string) appReadiness {
+		return appReadiness{OK: true, Since: time.Now().Add(-time.Hour)}
+	}
+	old, oldRetry := proxySettle, answerRetry
+	proxySettle, answerRetry = 300*time.Millisecond, 10*time.Millisecond
+	t.Cleanup(func() { proxySettle, answerRetry = old, oldRetry })
+	if !f.ready(context.Background(), "prj1") {
+		t.Fatal("an App that ran for an hour is not ready")
+	}
+	f.proxyStopping(nil)
+	if f.ready(context.Background(), "prj1") {
+		t.Fatal("ready while its proxy restarts")
+	}
+	f.proxyRestarted()
+	if f.ready(context.Background(), "prj1") {
+		t.Fatal("ready the moment its proxy restarted")
+	}
+	eventually(t, "ready once the proxy settled", func() bool { return f.ready(context.Background(), "prj1") })
+}
+
+// c42: an App on one server waited the whole restart of that server's proxy. A standby proxy takes its visitors:
+// the App stays ready and is reached through the standby's own answer entrypoint until the new proxy settled.
+func TestAnswers_anAppOnOneServerIsAnsweredByTheStandbyWhileItsProxyRestarts(t *testing.T) {
+	a, _, _, _, _ := answerPair(t)
+	f := a.forwarders()
+	f.s.fwdOps.ready = func(context.Context, string) appReadiness {
+		return appReadiness{OK: true, Since: time.Now().Add(-time.Hour)}
+	}
+	f.mu.Lock()
+	f.st.AnswerPort = 8443
+	f.mu.Unlock()
+	var dialed atomic.Uint32
+	f.proxyStopping(func(_ context.Context, port uint32) (net.Conn, error) {
+		dialed.Store(port)
+		c, _ := net.Pipe()
+		return c, nil
+	})
+	if !f.ready(context.Background(), "prj1") {
+		t.Fatal("not ready while its proxy restarts, though a standby proxy answers")
+	}
+	c, err := f.dialProxy(context.Background(), answerTLS)
+	if err != nil || dialed.Load() != 8443 {
+		t.Fatalf("dialed %d (%v), want the standby's answer entrypoint", dialed.Load(), err)
+	}
+	c.Close()
+	f.proxyRestarted()
+	f.standbyGone()
+	if f.ready(context.Background(), "prj1") {
+		t.Fatal("ready the moment its proxy restarted, with no standby left")
+	}
+}
+
+// c43: a failover's App waited 3 s ready before its first visitor, for a 2 s throttle its proxy no longer has. A
+// proxy that routes a change at once lets it answer after 1 s; any other still waits the 3 s.
+func TestAnswers_anUnthrottledProxyTakesAnAppAfterOneSecond(t *testing.T) {
+	for _, atOnce := range []bool{false, true} {
+		a, _, _, _, members := answerPair(t)
+		flag := ""
+		if atOnce {
+			flag = "      - --providers.providersthrottleduration=0\n"
+		}
+		if err := os.MkdirAll(a.traefikDir(), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		_ = os.WriteFile(a.traefikCompose(), []byte("services:\n  traefik:\n    command:\n"+flag), 0o600)
+		apply(t, a, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members, AnswerPort: backend(t, "proxy-a"),
+			Answers: []*pb.ClusterAnswer{shop()}, ServeAnswers: []string{"prj1"}})
+		f := a.forwarders()
+		started := time.Now().Add(-1500 * time.Millisecond)
+		f.s.fwdOps.ready = func(context.Context, string) appReadiness { return appReadiness{OK: true, Since: started} }
+		if got := f.ready(context.Background(), "prj1"); got != atOnce {
+			t.Fatalf("throttle off %v: an App up 1.5 s counts ready %v", atOnce, got)
+		}
+	}
+}
+
+// c43: an agent restarted under 20 new visitors a second reset the 20 it was carrying for other servers. Ending, it
+// takes none from another member, which holds them until it is back.
+func TestAnswers_aRestartingServerTakesNoVisitorAndTheOtherHoldsIt(t *testing.T) {
+	quickAnswers(t, 5*time.Second)
+	a, b, fa, _, members := answerPair(t)
+	bothAnswer(t, a, b, members)
+	placeOn(t, a, "srvA", appEntry("srvB"))
+	placeOn(t, b, "srvB", appEntry("srvB"))
+	restarting.Store(true)
+	t.Cleanup(func() { restarting.Store(false) })
+	got := make(chan string, 1)
+	go func() { got <- askPort(t, fa.spec(t, answerAlias), shopTLS) }()
+	select {
+	case g := <-got:
+		t.Fatalf("a server ending took the visitor: %q", g)
+	case <-time.After(400 * time.Millisecond):
+	}
+	restarting.Store(false)
+	select {
+	case g := <-got:
+		if g != "proxy-b:PING" {
+			t.Fatalf("once it is back the visitor read %q", g)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the held visitor was not passed on once the server was back")
+	}
+}
+
+// c43: back from a restart, the agent took its visitors only after a docker call for every name it holds: 4 s on one
+// core. It listens first, so a visitor is served while the containers are still being looked at.
+func TestAnswers_aResumedAgentServesBeforeItLooksAtItsContainers(t *testing.T) {
+	quickAnswers(t, 5*time.Second)
+	a, b, fa, _, members := answerPair(t)
+	bothAnswer(t, a, b, members)
+	apply(t, a, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members, AnswerPort: backend(t, "proxy-a"),
+		Answers: []*pb.ClusterAnswer{shop()}, Hold: []*pb.ClusterHeldName{hold(backend(t, "db"))}})
+	placeOn(t, a, "srvA", appEntry("srvB"))
+	placeOn(t, b, "srvB", appEntry("srvB"))
+	f := a.forwarders()
+	f.dock.Lock()
+	for name, l := range f.listeners {
+		l.ln.Close()
+		delete(f.listeners, name)
+	}
+	f.dock.Unlock()
+	slow := make(chan struct{})
+	fa.mu.Lock()
+	fa.slow = slow
+	fa.mu.Unlock()
+	t.Cleanup(func() { close(slow) })
+	go f.Resume()
+	spec := fa.spec(t, answerAlias)
+	var got string
+	eventually(t, "a visitor served while docker is still asked", func() bool {
+		c, err := net.DialTimeout("unix", filepath.Join(spec.Dir, fwdSocket), time.Second)
+		if err != nil {
+			return false
+		}
+		defer c.Close()
+		_ = c.SetDeadline(time.Now().Add(3 * time.Second))
+		_, _ = io.WriteString(c, "PORT "+strconv.Itoa(int(shopTLS))+"\nping")
+		out, _ := io.ReadAll(c)
+		got = string(out)
+		return got != ""
+	})
+	if got != "proxy-b:PING" {
+		t.Fatalf("the visitor read %q", got)
+	}
+}
+
+// c43 live: a readiness look that came due during a proxy restart waited 3 s for docker, busy recreating the proxy,
+// and visitors with it. An App found ready before the restart stays ready through it without a look.
+func TestAnswers_anAppReadyBeforeAProxyRestartIsNotLookedAtAgainDuringIt(t *testing.T) {
+	a, _, _, _, _ := answerPair(t)
+	f := a.forwarders()
+	looks := 0
+	f.s.fwdOps.ready = func(context.Context, string) appReadiness {
+		looks++
+		return appReadiness{OK: true, Since: time.Now().Add(-time.Hour)}
+	}
+	if !f.ready(context.Background(), "prj1") || looks != 1 {
+		t.Fatalf("ready after %d looks", looks)
+	}
+	f.mu.Lock()
+	f.readiness["prj1"].until = time.Time{}
+	f.mu.Unlock()
+	f.proxyStopping(func(context.Context, uint32) (net.Conn, error) { c, _ := net.Pipe(); return c, nil })
+	if !f.ready(context.Background(), "prj1") || looks != 1 {
+		t.Fatalf("during the restart: %d looks", looks)
+	}
+}
+
+// c41: at the thaw of a 2-minute hang, what a kept connection had queued reached the stale copy before the agent's
+// once-a-second look closed it. Each read passed on asks the lease first.
+func TestAnswers_aCarriedVisitorPassesNothingOnceTheLeaseRanOut(t *testing.T) {
+	quickAnswers(t, 2*time.Second)
+	a, b, fa, _, members := answerPair(t)
+	apply(t, a, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members, AnswerPort: backend(t, "proxy-a"),
+		Answers: []*pb.ClusterAnswer{shop()}, ServeAnswers: []string{"prj1"}})
+	apply(t, b, &pb.SetClusterForwardersRequest{ClusterId: "cl1", Members: members, AnswerPort: holdingBackend(t, "proxy-b"),
+		Answers: []*pb.ClusterAnswer{shop()}, ServeAnswers: []string{"prj1"}})
+	placeOn(t, a, "srvA", appEntry("srvB"))
+	placeOn(t, b, "srvB", appEntry("srvB"))
+	c, err := net.DialTimeout("unix", filepath.Join(fa.spec(t, answerAlias).Dir, fwdSocket), 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+	_, _ = io.WriteString(c, "PORT "+strconv.Itoa(int(shopTLS))+"\nping")
+	got := make([]byte, len("proxy-b:PING"))
+	if _, err := io.ReadFull(c, got); err != nil || string(got) != "proxy-b:PING" {
+		t.Fatalf("the visitor read %q (%v)", got, err)
+	}
+	g := b.leaseGuard()
+	g.mu.Lock()
+	g.now = func() time.Time { return time.Now().Add(2 * time.Minute) }
+	g.mu.Unlock()
+	_, _ = io.WriteString(c, "pong")
+	_ = c.SetDeadline(time.Now().Add(500 * time.Millisecond))
+	if rest, _ := io.ReadAll(c); strings.Contains(string(rest), "PONG") {
+		t.Fatalf("a server whose lease ran out passed the visitor on to its copy: %q", rest)
 	}
 }

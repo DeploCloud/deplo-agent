@@ -233,10 +233,16 @@ func (s *Service) acceptMemberStream(from wire.Party, c net.Conn) {
 	switch verb {
 	case imageVerb:
 		s.receiveImage(from, c, arg)
+	case imageGetVerb:
+		s.serveImageGet(from, c, arg)
 	case fwdVerb:
 		s.serveForward(from, c, arg)
 	case leftVerb:
 		s.receiveLeft(from, c, arg)
+	case fetchVerb:
+		s.serveFetch(from, c, arg)
+	case volumeVerb:
+		s.receiveVolume(from, c, arg)
 	case replVerb:
 		s.serveReplica(from, c, arg)
 	case meshVerb:

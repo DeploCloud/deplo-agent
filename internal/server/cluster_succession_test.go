@@ -257,3 +257,33 @@ func TestSuccession_aStartOrderThatNamesNoServerIsTakenAtItsLeadersEpoch(t *test
 		t.Fatalf("after the start, another leader took the heir's epoch: %+v", r)
 	}
 }
+
+// c43: eu-3, back from a power cut, asked the leader beside it to lead on a lease 4.5 min old while eu-2 still led.
+// A lease from before this boot gives its leader the whole wait from this start, and asks after every heir.
+func TestSuccession_aMemberBackFromAPowerCutAsksLastAndLate(t *testing.T) {
+	f := newGuard(t)
+	o := orderFor(129)
+	o.From, o.Line, o.Last = "srv_lead", []string{"srv_a", "srv_c"}, "srv_deplo"
+	f.g.Renew(o)
+	f.clk.Add(4*time.Minute + 26*time.Second)
+	b := bootID
+	bootID = func() string { return b() + "-next" }
+	t.Cleanup(func() { bootID = b })
+	f.reopen()
+	got := &asks{}
+	f.g.succeed = got.ask
+	for _, wait := range []time.Duration{0, lease.PreVoteFor, lease.SucceedStagger} {
+		f.clk.Add(wait)
+		f.g.Check(context.Background())
+		f.g.work.Wait()
+		if e := got.epochs(); len(e) != 0 {
+			t.Fatalf("asked %v %s after its start", e, f.clk.Now().Sub(f.g.started))
+		}
+	}
+	f.clk.Add(lease.SucceedStagger)
+	f.g.Check(context.Background())
+	f.g.work.Wait()
+	if e := got.epochs(); len(e) != 1 || e[0] != 132 {
+		t.Fatalf("asked %v once its leader and both heirs had their turn, want epoch 132", e)
+	}
+}

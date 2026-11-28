@@ -3,16 +3,25 @@ package server
 import (
 	"archive/tar"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
 )
+
+// holdBudget is the longest a backup keeps its App paused (deplo c44).
+var holdBudget = time.Second
+
+// The panel matches this text word for word to skip, not fail, a live App with no data yet.
+var errNoVolumeFiles = errors.New("the App's data holds no file on this server, so its archive is not a backup")
 
 func (s *Service) backupProject(ctx context.Context, p *pb.ProjectDescriptor, dest *artifactDestination, e *bkEmitter) {
 	if p == nil || p.GetSlug() == "" {
@@ -27,7 +36,11 @@ func (s *Service) backupProject(ctx context.Context, p *pb.ProjectDescriptor, de
 
 	produce := func(w io.Writer) error {
 		tw := tar.NewWriter(w)
-		err := s.writeProjectArchive(ctx, p, tw, e)
+		err := s.writeProjectArchive(ctx, p, tw, e, dest.store != nil)
+		// c43: a stopped copy on a stale server archived its empty volume, kept as a 398 B backup.
+		if err == nil && e.volumeFiles == 0 && slices.ContainsFunc(p.GetVolumeNames(), func(v string) bool { return v != "" }) {
+			err = errNoVolumeFiles
+		}
 		if cerr := tw.Close(); err == nil {
 			err = cerr
 		}
@@ -43,34 +56,122 @@ func (s *Service) backupProject(ctx context.Context, p *pb.ProjectDescriptor, de
 	e.emitResult(true, "", dest.key, written)
 }
 
-func (s *Service) writeProjectArchive(ctx context.Context, p *pb.ProjectDescriptor, tw *tar.Writer, e *bkEmitter) error {
-	hold, herr := s.holdVolumes(ctx, p.GetSlug(), p.GetVolumeNames(), func(text string) { e.log("info", text) })
+// archiveHere says the archive is written on this server's disk too.
+func (s *Service) writeProjectArchive(ctx context.Context, p *pb.ProjectDescriptor, tw *tar.Writer, e *bkEmitter, archiveHere bool) error {
+	copier := startCopier(ctx, p.GetVolumeNames(), s.newStage())
+	defer copier.remove()
+	skip := ""
+	if copier != nil {
+		skip = copier.id
+		select {
+		case <-ctx.Done():
+		case <-time.After(copierSettle):
+		}
+	}
+	// Copied once while the App runs: the pause then lasts only for what changed meanwhile.
+	why := copier.roomToStage(ctx, archiveHere)
+	first, copied := int64(0), false
+	since := time.Now().Add(-2 * time.Second)
+	if running, _ := runningOn(ctx, p.GetVolumeNames(), skip); why == "" && len(running) > 0 {
+		if n, err := copier.copyToStage(ctx, time.Time{}); err != nil {
+			why = "copying the data on the server's own disk failed: " + err.Error()
+		} else {
+			first, copied = n, true
+		}
+	}
+	if copied {
+		copier.readyPass(ctx)
+	}
+	hold, herr := s.holdVolumes(ctx, p.GetSlug(), p.GetVolumeNames(), func(text string) { e.log("info", text) }, skip)
 	if herr != nil {
 		return herr
 	}
+	// c44: fise was paused 4.1 s and lab-kit-a 21.5 s for a whole copy. Past holdBudget the App runs again, and the
+	// copy made while it was paused is no backup.
+	heldCtx, cancelHeld := context.WithCancel(ctx)
+	defer cancelHeld()
+	var overran atomic.Bool
+	var watchdog *time.Timer
 	if hold != nil {
 		e.holding = true
 		e.log("info", "Paused the app while its data is copied")
+		watchdog = time.AfterFunc(holdBudget-time.Since(hold.start), func() {
+			overran.Store(true)
+			cancelHeld()
+			hold.release()
+		})
+	}
+	overBudget := func() error {
+		msg := fmt.Sprintf("its data could not be copied within %s of pausing it, so it runs again and this backup was not kept", spoken(holdBudget))
+		if why != "" {
+			msg += ": " + why
+		}
+		return errors.New(msg)
 	}
 	// Also on a panic: an App left paused stays so until the agent restarts.
 	ended := false
 	end := func() {
 		if !ended {
 			ended = true
+			if watchdog != nil {
+				watchdog.Stop()
+			}
 			s.endHold(hold, e)
+			if copier == nil || !copier.staged {
+				copier.remove()
+			}
 		}
 	}
 	defer end()
+	if hold != nil && why == "" && !copied {
+		why = "it started while its data was being copied, so nothing was copied on the server's own disk first"
+	}
+	if hold != nil && why == "" {
+		copyPaused := func() (int64, error) { return copier.copyToStage(heldCtx, since) }
+		if copier.told {
+			copyPaused = func() (int64, error) {
+				files, n, took, err := copier.tellPass(heldCtx, since)
+				if err == nil {
+					e.log("info", fmt.Sprintf("Copied what changed while it was paused: %d files (%s) in %s", files, humanBytes(n), took.Round(time.Millisecond)))
+				}
+				return n, err
+			}
+		}
+		if n, err := copyPaused(); overran.Load() {
+			return overBudget()
+		} else if err != nil {
+			why = "copying the data on the server's own disk failed: " + err.Error()
+		} else {
+			copier.staged = true
+			end()
+			e.staged = true
+			if first > 0 && n >= first {
+				e.heldWhy = fmt.Sprintf("its data changed as fast as it was copied: the copy made while it was paused (%s) was no smaller than the first", humanBytes(n))
+				e.log("warn", "The second copy was not smaller than the first: "+e.heldWhy)
+			}
+		}
+	}
+	if hold != nil && why != "" {
+		e.heldWhy = why
+		e.log("warn", "The app stays paused for the whole copy: "+why)
+	}
 	for _, vol := range p.GetVolumeNames() {
 		if vol == "" {
 			continue
 		}
 		e.log("info", "Archiving volume "+vol)
-		if err := s.archiveVolume(ctx, vol, tw, e); err != nil {
+		err := s.archiveVolume(heldCtx, copier.tarArgs(heldCtx, vol), vol, tw, e)
+		if overran.Load() {
+			return overBudget()
+		}
+		if err != nil {
 			return fmt.Errorf("archive volume %q: %w", vol, err)
 		}
 	}
 	end()
+	if overran.Load() {
+		return overBudget()
+	}
 
 	if p.GetIncludeFiles() {
 		root := s.filesRoot(p.GetSlug())
@@ -118,16 +219,17 @@ func (s *Service) endHold(hold *volumeHold, e *bkEmitter) {
 	e.log("info", fmt.Sprintf("The app was paused for %s and is running again", held.Round(time.Millisecond)))
 }
 
-func (s *Service) archiveVolume(ctx context.Context, vol string, tw *tar.Writer, e *bkEmitter) error {
+func (s *Service) archiveVolume(ctx context.Context, argv []string, vol string, tw *tar.Writer, e *bkEmitter) error {
 	if err := validateVolumeName(vol); err != nil {
 		return err
 	}
 	pr, pw := io.Pipe()
 	done := make(chan error, 1)
+	// A reader that gives up stops the copy: its helper would otherwise run on, and the App stay paused behind it.
+	cctx, stop := context.WithCancel(ctx)
+	defer stop()
 	go func() {
-		code, err := dockercli.PipeOut(ctx, backupStepTimeout, pw, nil,
-			volumeHelperRun(ctx, "-v", vol+":/v:ro", volumeHelperImage,
-				"tar", "-C", "/v", "-cf", "-", ".")...)
+		code, err := dockercli.PipeOut(cctx, backupStepTimeout, pw, nil, argv...)
 		if err == nil && code != 0 {
 			err = fmt.Errorf("volume tar exited %d", code)
 		}
@@ -140,7 +242,7 @@ func (s *Service) archiveVolume(ctx context.Context, vol string, tw *tar.Writer,
 		hdr, err := tr.Next()
 		if err == io.EOF {
 			_, _ = io.Copy(io.Discard, pr)
-			if perr := <-done; perr != nil && e.holding {
+			if perr := <-done; perr != nil && (e.holding || e.staged) {
 				return perr
 			} else if perr != nil {
 				e.log("warn", fmt.Sprintf("volume %q: %v (archive completed; a file likely changed during read)", vol, perr))
@@ -149,6 +251,7 @@ func (s *Service) archiveVolume(ctx context.Context, vol string, tw *tar.Writer,
 		}
 		if err != nil {
 			_ = pr.CloseWithError(err)
+			stop()
 			<-done
 			return err
 		}
@@ -159,12 +262,15 @@ func (s *Service) archiveVolume(ctx context.Context, vol string, tw *tar.Writer,
 		}
 		if err := tw.WriteHeader(hdr); err != nil {
 			_ = pr.CloseWithError(err)
+			stop()
 			<-done
 			return err
 		}
 		if hdr.Typeflag == tar.TypeReg {
+			e.volumeFiles++
 			if _, err := io.Copy(tw, tr); err != nil {
 				_ = pr.CloseWithError(err)
+				stop()
 				<-done
 				return err
 			}

@@ -18,8 +18,15 @@ const WaitDelay = 10 * time.Second
 // Command is exec.CommandContext that kills the child's whole process group on cancel, so a
 // plugin or helper the child started cannot keep its pipes open and Wait blocked.
 func Command(ctx context.Context, name string, args ...string) *exec.Cmd {
+	if name == "docker" && changes(args) {
+		forgetReads()
+	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// A stream that outlives its call stays in the agent's own cgroup, which a stop of the agent ends.
+	if !streams(name, args) {
+		intoCgroup(cmd.SysProcAttr)
+	}
 	cmd.Cancel = func() error {
 		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 			return cmd.Process.Kill()
@@ -27,6 +34,10 @@ func Command(ctx context.Context, name string, args ...string) *exec.Cmd {
 		return nil
 	}
 	return cmd
+}
+
+func streams(name string, args []string) bool {
+	return name == "docker" && len(args) > 0 && (args[0] == "events" || args[0] == "logs" || args[0] == "attach")
 }
 
 // RunLines runs cmd with every output the caller left unset merged into one pipe read line by line

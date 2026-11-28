@@ -25,6 +25,14 @@ type failoverCert struct {
 // certSettle is how long the proxy takes to load a routes file it watches; a var so tests can shorten it.
 var certSettle = answerSettle
 
+// certSettleFor is certSettle, shorter for a proxy that applies a change at once.
+func (s *Service) certSettleFor() time.Duration {
+	if s.proxyAppliesAtOnce() {
+		return min(certSettle, answerSettleAtOnce)
+	}
+	return certSettle
+}
+
 // installCerts puts a failover's certificates in the routes file, for the proxy to serve before the App's router
 // asks it to order one. Only a pair for hostnames this server passes on goes in, and only one newer than what the
 // proxy has for the same names.
@@ -266,9 +274,10 @@ func (f *forwarders) forgetFiles(gone []proxyCert) error {
 	return f.writeAnswerRoutes()
 }
 
-// stopProxy stops this server's proxy; a var so tests can answer without Docker.
+// stopProxy stops this server's proxy; a var so tests can answer without Docker. It drains 1 s: the agent holds
+// new visitors meanwhile (startProxy), so Traefik waits out only what it carries (c39: 11 s of refusals).
 var stopProxy = func(ctx context.Context) error {
-	res, err := dockercli.Run(ctx, 60*time.Second, "stop", "-t", "15", traefikContainer)
+	res, err := dockercli.Run(ctx, 60*time.Second, "stop", "-t", "1", traefikContainer)
 	if err != nil {
 		return err
 	}
@@ -307,6 +316,7 @@ func (s *Service) mergeStore(ctx context.Context, path string, plan storeMerge) 
 		fmt.Fprintf(os.Stderr, "deplo-agent: proxy certificates: %v\n", err)
 		return nil
 	}
+	s.proxyGoingDown()
 	if err := stopProxy(ctx); err != nil {
 		fmt.Fprintf(os.Stderr, "deplo-agent: proxy certificates: %v\n", err)
 		return nil

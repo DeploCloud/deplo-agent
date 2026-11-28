@@ -20,8 +20,10 @@ import (
 const holdStepTimeout = 30 * time.Second
 
 type volumeHold struct {
-	s       *Service
-	ids     []string
+	s   *Service
+	ids []string
+	// dirs are the cgroups it froze, read before the pause: the thaw then asks Docker nothing.
+	dirs    map[string]string
 	journal string
 	start   time.Time
 	once    sync.Once
@@ -39,8 +41,9 @@ func (s *Service) holdJournalDir() string { return filepath.Join(s.dataBase, "ba
 
 // holdVolumes pauses every running container of slug that mounts one of vols, once no deploy of slug is under way.
 // It returns nil, nil when none runs.
-func (s *Service) holdVolumes(ctx context.Context, slug string, vols []string, logf func(string)) (*volumeHold, error) {
-	ids, err := runningOn(ctx, vols)
+// skip is the backup's own copier, which mounts them too.
+func (s *Service) holdVolumes(ctx context.Context, slug string, vols []string, logf func(string), skip string) (*volumeHold, error) {
+	ids, err := runningOn(ctx, vols, skip)
 	if err != nil || len(ids) == 0 {
 		return nil, err
 	}
@@ -58,11 +61,11 @@ func (s *Service) holdVolumes(ctx context.Context, slug string, vols []string, l
 		logf(fmt.Sprintf("Waited %s for the deploy to finish.", spoken(waited)))
 	}
 	// Read again: the deploy may have replaced every container.
-	if ids, err = runningOn(ctx, vols); err != nil || len(ids) == 0 {
+	if ids, err = runningOn(ctx, vols, skip); err != nil || len(ids) == 0 {
 		leave()
 		return nil, err
 	}
-	h := &volumeHold{s: s, ids: ids, start: time.Now(), leave: leave, healthy: withHealth(ctx, ids, "healthy")}
+	h := &volumeHold{s: s, ids: ids, dirs: map[string]string{}, leave: leave, healthy: withHealth(ctx, ids, "healthy")}
 	if err := os.MkdirAll(s.holdJournalDir(), 0o700); err != nil {
 		leave()
 		return nil, err
@@ -73,7 +76,19 @@ func (s *Service) holdVolumes(ctx context.Context, slug string, vols []string, l
 		leave()
 		return nil, err
 	}
+	dirs := map[string]string{}
 	for _, id := range ids {
+		if dir, err := containerCgroup(ctx, id); err == nil {
+			dirs[id] = dir
+		}
+	}
+	h.start = time.Now()
+	for _, id := range ids {
+		if dir := dirs[id]; dir != "" && freezeDir(dir, true) == nil {
+			h.dirs[id] = dir
+			s.markHeld(id, true)
+			continue
+		}
 		res, err := dockercli.Run(ctx, holdStepTimeout, "pause", id)
 		if err == nil && res.Code == 0 {
 			s.markHeld(id, true)
@@ -89,12 +104,11 @@ func (s *Service) holdVolumes(ctx context.Context, slug string, vols []string, l
 		h.release()
 		return nil, &holdError{msg: strings.TrimSpace(msg)}
 	}
-	h.start = time.Now()
 	return h, nil
 }
 
-// runningOn lists the running containers that mount one of vols.
-func runningOn(ctx context.Context, vols []string) ([]string, error) {
+// runningOn lists the running containers that mount one of vols, but skip.
+func runningOn(ctx context.Context, vols []string, skip string) ([]string, error) {
 	seen := map[string]bool{}
 	var ids []string
 	for _, v := range vols {
@@ -106,6 +120,9 @@ func runningOn(ctx context.Context, vols []string) ([]string, error) {
 			return nil, err
 		}
 		for _, id := range strings.Fields(res.Stdout) {
+			if skip != "" && strings.HasPrefix(id, skip) {
+				continue
+			}
 			if !seen[id] {
 				seen[id] = true
 				ids = append(ids, id)
@@ -121,16 +138,24 @@ func (e *holdError) Error() string {
 	return "could not pause the app to copy its data consistently: " + e.msg
 }
 
-// release unpauses what the hold paused, retrying, and is safe to call twice. It returns how long the hold lasted.
+// release unpauses what the hold paused, retrying, and is safe to call twice. It returns how long the hold lasted,
+// from the first freeze to the thaw.
 func (h *volumeHold) release() time.Duration {
 	if h == nil {
 		return 0
 	}
 	h.once.Do(func() {
-		h.held = time.Since(h.start)
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), 2*time.Minute)
 		defer cancel()
-		if !unpauseAll(ctx, h.ids) {
+		var rest []string
+		for _, id := range h.ids {
+			if dir := h.dirs[id]; dir == "" || freezeDir(dir, false) != nil {
+				rest = append(rest, id)
+			}
+		}
+		ok := unpauseAll(ctx, rest)
+		h.held = time.Since(h.start)
+		if !ok {
 			h.done()
 			return
 		}
@@ -183,12 +208,75 @@ func withHealth(ctx context.Context, ids []string, states ...string) []string {
 	return out
 }
 
-// unpauseAll reports whether every container is running again (one that is gone counts).
+// A hold freezes an App's processes where the proxy cannot see it: a paused container loses its routes at the
+// proxy's next read, which any other container's start, stop or health change makes (memos, 24 Nov 2026), and
+// the proxy then waits 2 s before it reads again. Docker's pause is the way back where freezing is not there.
+func freezeContainer(ctx context.Context, id string, on bool) error {
+	dir, err := containerCgroup(ctx, id)
+	if err != nil {
+		return err
+	}
+	return freezeDir(dir, on)
+}
+
+// freezeDir freezes or thaws one cgroup folder; a freeze returns once every process in it stopped.
+func freezeDir(dir string, on bool) error {
+	v := "0"
+	if on {
+		v = "1"
+	}
+	if err := os.WriteFile(filepath.Join(dir, "cgroup.freeze"), []byte(v), 0o644); err != nil || !on {
+		return err
+	}
+	for end := time.Now().Add(holdStepTimeout); ; time.Sleep(2 * time.Millisecond) {
+		if b, err := os.ReadFile(filepath.Join(dir, "cgroup.events")); err == nil && strings.Contains(string(b), "frozen 1") {
+			return nil
+		}
+		if time.Now().After(end) {
+			_ = os.WriteFile(filepath.Join(dir, "cgroup.freeze"), []byte("0"), 0o644)
+			return errors.New("the app's processes did not stop")
+		}
+	}
+}
+
+// containerCgroup is the cgroup v2 folder a running container's processes live in; a var so tests point elsewhere.
+var containerCgroup = func(ctx context.Context, id string) (string, error) {
+	res, err := dockercli.Run(ctx, holdStepTimeout, "inspect", "-f", "{{.State.Pid}} {{.State.Paused}}", id)
+	if err != nil || res.Code != 0 {
+		return "", fmt.Errorf("inspect %s: %v %s", id, err, res.Stderr)
+	}
+	// Docker's own pause freezes the same folder: only Docker undoes it.
+	pid, paused, _ := strings.Cut(strings.TrimSpace(res.Stdout), " ")
+	if paused != "false" {
+		return "", fmt.Errorf("%s is paused by Docker", id)
+	}
+	raw, err := os.ReadFile("/proc/" + pid + "/cgroup")
+	if err != nil || pid == "0" {
+		return "", fmt.Errorf("no process for %s", id)
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if rel, ok := strings.CutPrefix(line, "0::"); ok {
+			dir := filepath.Join("/sys/fs/cgroup", rel)
+			if _, err := os.Stat(filepath.Join(dir, "cgroup.freeze")); err != nil {
+				return "", err
+			}
+			return dir, nil
+		}
+	}
+	return "", errors.New("no cgroup v2 for " + id)
+}
+
+// unpauseAll reports whether every container is running again (one that is gone counts): thawed when it was
+// frozen, unpaused when Docker paused it.
 func unpauseAll(ctx context.Context, ids []string) bool {
 	ok := true
 	for _, id := range ids {
 		var done bool
 		for try := 0; try < 3 && !done; try++ {
+			if frozen(ctx, id) {
+				done = freezeContainer(ctx, id, false) == nil
+				continue
+			}
 			res, err := dockercli.Run(ctx, holdStepTimeout, "unpause", id)
 			done = err == nil && res.Code == 0 ||
 				strings.Contains(res.Stderr, "is not paused") || strings.Contains(res.Stderr, "No such container")
@@ -201,8 +289,19 @@ func unpauseAll(ctx context.Context, ids []string) bool {
 	return ok
 }
 
-// sweepBackupHolds unpauses what an earlier run of this agent paused for a copy and never released.
-func sweepBackupHolds(dir string) {
+// frozen says whether a hold froze the container: Docker does not know, and still calls it running and unpaused.
+func frozen(ctx context.Context, id string) bool {
+	dir, err := containerCgroup(ctx, id)
+	if err != nil {
+		return false
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "cgroup.freeze"))
+	return err == nil && strings.TrimSpace(string(b)) == "1"
+}
+
+// sweepBackupHolds unpauses what an earlier run of this agent paused for a copy and never released, and says
+// whether it unpaused anything.
+func sweepBackupHolds(dir string) bool {
 	files, _ := filepath.Glob(filepath.Join(dir, "*.json"))
 	for _, f := range files {
 		var ids []string
@@ -216,6 +315,7 @@ func sweepBackupHolds(dir string) {
 			_ = os.Remove(f)
 		}
 	}
+	return len(files) > 0
 }
 
 func (s *Service) markHeld(id string, on bool) {

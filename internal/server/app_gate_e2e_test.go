@@ -94,7 +94,7 @@ func TestE2E_ADeployDuringABackupsPauseWaitsAndSucceeds(t *testing.T) {
 	if res, log := r.deploy(boot); !res.GetReady() {
 		t.Fatalf("first deploy: %v; log:\n%s", res, log)
 	}
-	h, err := r.s.holdVolumes(context.Background(), r.slug, []string{r.volume()}, func(string) {})
+	h, err := r.s.holdVolumes(context.Background(), r.slug, []string{r.volume()}, func(string) {}, "")
 	if err != nil || h == nil {
 		t.Fatalf("hold: %v (volume %q)", err, r.volume())
 	}
@@ -150,7 +150,7 @@ func TestE2E_ABackupDuringADeployWaitsForIt(t *testing.T) {
 	}()
 	time.Sleep(2 * time.Second)
 	var logs []string
-	h, err := r.s.holdVolumes(context.Background(), r.slug, []string{r.volume()}, func(s string) { logs = append(logs, s) })
+	h, err := r.s.holdVolumes(context.Background(), r.slug, []string{r.volume()}, func(s string) { logs = append(logs, s) }, "")
 	paused := time.Now()
 	if err != nil || h == nil {
 		t.Fatalf("hold: %v", err)

@@ -44,9 +44,11 @@ func (s *Service) VolumeUsage(
 		if !ok || name == "" || mount == "" {
 			continue
 		}
+		total, largest := dirSizes(mount)
 		out.Volumes = append(out.Volumes, &pb.VolumeUsage{
-			VolumeName: name,
-			Bytes:      dirSize(mount),
+			VolumeName:       name,
+			Bytes:            total,
+			LargestFileBytes: largest,
 		})
 	}
 	for _, n := range req.GetSetAsideOf() {

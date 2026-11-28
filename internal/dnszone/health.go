@@ -10,8 +10,8 @@ const (
 	StateStale = "stale"
 	// StateFail: it hears fewer than half, or has nothing agreed to fall back on: SERVFAIL.
 	StateFail = "fail"
-	// StateWarming: just started or back, it has not heard the whole cluster yet: no answer at all, so a resolver
-	// asks another name server and nothing from its old set is ever named.
+	// StateWarming: just started or back, it hears no more than half of the cluster yet: no answer at all, so a
+	// resolver asks another name server and nothing from its old set is ever named.
 	StateWarming = "warming"
 )
 
@@ -97,7 +97,7 @@ func decide(members []Member, self string, heard map[string]time.Time, now time.
 	case v.Of == 0:
 		v.State = StateFail
 		return v
-	case warming && v.Heard < v.Of:
+	case warming && 2*v.Heard <= v.Of:
 		v.State = StateWarming
 		return v
 	case 2*v.Heard < v.Of:

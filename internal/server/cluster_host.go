@@ -324,6 +324,11 @@ func (s *Service) InstallCluster(ctx context.Context, req *pb.InstallClusterRequ
 		return nil, err
 	}
 	h.stop()
+	// The binary that ran stays beside the new one until the new one answers (deplo ADR-0043).
+	prev := exe + ".previous"
+	_ = os.Remove(prev)
+	kept := installed.Version != "" && statErr == nil && os.Link(exe, prev) == nil
+	defer os.Remove(prev)
 	if err := os.Rename(staged, exe); err != nil {
 		os.Remove(staged)
 		// The old binary is still there: a failed install never leaves the cluster without its leader.
@@ -339,8 +344,46 @@ func (s *Service) InstallCluster(ctx context.Context, req *pb.InstallClusterRequ
 		return nil, status.Errorf(codes.Internal, "remember the cluster install: %v", err)
 	}
 	h.start(dir, want)
+	if kept && !clusterAnswers(dir, want.Relay, time.Now().Add(updateAnswerWithin)) {
+		h.stop()
+		if err := os.Rename(prev, exe); err == nil {
+			raw, _ := json.Marshal(installed)
+			_ = writeFileAtomic(filepath.Join(dir, "state.json"), raw, 0o600)
+			h.start(dir, installed)
+			log.Printf("deplo-agent: cluster v%s did not answer within %s: v%s runs again", want.Version, updateAnswerWithin, installed.Version)
+			return nil, status.Errorf(codes.Aborted, "the cluster leader v%s did not answer within %s, so v%s runs again",
+				want.Version, updateAnswerWithin, installed.Version)
+		}
+		h.start(dir, want)
+	}
 	log.Printf("deplo-agent: cluster v%s installed in %s (relay=%v)", want.Version, dir, want.Relay)
 	return &pb.InstallClusterResponse{Version: want.Version, Running: true}, nil
+}
+
+// clusterAnswers says whether the leader, and the relay beside it when there is one, answer on their sockets before
+// the deadline; a var so tests answer for binaries that serve nothing.
+var clusterAnswers = func(dir string, relay bool, deadline time.Time) bool {
+	ask := func(sock, method string) bool {
+		c := &http.Client{Timeout: time.Second, Transport: &http.Transport{DisableKeepAlives: true,
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", sock)
+			}}}
+		resp, err := c.Post("http://cluster/call/"+method, "application/json", strings.NewReader("{}"))
+		if err != nil {
+			return false
+		}
+		resp.Body.Close()
+		return resp.StatusCode == http.StatusOK
+	}
+	for {
+		if ask(clusterSocket(dir), "leader.snapshot") && (!relay || ask(relaySocket(dir), "relay.status")) {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
 }
 
 func (h *clusterHost) allUp() bool {
