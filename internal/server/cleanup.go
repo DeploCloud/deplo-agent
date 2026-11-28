@@ -50,6 +50,8 @@ type cleanupParams struct {
 	cutoff           time.Time
 	appImageCutoff   time.Time
 	filesCutoff      time.Time
+	// failoverKept is the images this member holds for a failover: never an unused pulled image.
+	failoverKept map[string]bool
 }
 
 func (p cleanupParams) keepImagesFor(slug string) int {
@@ -76,6 +78,7 @@ func (s *Service) DockerCleanup(ctx context.Context, req *pb.DockerCleanupReques
 		stackDir:         s.stackDir,
 		buildTmpDir:      s.buildTmpDir,
 		seenVolumes:      make(map[string]bool),
+		failoverKept:     s.failoverKept(),
 	}
 	if live := req.GetLiveSlugs(); len(live) > 0 {
 		params.liveSlugs = make(map[string]bool, len(live))

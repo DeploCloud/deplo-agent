@@ -109,9 +109,9 @@ func TestForwarders_eachContainerIsRedirectedOncePerProcess(t *testing.T) {
 	fa.pid[name] = 7
 	fa.mu.Unlock()
 	f := a.forwarders()
-	f.mu.Lock()
-	f.redirectLocked(context.Background())
-	f.mu.Unlock()
+	f.dock.Lock()
+	f.redirect(context.Background(), f.state())
+	f.dock.Unlock()
 	fa.mu.Lock()
 	defer fa.mu.Unlock()
 	if fmt.Sprint(fa.redirects) != "[1:5432 7:5432]" {

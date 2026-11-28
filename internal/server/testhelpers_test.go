@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/x509"
 	"errors"
 	"os"
@@ -22,7 +23,12 @@ func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == "dns" {
 		os.Exit(dnszone.Main(os.Stdin, os.Stdout, os.Stderr))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "stage-sync" {
+		os.Exit(StageSync(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	buildStepCgroupDir = ""
+	// The tests read the state files back at once: they are written in place.
+	stateWritesInline = true
 	// The tests' certificates come from no public root: only the authority test judges against one.
 	publicRoots = func() (*x509.CertPool, error) { return nil, errors.New("no public roots in the tests") }
 	if os.Getenv(realDockerEnv) != "1" {
@@ -69,6 +75,10 @@ func dockerOnPath(t *testing.T, body string) func() []string {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// A fake docker runs nothing to freeze: a hold pauses through it, unless a test gives it a cgroup.
+	was := containerCgroup
+	containerCgroup = func(context.Context, string) (string, error) { return "", errors.New("a fake docker runs nothing") }
+	t.Cleanup(func() { containerCgroup = was })
 	return func() []string {
 		b, _ := os.ReadFile(logf)
 		return strings.Split(strings.TrimSpace(string(b)), "\n")

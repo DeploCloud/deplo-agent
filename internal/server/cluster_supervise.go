@@ -164,7 +164,7 @@ func (sv *supervisor) saveLocked() {
 	}
 	raw, err := json.Marshal(supervisorState{Kept: sv.kept, Stopped: sv.stopped, Fenced: sv.fenced})
 	if err == nil {
-		err = writeFileAtomic(sv.file, raw, 0o600)
+		keepLater(sv.file, raw)
 	}
 	if err != nil {
 		sv.logf("could not keep the restart policies in %s: %v", sv.file, err)
@@ -524,6 +524,7 @@ func composeLabel(labels any, key string) string {
 
 // superviseWriters keeps this member's single-writer stacks to their lease until ctx ends.
 func (s *Service) superviseWriters(ctx context.Context) {
+	s.afterStart(ctx)
 	t := time.NewTicker(superviseEvery)
 	defer t.Stop()
 	for {

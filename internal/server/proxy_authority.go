@@ -149,6 +149,7 @@ func (s *Service) settleProxyAuthority(ctx context.Context, composePath string) 
 		log.Printf("deplo-agent: could not set aside the proxy's certificates from another authority: %v", err)
 		return
 	}
+	s.proxyGoingDown()
 	if err := stopProxy(ctx); err != nil {
 		log.Printf("deplo-agent: proxy certificates from another authority: %v", err)
 		return

@@ -53,6 +53,8 @@ type Entry struct {
 	Standby bool `json:"standby,omitempty"`
 	// Balanced is an App the cluster load-balances: a member back from a failover gets its copy again (copyBack).
 	Balanced bool `json:"balanced,omitempty"`
+	// Epoch is the leader epoch that decided where this entry runs; zero is not known (an older panel or leader).
+	Epoch uint64 `json:"epoch,omitempty"`
 }
 
 // Order is what each renewal carries. Member names the receiver, so it knows which entries are its own.
@@ -70,6 +72,9 @@ type Order struct {
 	// Announce says a lease of this cluster may live this many seconds more because of an extension that follows:
 	// kept, to tell a leader that takes over.
 	Announce int `json:"announce,omitempty"`
+	// NoExtension says no lease of this cluster lives on an extension any more: every member took a plain renewal
+	// since, or was silent past the longest one. A member forgets the extensions it heard announced.
+	NoExtension bool `json:"noExtension,omitempty"`
 	// Probe only asks whether this member takes the epoch. It renews nothing and changes nothing else, and a
 	// member that answers refuses every older epoch from then on.
 	Probe bool `json:"probe,omitempty"`

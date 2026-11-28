@@ -24,8 +24,11 @@ type bkEmitter struct {
 	mu   sync.Mutex
 	send func(*pb.BackupEvent) error
 	held time.Duration
-	// holding is true while the app is paused, when a failed tar is a real failure.
-	holding bool
+	// holding is true while the app is paused, staged once its data was copied while paused: a failed tar is
+	// then a real failure. heldWhy says why the pause lasted the whole copy.
+	holding, staged bool
+	heldWhy         string
+	volumeFiles     int
 }
 
 func (e *bkEmitter) emit(ev *pb.BackupEvent) error {
@@ -52,6 +55,7 @@ func (e *bkEmitter) emitResult(ok bool, errMsg, objectKey string, w artifactWrit
 			Sha256:             w.digest,
 			DecryptedSizeBytes: w.decryptedSize,
 			HeldMs:             e.held.Milliseconds(),
+			HeldWhy:            e.heldWhy,
 		},
 	}})
 }
@@ -91,6 +95,10 @@ func s3cfg(t *pb.S3Target) s3client.Config {
 func (s *Service) Backup(req *pb.BackupRequest, stream pb.Agent_BackupServer) error {
 	e := &bkEmitter{send: stream.Send}
 	ctx := stream.Context()
+	if req.GetMemberFingerprint() != "" {
+		s.backupToMember(ctx, req, e)
+		return nil
+	}
 
 	dest, err := destinationFromBackup(s, req, e.data)
 	if err != nil {
@@ -112,8 +120,12 @@ func (s *Service) Backup(req *pb.BackupRequest, stream pb.Agent_BackupServer) er
 
 // Restore restores a database or project from an artifact this host can reach (an S3 object or a local store), in place.
 func (s *Service) Restore(req *pb.RestoreRequest, stream pb.Agent_RestoreServer) error {
-	e := &rsEmitter{send: stream.Send}
 	ctx := stream.Context()
+	if req.GetMemberFingerprint() != "" && req.GetStore() != nil {
+		s.restoreFromMember(ctx, req, stream)
+		return nil
+	}
+	e := &rsEmitter{send: stream.Send}
 
 	src, err := sourceFromRestore(s, req)
 	if err != nil {

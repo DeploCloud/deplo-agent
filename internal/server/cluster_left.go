@@ -17,7 +17,11 @@ import (
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/clusterlink/lease"
 	"github.com/DeploCloud/deplo-agent/internal/clusterlink/wire"
+	"github.com/DeploCloud/deplo-agent/internal/room"
 )
+
+// leftVolumeBytes is what a volume holds on this disk, the most its archive takes; a var so tests size it.
+var leftVolumeBytes = func(ctx context.Context, name string) int64 { return volumeBytes(ctx, helperDocker, name) }
 
 // What a member had left of a workload goes to the member whose disk holds the team's backups, over the relay
 // and mutual TLS end to end (ADR-0044). Stream: "LEFT <key>", answered SEND or ERR, then the encrypted archive
@@ -122,6 +126,9 @@ func (r *leftReader) end() error {
 func (s *Service) receiveLeft(from wire.Party, c net.Conn, key string) {
 	st, ok := s.leaseGuard().accepts(from, key)
 	if !ok {
+		st.Root, ok = s.takeExpectedBackup(from, key)
+	}
+	if !ok {
 		_ = wire.WriteHeader(c, wire.VerbErr, "this server was not told to keep that")
 		return
 	}
@@ -131,7 +138,10 @@ func (s *Service) receiveLeft(from wire.Party, c net.Conn, key string) {
 		return
 	}
 	_ = c.SetDeadline(time.Now().Add(leftTimeout))
-	if wire.WriteHeader(c, leftSend, "") != nil {
+	sweepPartials(root)
+	// Its room rides on SEND: the sender measures the archive and keeps it rather than fill this disk.
+	free, total := storeFreeBytes(root)
+	if wire.WriteHeader(c, leftSend, fmt.Sprintf("%d %d", free, total)) != nil {
 		return
 	}
 	n, sum, err := storeWrite(root, key, &leftReader{c: c, sum: sha256.New()}, true)
@@ -145,51 +155,70 @@ func (s *Service) receiveLeft(from wire.Party, c net.Conn, key string) {
 // sendLeft streams one archive to the member whose disk its destination is on. It is saved only once
 // that member says it holds the very bytes this one produced.
 func (s *Service) sendLeft(ctx context.Context, req *pb.BackupRequest, to string) (*pb.BackupResult, error) {
+	res, _, err := s.sendToMember(ctx, req, to)
+	return res, err
+}
+
+// sendToMember is sendLeft for any backup, and says how it went: "direct", "relay", or "none" when that member
+// answered nothing before a byte was read.
+func (s *Service) sendToMember(ctx context.Context, req *pb.BackupRequest, to string) (*pb.BackupResult, string, error) {
 	target := wire.Party{Fingerprint: strings.ToLower(to), Role: wire.RoleMember}
 	m := s.clusterMember()
 	m.mu.Lock()
 	party := m.party
 	m.mu.Unlock()
 	if party == nil || !target.Valid() {
-		return nil, errors.New("this server cannot reach the server that holds the backups")
+		return nil, pathNone, errors.New("this server cannot reach the server that holds the backups")
 	}
 	conn, err := party.Dial(ctx, target)
 	if err != nil {
-		return nil, fmt.Errorf("reach the server that holds the backups: %w", err)
+		return nil, pathNone, fmt.Errorf("reach the server that holds the backups: %w", err)
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(leftTimeout))
 	if err := wire.WriteHeader(conn, leftVerb, req.GetStore().GetObjectKey()); err != nil {
-		return nil, fmt.Errorf("reach the server that holds the backups: %w", err)
+		return nil, pathNone, fmt.Errorf("reach the server that holds the backups: %w", err)
 	}
 	// Asked before the volume is read: a member that was not told to keep it gets no byte of it.
 	verb, arg, err := wire.ReadHeader(conn)
 	if err != nil {
-		return nil, fmt.Errorf("the server that holds the backups did not answer: %w", err)
+		return nil, pathNone, fmt.Errorf("the server that holds the backups did not answer: %w", err)
 	}
+	path := s.copyPath(conn, target.Fingerprint)
 	if verb != leftSend {
-		return nil, fmt.Errorf("the server that holds the backups refused it: %s", arg)
+		return nil, path, fmt.Errorf("the server that holds the backups refused it: %s", arg)
+	}
+	// An older member says SEND alone; its own write still stops at a tenth free.
+	var free, total int64
+	if n, _ := fmt.Sscan(arg, &free, &total); n == 2 {
+		var need int64
+		for _, v := range req.GetProject().GetVolumeNames() {
+			need += leftVolumeBytes(ctx, v)
+		}
+		if !room.Fits(free, total, need) {
+			return nil, path, room.Refuse("the server that holds the backups", free, need)
+		}
 	}
 	req.StreamOut = true
 	res, err := runLeftBackup(s, ctx, req, frameWriter{conn})
 	if err != nil {
-		return nil, err
+		return nil, path, err
 	}
 	if _, err := conn.Write([]byte{0, 0, 0, 0}); err != nil {
-		return nil, fmt.Errorf("send the archive: %w", err)
+		return nil, path, fmt.Errorf("send the archive: %w", err)
 	}
 	want := fmt.Sprintf("%d %s", res.GetSizeBytes(), res.GetSha256())
 	if err := wire.WriteHeader(conn, leftSum, want); err != nil {
-		return nil, fmt.Errorf("send the archive: %w", err)
+		return nil, path, fmt.Errorf("send the archive: %w", err)
 	}
 	verb, arg, err = wire.ReadHeader(conn)
 	switch {
 	case err != nil:
-		return nil, fmt.Errorf("the server that holds the backups did not confirm it: %w", err)
+		return nil, path, fmt.Errorf("the server that holds the backups did not confirm it: %w", err)
 	case verb != wire.VerbOK:
-		return nil, fmt.Errorf("the server that holds the backups could not keep it: %s", arg)
+		return nil, path, fmt.Errorf("the server that holds the backups could not keep it: %s", arg)
 	case arg != want:
-		return nil, errors.New("the server that holds the backups stored something else than what was sent")
+		return nil, path, errors.New("the server that holds the backups stored something else than what was sent")
 	}
-	return res, nil
+	return res, path, nil
 }

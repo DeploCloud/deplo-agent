@@ -77,6 +77,14 @@ func (s *Service) applyUninstall(ctx context.Context, exe string) (*pb.SelfUnins
 			"cannot remove the systemd unit at %s: %v", agentUnitPath, err)
 	}
 
+	// Its drop-in goes too: left alone it would start an agent that is no longer there, again and again.
+	if dropIns := agentUnitPath + ".d"; exists(dropIns) {
+		if err := os.RemoveAll(dropIns); err != nil {
+			return nil, status.Errorf(codes.FailedPrecondition, "cannot remove %s: %v", dropIns, err)
+		}
+		removed = append(removed, dropIns)
+	}
+
 	if s.agentDir != "" {
 		if err := os.RemoveAll(s.agentDir); err != nil {
 			return nil, status.Errorf(codes.FailedPrecondition,

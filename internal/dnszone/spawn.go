@@ -133,13 +133,26 @@ func (s *Supervisor) Rebind() {
 }
 
 func bind(a netip.Addr, port int) (*socket, error) {
+	for try := 1; ; try++ {
+		s, err := bindOnce(a, port)
+		// Any port (tests): the one UDP got may be taken for TCP, so another one is tried.
+		if port != 0 || try == 8 || !errors.Is(err, syscall.EADDRINUSE) {
+			return s, err
+		}
+	}
+}
+
+// listenTCP is net.ListenTCP; a test makes it find a port taken.
+var listenTCP = net.ListenTCP
+
+func bindOnce(a netip.Addr, port int) (*socket, error) {
 	uc, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(a, uint16(port))))
 	if err != nil {
 		return nil, err
 	}
 	defer uc.Close()
 	port = uc.LocalAddr().(*net.UDPAddr).Port
-	tl, err := net.ListenTCP("tcp", net.TCPAddrFromAddrPort(netip.AddrPortFrom(a, uint16(port))))
+	tl, err := listenTCP("tcp", net.TCPAddrFromAddrPort(netip.AddrPortFrom(a, uint16(port))))
 	if err != nil {
 		return nil, err
 	}

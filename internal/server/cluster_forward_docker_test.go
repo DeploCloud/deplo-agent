@@ -7,7 +7,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 var testSpec = forwardSpec{
@@ -205,4 +207,33 @@ func TestForwarderSocket_survivesAnAgentRestartInTheSameDirectory(t *testing.T) 
 		t.Fatal(err)
 	}
 	c.Close()
+}
+
+// c39: while eu-4's proxy was recreated every passed-on visitor ran its own docker inspect for the proxy's process,
+// up to 59 a second on one core, and the leader beside them renewed every lease late.
+func TestDialProxy_aProxyThatIsGoneIsLookedUpOncePerSecond(t *testing.T) {
+	argv := dockerOnPath(t, `exit 1`)
+	proxyPid.Lock()
+	proxyPid.pid, proxyPid.missed = 0, time.Time{}
+	proxyPid.Unlock()
+	var wg sync.WaitGroup
+	for range 20 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := dialProxyLoopback(context.Background(), 8443); err == nil {
+				t.Error("a proxy that is not running was reached")
+			}
+		}()
+	}
+	wg.Wait()
+	n := 0
+	for _, l := range argv() {
+		if strings.Contains(l, "{{.State.Pid}}") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("docker was asked %d times for 20 visitors", n)
+	}
 }

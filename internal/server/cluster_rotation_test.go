@@ -35,12 +35,12 @@ func powerOff(s *Service) {
 	n.stopLocked()
 	n.mu.Unlock()
 	f := s.forwarders()
-	f.mu.Lock()
+	f.dock.Lock()
 	for k, l := range f.listeners {
 		l.ln.Close()
 		delete(f.listeners, k)
 	}
-	f.mu.Unlock()
+	f.dock.Unlock()
 	if z := s.zone; z != nil {
 		z.mu.Lock()
 		if z.sup == nil {

@@ -18,6 +18,7 @@ import (
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/dockercli"
+	"github.com/DeploCloud/deplo-agent/internal/room"
 )
 
 const volumeCopyTimeout = 6 * time.Hour
@@ -50,15 +51,18 @@ func (s *Service) ExportVolume(req *pb.ExportVolumeRequest, stream pb.Agent_Expo
 	if err := validateVolumeName(vol); err != nil {
 		return fmt.Errorf("export volume: %w", err)
 	}
-	ctx := stream.Context()
+	return exportVolumeTo(stream.Context(), vol, func(b []byte) error {
+		return stream.Send(&pb.VolumeChunk{Frame: &pb.VolumeChunk_Data{Data: b}})
+	})
+}
 
+// exportVolumeTo is ExportVolume's work, the gzipped tar handed to send a chunk at a time.
+func exportVolumeTo(ctx context.Context, vol string, send func([]byte) error) error {
 	if err := assertVolumeExists(ctx, vol); err != nil {
 		return err
 	}
 
-	cw := &chunkWriter{send: func(b []byte) error {
-		return stream.Send(&pb.VolumeChunk{Frame: &pb.VolumeChunk_Data{Data: b}})
-	}}
+	cw := &chunkWriter{send: send}
 	gz, _ := gzip.NewWriterLevel(cw, gzip.BestSpeed)
 
 	code, err := dockercli.PipeOut(ctx, volumeCopyTimeout, gz, nil,
@@ -133,14 +137,22 @@ func (s *Service) ImportVolume(stream pb.Agent_ImportVolumeServer) error {
 	if hdr == nil {
 		return sendImportResult(stream, false, 0, "", "first message must carry a header (volume name)")
 	}
+	return stream.SendAndClose(importVolumeFrom(ctx, hdr, func() ([]byte, error) {
+		msg, err := stream.Recv()
+		return msg.GetData(), err
+	}))
+}
+
+// importVolumeFrom is ImportVolume's work: next hands the gzipped tar a slice at a time, io.EOF at its end.
+func importVolumeFrom(ctx context.Context, hdr *pb.VolumeChunk_Header, next func() ([]byte, error)) *pb.StackResult {
 	vol := hdr.GetVolumeName()
 	if err := validateVolumeName(vol); err != nil {
-		return sendImportResult(stream, false, 0, "", fmt.Sprintf("import volume: %v", err))
+		return importResult(false, 0, "", fmt.Sprintf("import volume: %v", err), nil)
 	}
 	aside := hdr.GetAsideOf() != ""
 	if aside {
 		if err := createAsideTarget(ctx, setAsideRun, vol, hdr.GetAsideOf()); err != nil {
-			return sendImportResult(stream, false, 0, "", fmt.Sprintf("import volume: %v", err))
+			return importResult(false, 0, "", fmt.Sprintf("import volume: %v", err), nil)
 		}
 	}
 
@@ -162,16 +174,17 @@ func (s *Service) ImportVolume(stream pb.Agent_ImportVolumeServer) error {
 	if gzErr != nil {
 		_ = pw.CloseWithError(gzErr)
 		<-done
-		return sendImportResult(stream, false, 0, "", fmt.Sprintf("import volume %q: %v", vol, gzErr))
+		return importResult(false, 0, "", fmt.Sprintf("import volume %q: %v", vol, gzErr), nil)
 	}
 
 	var recvErr error
 	var wipeErr error
-	var received int64
+	var received, looked int64
+	mount := ""
 	digest := sha256.New()
 	wiped := false
 	for {
-		msg, rerr := stream.Recv()
+		data, rerr := next()
 		if rerr == io.EOF {
 			break
 		}
@@ -179,13 +192,23 @@ func (s *Service) ImportVolume(stream pb.Agent_ImportVolumeServer) error {
 			recvErr = rerr
 			break
 		}
-		if data := msg.GetData(); len(data) > 0 {
+		if len(data) > 0 {
 			if hdr.GetWipeFirst() && !wiped {
 				if err := wipeVolume(ctx, vol); err != nil {
 					wipeErr = err
 					break
 				}
 				wiped = true
+			}
+			if received == 0 || received-looked >= room.Step/4 {
+				looked = received
+				if mount == "" {
+					mount = volumePath(ctx, helperDocker, vol)
+				}
+				if err := room.CheckDir(mount); mount != "" && err != nil {
+					recvErr = err
+					break
+				}
 			}
 			received += int64(len(data))
 			digest.Write(data)
@@ -222,10 +245,9 @@ func (s *Service) ImportVolume(stream pb.Agent_ImportVolumeServer) error {
 				return wipeVolume(c, vol)
 			})
 		}
-		return stream.SendAndClose(importResult(false, 0, "", failure, &gz.drops))
+		return importResult(false, 0, "", failure, &gz.drops)
 	}
-	return stream.SendAndClose(
-		importResult(true, received, hex.EncodeToString(digest.Sum(nil)), "", &gz.drops))
+	return importResult(true, received, hex.EncodeToString(digest.Sum(nil)), "", &gz.drops)
 }
 
 func newGunzipPump(dst io.Writer) (*gunzipPump, error) {

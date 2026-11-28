@@ -24,8 +24,8 @@ func (e *endpoint) ClearSrc()           {}
 func (e *endpoint) SrcToString() string { return "" }
 func (e *endpoint) DstToString() string { return endpointPrefix + e.p.Fingerprint }
 
-// DstToBytes keys WireGuard's cookie under load; the peer's key is what this endpoint stands for.
-func (e *endpoint) DstToBytes() []byte { return e.p.PublicKey[:] }
+// DstToBytes keys WireGuard's cookie under load: the peer's certificate, which a key rotation never changes.
+func (e *endpoint) DstToBytes() []byte { return []byte(e.p.Fingerprint) }
 func (e *endpoint) DstIP() netip.Addr  { return netip.Addr{} }
 func (e *endpoint) SrcIP() netip.Addr  { return netip.Addr{} }
 

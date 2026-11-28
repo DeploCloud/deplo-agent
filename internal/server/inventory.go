@@ -178,7 +178,11 @@ func (s *Service) inventory(ctx context.Context, id string) (*pb.InventoryImageR
 		return inventoryStatus(pb.InventoryStatus_INVENTORY_STATUS_FAILED, "read the image size: "+err.Error()), nil
 	}
 
-	if free := inventoryFree(s.buildTmpDir); free < 2*img.Size {
+	work := s.inventoryDir()
+	if err := os.MkdirAll(work, 0o700); err != nil {
+		return nil, err
+	}
+	if free := inventoryFree(work); free < 2*img.Size {
 		return inventoryStatus(pb.InventoryStatus_INVENTORY_STATUS_SKIPPED_LOW_DISK,
 			fmt.Sprintf("needs %s free, %s left", humanBytes(2*img.Size), humanBytes(free))), nil
 	}
@@ -196,7 +200,7 @@ func (s *Service) inventory(ctx context.Context, id string) (*pb.InventoryImageR
 	if err != nil {
 		return inventoryStatus(pb.InventoryStatus_INVENTORY_STATUS_FAILED, err.Error()), nil
 	}
-	tmp, err := os.MkdirTemp(s.buildTmpDir, inventoryDirPrefix)
+	tmp, err := os.MkdirTemp(work, inventoryDirPrefix)
 	if err != nil {
 		return nil, err
 	}
@@ -240,6 +244,9 @@ func (s *Service) inventory(ctx context.Context, id string) (*pb.InventoryImageR
 }
 
 const inventoryDirPrefix = "deplo-inventory-"
+
+// inventoryDir is on the agent's data disk: /tmp is memory on many hosts, and an image's tar can be gigabytes.
+func (s *Service) inventoryDir() string { return filepath.Join(s.dataBase, "inventory") }
 
 // sweepInventoryDirs removes what an inventory cut short by a restart left in the build temp dir.
 func sweepInventoryDirs(dir string) {

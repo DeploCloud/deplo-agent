@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,9 @@ import (
 )
 
 func TestVolumeHelperRunSilencesTheContainerLog(t *testing.T) {
+	was := missingVolumes
+	missingVolumes = func(context.Context, []string) []string { return nil }
+	t.Cleanup(func() { missingVolumes = was })
 	argv := volumeHelperRun(t.Context(), "-v", "vol:/v:ro", volumeHelperImage, "tar", "-C", "/v", "-cf", "-", ".")
 	joined := strings.Join(argv, " ")
 	if !strings.Contains(joined, "--log-driver=none") {
@@ -46,5 +50,37 @@ func TestNoHandWrittenVolumeHelperRun(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// c39: a helper that mounted a deleted App's volume read-only made it again, empty, 12 s after the delete.
+func TestVolumeHelperRunNeverMakesAVolumeItOnlyReads(t *testing.T) {
+	was := missingVolumes
+	var asked []string
+	missingVolumes = func(_ context.Context, names []string) []string {
+		asked = names
+		return []string{"deplo-lab-a_data"}
+	}
+	t.Cleanup(func() { missingVolumes = was })
+	argv := volumeHelperRun(t.Context(), "-d", "-v", "deplo-lab-a_data:/v/0:ro", "-v", "/tmp/stage:/stage", "-v", "out:/to",
+		volumeHelperImage, "sleep", "60")
+	if strings.Join(asked, " ") != "deplo-lab-a_data" {
+		t.Fatalf("asked about %q: only a named volume mounted read-only is looked up", asked)
+	}
+	if strings.Join(argv, " ") != "volume inspect deplo-lab-a_data" {
+		t.Fatalf("a helper would mount a missing volume read-only, and docker would make it: %q", argv)
+	}
+}
+
+// Only docker's own "no such volume" counts: a docker that answers nothing hides no volume.
+func TestMissingVolumesAreWhatDockerSaysItLacks(t *testing.T) {
+	dockerOnPath(t, `echo deplo-web-data; echo "Error response from daemon: get deplo-lab-a_data: no such volume" >&2; exit 1`)
+	got := missingVolumes(t.Context(), []string{"deplo-web-data", "deplo-lab-a_data"})
+	if strings.Join(got, " ") != "deplo-lab-a_data" {
+		t.Fatalf("missing %q", got)
+	}
+	dockerOnPath(t, `exit 0`)
+	if got := missingVolumes(t.Context(), []string{"deplo-web-data"}); len(got) != 0 {
+		t.Fatalf("a docker that said nothing hid %q", got)
 	}
 }

@@ -2,10 +2,13 @@ package server
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	pb "github.com/DeploCloud/deplo-agent/gen"
 	"github.com/DeploCloud/deplo-agent/internal/clusterlink/lease"
@@ -252,5 +255,42 @@ func TestStartStack_ofAnOrdinaryStackIsOneStart(t *testing.T) {
 func TestStartAfterReadyIsAdvertised(t *testing.T) {
 	if !slices.Contains(Capabilities, "deploy.start-after-ready") {
 		t.Fatal("Hello does not advertise deploy.start-after-ready")
+	}
+}
+
+// c40: each recreate of a domain added met one 502 on the App's own server: a ready kept from before passed its
+// visitors to the container being replaced. A reroute holds them, and their App is looked at again once it is done.
+func TestReroute_holdsTheAppsVisitorsWhileItsContainersAreReplaced(t *testing.T) {
+	up := filepath.Join(t.TempDir(), "up")
+	dockerOnPath(t, `case "$*" in *" up -d"*) touch `+up+`; sleep 0.5 ;; esac
+exit 0`)
+	s := New(t.TempDir(), t.TempDir(), "/", "")
+	placeOn(t, s, "srv_a", lease.Entry{Kind: "app", ID: "prj_1", Member: "srv_a", Slug: "web"})
+	f := s.forwarders()
+	var looks atomic.Int32
+	s.fwdOps = forwardOps{ensure: func(context.Context, forwardSpec) error { return nil },
+		ready: func(context.Context, string) appReadiness {
+			looks.Add(1)
+			return appReadiness{OK: true, Since: time.Now().Add(-time.Hour)}
+		}}
+	ctx := context.Background()
+	if !f.ready(ctx, "prj_1") {
+		t.Fatal("not ready before the reroute")
+	}
+	res := make(chan *pb.StackResult, 1)
+	go func() {
+		r, _ := s.Reroute(ctx, &pb.RerouteRequest{Slug: "web", Network: testNetwork, ComposeYaml: "services:\n  web: {image: deplo/web:2}\n"})
+		res <- r
+	}()
+	eventually(t, "the reroute brings the stack up", func() bool { _, err := os.Stat(up); return err == nil })
+	if f.ready(ctx, "prj_1") {
+		t.Fatal("ready while the reroute replaces its containers")
+	}
+	if r := <-res; !r.GetOk() {
+		t.Fatalf("reroute: %q", r.GetError())
+	}
+	before := looks.Load()
+	if !f.ready(ctx, "prj_1") || looks.Load() == before {
+		t.Fatal("its App was not looked at again once the reroute was done")
 	}
 }

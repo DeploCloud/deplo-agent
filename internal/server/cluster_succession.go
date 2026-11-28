@@ -61,12 +61,17 @@ func (g *leaseGuard) askToLead(ctx context.Context, now time.Time) {
 	var asks []succeedAsk
 	g.mu.Lock()
 	for id, c := range g.clusters {
-		k := slices.Index(c.Line, c.Member)
+		k, silent := slices.Index(c.Line, c.Member), c.RenewedAt
+		// A lease from before this boot says where things were before it: its leader gets the whole wait from this
+		// start, and every heir renewed since asks first (c43: eu-3, back from a power cut, asked on one 4.5 min old).
+		if c.cold && k >= 0 {
+			k, silent = len(c.Line), latest(c.RenewedAt, g.started)
+		}
 		wait := lease.PreVoteFor + time.Duration(max(k, 0))*lease.SucceedStagger
 		// The leader beside this server is the one gone silent: asking it again only restarts it at a newer epoch.
 		self := c.Leader != "" && c.Leader == c.Member
-		if k < 0 || self || c.RenewedAt.IsZero() || g.asking[id] || now.Sub(c.RenewedAt) < wait || c.ExtraSeconds > 0 && !c.ranOut(now) {
-			if g.asked[id] != "" && (k < 0 || now.Sub(c.RenewedAt) < wait) {
+		if k < 0 || self || c.RenewedAt.IsZero() || g.asking[id] || now.Sub(silent) < wait || c.ExtraSeconds > 0 && !c.ranOut(now) {
+			if g.asked[id] != "" && (k < 0 || now.Sub(silent) < wait) {
 				delete(g.asked, id)
 			}
 			continue

@@ -223,7 +223,7 @@ func (cfg Config) serve(ctx context.Context, l *Listener, ws *websocket.Conn, ad
 				cfg.noteCopied(true)
 				return 0, ErrCopied
 			}
-			return time.Since(started), errors.New("link closed")
+			return time.Since(started), errors.New("link closed: " + c.why())
 		case err := <-unanswered:
 			ws.CloseNow()
 			return time.Since(started), err
@@ -369,18 +369,41 @@ type conn struct {
 	closed chan struct{}
 	mu     sync.Mutex
 	code   websocket.StatusCode
+	// ended is the first read error: the panel's close frame, or the connection under the link ending.
+	ended error
 }
 
 // Read remembers the close code the panel ended the link with.
 func (c *conn) Read(p []byte) (int, error) {
 	n, err := c.Conn.Read(p)
-	if code := websocket.CloseStatus(err); code != -1 {
+	if err != nil {
 		c.mu.Lock()
-		c.code = code
+		if code := websocket.CloseStatus(err); code != -1 {
+			c.code = code
+		}
+		if c.ended == nil {
+			c.ended = err
+		}
 		c.mu.Unlock()
 	}
 	return n, err
 }
+
+// why says who ended a closed link: the panel (its close frame), the connection under it, or this agent's gRPC.
+func (c *conn) why() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var ce websocket.CloseError
+	switch {
+	case errors.As(c.ended, &ce):
+		return fmt.Sprintf("the panel closed it (%d %s)", ce.Code, ce.Reason)
+	case c.ended == nil || errors.Is(c.ended, errClosedHere):
+		return "this agent's gRPC closed it"
+	}
+	return "its connection ended: " + c.ended.Error()
+}
+
+var errClosedHere = errors.New("closed here")
 
 func (c *conn) status() websocket.StatusCode {
 	c.mu.Lock()
@@ -389,6 +412,11 @@ func (c *conn) status() websocket.StatusCode {
 }
 
 func (c *conn) Close() error {
+	c.mu.Lock()
+	if c.ended == nil {
+		c.ended = errClosedHere
+	}
+	c.mu.Unlock()
 	err := c.Conn.Close()
 	c.once.Do(func() { close(c.closed) })
 	return err
